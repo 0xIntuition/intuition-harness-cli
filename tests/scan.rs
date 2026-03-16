@@ -49,6 +49,8 @@ echo "RAW AGENT STDERR: token-by-token noise" >&2
 printf '%s' "$PWD" > "$TEST_OUTPUT_DIR/cwd.txt"
 printf '%s' "$1" > "$TEST_OUTPUT_DIR/prompt.txt"
 printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/agent-prompt.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
 printf '%s' "$METASTACK_SCAN_FACT_BASE" > "$TEST_OUTPUT_DIR/fact-base.txt"
 printf '%s' "$METASTACK_SCAN_DOCUMENTS" > "$TEST_OUTPUT_DIR/documents.txt"
 mkdir -p .metastack/codebase
@@ -148,6 +150,14 @@ done
         fs::read_to_string(output_dir.join("fact-base.txt"))?,
         ".metastack/codebase/SCAN.md"
     );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("provider-source.txt"))?,
+        "explicit_override"
+    );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("route-key.txt"))?,
+        "context.scan"
+    );
     let prompt = fs::read_to_string(output_dir.join("agent-prompt.txt"))?;
     assert!(prompt.contains("Target repository:"));
     assert!(prompt.contains("Scan only the target repository rooted above."));
@@ -158,6 +168,9 @@ done
     let scan_log = fs::read_to_string(repo_root.join(".metastack/agents/sessions/scan.log"))?;
     assert!(scan_log.contains("RAW AGENT LOG: starting scan"));
     assert!(scan_log.contains("RAW AGENT STDERR: token-by-token noise"));
+    assert!(scan_log.contains("Resolved provider: scan-stub"));
+    assert!(scan_log.contains("Resolved route key: context.scan"));
+    assert!(scan_log.contains("Provider source: explicit_override"));
 
     Ok(())
 }
