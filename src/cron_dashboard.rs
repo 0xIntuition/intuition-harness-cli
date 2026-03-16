@@ -299,7 +299,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     let footer = Paragraph::new(Text::from(vec![
         Line::from("Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections."),
         Line::from(
-            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter adds a line. Ctrl+S also creates the job. Esc cancels.",
+            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline. Ctrl+S also creates the job. Esc cancels.",
         ),
         Line::from(
             app.error
