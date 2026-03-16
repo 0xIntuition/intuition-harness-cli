@@ -1429,6 +1429,8 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/global.txt"
         &listen_stub_path,
         r#"#!/bin/sh
 printf '%s' "$1" > "$TEST_OUTPUT_DIR/listen.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
 "#,
     )?;
     let mut permissions = fs::metadata(&listen_stub_path)?.permissions();
@@ -1658,8 +1660,18 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/listen.txt"
         .stdout(predicate::str::contains("MET-63"));
 
     wait_for_path(&stub_dir.join("listen.txt"))?;
+    wait_for_path(&stub_dir.join("provider-source.txt"))?;
+    wait_for_path(&stub_dir.join("route-key.txt"))?;
     assert!(stub_dir.join("listen.txt").exists());
     assert!(!stub_dir.join("global.txt").exists());
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("provider-source.txt"))?,
+        "command_route:agents.listen"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("route-key.txt"))?,
+        "agents.listen"
+    );
 
     Ok(())
 }

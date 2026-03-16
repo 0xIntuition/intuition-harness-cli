@@ -591,6 +591,17 @@ printf '%s' '{"merge_order":[11,12],"conflict_hotspots":[],"summary":"route"}'
         "route-stub"
     );
     assert!(!output_dir.join("global-agent.txt").exists());
+    let run_root = repo_root.join(".metastack/merge-runs");
+    let mut run_dirs = fs::read_dir(&run_root)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    run_dirs.sort();
+    let run_dir = run_dirs.pop().expect("merge run should exist");
+    let context = fs::read_to_string(run_dir.join("context.json"))?;
+    assert!(context.contains("\"agent_resolution\""));
+    assert!(context.contains("\"provider\": \"route-stub\""));
+    assert!(context.contains("\"route_key\": \"merge.run\""));
+    assert!(context.contains("\"provider_source\": \"command_route:merge.run\""));
 
     Ok(())
 }

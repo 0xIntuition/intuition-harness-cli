@@ -5,7 +5,8 @@ pub(crate) use execution::run_agent_capture;
 
 pub(crate) use brief::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 pub(crate) use execution::{
-    AgentExecutionOptions, command_args_for_invocation, render_invocation_diagnostics,
+    AgentExecutionOptions, apply_invocation_environment, command_args_for_invocation,
+    format_agent_config_source, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning,
 };
 

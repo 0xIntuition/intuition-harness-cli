@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local, Utc};
 
-use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
+use crate::agents::{
+    apply_invocation_environment, command_args_for_invocation, render_invocation_diagnostics,
+    resolve_agent_invocation_for_planning,
+};
 use crate::cli::{CronDaemonArgs, CronRunArgs, CronStartArgs, RunAgentArgs};
 use crate::config::{
     AGENT_ROUTE_RUNTIME_CRON_PROMPT, AppConfig, PlanningMeta, normalize_agent_name,
@@ -669,11 +672,23 @@ fn execute_agent_phase(
 
     writeln!(
         log,
-        "[{}] agent phase start\nagent: {}\n",
+        "[{}] agent phase start\nagent: {}",
         Local::now().to_rfc3339(),
         invocation.agent
     )
     .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+    writeln!(
+        log,
+        "command: {} {}",
+        invocation.command,
+        command_args.join(" ")
+    )
+    .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+    for line in render_invocation_diagnostics(&invocation) {
+        writeln!(log, "{line}")
+            .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+    }
+    writeln!(log).with_context(|| format!("failed to write `{}`", log_path.display()))?;
 
     let mut command = ProcessCommand::new(&invocation.command);
     command.current_dir(working_directory);
@@ -681,19 +696,11 @@ fn execute_agent_phase(
     command.stdin(Stdio::null());
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
-    command.env("METASTACK_AGENT_NAME", &invocation.agent);
-    command.env("METASTACK_AGENT_PROMPT", &run_args.prompt);
-    command.env(
-        "METASTACK_AGENT_INSTRUCTIONS",
-        run_args.instructions.as_deref().unwrap_or(""),
-    );
-    command.env(
-        "METASTACK_AGENT_MODEL",
-        invocation.model.as_deref().unwrap_or(""),
-    );
-    command.env(
-        "METASTACK_AGENT_REASONING",
-        invocation.reasoning.as_deref().unwrap_or(""),
+    apply_invocation_environment(
+        &mut command,
+        &invocation,
+        &run_args.prompt,
+        run_args.instructions.as_deref(),
     );
     command.env("METASTACK_CRON_ROOT", root);
     command.env("METASTACK_CRON_JOB_NAME", &job.name);

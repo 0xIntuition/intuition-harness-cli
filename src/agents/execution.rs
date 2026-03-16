@@ -81,25 +81,17 @@ pub(crate) fn render_invocation_diagnostics(invocation: &ResolvedAgentInvocation
     ]
 }
 
-pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
-    let config = AppConfig::load()?;
-    let planning_meta = match args.root.as_deref() {
-        Some(root) => PlanningMeta::load(root)?,
-        None => PlanningMeta::default(),
-    };
-    let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, args)?;
-    let command_args = command_args_for_invocation(&invocation, None)?;
-
-    let mut command = Command::new(&invocation.command);
-    command.args(&command_args);
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
+pub(crate) fn apply_invocation_environment(
+    command: &mut Command,
+    invocation: &ResolvedAgentInvocation,
+    prompt: &str,
+    instructions: Option<&str>,
+) {
     command.env("METASTACK_AGENT_NAME", &invocation.agent);
-    command.env("METASTACK_AGENT_PROMPT", &args.prompt);
+    command.env("METASTACK_AGENT_PROMPT", prompt);
     command.env(
         "METASTACK_AGENT_INSTRUCTIONS",
-        args.instructions.as_deref().unwrap_or(""),
+        instructions.unwrap_or_default(),
     );
     command.env(
         "METASTACK_AGENT_MODEL",
@@ -136,6 +128,28 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
             .as_ref()
             .map(format_agent_config_source)
             .unwrap_or_default(),
+    );
+}
+
+pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
+    let config = AppConfig::load()?;
+    let planning_meta = match args.root.as_deref() {
+        Some(root) => PlanningMeta::load(root)?,
+        None => PlanningMeta::default(),
+    };
+    let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, args)?;
+    let command_args = command_args_for_invocation(&invocation, None)?;
+
+    let mut command = Command::new(&invocation.command);
+    command.args(&command_args);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    apply_invocation_environment(
+        &mut command,
+        &invocation,
+        &args.prompt,
+        args.instructions.as_deref(),
     );
 
     let mut child = command.spawn().with_context(|| {
