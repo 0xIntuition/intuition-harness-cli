@@ -177,6 +177,14 @@ impl Default for ListenState {
 }
 
 impl ListenState {
+    #[cfg(test)]
+    pub(super) fn from_sessions(sessions: Vec<AgentSession>) -> Self {
+        Self {
+            version: 1,
+            sessions,
+        }
+    }
+
     pub(super) fn blocks_pickup(&self, identifier: &str) -> bool {
         self.sessions.iter().any(|session| {
             session.issue_matches(identifier)

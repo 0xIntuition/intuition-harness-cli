@@ -57,6 +57,7 @@ const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
 const DEFAULT_DASHBOARD_HOST: &str = "127.0.0.1";
+const DASHBOARD_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
@@ -334,6 +335,10 @@ impl ListenCycleData {
                 "codex | primary 12% / reset 1,773,515,901s | secondary 8% / reset 1,773,855,871s | credits n/a".to_string(),
             ),
         }
+    }
+
+    fn apply_state_snapshot(&mut self, state: ListenState) {
+        self.sessions = state.sorted_sessions();
     }
 }
 
@@ -1685,6 +1690,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 let cycle = cycle.clone();
                 async move { Ok(cycle) }
             },
+            |_| Ok(()),
         )
         .await?;
         return Ok(());
@@ -1786,6 +1792,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         initial_cycle,
         true,
         || daemon.run_cycle(),
+        |cycle| {
+            cycle.apply_state_snapshot(daemon.store.load_state()?);
+            Ok(())
+        },
     )
     .await
 }
@@ -1812,17 +1822,19 @@ fn store_summary(store: &ListenProjectStore) -> Result<StoredListenProjectSummar
         })
 }
 
-async fn run_live_loop<F, Fut>(
+async fn run_live_loop<F, Fut, S>(
     args: &ListenRunArgs,
     poll_interval_seconds: u64,
     started_at_epoch_seconds: u64,
     initial_cycle: ListenCycleData,
     refresh_immediately: bool,
     mut next_cycle: F,
+    mut refresh_dashboard_state: S,
 ) -> Result<()>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<ListenCycleData>>,
+    S: FnMut(&mut ListenCycleData) -> Result<()>,
 {
     let initial_data = build_dashboard_data(
         &initial_cycle,
@@ -1845,7 +1857,8 @@ where
         shared_state.clone(),
     )?;
     let dashboard_url = server.url().to_string();
-    let poll_interval = Duration::from_secs(poll_interval_seconds);
+    let linear_refresh_interval = Duration::from_secs(poll_interval_seconds);
+    let dashboard_refresh_interval = Duration::from_secs(DASHBOARD_REFRESH_INTERVAL_SECONDS);
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -1856,15 +1869,16 @@ where
     let mut terminal = Terminal::new(backend)?;
     let mut cycle = initial_cycle;
     let mut session_view = SessionListView::Active;
-    let mut next_refresh_at = if refresh_immediately {
+    let mut next_linear_refresh_at = if refresh_immediately {
         Instant::now()
     } else {
-        Instant::now() + poll_interval
+        Instant::now() + linear_refresh_interval
     };
+    let mut next_dashboard_refresh_at = Instant::now() + dashboard_refresh_interval;
 
     loop {
         let now = now_epoch_seconds();
-        let next_refresh_seconds = next_refresh_at
+        let next_refresh_seconds = next_linear_refresh_at
             .saturating_duration_since(Instant::now())
             .as_secs();
         let data = build_dashboard_data(
@@ -1880,9 +1894,13 @@ where
         update_shared_state(&shared_state, data.clone());
         terminal.draw(|frame| dashboard::render(frame, &data, session_view))?;
 
-        let wait_for_input = next_refresh_at
+        let wait_for_input = next_linear_refresh_at
             .saturating_duration_since(Instant::now())
-            .min(Duration::from_millis(250));
+            .min(
+                next_dashboard_refresh_at
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(250)),
+            );
 
         if event::poll(wait_for_input)?
             && let Event::Key(key) = event::read()?
@@ -1901,9 +1919,15 @@ where
             }
         }
 
-        if Instant::now() >= next_refresh_at {
+        let now = Instant::now();
+        if now >= next_linear_refresh_at {
             cycle = next_cycle().await?;
-            next_refresh_at = Instant::now() + poll_interval;
+            let refreshed_at = Instant::now();
+            next_linear_refresh_at = refreshed_at + linear_refresh_interval;
+            next_dashboard_refresh_at = refreshed_at + dashboard_refresh_interval;
+        } else if now >= next_dashboard_refresh_at {
+            refresh_dashboard_state(&mut cycle)?;
+            next_dashboard_refresh_at = Instant::now() + dashboard_refresh_interval;
         }
     }
 
@@ -2386,10 +2410,11 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListenCycleData, SessionPhase, TokenUsage, capture_workspace_snapshot, compact_identifier,
-        format_duration, format_number,
+        ListenCycleData, ListenState, SessionPhase, TokenUsage, capture_workspace_snapshot,
+        compact_identifier, format_duration, format_number,
     };
     use std::fs;
+    use std::path::Path;
     use std::process::Command;
     use tempfile::tempdir;
 
@@ -2459,6 +2484,51 @@ mod tests {
             ".metastack/agents/sessions/listen-state.json"
         );
         assert_eq!(cycle.rate_limits, None);
+    }
+
+    #[test]
+    fn cycle_state_snapshot_refreshes_sessions_without_resetting_linear_data() {
+        let mut cycle = ListenCycleData::demo(Path::new("."));
+        let existing_pending_count = cycle.pending_issues.len();
+        let existing_pending_identifier = cycle
+            .pending_issues
+            .first()
+            .map(|issue| issue.identifier.clone());
+        let existing_notes = cycle.notes.clone();
+        let existing_scope = cycle.scope.clone();
+        let existing_claimed = cycle.claimed_this_cycle;
+
+        let mut completed = cycle
+            .sessions
+            .first()
+            .expect("demo cycle should include a session")
+            .clone();
+        completed.issue_identifier = "MET-99".to_string();
+        completed.issue_title = "Completed ticket".to_string();
+        completed.phase = SessionPhase::Completed;
+        completed.summary = "Complete | moved to `Human Review`".to_string();
+        completed.updated_at_epoch_seconds += 60;
+
+        cycle.apply_state_snapshot(ListenState::from_sessions(vec![completed.clone()]));
+
+        assert_eq!(cycle.sessions.len(), 1);
+        assert_eq!(
+            cycle.sessions[0].issue_identifier,
+            completed.issue_identifier
+        );
+        assert_eq!(cycle.sessions[0].phase, SessionPhase::Completed);
+        assert_eq!(cycle.sessions[0].summary, completed.summary);
+        assert_eq!(cycle.pending_issues.len(), existing_pending_count);
+        assert_eq!(
+            cycle
+                .pending_issues
+                .first()
+                .map(|issue| issue.identifier.clone()),
+            existing_pending_identifier
+        );
+        assert_eq!(cycle.notes, existing_notes);
+        assert_eq!(cycle.scope, existing_scope);
+        assert_eq!(cycle.claimed_this_cycle, existing_claimed);
     }
 
     #[test]
