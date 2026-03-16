@@ -86,7 +86,8 @@ impl ListenDashboardData {
             format!("Rate Limits: {}", self.runtime.rate_limits),
             format!("Project: {}", self.runtime.project),
             format!("Dashboard: {}", self.runtime.dashboard),
-            format!("Next refresh: {}", self.runtime.next_refresh),
+            format!("Dashboard refresh: {}", self.runtime.dashboard_refresh),
+            format!("Linear refresh: {}", self.runtime.linear_refresh),
             format!("State file: {}", self.state_file),
         ];
 
@@ -137,8 +138,9 @@ pub struct ListenRuntimeSummary {
     pub project: String,
     pub dashboard: String,
     pub dashboard_url: Option<String>,
-    pub next_refresh: String,
-    pub next_refresh_seconds: u64,
+    pub dashboard_refresh: String,
+    pub dashboard_refresh_seconds: u64,
+    pub linear_refresh: String,
     pub current_epoch_seconds: u64,
 }
 
@@ -347,7 +349,8 @@ struct DashboardRuntimeContext {
     started_at_epoch_seconds: u64,
     now_epoch_seconds: u64,
     poll_interval_seconds: u64,
-    next_refresh_seconds: u64,
+    dashboard_refresh_seconds: u64,
+    linear_refresh_seconds: u64,
     dashboard_url: Option<String>,
 }
 
@@ -1653,7 +1656,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     started_at_epoch_seconds: DEMO_START_EPOCH_SECONDS,
                     now_epoch_seconds: DEMO_NOW_EPOCH_SECONDS,
                     poll_interval_seconds,
-                    next_refresh_seconds: poll_interval_seconds,
+                    dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                    linear_refresh_seconds: poll_interval_seconds,
                     dashboard_url: None,
                 },
             );
@@ -1671,7 +1675,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     started_at_epoch_seconds: DEMO_START_EPOCH_SECONDS,
                     now_epoch_seconds: DEMO_NOW_EPOCH_SECONDS,
                     poll_interval_seconds,
-                    next_refresh_seconds: poll_interval_seconds,
+                    dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                    linear_refresh_seconds: poll_interval_seconds,
                     dashboard_url: None,
                 },
             );
@@ -1747,7 +1752,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 started_at_epoch_seconds: now,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                next_refresh_seconds: 0,
+                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                linear_refresh_seconds: 0,
                 dashboard_url: None,
             },
         );
@@ -1767,7 +1773,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 started_at_epoch_seconds: now,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                next_refresh_seconds: 0,
+                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                linear_refresh_seconds: 0,
                 dashboard_url: None,
             },
         );
@@ -1842,7 +1849,8 @@ where
             started_at_epoch_seconds,
             now_epoch_seconds: started_at_epoch_seconds,
             poll_interval_seconds,
-            next_refresh_seconds: if refresh_immediately {
+            dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+            linear_refresh_seconds: if refresh_immediately {
                 0
             } else {
                 poll_interval_seconds
@@ -1878,7 +1886,7 @@ where
 
     loop {
         let now = now_epoch_seconds();
-        let next_refresh_seconds = next_linear_refresh_at
+        let linear_refresh_seconds = next_linear_refresh_at
             .saturating_duration_since(Instant::now())
             .as_secs();
         let data = build_dashboard_data(
@@ -1887,7 +1895,8 @@ where
                 started_at_epoch_seconds,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                next_refresh_seconds,
+                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                linear_refresh_seconds,
                 dashboard_url: Some(dashboard_url.clone()),
             },
         );
@@ -1993,8 +2002,9 @@ fn build_dashboard_data(
             project: cycle.scope.clone(),
             dashboard: dashboard.clone(),
             dashboard_url: runtime.dashboard_url.clone(),
-            next_refresh: format!("{}s", runtime.next_refresh_seconds),
-            next_refresh_seconds: runtime.next_refresh_seconds,
+            dashboard_refresh: format!("{}s", runtime.dashboard_refresh_seconds),
+            dashboard_refresh_seconds: runtime.dashboard_refresh_seconds,
+            linear_refresh: format!("{}s", runtime.linear_refresh_seconds),
             current_epoch_seconds: runtime.now_epoch_seconds,
         },
         pending_issues: cycle.pending_issues.clone(),
