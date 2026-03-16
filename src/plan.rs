@@ -2082,6 +2082,43 @@ mod tests {
     }
 
     #[test]
+    fn questions_step_enter_generates_plan_when_last_answer_is_recorded() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            questions: vec![
+                answered_question("Who uses it?", "CLI maintainers"),
+                pending_question("How should it be validated?"),
+            ],
+            selected: 1,
+            error: Some("stale".to_string()),
+        };
+        let _ = app.questions[1]
+            .answer
+            .paste("Direct command-path proofs and targeted tests");
+
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+        );
+
+        match action {
+            SessionAction::GeneratePlan {
+                request,
+                follow_ups,
+            } => {
+                assert_eq!(request, "Plan a new command");
+                assert_eq!(follow_ups.len(), 2);
+                assert_eq!(follow_ups[1].question, "How should it be validated?");
+                assert_eq!(follow_ups[1].answer, "Direct command-path proofs and targeted tests");
+                assert!(!follow_ups[1].skipped);
+            }
+            _ => panic!("expected the last enter to generate a plan"),
+        }
+        assert_eq!(app.questions[1].state, FollowUpAnswerState::Answered);
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
     fn questions_step_ctrl_s_generates_a_plan_after_more_than_three_answers_are_complete() {
         let mut app = QuestionsApp {
             request: "Plan a new command".to_string(),

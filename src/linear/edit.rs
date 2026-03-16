@@ -850,4 +850,24 @@ mod tests {
         assert_eq!(app.description.value(), "Line one\nLine two\n");
         assert_eq!(app.error, None);
     }
+
+    #[test]
+    fn issue_edit_app_paste_normalizes_multiline_title_to_single_line() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: String::new(),
+                description: None,
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.step = EditStep::Title;
+
+        app.handle_paste("Line one\nLine two\n");
+
+        assert_eq!(app.title.value(), "Line one Line two");
+        assert_eq!(app.error, None);
+    }
 }
