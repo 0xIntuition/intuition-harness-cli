@@ -1338,6 +1338,8 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             state_path.to_string_lossy().as_ref(),
         ));
 
+    wait_for_terminal_session_state(&state_path)?;
+
     meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
