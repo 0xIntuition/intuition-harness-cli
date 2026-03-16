@@ -266,6 +266,133 @@ esac
 
 #[cfg(unix)]
 #[test]
+fn refine_command_prefers_command_route_agent_over_global_default() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let global_stub_path = temp.path().join("refine-global-stub");
+    let route_stub_path = temp.path().join("refine-route-stub");
+    let output_dir = temp.path().join("agent-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&output_dir)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "global-stub"
+
+[agents.routing.commands."linear.issues.refine"]
+provider = "route-stub"
+
+[agents.commands.global-stub]
+command = "{}"
+transport = "stdin"
+
+[agents.commands.route-stub]
+command = "{}"
+transport = "stdin"
+"#,
+            global_stub_path.display(),
+            route_stub_path.display()
+        ),
+    )?;
+    write_refine_stub(
+        &global_stub_path,
+        r##"#!/bin/sh
+cat > "$TEST_OUTPUT_DIR/global-payload.txt"
+cat <<'JSON'
+{"summary":"global","findings":{"missing_requirements":[],"unclear_scope":[],"validation_gaps":[],"dependency_risks":[],"follow_up_ideas":[]},"rewrite":"# Global"}
+JSON
+"##,
+    )?;
+    write_refine_stub(
+        &route_stub_path,
+        r##"#!/bin/sh
+cat > "$TEST_OUTPUT_DIR/route-payload.txt"
+cat <<'JSON'
+{"summary":"route","findings":{"missing_requirements":[],"unclear_scope":[],"validation_gaps":[],"dependency_risks":[],"follow_up_ideas":[]},"rewrite":"# Route"}
+JSON
+"##,
+    )?;
+
+    let issue = issue_node(
+        "issue-263",
+        "MET-263",
+        "Route refine agent",
+        "Current Linear description",
+        "state-2",
+        "In Progress",
+    );
+    mock_issue_lookup(&server, vec![issue.clone()]);
+    mock_issue_detail(
+        &server,
+        "issue-263",
+        issue_detail_node(
+            "issue-263",
+            "MET-263",
+            "Route refine agent",
+            "Current Linear description",
+            Vec::new(),
+            None,
+        ),
+    );
+    let update_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": issue
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "issues",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "refine",
+            "MET-263",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MET-263"));
+
+    assert!(output_dir.join("route-payload.txt").exists());
+    assert!(!output_dir.join("global-payload.txt").exists());
+    update_issue_mock.assert_calls(0);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn refine_command_apply_updates_local_backlog_and_linear_description() -> Result<(), Box<dyn Error>>
 {
     let temp = tempdir()?;

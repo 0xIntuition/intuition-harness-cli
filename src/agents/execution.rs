@@ -115,6 +115,7 @@ pub(crate) fn resolve_agent_invocation_for_planning(
     let resolved = resolve_agent_config(
         config,
         planning_meta,
+        args.route_key.as_deref(),
         AgentConfigOverrides {
             provider: args.agent.clone(),
             model: args.model.clone(),

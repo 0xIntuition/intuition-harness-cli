@@ -713,3 +713,228 @@ default_model = "gpt-5.4"
 
     Ok(())
 }
+
+#[test]
+fn config_json_includes_advanced_agent_routing_map() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+
+[agents.routing.families.backlog]
+provider = "claude"
+model = "opus"
+reasoning = "high"
+
+[agents.routing.commands."backlog.plan"]
+provider = "codex"
+model = "gpt-5.3-codex"
+"#,
+    )?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output)?;
+
+    assert_eq!(
+        parsed["app"]["agents"]["routing"]["families"]["backlog"]["provider"].as_str(),
+        Some("claude")
+    );
+    assert_eq!(
+        parsed["app"]["agents"]["routing"]["commands"]["backlog.plan"]["model"].as_str(),
+        Some("gpt-5.3-codex")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_direct_route_updates_can_set_and_clear_family_and_command_overrides()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--default-agent",
+            "codex",
+            "--default-model",
+            "gpt-5.4",
+        ])
+        .assert()
+        .success();
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--route",
+            "backlog",
+            "--route-agent",
+            "claude",
+            "--route-model",
+            "opus",
+            "--route-reasoning",
+            "high",
+        ])
+        .assert()
+        .success();
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--route",
+            "backlog.plan",
+            "--route-agent",
+            "codex",
+            "--route-model",
+            "gpt-5.3-codex",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(&config_path)?;
+    assert!(config.contains("[agents.routing.families.backlog]"));
+    assert!(config.contains("[agents.routing.commands.\"backlog.plan\"]"));
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--clear-route",
+            "backlog.plan",
+        ])
+        .assert()
+        .success();
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        parsed["app"]["agents"]["routing"]["families"]["backlog"]["provider"].as_str(),
+        Some("claude")
+    );
+    assert!(
+        parsed["app"]["agents"]["routing"]["commands"]
+            .get("backlog.plan")
+            .is_none()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_render_once_can_show_dedicated_advanced_routing_dashboard() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+
+[agents.routing.families.backlog]
+provider = "claude"
+model = "opus"
+"#,
+    )?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--advanced-routing",
+            "--render-once",
+            "--width",
+            "140",
+            "--height",
+            "40",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Advanced Agent Routing"))
+        .stdout(predicate::str::contains("Family: backlog"))
+        .stdout(predicate::str::contains("Command: backlog.plan"))
+        .stdout(predicate::str::contains("Effective routes"));
+
+    Ok(())
+}
+
+#[test]
+fn config_json_rejects_invalid_route_keys_from_manual_toml_edits() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+
+[agents.routing.commands.backlogoops]
+provider = "claude"
+"#,
+    )?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid"))
+        .stderr(predicate::str::contains(
+            "unknown agent command route key `backlogoops`",
+        ));
+
+    Ok(())
+}

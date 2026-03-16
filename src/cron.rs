@@ -12,7 +12,10 @@ use cron::Schedule;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{CronArgs, CronCommands, CronInitArgs, CronInitEventArg};
-use crate::config::{AppConfig, detect_supported_agents, normalize_agent_name};
+use crate::config::{
+    AGENT_ROUTE_RUNTIME_CRON_PROMPT, AgentConfigOverrides, AppConfig, PlanningMeta,
+    detect_supported_agents, normalize_agent_name, resolve_agent_route,
+};
 use crate::cron_dashboard::{
     CronInitAction, CronInitFormContext, CronInitFormExit, CronInitFormOptions,
     CronInitFormPrefill, CronInitFormValues, run_cron_init_form,
@@ -134,6 +137,7 @@ pub fn run_cron(args: &CronArgs) -> Result<Option<String>> {
 fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     ensure_cron_layout(root)?;
     let config = AppConfig::load()?;
+    let planning_meta = PlanningMeta::load(root)?;
     let mut agent_options = available_agent_names(&config);
     if let Some(agent) = args
         .agent
@@ -147,7 +151,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
         agent_options.push(agent);
     }
 
-    let default_agent = resolve_default_agent_name(&config, &agent_options);
+    let default_agent = resolve_default_agent_name(&config, &planning_meta, &agent_options);
     let prefill = build_init_prefill(root, args, default_agent.clone())?;
     let options = CronInitFormOptions {
         render_once: args.render_once,
@@ -350,6 +354,16 @@ fn available_agent_names(config: &AppConfig) -> Vec<String> {
     for name in config.agents.commands.keys() {
         names.insert(normalize_agent_name(name));
     }
+    for route in config.agents.routing.families.values() {
+        if let Some(provider) = route.provider.as_deref().map(normalize_agent_name) {
+            names.insert(provider);
+        }
+    }
+    for route in config.agents.routing.commands.values() {
+        if let Some(provider) = route.provider.as_deref().map(normalize_agent_name) {
+            names.insert(provider);
+        }
+    }
 
     for name in detect_supported_agents() {
         names.insert(normalize_agent_name(&name));
@@ -358,18 +372,25 @@ fn available_agent_names(config: &AppConfig) -> Vec<String> {
     names.into_iter().collect()
 }
 
-fn resolve_default_agent_name(config: &AppConfig, available_agents: &[String]) -> Option<String> {
-    config
-        .agents
-        .default_agent
-        .as_deref()
-        .map(normalize_agent_name)
-        .filter(|candidate| {
-            available_agents
-                .iter()
-                .any(|available| available.eq_ignore_ascii_case(candidate))
-        })
-        .or_else(|| available_agents.first().cloned())
+fn resolve_default_agent_name(
+    config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    available_agents: &[String],
+) -> Option<String> {
+    resolve_agent_route(
+        config,
+        planning_meta,
+        AGENT_ROUTE_RUNTIME_CRON_PROMPT,
+        AgentConfigOverrides::default(),
+    )
+    .ok()
+    .map(|resolved| resolved.provider)
+    .filter(|candidate| {
+        available_agents
+            .iter()
+            .any(|available| available.eq_ignore_ascii_case(candidate))
+    })
+    .or_else(|| available_agents.first().cloned())
 }
 
 fn render_command_error(job: &CronJob, outcome: &CommandPhaseOutcome) -> Option<String> {

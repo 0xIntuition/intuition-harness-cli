@@ -88,6 +88,7 @@ mod tests {
                 default_agent: Some("capture".to_string()),
                 default_model: Some("gpt-5".to_string()),
                 default_reasoning: None,
+                routing: Default::default(),
                 commands,
             },
             ..AppConfig::default()
@@ -98,6 +99,7 @@ mod tests {
             &PlanningMeta::default(),
             &RunAgentArgs {
                 root: None,
+                route_key: None,
                 agent: None,
                 prompt: "Investigate config loading".to_string(),
                 instructions: Some("Reply with a plan".to_string()),
@@ -126,6 +128,7 @@ mod tests {
                 default_agent: None,
                 default_model: Some("gpt-5.3-codex".to_string()),
                 default_reasoning: None,
+                routing: Default::default(),
                 commands: BTreeMap::new(),
             },
             ..AppConfig::default()
@@ -136,6 +139,7 @@ mod tests {
             &PlanningMeta::default(),
             &RunAgentArgs {
                 root: None,
+                route_key: None,
                 agent: Some("codex".to_string()),
                 prompt: "Ship setup flow".to_string(),
                 instructions: Some("Use concise output".to_string()),
@@ -213,6 +217,7 @@ mod tests {
                 default_agent: None,
                 default_model: Some("gpt-5.3-codex".to_string()),
                 default_reasoning: None,
+                routing: Default::default(),
                 commands: BTreeMap::new(),
             },
             ..AppConfig::default()
@@ -222,6 +227,7 @@ mod tests {
             &PlanningMeta::default(),
             &RunAgentArgs {
                 root: None,
+                route_key: None,
                 agent: Some("codex".to_string()),
                 prompt: "Ship setup flow".to_string(),
                 instructions: None,
@@ -274,6 +280,7 @@ mod tests {
                 default_agent: None,
                 default_model: Some("sonnet".to_string()),
                 default_reasoning: None,
+                routing: Default::default(),
                 commands: BTreeMap::new(),
             },
             ..AppConfig::default()
@@ -284,6 +291,7 @@ mod tests {
             &PlanningMeta::default(),
             &RunAgentArgs {
                 root: None,
+                route_key: None,
                 agent: Some("claude".to_string()),
                 prompt: "Draft the review summary".to_string(),
                 instructions: None,

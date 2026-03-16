@@ -10,6 +10,10 @@ use crate::agents::run_agent_capture;
 use crate::cli::{
     LinearClientArgs, RunAgentArgs, WorkflowCommands, WorkflowRunArgs, WorkflowsArgs,
 };
+use crate::config::{
+    AGENT_ROUTE_AGENTS_WORKFLOWS_RUN, AgentConfigOverrides, AppConfig, PlanningMeta,
+    resolve_agent_route,
+};
 use crate::context::{
     load_codebase_context_bundle, load_effective_instructions, load_project_rules_bundle,
     load_workflow_contract, render_repo_map,
@@ -115,9 +119,24 @@ async fn run_workflow(args: &WorkflowRunArgs) -> Result<String> {
         .transpose()?
         .filter(|value| !value.trim().is_empty());
     let prompt = render_template(&workflow.prompt_template, &values)?;
+    let app_config = AppConfig::load()?;
+    let planning_meta = PlanningMeta::load(&root)?;
+    let routed_provider = resolve_agent_route(
+        &app_config,
+        &planning_meta,
+        AGENT_ROUTE_AGENTS_WORKFLOWS_RUN,
+        AgentConfigOverrides {
+            provider: args.provider.clone(),
+            model: None,
+            reasoning: None,
+        },
+    )
+    .ok()
+    .map(|resolved| resolved.provider);
     let provider = args
         .provider
         .clone()
+        .or(routed_provider)
         .unwrap_or_else(|| workflow.provider.clone());
 
     if args.dry_run {
@@ -132,6 +151,7 @@ async fn run_workflow(args: &WorkflowRunArgs) -> Result<String> {
 
     let output = run_agent_capture(&RunAgentArgs {
         root: Some(root.clone()),
+        route_key: Some(AGENT_ROUTE_AGENTS_WORKFLOWS_RUN.to_string()),
         agent: Some(provider.clone()),
         prompt,
         instructions,

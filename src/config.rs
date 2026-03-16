@@ -16,6 +16,15 @@ pub const DEFAULT_LISTEN_POLL_INTERVAL_SECONDS: u64 = 7;
 pub const DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
 pub const MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 1;
 pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
+pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
+pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
+pub const AGENT_ROUTE_CONTEXT_RELOAD: &str = "context.reload";
+pub const AGENT_ROUTE_LINEAR_ISSUES_REFINE: &str = "linear.issues.refine";
+pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
+pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
+pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
+pub const AGENT_ROUTE_MERGE: &str = "merge.run";
 const SUPPORTED_AGENT_NAMES: &[&str] = &["codex", "claude"];
 const CODEX_AGENT_MODELS: &[&str] = &[
     "gpt-5.4",
@@ -121,7 +130,24 @@ pub struct AgentSettings {
     pub default_model: Option<String>,
     pub default_reasoning: Option<String>,
     #[serde(default)]
+    pub routing: AgentRoutingSettings,
+    #[serde(default)]
     pub commands: BTreeMap<String, AgentCommandConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentRoutingSettings {
+    #[serde(default)]
+    pub families: BTreeMap<String, AgentRouteConfig>,
+    #[serde(default)]
+    pub commands: BTreeMap<String, AgentRouteConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AgentRouteConfig {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,6 +205,38 @@ pub struct AgentConfigOverrides {
     pub reasoning: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRouteScope {
+    Family,
+    Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentRouteDefinition {
+    pub key: &'static str,
+    pub family: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAgentRoute {
+    pub route_key: String,
+    pub family_key: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+    pub source: AgentRouteSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRouteSource {
+    ExplicitOverride,
+    RepoDefault,
+    CommandDefault(String),
+    FamilyDefault(String),
+    GlobalDefault,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedAgentConfig {
     pub provider: String,
@@ -217,8 +275,14 @@ impl AppConfig {
         };
 
         match fs::read_to_string(&path) {
-            Ok(contents) => toml::from_str(&contents)
-                .with_context(|| format!("failed to parse `{}`", path.display())),
+            Ok(contents) => {
+                let parsed: Self = toml::from_str(&contents)
+                    .with_context(|| format!("failed to parse `{}`", path.display()))?;
+                parsed
+                    .validate()
+                    .with_context(|| format!("invalid `{}`", path.display()))?;
+                Ok(parsed)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => {
                 Err(error).with_context(|| format!("failed to read `{}`", path.display()))
@@ -227,6 +291,7 @@ impl AppConfig {
     }
 
     pub fn save(&self) -> Result<PathBuf> {
+        self.validate().context("config is invalid")?;
         let path = resolve_config_path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -275,6 +340,80 @@ impl AppConfig {
                 self.linear.repo_auth.remove(&key);
             }
         }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_global_agent_defaults()?;
+        self.validate_agent_routes()?;
+        Ok(())
+    }
+
+    pub fn upsert_agent_route(
+        &mut self,
+        scope: AgentRouteScope,
+        key: &str,
+        config: AgentRouteConfig,
+    ) -> Result<()> {
+        let normalized = normalize_agent_route_key(scope, key)?;
+        match scope {
+            AgentRouteScope::Family => {
+                self.agents.routing.families.insert(normalized, config);
+            }
+            AgentRouteScope::Command => {
+                self.agents.routing.commands.insert(normalized, config);
+            }
+        }
+        self.validate()
+    }
+
+    pub fn clear_agent_route(&mut self, scope: AgentRouteScope, key: &str) -> Result<bool> {
+        let normalized = normalize_agent_route_key(scope, key)?;
+        let removed = match scope {
+            AgentRouteScope::Family => self.agents.routing.families.remove(&normalized).is_some(),
+            AgentRouteScope::Command => self.agents.routing.commands.remove(&normalized).is_some(),
+        };
+        self.validate()?;
+        Ok(removed)
+    }
+
+    fn validate_global_agent_defaults(&self) -> Result<()> {
+        if let Some(provider) = normalize_optional_ref(self.agents.default_agent.as_deref()) {
+            validate_agent_name(self, &provider)?;
+            validate_agent_model(&provider, self.agents.default_model.as_deref())?;
+        } else if normalize_optional_ref(self.agents.default_model.as_deref()).is_some() {
+            return Err(anyhow!(
+                "global default model requires a global default agent under `[agents]`"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_agent_routes(&self) -> Result<()> {
+        for key in self.agents.routing.families.keys() {
+            normalize_agent_route_key(AgentRouteScope::Family, key)?;
+        }
+        for key in self.agents.routing.commands.keys() {
+            normalize_agent_route_key(AgentRouteScope::Command, key)?;
+        }
+
+        for definition in supported_agent_route_definitions() {
+            let family = self.agents.routing.families.get(definition.family);
+            validate_agent_route_config(
+                self,
+                family,
+                None,
+                Some(definition.family),
+                Some(definition.key),
+            )?;
+            validate_agent_route_config(
+                self,
+                self.agents.routing.commands.get(definition.key),
+                family,
+                Some(definition.family),
+                Some(definition.key),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -469,9 +608,38 @@ pub async fn ensure_saved_issue_labels(
 pub fn resolve_agent_config(
     app_config: &AppConfig,
     planning_meta: &PlanningMeta,
+    route_key: Option<&str>,
     overrides: AgentConfigOverrides,
 ) -> Result<ResolvedAgentConfig> {
-    let provider = normalize_optional_owned(overrides.provider)
+    let explicit_provider =
+        normalize_optional_owned(overrides.provider).map(|value| normalize_agent_name(&value));
+    if let Some(provider) = explicit_provider.as_deref() {
+        validate_agent_name(app_config, provider)?;
+    }
+
+    let route = match route_key {
+        Some(key) => match resolve_agent_route(
+            app_config,
+            planning_meta,
+            key,
+            AgentConfigOverrides::default(),
+        ) {
+            Ok(resolved) => Some(resolved),
+            Err(error)
+                if explicit_provider.is_some()
+                    && error
+                        .to_string()
+                        .contains("no agent was selected for route") =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
+
+    let provider = explicit_provider
+        .or_else(|| route.as_ref().map(|resolved| resolved.provider.clone()))
         .or_else(|| normalize_optional_ref(planning_meta.agent.provider.as_deref()))
         .or_else(|| normalize_optional_ref(app_config.agents.default_agent.as_deref()))
         .map(|value| normalize_agent_name(&value))
@@ -482,6 +650,7 @@ pub fn resolve_agent_config(
         })?;
     validate_agent_name(app_config, &provider)?;
     let model = normalize_optional_owned(overrides.model)
+        .or_else(|| route.as_ref().and_then(|resolved| resolved.model.clone()))
         .or_else(|| normalize_optional_ref(planning_meta.agent.model.as_deref()))
         .or_else(|| normalize_optional_ref(app_config.agents.default_model.as_deref()));
     validate_agent_model(&provider, model.as_deref())?;
@@ -490,8 +659,199 @@ pub fn resolve_agent_config(
         provider,
         model,
         reasoning: normalize_optional_owned(overrides.reasoning)
+            .or_else(|| {
+                route
+                    .as_ref()
+                    .and_then(|resolved| resolved.reasoning.clone())
+            })
             .or_else(|| normalize_optional_ref(planning_meta.agent.reasoning.as_deref()))
             .or_else(|| normalize_optional_ref(app_config.agents.default_reasoning.as_deref())),
+    })
+}
+
+pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
+    const ROUTES: &[AgentRouteDefinition] = &[
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_BACKLOG_PLAN,
+            family: "backlog",
+            label: "meta backlog plan",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_BACKLOG_SPLIT,
+            family: "backlog",
+            label: "meta backlog split",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_CONTEXT_SCAN,
+            family: "context",
+            label: "meta context scan",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_CONTEXT_RELOAD,
+            family: "context",
+            label: "meta context reload",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_LINEAR_ISSUES_REFINE,
+            family: "linear",
+            label: "meta linear issues refine",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_AGENTS_LISTEN,
+            family: "agents",
+            label: "meta agents listen",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_AGENTS_WORKFLOWS_RUN,
+            family: "agents",
+            label: "meta agents workflows run",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_RUNTIME_CRON_PROMPT,
+            family: "runtime.cron",
+            label: "meta runtime cron prompt jobs",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_MERGE,
+            family: "merge",
+            label: "meta merge",
+        },
+    ];
+    ROUTES
+}
+
+pub fn supported_agent_route_families() -> Vec<&'static str> {
+    let mut families = supported_agent_route_definitions()
+        .iter()
+        .map(|definition| definition.family)
+        .collect::<Vec<_>>();
+    families.sort_unstable();
+    families.dedup();
+    families
+}
+
+pub fn supported_agent_route_definition(key: &str) -> Option<&'static AgentRouteDefinition> {
+    let normalized = normalize_agent_name(key);
+    supported_agent_route_definitions()
+        .iter()
+        .find(|definition| definition.key == normalized)
+}
+
+pub fn normalize_agent_route_key(scope: AgentRouteScope, key: &str) -> Result<String> {
+    let normalized = normalize_agent_name(key);
+    let valid = match scope {
+        AgentRouteScope::Family => supported_agent_route_families()
+            .into_iter()
+            .any(|candidate| candidate == normalized),
+        AgentRouteScope::Command => supported_agent_route_definition(&normalized).is_some(),
+    };
+    if valid {
+        Ok(normalized)
+    } else {
+        let expected = match scope {
+            AgentRouteScope::Family => supported_agent_route_families().join(", "),
+            AgentRouteScope::Command => supported_agent_route_definitions()
+                .iter()
+                .map(|definition| definition.key)
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        Err(anyhow!(
+            "unknown {} route key `{}`; supported keys: {}",
+            match scope {
+                AgentRouteScope::Family => "agent family",
+                AgentRouteScope::Command => "agent command",
+            },
+            normalized,
+            expected
+        ))
+    }
+}
+
+pub fn resolve_agent_route(
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    route_key: &str,
+    overrides: AgentConfigOverrides,
+) -> Result<ResolvedAgentRoute> {
+    let definition = supported_agent_route_definition(route_key).ok_or_else(|| {
+        anyhow!(
+            "unknown agent command route `{}`; supported keys: {}",
+            normalize_agent_name(route_key),
+            supported_agent_route_definitions()
+                .iter()
+                .map(|route| route.key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let explicit_provider =
+        normalize_optional_owned(overrides.provider).map(|value| normalize_agent_name(&value));
+    if let Some(provider) = explicit_provider.as_deref() {
+        validate_agent_name(app_config, provider)?;
+    }
+
+    let route_command = app_config.agents.routing.commands.get(definition.key);
+    let route_family = app_config.agents.routing.families.get(definition.family);
+    let repo_provider = normalize_optional_ref(planning_meta.agent.provider.as_deref())
+        .map(|value| normalize_agent_name(&value));
+    let global_provider = normalize_optional_ref(app_config.agents.default_agent.as_deref())
+        .map(|value| normalize_agent_name(&value));
+
+    let (provider, source) = if let Some(provider) = explicit_provider.clone() {
+        (provider, AgentRouteSource::ExplicitOverride)
+    } else if let Some(provider) = route_command
+        .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
+        .map(|value| normalize_agent_name(&value))
+    {
+        (
+            provider,
+            AgentRouteSource::CommandDefault(definition.key.to_string()),
+        )
+    } else if let Some(provider) = route_family
+        .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
+        .map(|value| normalize_agent_name(&value))
+    {
+        (
+            provider,
+            AgentRouteSource::FamilyDefault(definition.family.to_string()),
+        )
+    } else if let Some(provider) = repo_provider.clone() {
+        (provider, AgentRouteSource::RepoDefault)
+    } else if let Some(provider) = global_provider {
+        (provider, AgentRouteSource::GlobalDefault)
+    } else {
+        return Err(anyhow!(
+            "no agent was selected for route `{}`. Pass `--agent <NAME>` or configure a route or global default with `meta runtime config`.",
+            definition.key
+        ));
+    };
+    validate_agent_name(app_config, &provider)?;
+
+    let model = normalize_optional_owned(overrides.model)
+        .or_else(|| {
+            route_command.and_then(|config| normalize_optional_ref(config.model.as_deref()))
+        })
+        .or_else(|| route_family.and_then(|config| normalize_optional_ref(config.model.as_deref())))
+        .or_else(|| normalize_optional_ref(planning_meta.agent.model.as_deref()))
+        .or_else(|| normalize_optional_ref(app_config.agents.default_model.as_deref()));
+    validate_agent_model(&provider, model.as_deref())?;
+
+    Ok(ResolvedAgentRoute {
+        route_key: definition.key.to_string(),
+        family_key: definition.family.to_string(),
+        provider,
+        model,
+        reasoning: normalize_optional_owned(overrides.reasoning)
+            .or_else(|| {
+                route_command.and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
+            })
+            .or_else(|| {
+                route_family.and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
+            })
+            .or_else(|| normalize_optional_ref(planning_meta.agent.reasoning.as_deref()))
+            .or_else(|| normalize_optional_ref(app_config.agents.default_reasoning.as_deref())),
+        source,
     })
 }
 
@@ -761,11 +1121,55 @@ fn normalize_optional_ref(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn validate_agent_route_config(
+    app_config: &AppConfig,
+    route: Option<&AgentRouteConfig>,
+    fallback: Option<&AgentRouteConfig>,
+    family_key: Option<&str>,
+    command_key: Option<&str>,
+) -> Result<()> {
+    let Some(route) = route else {
+        return Ok(());
+    };
+    let provider = normalize_optional_ref(route.provider.as_deref())
+        .or_else(|| fallback.and_then(|config| normalize_optional_ref(config.provider.as_deref())))
+        .or_else(|| normalize_optional_ref(app_config.agents.default_agent.as_deref()));
+    let context = if let Some(command_key) = command_key {
+        format!("agent route `{command_key}`")
+    } else if let Some(family_key) = family_key {
+        format!("agent family route `{family_key}`")
+    } else {
+        "agent route".to_string()
+    };
+
+    if let Some(provider_value) = normalize_optional_ref(route.provider.as_deref()) {
+        validate_agent_name(app_config, &provider_value)
+            .with_context(|| format!("{context} has an invalid provider"))?;
+    }
+
+    if normalize_optional_ref(route.model.as_deref()).is_some() {
+        let provider = provider.ok_or_else(|| {
+            anyhow!(
+                "{context} sets a model but no provider can be resolved from the route, family, or global defaults"
+            )
+        })?;
+        validate_agent_model(&provider, route.model.as_deref())
+            .with_context(|| format!("{context} has an invalid model"))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
+        AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentRouteConfig, AgentRouteScope,
+        AgentRoutingSettings, AgentSettings, AppConfig,
         DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
-        PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        PlanningAgentSettings, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        normalize_agent_route_key, resolve_agent_config, resolve_agent_route,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
 
@@ -848,5 +1252,301 @@ mod tests {
     fn listen_poll_interval_validation_accepts_positive_values() {
         assert!(validate_listen_poll_interval_seconds(1).is_ok());
         assert!(validate_listen_poll_interval_seconds(60).is_ok());
+    }
+
+    #[test]
+    fn resolve_agent_route_prefers_command_then_family_then_global_defaults() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("medium".to_string()),
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::from([(
+                        "backlog".to_string(),
+                        AgentRouteConfig {
+                            provider: Some("claude".to_string()),
+                            model: Some("opus".to_string()),
+                            reasoning: Some("high".to_string()),
+                        },
+                    )]),
+                    commands: BTreeMap::from([(
+                        AGENT_ROUTE_BACKLOG_PLAN.to_string(),
+                        AgentRouteConfig {
+                            provider: Some("codex".to_string()),
+                            model: Some("gpt-5.3-codex".to_string()),
+                            reasoning: Some("low".to_string()),
+                        },
+                    )]),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+
+        let plan = resolve_agent_route(
+            &config,
+            &PlanningMeta::default(),
+            AGENT_ROUTE_BACKLOG_PLAN,
+            Default::default(),
+        )
+        .expect("plan route should resolve");
+        assert_eq!(plan.provider, "codex");
+        assert_eq!(plan.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(plan.reasoning.as_deref(), Some("low"));
+        assert!(matches!(
+            plan.source,
+            super::AgentRouteSource::CommandDefault(_)
+        ));
+
+        let split = resolve_agent_route(
+            &config,
+            &PlanningMeta::default(),
+            AGENT_ROUTE_BACKLOG_SPLIT,
+            Default::default(),
+        )
+        .expect("split route should resolve");
+        assert_eq!(split.provider, "claude");
+        assert_eq!(split.model.as_deref(), Some("opus"));
+        assert_eq!(split.reasoning.as_deref(), Some("high"));
+        assert!(matches!(
+            split.source,
+            super::AgentRouteSource::FamilyDefault(_)
+        ));
+    }
+
+    #[test]
+    fn app_config_validation_rejects_invalid_route_model_combinations() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::new(),
+                    commands: BTreeMap::from([(
+                        AGENT_ROUTE_BACKLOG_PLAN.to_string(),
+                        AgentRouteConfig {
+                            provider: None,
+                            model: Some("opus".to_string()),
+                            reasoning: None,
+                        },
+                    )]),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+
+        let error = config.validate().expect_err("route validation should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("agent route `backlog.plan` has an invalid model")
+        );
+    }
+
+    #[test]
+    fn route_key_normalization_rejects_unknown_keys() {
+        let error = normalize_agent_route_key(AgentRouteScope::Command, "backlog.unknown")
+            .expect_err("unknown route should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown agent command route key `backlog.unknown`")
+        );
+    }
+
+    #[test]
+    fn app_config_toml_round_trips_advanced_routing() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::from([(
+                        "backlog".to_string(),
+                        AgentRouteConfig {
+                            provider: Some("claude".to_string()),
+                            model: Some("opus".to_string()),
+                            reasoning: Some("high".to_string()),
+                        },
+                    )]),
+                    commands: BTreeMap::from([(
+                        AGENT_ROUTE_BACKLOG_PLAN.to_string(),
+                        AgentRouteConfig {
+                            provider: Some("codex".to_string()),
+                            model: Some("gpt-5.3-codex".to_string()),
+                            reasoning: Some("low".to_string()),
+                        },
+                    )]),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+
+        let encoded = toml::to_string_pretty(&config).expect("config should encode");
+        let decoded: AppConfig = toml::from_str(&encoded).expect("config should decode");
+        decoded.validate().expect("decoded config should validate");
+        assert_eq!(
+            decoded
+                .agents
+                .routing
+                .commands
+                .get(AGENT_ROUTE_BACKLOG_PLAN)
+                .and_then(|route| route.model.as_deref()),
+            Some("gpt-5.3-codex")
+        );
+        assert_eq!(
+            decoded
+                .agents
+                .routing
+                .families
+                .get("backlog")
+                .and_then(|route| route.provider.as_deref()),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn resolve_agent_route_ignores_repo_defaults_when_route_defaults_exist() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("medium".to_string()),
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::from([(
+                        "backlog".to_string(),
+                        AgentRouteConfig {
+                            provider: Some("claude".to_string()),
+                            model: Some("opus".to_string()),
+                            reasoning: Some("high".to_string()),
+                        },
+                    )]),
+                    commands: BTreeMap::from([(
+                        AGENT_ROUTE_BACKLOG_PLAN.to_string(),
+                        AgentRouteConfig {
+                            provider: Some("codex".to_string()),
+                            model: Some("gpt-5.3-codex".to_string()),
+                            reasoning: Some("low".to_string()),
+                        },
+                    )]),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let planning_meta = PlanningMeta {
+            agent: PlanningAgentSettings {
+                provider: Some("claude".to_string()),
+                model: Some("sonnet".to_string()),
+                reasoning: Some("medium".to_string()),
+            },
+            ..PlanningMeta::default()
+        };
+
+        let plan = resolve_agent_route(
+            &config,
+            &planning_meta,
+            AGENT_ROUTE_BACKLOG_PLAN,
+            Default::default(),
+        )
+        .expect("plan route should resolve");
+        assert_eq!(plan.provider, "codex");
+        assert_eq!(plan.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(plan.reasoning.as_deref(), Some("low"));
+        assert!(matches!(
+            plan.source,
+            super::AgentRouteSource::CommandDefault(_)
+        ));
+
+        let split = resolve_agent_route(
+            &config,
+            &planning_meta,
+            AGENT_ROUTE_BACKLOG_SPLIT,
+            Default::default(),
+        )
+        .expect("split route should resolve");
+        assert_eq!(split.provider, "claude");
+        assert_eq!(split.model.as_deref(), Some("opus"));
+        assert_eq!(split.reasoning.as_deref(), Some("high"));
+        assert!(matches!(
+            split.source,
+            super::AgentRouteSource::FamilyDefault(_)
+        ));
+    }
+
+    #[test]
+    fn resolve_agent_config_uses_routes_before_repo_defaults() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("medium".to_string()),
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::from([(
+                        "backlog".to_string(),
+                        AgentRouteConfig {
+                            provider: Some("claude".to_string()),
+                            model: Some("opus".to_string()),
+                            reasoning: Some("high".to_string()),
+                        },
+                    )]),
+                    commands: BTreeMap::new(),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let planning_meta = PlanningMeta {
+            agent: PlanningAgentSettings {
+                provider: Some("codex".to_string()),
+                model: Some("gpt-5.3-codex".to_string()),
+                reasoning: Some("low".to_string()),
+            },
+            ..PlanningMeta::default()
+        };
+
+        let routed = resolve_agent_config(
+            &config,
+            &planning_meta,
+            Some(AGENT_ROUTE_BACKLOG_SPLIT),
+            Default::default(),
+        )
+        .expect("routed config should resolve");
+        assert_eq!(routed.provider, "claude");
+        assert_eq!(routed.model.as_deref(), Some("opus"));
+        assert_eq!(routed.reasoning.as_deref(), Some("high"));
+
+        let no_route_config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("claude".to_string()),
+                default_model: Some("opus".to_string()),
+                default_reasoning: Some("high".to_string()),
+                routing: AgentRoutingSettings::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let repo_fallback = resolve_agent_config(
+            &no_route_config,
+            &planning_meta,
+            Some(AGENT_ROUTE_BACKLOG_PLAN),
+            Default::default(),
+        )
+        .expect("route without override should fall back to repo defaults");
+        assert_eq!(repo_fallback.provider, "codex");
+        assert_eq!(repo_fallback.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(repo_fallback.reasoning.as_deref(), Some("low"));
+
+        let unrouted =
+            resolve_agent_config(&no_route_config, &planning_meta, None, Default::default())
+                .expect("unrouted config should still resolve");
+        assert_eq!(unrouted.provider, "codex");
+        assert_eq!(unrouted.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(unrouted.reasoning.as_deref(), Some("low"));
     }
 }

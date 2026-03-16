@@ -8,7 +8,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
-use crate::config::{AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport};
+use crate::config::{
+    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport,
+};
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{
     IssueListFilters, IssueSummary, LinearClient, LinearService, ReqwestLinearClient, WorkflowState,
@@ -394,6 +396,7 @@ fn execute_agent_turn(
     let instructions = build_agent_instructions(issue, turn_number, context)?;
     let run_args = RunAgentArgs {
         root: Some(context.source_root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN.to_string()),
         agent: context.args.agent.clone(),
         prompt: render_agent_prompt(
             issue,
