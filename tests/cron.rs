@@ -3,6 +3,12 @@
 include!("support/common.rs");
 
 #[cfg(unix)]
+fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
+    let current_path = std::env::var("PATH")?;
+    Ok(format!("{}:{}", bin_dir.display(), current_path))
+}
+
+#[cfg(unix)]
 #[test]
 fn cron_init_creates_a_markdown_job_template() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -290,6 +296,92 @@ printf '%s' "$METASTACK_CRON_JOB_COMMAND_EXIT_CODE" > "$TEST_OUTPUT_DIR/command-
             .contains("Scan reddit for top posts in r/programming and r/rust")
     );
     assert!(fs::read_to_string(output_dir.join("prompt.txt"))?.contains("Command phase: skipped"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn cron_run_prefers_route_specific_agent_over_global_default() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    let output_dir = temp.path().join("agent-output");
+    let bin_dir = temp.path().join("bin");
+    let global_stub_path = bin_dir.join("global-stub");
+    let route_stub_path = bin_dir.join("cron-route-stub");
+
+    fs::create_dir_all(&output_dir)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "global-stub"
+
+[agents.routing.commands."runtime.cron.prompt"]
+provider = "cron-route-stub"
+
+[agents.commands.global-stub]
+command = "global-stub"
+args = ["{{payload}}"]
+transport = "arg"
+
+[agents.commands.cron-route-stub]
+command = "cron-route-stub"
+args = ["{{payload}}"]
+transport = "arg"
+"#,
+    )?;
+    fs::write(
+        &global_stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/global.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&global_stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&global_stub_path, permissions)?;
+    fs::write(
+        &route_stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/route.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&route_stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&route_stub_path, permissions)?;
+
+    cli()
+        .current_dir(temp.path())
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "cron",
+            "init",
+            "nightly",
+            "--no-interactive",
+            "--schedule",
+            "0 * * * *",
+            "--prompt",
+            "Inspect the latest logs",
+        ])
+        .assert()
+        .success();
+
+    cli()
+        .current_dir(temp.path())
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args(["cron", "run", "nightly"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Ran cron job `nightly` successfully.",
+        ));
+
+    assert!(output_dir.join("route.txt").is_file());
+    assert!(!output_dir.join("global.txt").exists());
+    assert!(fs::read_to_string(output_dir.join("route.txt"))?.contains("Inspect the latest logs"));
 
     Ok(())
 }
