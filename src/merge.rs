@@ -487,6 +487,7 @@ fn execute_merge_run(
                 format!("Validation setup failed: {error:#}"),
                 None,
             )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
             return Err(error);
         }
     };
@@ -505,6 +506,7 @@ fn execute_merge_run(
                 format!("Validation execution failed: {error:#}"),
                 None,
             )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
             return Err(error);
         }
     };
@@ -525,6 +527,7 @@ fn execute_merge_run(
             format!("{failing_command}. Publication was skipped."),
             None,
         )?;
+        write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
         bail!(
             "validation failed for aggregate branch `{}`; publication was skipped",
             aggregate_branch
@@ -556,6 +559,7 @@ fn execute_merge_run(
             format!("Push failed for `{aggregate_branch}`: {error:#}"),
             None,
         )?;
+        write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
         return Err(error);
     }
     tracker.complete_step(STEP_PUSH, format!("Pushed `{aggregate_branch}` to origin."))?;
@@ -586,6 +590,7 @@ fn execute_merge_run(
                 format!("Aggregate PR publication failed: {error:#}"),
                 None,
             )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
             return Err(error);
         }
     };
@@ -628,6 +633,20 @@ fn execute_merge_run(
         publication: publication_artifact,
         selected_count: selected_pull_requests.len(),
     })
+}
+
+fn write_merge_progress_artifact(
+    run_dir: &Path,
+    tracker: &ProgressTracker,
+    steps: &[MergeStepRecord],
+) -> Result<()> {
+    write_json_artifact(
+        &run_dir.join("merge-progress.json"),
+        &MergeProgressArtifact {
+            run: tracker.artifact().clone(),
+            steps: steps.to_vec(),
+        },
+    )
 }
 
 fn reserve_run_dir(paths: &PlanningPaths) -> Result<(String, PathBuf)> {

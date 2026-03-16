@@ -584,6 +584,11 @@ transport = "arg"
     assert!(progress.contains("\"status\": \"failed\""));
     assert!(progress.contains("\"current_phase_key\": \"validation\""));
     assert!(progress.contains("Publication was skipped."));
+    let merge_progress = fs::read_to_string(run_dir.join("merge-progress.json"))?;
+    assert!(merge_progress.contains("\"status\": \"failed\""));
+    assert!(merge_progress.contains("\"current_phase_key\": \"validation\""));
+    assert!(merge_progress.contains("\"pull_request\": 21"));
+    assert!(merge_progress.contains("\"status\": \"merged\""));
 
     Ok(())
 }
