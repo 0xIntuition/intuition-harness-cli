@@ -1687,8 +1687,8 @@ mod tests {
         BacklogTemplateConflictAction, SetupApp, SetupViewData,
         parse_backlog_template_conflict_action, prompt_backlog_template_conflicts_with_io,
     };
-    use anyhow::Result;
     use crate::config::{AgentSettings, AppConfig, PlanningAgentSettings, PlanningMeta};
+    use anyhow::Result;
     use std::io::Cursor;
 
     #[test]
@@ -1734,7 +1734,8 @@ mod tests {
             .iter()
             .position(|option| option == "haiku")
             .expect("haiku model should be listed");
-        app.model_field.move_by(haiku_index as isize - app.model_field.selected() as isize);
+        app.model_field
+            .move_by(haiku_index as isize - app.model_field.selected() as isize);
         app.sync_reasoning(None);
 
         assert_eq!(

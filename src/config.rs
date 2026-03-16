@@ -197,6 +197,13 @@ pub struct AgentConfigOverrides {
     pub reasoning: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct AgentValueCandidate {
+    value: String,
+    source: AgentConfigSource,
+    provider: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentRouteScope {
     Family,
@@ -668,8 +675,13 @@ pub fn resolve_agent_config(
             )
         })?;
     validate_agent_name(app_config, &provider)?;
-    let (model, model_source) = resolve_optional_agent_value(
-        normalize_optional_owned(overrides.model),
+    let (model, model_source) = resolve_supported_model(
+        &provider,
+        normalize_optional_owned(overrides.model).map(|value| AgentValueCandidate {
+            value,
+            source: AgentConfigSource::ExplicitOverride,
+            provider: explicit_provider.clone(),
+        }),
         route
             .as_ref()
             .and_then(|resolved| resolved.model.clone())
@@ -677,14 +689,38 @@ pub fn resolve_agent_config(
                 route
                     .as_ref()
                     .and_then(|resolved| resolved.model_source.clone()),
-            ),
+            )
+            .map(|(value, source)| AgentValueCandidate {
+                value,
+                source,
+                provider: route.as_ref().map(|resolved| resolved.provider.clone()),
+            }),
         None,
-        normalize_optional_ref(planning_meta.agent.model.as_deref()),
-        normalize_optional_ref(app_config.agents.default_model.as_deref()),
-    );
-    validate_agent_model(&provider, model.as_deref())?;
-    let (reasoning, reasoning_source) = resolve_optional_agent_value(
-        normalize_optional_owned(overrides.reasoning),
+        normalize_optional_ref(planning_meta.agent.model.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::RepoDefault,
+                provider: normalize_optional_ref(planning_meta.agent.provider.as_deref())
+                    .map(|provider| normalize_agent_name(&provider)),
+            }
+        }),
+        normalize_optional_ref(app_config.agents.default_model.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::GlobalDefault,
+                provider: normalize_optional_ref(app_config.agents.default_agent.as_deref())
+                    .map(|provider| normalize_agent_name(&provider)),
+            }
+        }),
+    )?;
+    let (reasoning, reasoning_source) = resolve_supported_reasoning(
+        &provider,
+        model.as_deref(),
+        normalize_optional_owned(overrides.reasoning).map(|value| AgentValueCandidate {
+            value,
+            source: AgentConfigSource::ExplicitOverride,
+            provider: explicit_provider.clone(),
+        }),
         route
             .as_ref()
             .and_then(|resolved| resolved.reasoning.clone())
@@ -692,12 +728,30 @@ pub fn resolve_agent_config(
                 route
                     .as_ref()
                     .and_then(|resolved| resolved.reasoning_source.clone()),
-            ),
+            )
+            .map(|(value, source)| AgentValueCandidate {
+                value,
+                source,
+                provider: route.as_ref().map(|resolved| resolved.provider.clone()),
+            }),
         None,
-        normalize_optional_ref(planning_meta.agent.reasoning.as_deref()),
-        normalize_optional_ref(app_config.agents.default_reasoning.as_deref()),
-    );
-    validate_agent_reasoning(&provider, model.as_deref(), reasoning.as_deref())?;
+        normalize_optional_ref(planning_meta.agent.reasoning.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::RepoDefault,
+                provider: normalize_optional_ref(planning_meta.agent.provider.as_deref())
+                    .map(|provider| normalize_agent_name(&provider)),
+            }
+        }),
+        normalize_optional_ref(app_config.agents.default_reasoning.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::GlobalDefault,
+                provider: normalize_optional_ref(app_config.agents.default_agent.as_deref())
+                    .map(|provider| normalize_agent_name(&provider)),
+            }
+        }),
+    )?;
 
     Ok(ResolvedAgentConfig {
         provider,
@@ -873,7 +927,7 @@ pub fn resolve_agent_route(
         )
     } else if let Some(provider) = repo_provider.clone() {
         (provider, AgentConfigSource::RepoDefault)
-    } else if let Some(provider) = global_provider {
+    } else if let Some(provider) = global_provider.clone() {
         (provider, AgentConfigSource::GlobalDefault)
     } else {
         return Err(anyhow!(
@@ -883,50 +937,87 @@ pub fn resolve_agent_route(
     };
     validate_agent_name(app_config, &provider)?;
 
-    let (model, model_source) = resolve_optional_agent_value(
-        normalize_optional_owned(overrides.model),
+    let (model, model_source) = resolve_supported_model(
+        &provider,
+        normalize_optional_owned(overrides.model).map(|value| AgentValueCandidate {
+            value,
+            source: AgentConfigSource::ExplicitOverride,
+            provider: explicit_provider.clone(),
+        }),
         route_command
             .and_then(|config| normalize_optional_ref(config.model.as_deref()))
-            .map(|value| {
-                (
-                    value,
-                    AgentConfigSource::CommandRoute(definition.key.to_string()),
-                )
+            .map(|value| AgentValueCandidate {
+                value,
+                source: AgentConfigSource::CommandRoute(definition.key.to_string()),
+                provider: route_command
+                    .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
+                    .map(|provider| normalize_agent_name(&provider)),
             }),
         route_family
             .and_then(|config| normalize_optional_ref(config.model.as_deref()))
-            .map(|value| {
-                (
-                    value,
-                    AgentConfigSource::FamilyRoute(definition.family.to_string()),
-                )
+            .map(|value| AgentValueCandidate {
+                value,
+                source: AgentConfigSource::FamilyRoute(definition.family.to_string()),
+                provider: route_family
+                    .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
+                    .map(|provider| normalize_agent_name(&provider)),
             }),
-        normalize_optional_ref(planning_meta.agent.model.as_deref()),
-        normalize_optional_ref(app_config.agents.default_model.as_deref()),
-    );
-    validate_agent_model(&provider, model.as_deref())?;
-    let (reasoning, reasoning_source) = resolve_optional_agent_value(
-        normalize_optional_owned(overrides.reasoning),
+        normalize_optional_ref(planning_meta.agent.model.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::RepoDefault,
+                provider: repo_provider.clone(),
+            }
+        }),
+        normalize_optional_ref(app_config.agents.default_model.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::GlobalDefault,
+                provider: global_provider.clone(),
+            }
+        }),
+    )?;
+    let (reasoning, reasoning_source) = resolve_supported_reasoning(
+        &provider,
+        model.as_deref(),
+        normalize_optional_owned(overrides.reasoning).map(|value| AgentValueCandidate {
+            value,
+            source: AgentConfigSource::ExplicitOverride,
+            provider: explicit_provider.clone(),
+        }),
         route_command
             .and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
-            .map(|value| {
-                (
-                    value,
-                    AgentConfigSource::CommandRoute(definition.key.to_string()),
-                )
+            .map(|value| AgentValueCandidate {
+                value,
+                source: AgentConfigSource::CommandRoute(definition.key.to_string()),
+                provider: route_command
+                    .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
+                    .map(|provider| normalize_agent_name(&provider)),
             }),
         route_family
             .and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
-            .map(|value| {
-                (
-                    value,
-                    AgentConfigSource::FamilyRoute(definition.family.to_string()),
-                )
+            .map(|value| AgentValueCandidate {
+                value,
+                source: AgentConfigSource::FamilyRoute(definition.family.to_string()),
+                provider: route_family
+                    .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
+                    .map(|provider| normalize_agent_name(&provider)),
             }),
-        normalize_optional_ref(planning_meta.agent.reasoning.as_deref()),
-        normalize_optional_ref(app_config.agents.default_reasoning.as_deref()),
-    );
-    validate_agent_reasoning(&provider, model.as_deref(), reasoning.as_deref())?;
+        normalize_optional_ref(planning_meta.agent.reasoning.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::RepoDefault,
+                provider: repo_provider.clone(),
+            }
+        }),
+        normalize_optional_ref(app_config.agents.default_reasoning.as_deref()).map(|value| {
+            AgentValueCandidate {
+                value,
+                source: AgentConfigSource::GlobalDefault,
+                provider: global_provider.clone(),
+            }
+        }),
+    )?;
 
     Ok(ResolvedAgentRoute {
         route_key: definition.key.to_string(),
@@ -1062,29 +1153,71 @@ fn default_linear_api_url() -> String {
     DEFAULT_LINEAR_API_URL.to_string()
 }
 
-fn resolve_optional_agent_value(
-    explicit: Option<String>,
-    command_route: Option<(String, AgentConfigSource)>,
-    family_route: Option<(String, AgentConfigSource)>,
-    repo_default: Option<String>,
-    global_default: Option<String>,
-) -> (Option<String>, Option<AgentConfigSource>) {
-    if let Some(value) = explicit {
-        return (Some(value), Some(AgentConfigSource::ExplicitOverride));
+fn resolve_supported_model(
+    provider: &str,
+    explicit: Option<AgentValueCandidate>,
+    command_route: Option<AgentValueCandidate>,
+    family_route: Option<AgentValueCandidate>,
+    repo_default: Option<AgentValueCandidate>,
+    global_default: Option<AgentValueCandidate>,
+) -> Result<(Option<String>, Option<AgentConfigSource>)> {
+    resolve_supported_agent_value(
+        provider,
+        explicit,
+        [command_route, family_route, repo_default, global_default],
+        |value| validate_agent_model(provider, Some(value)),
+    )
+}
+
+fn resolve_supported_reasoning(
+    provider: &str,
+    model: Option<&str>,
+    explicit: Option<AgentValueCandidate>,
+    command_route: Option<AgentValueCandidate>,
+    family_route: Option<AgentValueCandidate>,
+    repo_default: Option<AgentValueCandidate>,
+    global_default: Option<AgentValueCandidate>,
+) -> Result<(Option<String>, Option<AgentConfigSource>)> {
+    resolve_supported_agent_value(
+        provider,
+        explicit,
+        [command_route, family_route, repo_default, global_default],
+        |value| validate_agent_reasoning(provider, model, Some(value)),
+    )
+}
+
+fn resolve_supported_agent_value<const N: usize>(
+    provider: &str,
+    explicit: Option<AgentValueCandidate>,
+    fallbacks: [Option<AgentValueCandidate>; N],
+    validate: impl Fn(&str) -> Result<()>,
+) -> Result<(Option<String>, Option<AgentConfigSource>)> {
+    if let Some(candidate) = explicit {
+        if candidate
+            .provider
+            .as_deref()
+            .is_some_and(|value| value != provider)
+        {
+            return Ok((None, None));
+        }
+        validate(&candidate.value)?;
+        return Ok((Some(candidate.value), Some(candidate.source)));
     }
-    if let Some((value, source)) = command_route {
-        return (Some(value), Some(source));
+
+    for candidate in fallbacks.into_iter().flatten() {
+        if candidate
+            .provider
+            .as_deref()
+            .is_some_and(|value| value != provider)
+        {
+            continue;
+        }
+        if validate(&candidate.value).is_ok() {
+            return Ok((Some(candidate.value), Some(candidate.source)));
+        }
     }
-    if let Some((value, source)) = family_route {
-        return (Some(value), Some(source));
-    }
-    if let Some(value) = repo_default {
-        return (Some(value), Some(AgentConfigSource::RepoDefault));
-    }
-    if let Some(value) = global_default {
-        return (Some(value), Some(AgentConfigSource::GlobalDefault));
-    }
-    (None, None)
+
+    Ok((None, None))
 }
 
 pub fn validate_supported_agent(agent: &str) -> Result<()> {
@@ -1310,13 +1443,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentRouteConfig, AgentRouteScope,
-        AgentRoutingSettings, AgentSettings, AppConfig,
-        DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
-        PlanningAgentSettings, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
-        normalize_agent_route_key, resolve_agent_config, resolve_agent_route,
-        validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-        validate_listen_poll_interval_seconds,
+        AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
+        AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
+        AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
+        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, PlanningAgentSettings, PlanningListenSettings,
+        PlanningMeta, PlanningPlanSettings, normalize_agent_route_key, resolve_agent_config,
+        resolve_agent_route, validate_agent_reasoning,
+        validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
 
     #[test]
@@ -1694,6 +1827,120 @@ mod tests {
         assert_eq!(unrouted.provider, "codex");
         assert_eq!(unrouted.model.as_deref(), Some("gpt-5.3-codex"));
         assert_eq!(unrouted.reasoning.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn resolve_agent_config_skips_incompatible_route_values_when_provider_is_overridden() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("low".to_string()),
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::new(),
+                    commands: BTreeMap::from([(
+                        AGENT_ROUTE_BACKLOG_PLAN.to_string(),
+                        AgentRouteConfig {
+                            provider: Some("codex".to_string()),
+                            model: Some("gpt-5.4".to_string()),
+                            reasoning: Some("high".to_string()),
+                        },
+                    )]),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let planning_meta = PlanningMeta {
+            agent: PlanningAgentSettings {
+                provider: Some("claude".to_string()),
+                model: Some("haiku".to_string()),
+                reasoning: Some("low".to_string()),
+            },
+            ..PlanningMeta::default()
+        };
+
+        let resolved = resolve_agent_config(
+            &config,
+            &planning_meta,
+            Some(AGENT_ROUTE_BACKLOG_PLAN),
+            AgentConfigOverrides {
+                provider: Some("claude".to_string()),
+                model: None,
+                reasoning: None,
+            },
+        )
+        .expect("explicit provider override should skip incompatible route values");
+
+        assert_eq!(resolved.provider, "claude");
+        assert_eq!(resolved.model.as_deref(), Some("haiku"));
+        assert_eq!(resolved.reasoning.as_deref(), Some("low"));
+        assert_eq!(
+            resolved.provider_source,
+            AgentConfigSource::ExplicitOverride
+        );
+        assert_eq!(resolved.model_source, Some(AgentConfigSource::RepoDefault));
+        assert_eq!(
+            resolved.reasoning_source,
+            Some(AgentConfigSource::RepoDefault)
+        );
+    }
+
+    #[test]
+    fn resolve_agent_route_skips_incompatible_route_values_when_provider_is_overridden() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("low".to_string()),
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::from([(
+                        "backlog".to_string(),
+                        AgentRouteConfig {
+                            provider: Some("codex".to_string()),
+                            model: Some("gpt-5.4".to_string()),
+                            reasoning: Some("high".to_string()),
+                        },
+                    )]),
+                    commands: BTreeMap::new(),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let planning_meta = PlanningMeta {
+            agent: PlanningAgentSettings {
+                provider: Some("claude".to_string()),
+                model: Some("haiku".to_string()),
+                reasoning: Some("low".to_string()),
+            },
+            ..PlanningMeta::default()
+        };
+
+        let resolved = resolve_agent_route(
+            &config,
+            &planning_meta,
+            AGENT_ROUTE_BACKLOG_PLAN,
+            AgentConfigOverrides {
+                provider: Some("claude".to_string()),
+                model: None,
+                reasoning: None,
+            },
+        )
+        .expect("explicit provider override should skip incompatible family route values");
+
+        assert_eq!(resolved.provider, "claude");
+        assert_eq!(resolved.model.as_deref(), Some("haiku"));
+        assert_eq!(resolved.reasoning.as_deref(), Some("low"));
+        assert_eq!(
+            resolved.provider_source,
+            AgentConfigSource::ExplicitOverride
+        );
+        assert_eq!(resolved.model_source, Some(AgentConfigSource::RepoDefault));
+        assert_eq!(
+            resolved.reasoning_source,
+            Some(AgentConfigSource::RepoDefault)
+        );
     }
 
     #[test]
