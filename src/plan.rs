@@ -801,10 +801,23 @@ fn handle_request_step_key(app: &mut RequestApp, key: crossterm::event::KeyEvent
             }
         }
         KeyCode::Enter => {
-            if app.request.insert_newline() {
-                app.error = None;
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if app.request.insert_newline() {
+                    app.error = None;
+                }
+                SessionAction::None
+            } else {
+                let request = app.request.value().trim();
+                if request.is_empty() {
+                    app.error = Some("Enter a planning request before continuing.".to_string());
+                    SessionAction::None
+                } else {
+                    app.error = None;
+                    SessionAction::GenerateQuestions {
+                        request: request.to_string(),
+                    }
+                }
             }
-            SessionAction::None
         }
         _ => {
             if app.request.handle_key(key) {
@@ -865,13 +878,38 @@ fn handle_questions_step_key(
             SessionAction::None
         }
         KeyCode::Enter => {
-            if let Some(question) = app.questions.get_mut(app.selected)
-                && question.answer.insert_newline()
-            {
-                question.state = FollowUpAnswerState::Pending;
-                app.error = None;
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(question) = app.questions.get_mut(app.selected)
+                    && question.answer.insert_newline()
+                {
+                    question.state = FollowUpAnswerState::Pending;
+                    app.error = None;
+                }
+                SessionAction::None
+            } else {
+                let Some(selected) = app.questions.get_mut(app.selected) else {
+                    return SessionAction::None;
+                };
+                selected.state = if selected.answer.value().trim().is_empty() {
+                    FollowUpAnswerState::Skipped
+                } else {
+                    FollowUpAnswerState::Answered
+                };
+
+                if app.questions.iter().all(question_is_completed) {
+                    app.error = None;
+                    SessionAction::GeneratePlan {
+                        request: app.request.clone(),
+                        follow_ups: collect_follow_up_responses(&app.questions),
+                    }
+                } else {
+                    if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
+                        app.selected = index;
+                    }
+                    app.error = None;
+                    SessionAction::None
+                }
             }
-            SessionAction::None
         }
         _ => {
             if let Some(question) = app.questions.get_mut(app.selected)
@@ -1066,7 +1104,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type the planning request. Enter adds a line. Ctrl+S continues. Esc cancels.",
+        "Type the planning request. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Esc cancels.",
     );
 }
 
@@ -1090,7 +1128,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         Line::from(selected.question.clone()),
         Line::from(""),
         Line::styled(
-            "Enter adds a line in the active answer. Ctrl+S moves to the next unanswered question, or generates the ticket plan once every answer is complete.",
+            "Enter records the current answer. Shift+Enter inserts a newline. Ctrl+S also moves to the next unanswered question, or generates the ticket plan once every answer is complete.",
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]))
@@ -1192,7 +1230,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab/Shift-Tab or Up/Down moves between questions. Type to answer. Enter records the current response; a blank answer skips that question. Once every question is answered or skipped, Enter generates the ticket plan. Esc cancels.",
+        "Tab/Shift-Tab or Up/Down moves between questions. Type to answer. Enter records the current response; a blank answer skips that question. Shift+Enter inserts a newline. Once every question is answered or skipped, Enter generates the ticket plan. Ctrl+S remains available as an alternate submit key. Esc cancels.",
     );
 }
 
@@ -1909,7 +1947,7 @@ mod tests {
     }
 
     #[test]
-    fn request_step_enter_adds_a_newline_instead_of_submitting() {
+    fn request_step_shift_enter_adds_a_newline() {
         let mut app = RequestApp {
             request: InputFieldState::multiline("Plan:"),
             error: Some("stale".to_string()),
@@ -1917,12 +1955,35 @@ mod tests {
 
         let action = handle_request_step_key(
             &mut app,
-            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
         );
 
         assert!(matches!(action, SessionAction::None));
         assert_eq!(app.request.value(), "Plan:\n");
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn request_step_enter_submits_when_text_is_present() {
+        let mut app = RequestApp {
+            request: InputFieldState::multiline("Plan a new command"),
+            error: None,
+        };
+
+        let action = handle_request_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+        );
+
+        match action {
+            SessionAction::GenerateQuestions { request } => {
+                assert_eq!(request, "Plan a new command")
+            }
+            _ => panic!("expected enter to continue to question generation"),
+        }
     }
 
     #[test]
@@ -1972,7 +2033,7 @@ mod tests {
     }
 
     #[test]
-    fn questions_step_enter_adds_a_newline_in_active_answer() {
+    fn questions_step_shift_enter_adds_a_newline_in_active_answer() {
         let mut app = QuestionsApp {
             request: "Plan a new command".to_string(),
             questions: vec![pending_question("How should it be validated?")],
@@ -1982,12 +2043,41 @@ mod tests {
 
         let action = handle_questions_step_key(
             &mut app,
-            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
         );
 
         assert!(matches!(action, SessionAction::None));
         assert_eq!(app.questions[0].answer.value(), "\n");
         assert_eq!(app.questions[0].state, FollowUpAnswerState::Pending);
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn questions_step_enter_records_answer_and_advances() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            questions: vec![
+                pending_question("How should it be validated?"),
+                pending_question("Who owns it?"),
+            ],
+            selected: 0,
+            error: Some("stale".to_string()),
+        };
+        let _ = app.questions[0]
+            .answer
+            .paste("Direct command-path proofs and targeted tests");
+
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.questions[0].state, FollowUpAnswerState::Answered);
+        assert_eq!(app.selected, 1);
         assert_eq!(app.error, None);
     }
 

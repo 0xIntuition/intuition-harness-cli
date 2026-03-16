@@ -465,6 +465,8 @@ Side effects:
 - runs the shell command first when configured, then the optional agent in the same working directory
 - creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
 
+In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`.
+
 Cron job files use this shape:
 
 ```md
@@ -493,6 +495,8 @@ meta backlog plan --no-interactive --request "Plan a dashboard for feature intak
 Legacy alias: `meta plan`
 
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
+
+Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow.
 
 For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values.
 
@@ -600,6 +604,7 @@ Notes:
 
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
+- In the interactive create/edit forms, multiline descriptions advance on `Enter` and insert a newline on `Shift+Enter`
 - `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
 - `meta dashboard linear` is the preferred Linear dashboard path; bare `meta dashboard` remains a compatibility alias during migration
 
