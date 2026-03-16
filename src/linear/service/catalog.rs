@@ -29,6 +29,7 @@ where
         let team = filters.team.or_else(|| self.default_team.clone());
         let issues = self
             .list_issues(IssueListFilters {
+                identifier: None,
                 team: team.clone(),
                 project: filters.project.clone(),
                 project_id: filters.project_id.clone(),

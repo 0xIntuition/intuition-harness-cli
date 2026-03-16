@@ -1,0 +1,12 @@
+{
+  "issue_id": "dfab165c-316a-4575-8d87-5979ca1f6b4a",
+  "identifier": "ENG-10094",
+  "title": "Fix `meta backlog plan` session state loss after follow-up submission and generation",
+  "url": "https://linear.app/0xintuition/issue/ENG-10094/fix-meta-backlog-plan-session-state-loss-after-follow-up-submission",
+  "team_key": "ENG",
+  "project_id": "5601d0a8-ba80-4cc0-b9f4-48f2b759e1a0",
+  "project_name": "CLI Harness",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

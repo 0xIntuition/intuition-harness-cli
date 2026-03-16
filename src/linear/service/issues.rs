@@ -12,6 +12,7 @@ use super::{
 
 #[derive(Debug, Clone)]
 struct IssueListSelection {
+    identifier: Option<String>,
     team: Option<String>,
     project: Option<String>,
     project_id: Option<String>,
@@ -22,6 +23,7 @@ struct IssueListSelection {
 impl IssueListSelection {
     fn new(filters: IssueListFilters, default_team: Option<String>) -> Self {
         Self {
+            identifier: filters.identifier,
             team: filters.team.or(default_team),
             project: filters.project,
             project_id: filters.project_id,
@@ -31,7 +33,8 @@ impl IssueListSelection {
     }
 
     fn needs_full_scan(&self) -> bool {
-        self.team.is_some()
+        self.identifier.is_some()
+            || self.team.is_some()
             || self.project.is_some()
             || self.project_id.is_some()
             || self.state.is_some()
@@ -45,11 +48,23 @@ where
     pub async fn list_issues(&self, filters: IssueListFilters) -> Result<Vec<IssueSummary>> {
         let selection = IssueListSelection::new(filters, self.default_team.clone());
         let mut issues = if selection.needs_full_scan() {
-            self.client.list_all_issues().await?
+            self.client
+                .list_filtered_issues(&IssueListFilters {
+                    identifier: selection.identifier.clone(),
+                    team: selection.team.clone(),
+                    project: selection.project.clone(),
+                    project_id: selection.project_id.clone(),
+                    state: selection.state.clone(),
+                    limit: selection.limit,
+                })
+                .await?
         } else {
             self.client.list_issues(selection.limit).await?
         };
 
+        if let Some(identifier) = selection.identifier.as_deref() {
+            issues.retain(|issue| issue.identifier.eq_ignore_ascii_case(identifier));
+        }
         if let Some(team) = selection.team.as_deref() {
             issues.retain(|issue| issue.team.key.eq_ignore_ascii_case(team));
         }
@@ -96,7 +111,8 @@ where
         filters: IssueListFilters,
     ) -> Result<Option<IssueSummary>> {
         let mut filters = filters;
-        filters.limit = filters.limit.max(250);
+        filters.identifier = Some(identifier.to_string());
+        filters.limit = filters.limit.max(1);
         let issues = self.list_issues(filters).await?;
         Ok(issues
             .into_iter()

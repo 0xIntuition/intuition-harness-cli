@@ -1,0 +1,12 @@
+{
+  "issue_id": "a5603a5a-b2d3-4bd7-93f9-2a9457978a04",
+  "identifier": "ENG-10091",
+  "title": "Add reusable long-running progress tracking and a live merge progress screen to `meta merge`",
+  "url": "https://linear.app/0xintuition/issue/ENG-10091/add-reusable-long-running-progress-tracking-and-a-live-merge-progress",
+  "team_key": "ENG",
+  "project_id": "5601d0a8-ba80-4cc0-b9f4-48f2b759e1a0",
+  "project_name": "CLI Harness",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

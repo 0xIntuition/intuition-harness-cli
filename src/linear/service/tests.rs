@@ -9,13 +9,13 @@ use super::{
 };
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
-    IssueLabelCreateRequest, IssueSummary, IssueUpdateRequest, LabelRef, LinearClient,
-    ProjectSummary, TeamSummary, UserRef,
+    IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
+    LinearClient, ProjectSummary, TeamSummary, UserRef,
 };
-use crate::linear::{IssueCreateSpec, IssueEditSpec, IssueListFilters};
+use crate::linear::{IssueCreateSpec, IssueEditSpec};
 
 #[tokio::test]
-async fn list_issues_full_scans_and_applies_filters() {
+async fn list_issues_uses_filtered_query_and_applies_filters() {
     let client = FakeLinearClient {
         issues: vec![issue("MET-01", "Todo", Some("project-1"), "MetaStack CLI")],
         all_issues: vec![
@@ -49,7 +49,8 @@ async fn list_issues_full_scans_and_applies_filters() {
             .collect::<Vec<_>>(),
         vec!["MET-12"]
     );
-    assert_eq!(client.list_all_issues_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(client.list_filtered_issues_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(client.list_all_issues_calls.load(Ordering::SeqCst), 0);
     assert_eq!(client.list_issues_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -167,6 +168,10 @@ impl LinearClient for DuplicateThenVisibleLabelClient {
         unreachable!("list_issues is not used in these tests")
     }
 
+    async fn list_filtered_issues(&self, _filters: &IssueListFilters) -> Result<Vec<IssueSummary>> {
+        unreachable!("list_filtered_issues is not used in these tests")
+    }
+
     async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {
         unreachable!("list_all_issues is not used in these tests")
     }
@@ -265,6 +270,10 @@ impl LinearClient for DuplicateLabelClient {
 
     async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
         unreachable!("list_issues is not used in these tests")
+    }
+
+    async fn list_filtered_issues(&self, _filters: &IssueListFilters) -> Result<Vec<IssueSummary>> {
+        unreachable!("list_filtered_issues is not used in these tests")
     }
 
     async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {

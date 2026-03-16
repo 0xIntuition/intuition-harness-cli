@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::linear::{IssueCreateRequest, IssueSummary, IssueUpdateRequest};
+use crate::linear::{IssueCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest};
 
 use super::{
     ReqwestLinearClient,
@@ -12,8 +12,8 @@ use super::{
 const ISSUES_PAGE_SIZE: usize = 100;
 
 const ISSUES_QUERY: &str = r#"
-query Issues($first: Int!, $after: String) {
-  issues(first: $first, after: $after) {
+query Issues($first: Int!, $after: String, $filter: IssueFilter) {
+  issues(first: $first, after: $after, filter: $filter) {
     nodes {
       id
       identifier
@@ -168,11 +168,22 @@ children(first: 100) {
 
 impl ReqwestLinearClient {
     pub(super) async fn list_issues_resource(&self, limit: usize) -> Result<Vec<IssueSummary>> {
-        self.collect_issues(Some(limit.max(1))).await
+        self.collect_issues(Some(limit.max(1)), None).await
+    }
+
+    pub(super) async fn list_filtered_issues_resource(
+        &self,
+        filters: &IssueListFilters,
+    ) -> Result<Vec<IssueSummary>> {
+        self.collect_issues(
+            Some(filters.limit.max(1)),
+            Some(render_issue_filter(filters)),
+        )
+        .await
     }
 
     pub(super) async fn list_all_issues_resource(&self) -> Result<Vec<IssueSummary>> {
-        self.collect_issues(None).await
+        self.collect_issues(None, None).await
     }
 
     pub(super) async fn get_issue_resource(&self, issue_id: &str) -> Result<IssueSummary> {
@@ -295,7 +306,11 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
             .ok_or_else(|| anyhow!("Linear issue update returned no issue body"))
     }
 
-    async fn collect_issues(&self, limit: Option<usize>) -> Result<Vec<IssueSummary>> {
+    async fn collect_issues(
+        &self,
+        limit: Option<usize>,
+        filter: Option<Value>,
+    ) -> Result<Vec<IssueSummary>> {
         let mut issues = Vec::new();
         let mut pager = CursorPager::new(limit, ISSUES_PAGE_SIZE);
 
@@ -307,6 +322,7 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
                     json!({
                         "first": page_size,
                         "after": pager.after(),
+                        "filter": filter,
                     }),
                 )
                 .await?;
@@ -316,4 +332,59 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
 
         Ok(issues)
     }
+}
+
+fn render_issue_filter(filters: &IssueListFilters) -> Value {
+    let mut filter = serde_json::Map::new();
+
+    if let Some(identifier) = filters.identifier.as_deref() {
+        filter.insert(
+            "identifier".to_string(),
+            json!({
+                "eq": identifier,
+            }),
+        );
+    }
+    if let Some(team) = filters.team.as_deref() {
+        filter.insert(
+            "team".to_string(),
+            json!({
+                "key": {
+                    "eq": team,
+                }
+            }),
+        );
+    }
+    if let Some(project) = filters.project.as_deref() {
+        filter.insert(
+            "project".to_string(),
+            json!({
+                "name": {
+                    "eq": project,
+                }
+            }),
+        );
+    }
+    if let Some(project_id) = filters.project_id.as_deref() {
+        filter.insert(
+            "project".to_string(),
+            json!({
+                "id": {
+                    "eq": project_id,
+                }
+            }),
+        );
+    }
+    if let Some(state) = filters.state.as_deref() {
+        filter.insert(
+            "state".to_string(),
+            json!({
+                "name": {
+                    "eq": state,
+                }
+            }),
+        );
+    }
+
+    Value::Object(filter)
 }

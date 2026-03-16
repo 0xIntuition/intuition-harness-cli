@@ -124,6 +124,7 @@ pub struct ProjectListFilters {
 
 #[derive(Debug, Clone, Default)]
 pub struct IssueListFilters {
+    pub identifier: Option<String>,
     pub team: Option<String>,
     pub project: Option<String>,
     pub project_id: Option<String>,

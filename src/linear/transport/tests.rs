@@ -4,7 +4,8 @@ use serde_json::json;
 
 use crate::config::LinearConfig;
 use crate::linear::{
-    IssueCreateRequest, IssueLabelCreateRequest, LinearClient, ReqwestLinearClient,
+    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, LinearClient,
+    ReqwestLinearClient,
 };
 
 #[tokio::test]
@@ -109,6 +110,49 @@ async fn reqwest_client_honors_issue_limit_without_extra_pages() {
     assert_eq!(issues[0].identifier, "MET-11");
     first_page.assert_calls(1);
     second_page.assert_calls(0);
+}
+
+#[tokio::test]
+async fn reqwest_client_sends_server_side_issue_filters() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let filtered_page = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues")
+            .body_includes("\"identifier\":{\"eq\":\"MET-11\"}")
+            .body_includes("\"team\":{\"key\":{\"eq\":\"MET\"}}")
+            .body_includes("\"project\":{\"id\":{\"eq\":\"project-1\"}}")
+            .body_includes("\"state\":{\"name\":{\"eq\":\"Todo\"}}");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node("MET-11")],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issues = client
+        .list_filtered_issues(&IssueListFilters {
+            identifier: Some("MET-11".to_string()),
+            team: Some("MET".to_string()),
+            project: None,
+            project_id: Some("project-1".to_string()),
+            state: Some("Todo".to_string()),
+            limit: 5,
+        })
+        .await
+        .expect("filtered issues should load");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].identifier, "MET-11");
+    filtered_page.assert_calls(1);
 }
 
 #[tokio::test]

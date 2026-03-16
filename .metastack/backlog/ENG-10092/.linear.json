@@ -1,0 +1,12 @@
+{
+  "issue_id": "2d58fbb8-9963-493a-ab7d-f89f58d2cd2c",
+  "identifier": "ENG-10092",
+  "title": "Standardize TUI multiline inputs to submit on Enter and newline on Shift+Enter",
+  "url": "https://linear.app/0xintuition/issue/ENG-10092/standardize-tui-multiline-inputs-to-submit-on-enter-and-newline-on",
+  "team_key": "ENG",
+  "project_id": "5601d0a8-ba80-4cc0-b9f4-48f2b759e1a0",
+  "project_name": "CLI Harness",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

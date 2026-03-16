@@ -14,7 +14,7 @@
     "assignment_scope": "any",
     "refresh_policy": "reuse_and_refresh",
     "instructions_path": null,
-    "poll_interval_seconds": null
+    "poll_interval_seconds": 20
   },
   "plan": {
     "interactive_follow_up_questions": null

@@ -72,6 +72,7 @@ pub(crate) async fn run_issues_command(
             };
             let issues = service
                 .list_issues(IssueListFilters {
+                    identifier: None,
                     team: applied_team.clone(),
                     project_id: applied_project_id.clone(),
                     project: list_args.project.clone(),
