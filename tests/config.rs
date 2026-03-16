@@ -259,14 +259,16 @@ default_model = "gpt-5.4"
     let config = fs::read_to_string(&config_path)?;
     let planning_meta: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo_root.join(".metastack/meta.json"))?)?;
+    let canonical_repo_root = fs::canonicalize(&repo_root)?;
 
-    assert!(!config.contains("repo-token"));
+    assert!(config.contains(&format!(
+        "[linear.repo_auth.\"{}\"]",
+        canonical_repo_root.to_string_lossy()
+    )));
+    assert!(config.contains("api_key = \"repo-token\""));
     assert!(config.contains("team = \"MET\""));
     assert!(!config.contains("project-42"));
-    assert_eq!(
-        planning_meta["linear"]["api_key"].as_str(),
-        Some("repo-token")
-    );
+    assert!(planning_meta["linear"]["api_key"].is_null());
     assert_eq!(planning_meta["linear"]["team"].as_str(), Some("MET"));
     assert_eq!(
         planning_meta["linear"]["project_id"].as_str(),
@@ -587,7 +589,6 @@ default_model = "gpt-5.4"
         repo_root.join(".metastack/meta.json"),
         r#"{
   "linear": {
-    "api_key": null,
     "profile": null,
     "team": "MET",
     "project_id": "project-very-long-1234567890"
@@ -663,7 +664,6 @@ default_model = "gpt-5.4"
         repo_root.join(".metastack/meta.json"),
         r#"{
   "linear": {
-    "api_key": null,
     "profile": "ops profile west",
     "team": "MET",
     "project_id": "project-very-long-1234567890"

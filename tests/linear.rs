@@ -232,11 +232,11 @@ fn issues_command_uses_repo_scoped_api_key_over_global_auth() -> Result<(), Box<
     let right_api_url = right_server.url("/graphql");
 
     fs::create_dir_all(repo_root.join(".metastack"))?;
+    let canonical_repo_root = fs::canonicalize(&repo_root)?;
     fs::write(
         repo_root.join(".metastack/meta.json"),
         r#"{
   "linear": {
-    "api_key": "repo-token",
     "team": "MET",
     "project_id": "project-1"
   }
@@ -250,7 +250,11 @@ fn issues_command_uses_repo_scoped_api_key_over_global_auth() -> Result<(), Box<
 api_key = "global-token"
 api_url = "{right_api_url}"
 team = "PER"
-"#
+
+[linear.repo_auth."{}"]
+api_key = "repo-token"
+"#,
+            canonical_repo_root.to_string_lossy()
         ),
     )?;
 

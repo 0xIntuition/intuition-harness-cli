@@ -59,7 +59,14 @@ pub struct LinearSettings {
     pub team: Option<String>,
     pub default_profile: Option<String>,
     #[serde(default)]
+    pub repo_auth: BTreeMap<String, RepoLinearAuthSettings>,
+    #[serde(default)]
     pub profiles: BTreeMap<String, LinearProfileSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepoLinearAuthSettings {
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +80,6 @@ pub struct LinearProfileSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanningLinearSettings {
-    pub api_key: Option<String>,
     pub profile: Option<String>,
     pub team: Option<String>,
     pub project_id: Option<String>,
@@ -187,6 +193,7 @@ impl Default for LinearSettings {
             api_url: default_linear_api_url(),
             team: None,
             default_profile: None,
+            repo_auth: BTreeMap::new(),
             profiles: BTreeMap::new(),
         }
     }
@@ -244,6 +251,30 @@ impl AppConfig {
         self.agents
             .commands
             .insert(normalize_agent_name(name), definition);
+    }
+
+    pub fn repo_linear_api_key(&self, root: &Path) -> Option<String> {
+        self.linear
+            .repo_auth
+            .get(&repo_auth_key(root))
+            .and_then(|entry| normalize_optional_ref(entry.api_key.as_deref()))
+    }
+
+    pub fn set_repo_linear_api_key(&mut self, root: &Path, api_key: Option<String>) {
+        let key = repo_auth_key(root);
+        match api_key {
+            Some(api_key) => {
+                self.linear.repo_auth.insert(
+                    key,
+                    RepoLinearAuthSettings {
+                        api_key: Some(api_key),
+                    },
+                );
+            }
+            None => {
+                self.linear.repo_auth.remove(&key);
+            }
+        }
     }
 }
 
@@ -345,12 +376,13 @@ impl LinearConfig {
             None => PlanningMeta::default(),
         };
 
-        Self::from_sources(&app_config, &planning_meta, overrides)
+        Self::from_sources(&app_config, &planning_meta, root, overrides)
     }
 
     pub fn from_sources(
         app_config: &AppConfig,
         planning_meta: &PlanningMeta,
+        root: Option<&Path>,
         overrides: LinearConfigOverrides,
     ) -> Result<Self> {
         let selected_profile = normalize_optional_owned(overrides.profile)
@@ -366,7 +398,7 @@ impl LinearConfig {
             .map(|name| resolve_named_profile(&app_config.linear, name))
             .transpose()?;
         let api_key = explicit_api_key
-            .or_else(|| normalize_optional_ref(planning_meta.linear.api_key.as_deref()))
+            .or_else(|| root.and_then(|root| app_config.repo_linear_api_key(root)))
             .or_else(|| profile.as_ref().and_then(ResolvedLinearProfile::api_key))
             .or_else(|| normalize_optional_ref(app_config.linear.api_key.as_deref()))
             .or_else(|| normalize_optional_owned(env::var("LINEAR_API_KEY").ok()))
@@ -397,6 +429,7 @@ impl LinearConfig {
 }
 
 pub async fn ensure_saved_issue_labels(
+    root: &Path,
     app_config: &AppConfig,
     planning_meta: &PlanningMeta,
 ) -> Result<()> {
@@ -416,6 +449,7 @@ pub async fn ensure_saved_issue_labels(
     let config = match LinearConfig::from_sources(
         app_config,
         planning_meta,
+        Some(root),
         LinearConfigOverrides::default(),
     ) {
         Ok(config) => config,
@@ -714,6 +748,10 @@ impl ResolvedLinearProfile<'_> {
 
 fn normalize_optional_owned(value: Option<String>) -> Option<String> {
     value.and_then(|value| normalize_optional_ref(Some(value.as_str())))
+}
+
+fn repo_auth_key(root: &Path) -> String {
+    root.display().to_string()
 }
 
 fn normalize_optional_ref(value: Option<&str>) -> Option<String> {

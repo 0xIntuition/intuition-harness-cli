@@ -38,6 +38,7 @@ struct SetupViewData {
     config_path: PathBuf,
     metastack_meta_path: PathBuf,
     app_config: AppConfig,
+    app_config_changed: bool,
     planning_meta: PlanningMeta,
     detected_agents: Vec<String>,
 }
@@ -209,7 +210,7 @@ impl SetupStep {
     fn panel_label(self) -> &'static str {
         match self {
             Self::LinearAuth => "Project-specific Linear auth",
-            Self::LinearApiKey => "Repo Linear API key",
+            Self::LinearApiKey => "Project Linear API key (CLI config)",
             Self::Team => "Repo default Linear team",
             Self::Project => "Repo default Linear project",
             Self::Provider => "Repo default agent/provider",
@@ -384,13 +385,17 @@ fn load_view(root: &std::path::Path) -> Result<SetupViewData> {
         config_path: crate::config::resolve_config_path()?,
         metastack_meta_path: PlanningPaths::new(root).meta_path(),
         app_config: AppConfig::load()?,
+        app_config_changed: false,
         planning_meta: PlanningMeta::load(root)?,
         detected_agents: crate::config::detect_supported_agents(),
     })
 }
 
 async fn save_view(view: &mut SetupViewData) -> Result<()> {
-    ensure_saved_issue_labels(&view.app_config, &view.planning_meta).await?;
+    ensure_saved_issue_labels(&view.root, &view.app_config, &view.planning_meta).await?;
+    if view.app_config_changed {
+        view.app_config.save()?;
+    }
     view.planning_meta.save(&view.root)?;
     Ok(())
 }
@@ -415,7 +420,7 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
     lines.push(format!(
         "Repo Linear auth: {}",
         display_repo_auth(
-            view.planning_meta.linear.api_key.as_deref(),
+            view.app_config.repo_linear_api_key(&view.root).as_deref(),
             view.planning_meta.linear.profile.as_deref()
         )
     ));
@@ -497,7 +502,8 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
 }
 
 async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Result<bool> {
-    let before = serde_json::to_value(&view.planning_meta)?;
+    let before_meta = serde_json::to_value(&view.planning_meta)?;
+    let before_app = serde_json::to_value(&view.app_config)?;
 
     if args.project.is_some() && args.project_id.is_some() {
         return Err(anyhow!(
@@ -511,7 +517,11 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         view.planning_meta.linear.profile = profile;
     }
     if let Some(api_key) = &args.api_key {
-        view.planning_meta.linear.api_key = normalize_optional(api_key);
+        let api_key = normalize_optional(api_key);
+        if view.app_config.repo_linear_api_key(&view.root) != api_key {
+            view.app_config.set_repo_linear_api_key(&view.root, api_key);
+            view.app_config_changed = true;
+        }
     }
     if let Some(team) = &args.team {
         view.planning_meta.linear.team = normalize_optional(team);
@@ -570,8 +580,9 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         view.planning_meta.issue_labels.technical = normalize_optional(label);
     }
 
-    let after = serde_json::to_value(&view.planning_meta)?;
-    Ok(before != after)
+    let after_meta = serde_json::to_value(&view.planning_meta)?;
+    let after_app = serde_json::to_value(&view.app_config)?;
+    Ok(before_meta != after_meta || before_app != after_app)
 }
 
 fn validate_profile(app_config: &AppConfig, profile: Option<&str>) -> Result<()> {
@@ -604,6 +615,7 @@ async fn resolve_project_selector(
     let config = LinearConfig::from_sources(
         &view.app_config,
         &view.planning_meta,
+        Some(&view.root),
         LinearConfigOverrides::default(),
     )?;
     let default_team = config.default_team.clone();
@@ -649,13 +661,11 @@ impl SetupApp {
                     "Inherit shared or configured Linear auth".to_string(),
                     "Set a Linear API key for this project".to_string(),
                 ],
-                usize::from(view.planning_meta.linear.api_key.is_some()),
+                usize::from(view.app_config.repo_linear_api_key(&view.root).is_some()),
             ),
             api_key: InputFieldState::new(
-                view.planning_meta
-                    .linear
-                    .api_key
-                    .clone()
+                view.app_config
+                    .repo_linear_api_key(&view.root)
                     .unwrap_or_default(),
             ),
             team: InputFieldState::new(view.planning_meta.linear.team.clone().unwrap_or_default()),
@@ -1012,7 +1022,11 @@ impl SubmittedSetup {
             validate_agent_name(&view.app_config, provider)?;
             validate_agent_model(provider, self.model.as_deref())?;
         }
-        view.planning_meta.linear.api_key = self.api_key.clone();
+        if view.app_config.repo_linear_api_key(&view.root) != self.api_key {
+            view.app_config
+                .set_repo_linear_api_key(&view.root, self.api_key.clone());
+            view.app_config_changed = true;
+        }
         view.planning_meta.linear.profile = self.profile.clone();
         view.planning_meta.linear.team = self.team.clone();
         view.planning_meta.linear.project_id =
@@ -1220,7 +1234,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.api_key,
-            "Paste a repo-specific Linear API key, or leave blank to inherit shared auth.",
+            "Paste a project-specific Linear API key stored in local CLI config, or leave blank to inherit shared auth.",
         ),
         SetupStep::Team => render_input_panel(
             frame,
