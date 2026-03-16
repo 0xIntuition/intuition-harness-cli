@@ -314,3 +314,150 @@ done
 
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn context_scan_and_reload_can_use_different_route_specific_agents() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let output_dir = temp.path().join("agent-output");
+    let scan_stub_path = temp.path().join("scan-agent");
+    let reload_stub_path = temp.path().join("reload-agent");
+
+    fs::create_dir_all(repo_root.join("src"))?;
+    fs::create_dir_all(&output_dir)?;
+    fs::write(
+        repo_root.join("Cargo.toml"),
+        r#"[package]
+name = "route-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = "4"
+"#,
+    )?;
+    fs::write(repo_root.join("README.md"), "# Route Demo\n")?;
+    fs::write(repo_root.join("src/main.rs"), "fn main() {}\n")?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "codex"
+
+[agents.routing.commands."context.scan"]
+provider = "scan-stub"
+
+[agents.routing.commands."context.reload"]
+provider = "reload-stub"
+
+[agents.commands.scan-stub]
+command = "{}"
+args = ["{{payload}}"]
+transport = "arg"
+
+[agents.commands.reload-stub]
+command = "{}"
+args = ["{{payload}}"]
+transport = "arg"
+"#,
+            scan_stub_path.display(),
+            reload_stub_path.display()
+        ),
+    )?;
+    fs::write(
+        &scan_stub_path,
+        r#"#!/bin/sh
+printf 'scan-stub' > "$TEST_OUTPUT_DIR/scan-agent.txt"
+mkdir -p .metastack/codebase
+for pair in \
+  "ARCHITECTURE.md:# Scan Architecture" \
+  "CONCERNS.md:# Scan Concerns" \
+  "CONVENTIONS.md:# Scan Conventions" \
+  "INTEGRATIONS.md:# Scan Integrations" \
+  "STACK.md:# Scan Stack" \
+  "STRUCTURE.md:# Scan Structure" \
+  "TESTING.md:# Scan Testing"
+do
+  file="${pair%%:*}"
+  header="${pair#*:}"
+  printf '%s\n' "$header" > ".metastack/codebase/$file"
+done
+"#,
+    )?;
+    fs::write(
+        &reload_stub_path,
+        r#"#!/bin/sh
+printf 'reload-stub' > "$TEST_OUTPUT_DIR/reload-agent.txt"
+mkdir -p .metastack/codebase
+for pair in \
+  "ARCHITECTURE.md:# Reload Architecture" \
+  "CONCERNS.md:# Reload Concerns" \
+  "CONVENTIONS.md:# Reload Conventions" \
+  "INTEGRATIONS.md:# Reload Integrations" \
+  "STACK.md:# Reload Stack" \
+  "STRUCTURE.md:# Reload Structure" \
+  "TESTING.md:# Reload Testing"
+do
+  file="${pair%%:*}"
+  header="${pair#*:}"
+  printf '%s\n' "$header" > ".metastack/codebase/$file"
+done
+"#,
+    )?;
+    let mut permissions = fs::metadata(&scan_stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&scan_stub_path, permissions)?;
+    let mut permissions = fs::metadata(&reload_stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&reload_stub_path, permissions)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "context",
+            "scan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Codebase scan completed"));
+
+    assert_eq!(
+        fs::read_to_string(output_dir.join("scan-agent.txt"))?,
+        "scan-stub"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),
+        "# Scan Architecture"
+    );
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "context",
+            "reload",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Codebase scan completed"));
+
+    assert_eq!(
+        fs::read_to_string(output_dir.join("reload-agent.txt"))?,
+        "reload-stub"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),
+        "# Reload Architecture"
+    );
+
+    Ok(())
+}

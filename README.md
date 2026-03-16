@@ -216,6 +216,10 @@ meta runtime config --json
 meta runtime config --api-key lin_api_work
 meta runtime config --default-profile work
 meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
+meta runtime config --route backlog --route-agent claude --route-model opus
+meta runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
+meta runtime config --clear-route backlog.plan
+meta runtime config --advanced-routing
 ```
 
 Legacy alias: `meta config`
@@ -230,9 +234,19 @@ The persisted config can store:
 - install-scoped Linear API key/default team values
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
-- default agent name
-- default model
-- default reasoning effort
+- global default agent/model/reasoning values
+- advanced family-level agent routing under `[agents.routing.families.<family>]`
+- advanced command-level agent routing under `[agents.routing.commands."<route>"]`
+
+Agent-backed routes resolve install-scoped settings in this order:
+
+1. command route override
+2. command family override
+3. global default
+
+Use `meta runtime config --advanced-routing` for the dedicated routing dashboard, or use
+`--route`, `--route-agent`, `--route-model`, `--route-reasoning`, and `--clear-route` for
+non-interactive edits.
 
 Example global config:
 
@@ -249,6 +263,15 @@ team = "MET"
 default_agent = "codex"
 default_model = "gpt-5.4"
 default_reasoning = "medium"
+
+[agents.routing.families.backlog]
+provider = "claude"
+model = "opus"
+reasoning = "high"
+
+[agents.routing.commands."backlog.plan"]
+provider = "codex"
+model = "gpt-5.3-codex"
 ```
 
 ### `runtime setup`

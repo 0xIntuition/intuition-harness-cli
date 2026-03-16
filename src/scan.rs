@@ -14,7 +14,9 @@ use crate::agents::{
     AgentExecutionOptions, command_args_for_invocation, resolve_agent_invocation_for_planning,
 };
 use crate::cli::{RunAgentArgs, ScanArgs};
-use crate::config::{AppConfig, PlanningMeta, detect_supported_agents, normalize_agent_name};
+use crate::config::{
+    AGENT_ROUTE_CONTEXT_SCAN, AppConfig, PlanningMeta, detect_supported_agents, resolve_agent_route,
+};
 use crate::context::load_workflow_contract;
 use crate::fs::{
     FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, write_text_file,
@@ -98,11 +100,15 @@ pub(crate) struct CodebaseContext {
 }
 
 pub fn run_scan(args: &ScanArgs) -> Result<ScanReport> {
+    run_scan_for_route(args, AGENT_ROUTE_CONTEXT_SCAN)
+}
+
+pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<ScanReport> {
     let root = canonicalize_existing_dir(&args.root)?;
     ensure_planning_layout(&root, false)?;
     let paths = PlanningPaths::new(&root);
     let context = CodebaseContext::collect(&root)?;
-    let agent = resolve_scan_agent_name()?;
+    let agent = resolve_scan_agent_name(&root, route_key)?;
     let log_path = display_path(&paths.scan_log_path(), &root);
     let mut progress = ScanProgress::new(
         &context.repo_name,
@@ -161,6 +167,7 @@ pub fn run_scan(args: &ScanArgs) -> Result<ScanReport> {
     );
     let run_args = RunAgentArgs {
         root: Some(root.clone()),
+        route_key: Some(route_key.to_string()),
         agent: Some(agent.clone()),
         prompt,
         instructions: None,
@@ -798,16 +805,16 @@ impl CodebaseContext {
     }
 }
 
-fn resolve_scan_agent_name() -> Result<String> {
+fn resolve_scan_agent_name(root: &Path, route_key: &str) -> Result<String> {
     let config = AppConfig::load()?;
-    if let Some(agent) = config
-        .agents
-        .default_agent
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(normalize_agent_name(agent));
+    let planning_meta = PlanningMeta::load(root)?;
+    if let Ok(resolved) = resolve_agent_route(
+        &config,
+        &planning_meta,
+        route_key,
+        crate::config::AgentConfigOverrides::default(),
+    ) {
+        return Ok(resolved.provider);
     }
 
     detect_supported_agents()

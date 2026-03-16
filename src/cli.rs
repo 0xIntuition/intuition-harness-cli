@@ -496,6 +496,24 @@ pub struct ConfigArgs {
     /// Update the global default reasoning effort.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
+    #[arg(long)]
+    pub route: Option<String>,
+    /// Remove an advanced agent route override for a family or command key.
+    #[arg(long)]
+    pub clear_route: Option<String>,
+    /// Update the agent/provider override for `--route`.
+    #[arg(long)]
+    pub route_agent: Option<String>,
+    /// Update the model override for `--route`.
+    #[arg(long)]
+    pub route_model: Option<String>,
+    /// Update the reasoning override for `--route`.
+    #[arg(long)]
+    pub route_reasoning: Option<String>,
+    /// Launch the dedicated advanced agent-routing dashboard instead of the primary simple config flow.
+    #[arg(long)]
+    pub advanced_routing: bool,
     /// Emit the install-scoped config view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,
@@ -806,6 +824,7 @@ pub struct ListenWorkerArgs {
 #[derive(Debug, Clone)]
 pub struct RunAgentArgs {
     pub root: Option<PathBuf>,
+    pub route_key: Option<String>,
     /// Agent name to run. Falls back to the configured default agent.
     pub agent: Option<String>,
     /// Prompt to send to the agent.

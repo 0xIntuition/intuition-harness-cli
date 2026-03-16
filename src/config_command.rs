@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -19,8 +20,10 @@ use serde::Serialize;
 
 use crate::cli::ConfigArgs;
 use crate::config::{
-    AppConfig, builtin_agent_definition, detect_supported_agents, normalize_agent_name,
-    supported_agent_models, supported_agent_names, validate_agent_model, validate_agent_name,
+    AgentRouteConfig, AgentRouteScope, AgentRouteSource, AppConfig, builtin_agent_definition,
+    detect_supported_agents, normalize_agent_name, normalize_agent_route_key, resolve_agent_route,
+    supported_agent_models, supported_agent_names, supported_agent_route_definitions,
+    supported_agent_route_families, validate_agent_model, validate_agent_name,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
@@ -70,19 +73,35 @@ pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
     }
 
     if args.render_once {
-        return Ok(ConfigCommandOutput::Text(render_once(
-            ConfigApp::new(&view),
-            args,
-        )?));
+        return Ok(ConfigCommandOutput::Text(if args.advanced_routing {
+            render_advanced_once(AdvancedRoutingApp::new(&view)?, args)?
+        } else {
+            render_once(ConfigApp::new(&view), args)?
+        }));
     }
 
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        let exit = run_config_dashboard(ConfigApp::new(&view))?;
+        let exit = if args.advanced_routing {
+            run_advanced_routing_dashboard(AdvancedRoutingApp::new(&view)?)?
+        } else {
+            run_config_dashboard(ConfigApp::new(&view))?
+        };
         return match exit {
             ConfigDashboardExit::Cancelled => Ok(ConfigCommandOutput::Text(
                 "Configuration dashboard cancelled.".to_string(),
             )),
             ConfigDashboardExit::Submitted(submitted) => {
+                submitted.apply(&mut view)?;
+                save_view(&view)?;
+                Ok(ConfigCommandOutput::Text(
+                    ConfigReport {
+                        config_path: view.config_path.clone(),
+                        changed: true,
+                    }
+                    .render(&view),
+                ))
+            }
+            ConfigDashboardExit::SubmittedRoute(submitted) => {
                 submitted.apply(&mut view)?;
                 save_view(&view)?;
                 Ok(ConfigCommandOutput::Text(
@@ -161,6 +180,10 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         display_optional(view.app_config.agents.default_reasoning.as_deref())
     ));
     lines.push(format!(
+        "Advanced route overrides: {}",
+        render_route_override_summary(&view.app_config)
+    ));
+    lines.push(format!(
         "Configured Linear profiles: {}",
         if view.app_config.linear.profiles.is_empty() {
             "none".to_string()
@@ -212,6 +235,11 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.default_agent.is_some()
         || args.default_model.is_some()
         || args.default_reasoning.is_some()
+        || args.route.is_some()
+        || args.clear_route.is_some()
+        || args.route_agent.is_some()
+        || args.route_model.is_some()
+        || args.route_reasoning.is_some()
 }
 
 fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<bool> {
@@ -251,6 +279,8 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
     if let Some(default_reasoning) = &args.default_reasoning {
         view.app_config.agents.default_reasoning = normalize_optional(default_reasoning);
     }
+    apply_route_updates(&mut view.app_config, args)?;
+    view.app_config.validate()?;
 
     let after = serde_json::to_value(&view.app_config)?;
     Ok(before != after)
@@ -282,6 +312,112 @@ fn normalize_optional(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn render_route_override_summary(app_config: &AppConfig) -> String {
+    format!(
+        "{} family, {} command",
+        app_config.agents.routing.families.len(),
+        app_config.agents.routing.commands.len()
+    )
+}
+
+fn apply_route_updates(app_config: &mut AppConfig, args: &ConfigArgs) -> Result<()> {
+    if (args.route_agent.is_some() || args.route_model.is_some() || args.route_reasoning.is_some())
+        && args.route.is_none()
+    {
+        return Err(anyhow!(
+            "`--route-agent`, `--route-model`, and `--route-reasoning` require `--route <KEY>`"
+        ));
+    }
+    if let Some(clear_route) = args.clear_route.as_deref() {
+        let scope = route_scope_for_key(clear_route)?;
+        app_config.clear_agent_route(scope, clear_route)?;
+    }
+
+    let Some(route) = args.route.as_deref() else {
+        return Ok(());
+    };
+    if args.clear_route.is_some() {
+        return Err(anyhow!(
+            "`--route` cannot be combined with `--clear-route`; choose one action per invocation"
+        ));
+    }
+
+    let scope = route_scope_for_key(route)?;
+    let normalized = normalize_agent_route_key(scope, route)?;
+    let mut updated = existing_route_config(app_config, scope, &normalized);
+    if let Some(agent) = args.route_agent.as_deref() {
+        updated.provider = normalize_optional(agent).map(|value| normalize_agent_name(&value));
+    }
+    if let Some(model) = args.route_model.as_deref() {
+        updated.model = normalize_optional(model);
+    }
+    if let Some(reasoning) = args.route_reasoning.as_deref() {
+        updated.reasoning = normalize_optional(reasoning);
+    }
+
+    let route_config = if updated.provider.is_none()
+        && updated.model.is_none()
+        && updated.reasoning.is_none()
+    {
+        return Err(anyhow!(
+            "route `{normalized}` would be empty; use `--clear-route {normalized}` to remove the override"
+        ));
+    } else {
+        updated
+    };
+    app_config.upsert_agent_route(scope, &normalized, route_config)?;
+    Ok(())
+}
+
+fn existing_route_config(
+    app_config: &AppConfig,
+    scope: AgentRouteScope,
+    key: &str,
+) -> AgentRouteConfig {
+    match scope {
+        AgentRouteScope::Family => app_config
+            .agents
+            .routing
+            .families
+            .get(key)
+            .cloned()
+            .unwrap_or_default(),
+        AgentRouteScope::Command => app_config
+            .agents
+            .routing
+            .commands
+            .get(key)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+fn route_scope_for_key(key: &str) -> Result<AgentRouteScope> {
+    let normalized = normalize_agent_name(key);
+    if supported_agent_route_families()
+        .iter()
+        .any(|candidate| *candidate == normalized)
+    {
+        Ok(AgentRouteScope::Family)
+    } else if supported_agent_route_definitions()
+        .iter()
+        .any(|definition| definition.key == normalized)
+    {
+        Ok(AgentRouteScope::Command)
+    } else {
+        Err(anyhow!(
+            "unknown route key `{}`; supported family keys: {}; supported command keys: {}",
+            normalized,
+            supported_agent_route_families().join(", "),
+            supported_agent_route_definitions()
+                .iter()
+                .map(|definition| definition.key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
     }
 }
 
@@ -389,6 +525,7 @@ struct SubmittedConfig {
 enum ConfigDashboardExit {
     Cancelled,
     Submitted(SubmittedConfig),
+    SubmittedRoute(AdvancedRouteSubmission),
 }
 
 impl ConfigApp {
@@ -601,6 +738,320 @@ impl SubmittedConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvancedRoutingStep {
+    Route,
+    Agent,
+    Model,
+    Reasoning,
+    Save,
+}
+
+impl AdvancedRoutingStep {
+    fn all() -> [Self; 5] {
+        [
+            Self::Route,
+            Self::Agent,
+            Self::Model,
+            Self::Reasoning,
+            Self::Save,
+        ]
+    }
+
+    fn index(self) -> usize {
+        Self::all()
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        let index = (self.index() + 1).min(Self::all().len() - 1);
+        Self::all()[index]
+    }
+
+    fn previous(self) -> Self {
+        let index = self.index().saturating_sub(1);
+        Self::all()[index]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Route => "Route",
+            Self::Agent => "Agent override",
+            Self::Model => "Model override",
+            Self::Reasoning => "Reasoning override",
+            Self::Save => "Save",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RouteEntry {
+    scope: AgentRouteScope,
+    key: String,
+    label: String,
+}
+
+#[derive(Debug, Clone)]
+struct AdvancedRoutingApp {
+    step: AdvancedRoutingStep,
+    route_entries: Vec<RouteEntry>,
+    route_field: SelectFieldState,
+    agent_field: SelectFieldState,
+    model_field: SelectFieldState,
+    reasoning: InputFieldState,
+    agent_options: Vec<String>,
+    app_config: AppConfig,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AdvancedRouteSubmission {
+    scope: AgentRouteScope,
+    key: String,
+    config: Option<AgentRouteConfig>,
+}
+
+impl AdvancedRouteSubmission {
+    fn apply(&self, view: &mut ConfigViewData) -> Result<()> {
+        match &self.config {
+            Some(config) => {
+                view.app_config
+                    .upsert_agent_route(self.scope, &self.key, config.clone())?
+            }
+            None => {
+                view.app_config.clear_agent_route(self.scope, &self.key)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AdvancedRoutingApp {
+    fn new(view: &ConfigViewData) -> Result<Self> {
+        let route_entries = route_entries();
+        let route_options = route_entries
+            .iter()
+            .map(|entry| entry.label.clone())
+            .collect::<Vec<_>>();
+        let mut agent_options = vec!["Inherit".to_string()];
+        agent_options.extend(route_agent_names(view));
+        let mut app = Self {
+            step: AdvancedRoutingStep::Route,
+            route_entries,
+            route_field: SelectFieldState::new(route_options, 0),
+            agent_field: SelectFieldState::new(agent_options.clone(), 0),
+            model_field: SelectFieldState::new(vec!["Inherit".to_string()], 0),
+            reasoning: InputFieldState::new(String::new()),
+            agent_options,
+            app_config: view.app_config.clone(),
+            error: None,
+        };
+        app.sync_from_selected_route()?;
+        Ok(app)
+    }
+
+    fn selected_entry(&self) -> &RouteEntry {
+        &self.route_entries[self.route_field.selected()]
+    }
+
+    fn selected_agent_override(&self) -> Option<String> {
+        match self.agent_field.selected_label() {
+            Some("Inherit") | None => None,
+            Some(value) => Some(normalize_agent_name(value)),
+        }
+    }
+
+    fn effective_provider_for_selected_route(&self) -> Result<String> {
+        Ok(resolve_agent_route(
+            &self.app_config,
+            &crate::config::PlanningMeta::default(),
+            &self.selected_entry().key,
+            crate::config::AgentConfigOverrides::default(),
+        )?
+        .provider)
+    }
+
+    fn sync_from_selected_route(&mut self) -> Result<()> {
+        let entry = self.selected_entry().clone();
+        let route_config = existing_route_config(&self.app_config, entry.scope, &entry.key);
+        let agent_index = route_config
+            .provider
+            .as_deref()
+            .and_then(|value| {
+                self.agent_options
+                    .iter()
+                    .position(|candidate| candidate.eq_ignore_ascii_case(value))
+            })
+            .unwrap_or(0);
+        self.agent_field = SelectFieldState::new(self.agent_options.clone(), agent_index);
+        self.reasoning = InputFieldState::new(route_config.reasoning.unwrap_or_default());
+        self.sync_models(route_config.model.as_deref())?;
+        Ok(())
+    }
+
+    fn sync_models(&mut self, preferred: Option<&str>) -> Result<()> {
+        let provider = self
+            .selected_agent_override()
+            .map(Ok)
+            .unwrap_or_else(|| self.effective_provider_for_selected_route())
+            .ok();
+        let mut options = vec!["Inherit".to_string()];
+        if let Some(provider) = provider.as_deref() {
+            options.extend(
+                supported_agent_models(provider)
+                    .iter()
+                    .map(|value| (*value).to_string()),
+            );
+        }
+        let selected = preferred
+            .and_then(|value| {
+                options
+                    .iter()
+                    .position(|candidate| candidate.eq_ignore_ascii_case(value))
+            })
+            .unwrap_or(0);
+        self.model_field = SelectFieldState::new(options, selected);
+        Ok(())
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Option<ConfigDashboardExit> {
+        match key.code {
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {
+                self.error = None;
+                if self.step == AdvancedRoutingStep::Reasoning {
+                    let _ = self.reasoning.handle_key(key);
+                }
+                None
+            }
+            KeyCode::Up => self.apply_action(ConfigAction::Up),
+            KeyCode::Down => self.apply_action(ConfigAction::Down),
+            KeyCode::Tab => self.apply_action(ConfigAction::Tab),
+            KeyCode::BackTab => self.apply_action(ConfigAction::BackTab),
+            KeyCode::Enter => self.apply_action(ConfigAction::Enter),
+            KeyCode::Esc => self.apply_action(ConfigAction::Esc),
+            _ => None,
+        }
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        self.error = None;
+        if self.step == AdvancedRoutingStep::Reasoning {
+            let _ = self.reasoning.paste(text);
+        }
+    }
+
+    fn apply_action(&mut self, action: ConfigAction) -> Option<ConfigDashboardExit> {
+        match action {
+            ConfigAction::Tab => {
+                self.step = self.step.next();
+                None
+            }
+            ConfigAction::BackTab => {
+                self.step = self.step.previous();
+                None
+            }
+            ConfigAction::Esc => Some(ConfigDashboardExit::Cancelled),
+            ConfigAction::Enter => {
+                if self.step == AdvancedRoutingStep::Save {
+                    match self.submit() {
+                        Ok(submitted) => Some(ConfigDashboardExit::SubmittedRoute(submitted)),
+                        Err(error) => {
+                            self.error = Some(error.to_string());
+                            None
+                        }
+                    }
+                } else {
+                    self.step = self.step.next();
+                    None
+                }
+            }
+            ConfigAction::Up => {
+                self.error = None;
+                match self.step {
+                    AdvancedRoutingStep::Route => {
+                        self.route_field.move_by(-1);
+                        if let Err(error) = self.sync_from_selected_route() {
+                            self.error = Some(error.to_string());
+                        }
+                    }
+                    AdvancedRoutingStep::Agent => {
+                        self.agent_field.move_by(-1);
+                        if let Err(error) = self.sync_models(None) {
+                            self.error = Some(error.to_string());
+                        }
+                    }
+                    AdvancedRoutingStep::Model => self.model_field.move_by(-1),
+                    AdvancedRoutingStep::Reasoning | AdvancedRoutingStep::Save => {
+                        self.step = self.step.previous();
+                    }
+                }
+                None
+            }
+            ConfigAction::Down => {
+                self.error = None;
+                match self.step {
+                    AdvancedRoutingStep::Route => {
+                        self.route_field.move_by(1);
+                        if let Err(error) = self.sync_from_selected_route() {
+                            self.error = Some(error.to_string());
+                        }
+                    }
+                    AdvancedRoutingStep::Agent => {
+                        self.agent_field.move_by(1);
+                        if let Err(error) = self.sync_models(None) {
+                            self.error = Some(error.to_string());
+                        }
+                    }
+                    AdvancedRoutingStep::Model => self.model_field.move_by(1),
+                    AdvancedRoutingStep::Reasoning | AdvancedRoutingStep::Save => {
+                        self.step = self.step.next();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn submit(&self) -> Result<AdvancedRouteSubmission> {
+        let entry = self.selected_entry();
+        let provider = self.selected_agent_override();
+        let model = match self.model_field.selected_label() {
+            Some("Inherit") | None => None,
+            Some(value) => Some(value.to_string()),
+        };
+        let reasoning = normalize_optional(self.reasoning.value());
+        if let Some(provider) = provider.as_deref() {
+            validate_agent_name(&self.app_config, provider)?;
+        }
+        let effective_provider = provider
+            .clone()
+            .or_else(|| self.effective_provider_for_selected_route().ok());
+        if let Some(model) = model.as_deref()
+            && let Some(provider) = effective_provider.as_deref()
+        {
+            validate_agent_model(provider, Some(model))?;
+        }
+        let config = AgentRouteConfig {
+            provider,
+            model,
+            reasoning,
+        };
+        let config =
+            if config.provider.is_none() && config.model.is_none() && config.reasoning.is_none() {
+                None
+            } else {
+                Some(config)
+            };
+        Ok(AdvancedRouteSubmission {
+            scope: entry.scope,
+            key: entry.key.clone(),
+            config,
+        })
+    }
+}
+
 fn render_once(app: ConfigApp, args: &ConfigArgs) -> Result<String> {
     let backend = TestBackend::new(args.width, args.height);
     let mut terminal = Terminal::new(backend)?;
@@ -640,6 +1091,265 @@ fn run_config_dashboard(app: ConfigApp) -> Result<ConfigDashboardExit> {
                 _ => {}
             }
         }
+    }
+}
+
+fn render_advanced_once(app: AdvancedRoutingApp, args: &ConfigArgs) -> Result<String> {
+    let backend = TestBackend::new(args.width, args.height);
+    let mut terminal = Terminal::new(backend)?;
+    let mut app = app;
+
+    for action in args.events.iter().copied().map(ConfigAction::from) {
+        if app.apply_action(action).is_some() {
+            break;
+        }
+    }
+
+    terminal.draw(|frame| render_advanced_routing_dashboard(frame, &app))?;
+    Ok(snapshot(terminal.backend()))
+}
+
+fn run_advanced_routing_dashboard(app: AdvancedRoutingApp) -> Result<ConfigDashboardExit> {
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen)?;
+    let _cleanup = TerminalCleanup;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let mut app = app;
+
+    loop {
+        terminal.draw(|frame| render_advanced_routing_dashboard(frame, &app))?;
+
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if let Some(exit) = app.handle_key(key) {
+                        return Ok(exit);
+                    }
+                }
+                Event::Paste(text) => app.handle_paste(&text),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn route_entries() -> Vec<RouteEntry> {
+    let mut entries = supported_agent_route_families()
+        .into_iter()
+        .map(|family| RouteEntry {
+            scope: AgentRouteScope::Family,
+            key: family.to_string(),
+            label: format!("Family: {family}"),
+        })
+        .collect::<Vec<_>>();
+    entries.extend(
+        supported_agent_route_definitions()
+            .iter()
+            .map(|definition| RouteEntry {
+                scope: AgentRouteScope::Command,
+                key: definition.key.to_string(),
+                label: format!("Command: {} ({})", definition.key, definition.label),
+            }),
+    );
+    entries
+}
+
+fn route_agent_names(view: &ConfigViewData) -> Vec<String> {
+    let mut names = BTreeMap::new();
+    for name in supported_agent_names() {
+        names.insert((*name).to_string(), ());
+    }
+    for name in view.app_config.agents.commands.keys() {
+        names.insert(normalize_agent_name(name), ());
+    }
+    for name in &view.detected_agents {
+        names.insert(normalize_agent_name(name), ());
+    }
+    names.into_keys().collect()
+}
+
+fn render_advanced_routing_dashboard(frame: &mut Frame<'_>, app: &AdvancedRoutingApp) {
+    let area = frame.area();
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ])
+        .split(area);
+    let header = Paragraph::new(Text::from(vec![
+        Line::from("Advanced Agent Routing"),
+        Line::from(
+            "Set family-level and command-level agent defaults with effective inheritance previews.",
+        ),
+        Line::from("Primary config stays simple; this mode is the explicit per-command dashboard."),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("meta runtime config --advanced-routing"),
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(header, layout[0]);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(28),
+            Constraint::Min(32),
+            Constraint::Length(46),
+        ])
+        .split(layout[1]);
+    render_advanced_step_list(frame, app, body[0]);
+    render_advanced_step_panel(frame, app, body[1]);
+    render_advanced_summary_panel(frame, app, body[2]);
+    render_advanced_footer(frame, app, layout[2]);
+}
+
+fn render_advanced_step_list(frame: &mut Frame<'_>, app: &AdvancedRoutingApp, area: Rect) {
+    let lines = AdvancedRoutingStep::all()
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let selected = index == app.step.index();
+            let marker = if selected { "> " } else { "  " };
+            let style = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(
+                format!("{marker}{}. {}", index + 1, step.label()),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(Block::default().borders(Borders::ALL).title("Steps"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn render_advanced_step_panel(frame: &mut Frame<'_>, app: &AdvancedRoutingApp, area: Rect) {
+    let title = format!(
+        "Step {} of {}: {}",
+        app.step.index() + 1,
+        AdvancedRoutingStep::all().len(),
+        app.step.label()
+    );
+    match app.step {
+        AdvancedRoutingStep::Route => render_select_panel(frame, area, &title, &app.route_field),
+        AdvancedRoutingStep::Agent => render_select_panel(frame, area, &title, &app.agent_field),
+        AdvancedRoutingStep::Model => render_select_panel(frame, area, &title, &app.model_field),
+        AdvancedRoutingStep::Reasoning => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.reasoning,
+            "Leave blank to inherit reasoning for the selected route.",
+        ),
+        AdvancedRoutingStep::Save => render_save_panel(frame, area),
+    }
+}
+
+fn render_advanced_summary_panel(frame: &mut Frame<'_>, app: &AdvancedRoutingApp, area: Rect) {
+    let selected_key = &app.selected_entry().key;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Selected: {selected_key}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(String::new()),
+    ];
+    for entry in route_entries() {
+        let line = summarize_route_line(&app.app_config, &entry);
+        lines.push(Line::from(line));
+    }
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Effective routes"),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn render_advanced_footer(frame: &mut Frame<'_>, app: &AdvancedRoutingApp, area: Rect) {
+    let controls = match app.step {
+        AdvancedRoutingStep::Reasoning => {
+            "Type or paste the override. Up/Down changes steps. Enter advances. Esc cancels."
+        }
+        AdvancedRoutingStep::Save => {
+            "Press Enter to save. Choosing Inherit plus blank reasoning clears the selected route."
+        }
+        _ => "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+    };
+    let status = app.error.as_deref().unwrap_or("Ready.");
+    let footer = Paragraph::new(Text::from(vec![Line::from(controls), Line::from(status)]))
+        .block(Block::default().borders(Borders::ALL).title("Controls"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(footer, area);
+}
+
+fn summarize_route_line(app_config: &AppConfig, entry: &RouteEntry) -> String {
+    match entry.scope {
+        AgentRouteScope::Family => {
+            let route_text = app_config
+                .agents
+                .routing
+                .families
+                .get(&entry.key)
+                .map(summarize_raw_route_config)
+                .unwrap_or_else(|| "inherit".to_string());
+            let source = if app_config.agents.routing.families.contains_key(&entry.key) {
+                format!("family:{}", entry.key)
+            } else if app_config.agents.default_agent.is_some() {
+                "global".to_string()
+            } else {
+                "unset".to_string()
+            };
+            format!("{} -> {} ({source})", entry.key, route_text)
+        }
+        AgentRouteScope::Command => {
+            let resolved = resolve_agent_route(
+                app_config,
+                &crate::config::PlanningMeta::default(),
+                &entry.key,
+                crate::config::AgentConfigOverrides::default(),
+            );
+            match resolved {
+                Ok(route) => format!(
+                    "{} -> {} / {} ({})",
+                    entry.key,
+                    route.provider,
+                    route.model.as_deref().unwrap_or("inherit"),
+                    summarize_route_source(&route.source)
+                ),
+                Err(error) => format!("{} -> error: {}", entry.key, error),
+            }
+        }
+    }
+}
+
+fn summarize_raw_route_config(config: &AgentRouteConfig) -> String {
+    let provider = config.provider.as_deref().unwrap_or("inherit");
+    let model = config.model.as_deref().unwrap_or("inherit");
+    let reasoning = config.reasoning.as_deref().unwrap_or("inherit");
+    format!("{provider} / {model} / {reasoning}")
+}
+
+fn summarize_route_source(source: &AgentRouteSource) -> String {
+    match source {
+        AgentRouteSource::ExplicitOverride => "explicit".to_string(),
+        AgentRouteSource::RepoDefault => "repo".to_string(),
+        AgentRouteSource::CommandDefault(key) => format!("command:{key}"),
+        AgentRouteSource::FamilyDefault(key) => format!("family:{key}"),
+        AgentRouteSource::GlobalDefault => "global".to_string(),
     }
 }
 
