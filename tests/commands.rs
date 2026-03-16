@@ -80,6 +80,42 @@ fn legacy_config_alias_prints_runtime_hint() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn runtime_config_help_describes_precedence_catalog_and_dry_run_diagnostics() {
+    cli()
+        .args(["runtime", "config", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Resolution precedence for built-in provider/model/reasoning:",
+        ))
+        .stdout(predicate::str::contains(
+            "1. explicit CLI overrides such as --agent/--provider, --model, and --reasoning",
+        ))
+        .stdout(predicate::str::contains("codex: gpt-5.4"))
+        .stdout(predicate::str::contains("claude: sonnet, opus"))
+        .stdout(predicate::str::contains(
+            "meta agents workflows run ticket-implementation --root . --dry-run",
+        ));
+}
+
+#[test]
+fn runtime_setup_help_describes_repo_precedence_and_validation() {
+    cli()
+        .args(["runtime", "setup", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "explicit CLI override -> command route -> family route -> repo default -> install default",
+        ))
+        .stdout(predicate::str::contains(
+            "Built-in provider/model/reasoning combinations are validated before they are saved.",
+        ))
+        .stdout(predicate::str::contains(
+            "resolved provider, model, reasoning, route key, and config source",
+        ));
+}
+
+#[test]
 fn merge_help_lists_discovery_and_execution_flags() {
     cli()
         .args(["merge", "--help"])

@@ -42,6 +42,34 @@ Examples:
   meta runtime setup --root . --team MET --project \"MetaStack CLI\"
   meta runtime cron status --root .";
 
+const RUNTIME_CONFIG_HELP: &str = "\
+Resolution precedence for built-in provider/model/reasoning:
+  1. explicit CLI overrides such as --agent/--provider, --model, and --reasoning
+  2. command route override
+  3. family route override
+  4. repo defaults from `meta runtime setup`
+  5. install defaults from `meta runtime config`
+
+Built-in provider catalog:
+  codex: gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex,
+         gpt-5.1-codex-mini, gpt-5-codex, gpt-5-codex-mini
+         reasoning: low, medium, high
+  claude: sonnet, opus (low, medium, high)
+          haiku (low, medium)
+          sonnet[1m] (medium, high)
+          opusplan (high)
+
+Confirm the effective selection before launch:
+  meta agents workflows run ticket-implementation --root . --dry-run";
+
+const RUNTIME_SETUP_HELP: &str = "\
+Repo defaults written by `meta runtime setup` participate in the built-in resolution order:
+  explicit CLI override -> command route -> family route -> repo default -> install default
+
+Built-in provider/model/reasoning combinations are validated before they are saved.
+Use `meta agents workflows run ... --dry-run` or `meta context scan --root .` to confirm the
+resolved provider, model, reasoning, route key, and config source before or during execution.";
+
 const DASHBOARD_HELP_EXAMPLES: &str = "\
 Examples:
   meta dashboard linear --team MET --project \"MetaStack CLI\"
@@ -474,6 +502,7 @@ pub struct PlanArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = RUNTIME_CONFIG_HELP)]
 pub struct ConfigArgs {
     /// Repository root to resolve when compatibility with older invocations is needed.
     #[arg(long, value_name = "PATH", default_value = ".")]
@@ -532,6 +561,7 @@ pub struct ConfigArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = RUNTIME_SETUP_HELP)]
 pub struct SetupArgs {
     /// Repository root containing `.metastack/meta.json`.
     #[arg(long, value_name = "PATH", default_value = ".")]
