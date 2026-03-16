@@ -85,10 +85,6 @@ impl InputFieldState {
         }
     }
 
-    pub(crate) fn push(&mut self, ch: char) {
-        self.insert(ch);
-    }
-
     pub(crate) fn insert_newline(&mut self) -> bool {
         if self.mode != InputFieldMode::MultiLine {
             return false;
@@ -564,6 +560,15 @@ mod tests {
 
         assert!(multi_line.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)));
         assert_eq!(multi_line.value(), "repo\n");
+        assert_eq!(multi_line.cursor(), multi_line.value().len());
+    }
+
+    #[test]
+    fn input_field_plain_enter_does_not_change_multiline_fields() {
+        let mut multi_line = InputFieldState::multiline("repo");
+
+        assert!(!multi_line.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(multi_line.value(), "repo");
         assert_eq!(multi_line.cursor(), multi_line.value().len());
     }
 

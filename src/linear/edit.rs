@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::{Frame, Terminal};
 
 use super::WorkflowState;
+use crate::tui::fields::InputFieldState;
 
 #[derive(Debug, Clone)]
 pub struct IssueEditFormContext {
@@ -116,8 +117,8 @@ struct IssueEditApp {
     context: IssueEditFormContext,
     step: EditStep,
     step_focus: StatusPriorityFocus,
-    title: String,
-    description: String,
+    title: InputFieldState,
+    description: InputFieldState,
     selected_state: usize,
     selected_priority: usize,
     error: Option<String>,
@@ -145,12 +146,16 @@ pub fn run_issue_edit_form(
     loop {
         terminal.draw(|frame| render_issue_edit_form(frame, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && let Some(exit) = app.handle_key(key)
-        {
-            return Ok(exit);
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if let Some(exit) = app.handle_key(key) {
+                        return Ok(exit);
+                    }
+                }
+                Event::Paste(text) => app.handle_paste(&text),
+                _ => {}
+            }
         }
     }
 }
@@ -225,32 +230,32 @@ fn render_step_list(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::la
 fn render_step_panel(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layout::Rect) {
     match app.step {
         EditStep::Title => {
-            let title = if app.title.is_empty() {
-                Text::from(Line::styled(
-                    "Type the issue title...",
-                    Style::default().add_modifier(Modifier::DIM),
-                ))
-            } else {
-                Text::from(app.title.clone())
-            };
-            let paragraph = Paragraph::new(title)
-                .block(Block::default().borders(Borders::ALL).title("Title"))
+            let rendered = app.title.render("Type the issue title...", true);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("Title [editing]")
+                .border_style(Style::default().add_modifier(Modifier::BOLD));
+            let inner = block.inner(area);
+            let paragraph = Paragraph::new(rendered.text.clone())
+                .block(block)
                 .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, area);
+            rendered.set_cursor(frame, inner);
         }
         EditStep::Description => {
-            let description = if app.description.is_empty() {
-                Text::from(Line::styled(
-                    "Type the issue description...",
-                    Style::default().add_modifier(Modifier::DIM),
-                ))
-            } else {
-                Text::from(app.description.clone())
-            };
-            let paragraph = Paragraph::new(description)
-                .block(Block::default().borders(Borders::ALL).title("Description"))
+            let rendered = app
+                .description
+                .render("Type the issue description...", true);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("Description [editing]")
+                .border_style(Style::default().add_modifier(Modifier::BOLD));
+            let inner = block.inner(area);
+            let paragraph = Paragraph::new(rendered.text.clone())
+                .block(block)
                 .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, area);
+            rendered.set_cursor(frame, inner);
         }
         EditStep::StatusPriority => {
             let columns = Layout::default()
@@ -312,10 +317,11 @@ fn render_priorities(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
 }
 
 fn render_summary(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layout::Rect) {
-    let description = if app.description.trim().is_empty() {
+    let description = if app.description.value().trim().is_empty() {
         "No description".to_string()
     } else {
         app.description
+            .value()
             .lines()
             .map(str::trim)
             .collect::<Vec<_>>()
@@ -325,10 +331,10 @@ fn render_summary(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layo
         Line::from(format!("Issue: {}", app.context.issue_identifier.as_str())),
         Line::from(format!(
             "Title: {}",
-            if app.title.trim().is_empty() {
+            if app.title.value().trim().is_empty() {
                 "Untitled issue"
             } else {
-                app.title.trim()
+                app.title.value().trim()
             }
         )),
         Line::from(format!("Description: {description}")),
@@ -351,7 +357,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layou
             "Type the title. Tab/Shift+Tab or Up/Down switches fields. Enter moves to Description."
         }
         EditStep::Description => {
-            "Type the description. Enter inserts a newline. Tab/Shift+Tab or Up/Down switches fields."
+            "Type the description. Enter advances. Shift+Enter inserts a newline. Tab/Shift+Tab or Up/Down switches fields."
         }
         EditStep::StatusPriority => {
             "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Esc cancels."
@@ -384,8 +390,8 @@ impl IssueEditApp {
             context,
             step: EditStep::Title,
             step_focus: StatusPriorityFocus::State,
-            title: prefill.title,
-            description: prefill.description.unwrap_or_default(),
+            title: InputFieldState::new(prefill.title),
+            description: InputFieldState::multiline(prefill.description.unwrap_or_default()),
             selected_state,
             selected_priority,
             error: None,
@@ -397,12 +403,12 @@ impl IssueEditApp {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(IssueEditFormExit::Cancelled)
             }
-            KeyCode::Char(ch) => {
-                self.insert_char(ch);
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.apply_shift_enter();
                 None
             }
-            KeyCode::Backspace => {
-                self.backspace();
+            KeyCode::Char(_) | KeyCode::Backspace => {
+                self.apply_text_key(key);
                 None
             }
             KeyCode::Up => self.apply_action(IssueEditAction::Up),
@@ -472,7 +478,7 @@ impl IssueEditApp {
                 None
             }
             EditStep::Description => {
-                self.description.push('\n');
+                self.step = EditStep::StatusPriority;
                 None
             }
             EditStep::StatusPriority => match self.build_submission() {
@@ -486,23 +492,34 @@ impl IssueEditApp {
         }
     }
 
-    fn insert_char(&mut self, ch: char) {
+    fn apply_shift_enter(&mut self) {
+        self.error = None;
+        if self.step == EditStep::Description {
+            let _ = self.description.insert_newline();
+        }
+    }
+
+    fn apply_text_key(&mut self, key: KeyEvent) {
         self.error = None;
         match self.step {
-            EditStep::Title => self.title.push(ch),
-            EditStep::Description => self.description.push(ch),
+            EditStep::Title => {
+                let _ = self.title.handle_key(key);
+            }
+            EditStep::Description => {
+                let _ = self.description.handle_key(key);
+            }
             EditStep::StatusPriority => {}
         }
     }
 
-    fn backspace(&mut self) {
+    fn handle_paste(&mut self, text: &str) {
         self.error = None;
         match self.step {
             EditStep::Title => {
-                self.title.pop();
+                let _ = self.title.paste(text);
             }
             EditStep::Description => {
-                self.description.pop();
+                let _ = self.description.paste(text);
             }
             EditStep::StatusPriority => {}
         }
@@ -524,16 +541,16 @@ impl IssueEditApp {
     }
 
     fn build_submission(&self) -> Result<IssueEditValues> {
-        let title = self.title.trim();
+        let title = self.title.value().trim();
         if title.is_empty() {
             return Err(anyhow!("Title is required."));
         }
 
-        let description = self.description.trim();
+        let description = self.description.value().trim();
         Ok(IssueEditValues {
             title: title.to_string(),
             description: (!description.is_empty())
-                .then_some(self.description.trim_end().to_string()),
+                .then_some(self.description.value().trim_end().to_string()),
             state: self.selected_state_name().map(str::to_string),
             priority: PRIORITY_OPTIONS[self.selected_priority].value,
         })
@@ -789,7 +806,68 @@ mod tests {
         let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
 
         assert_eq!(exit, None);
-        assert_eq!(app.description, "Ship it\n");
+        assert_eq!(app.description.value(), "Ship it\n");
         assert_eq!(app.step, EditStep::Description);
+    }
+
+    #[test]
+    fn issue_edit_app_enter_advances_from_description_to_status_priority() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: Some("Ship it".to_string()),
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.step = EditStep::Description;
+
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(exit, None);
+        assert_eq!(app.description.value(), "Ship it");
+        assert_eq!(app.step, EditStep::StatusPriority);
+    }
+
+    #[test]
+    fn issue_edit_app_paste_preserves_multiline_description() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: None,
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.step = EditStep::Description;
+
+        app.handle_paste("Line one\nLine two\n");
+
+        assert_eq!(app.description.value(), "Line one\nLine two\n");
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn issue_edit_app_paste_normalizes_multiline_title_to_single_line() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: String::new(),
+                description: None,
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.step = EditStep::Title;
+
+        app.handle_paste("Line one\nLine two\n");
+
+        assert_eq!(app.title.value(), "Line one Line two");
+        assert_eq!(app.error, None);
     }
 }
