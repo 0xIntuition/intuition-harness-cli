@@ -12,7 +12,9 @@ use chrono::{DateTime, Local, Utc};
 
 use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
 use crate::cli::{CronDaemonArgs, CronRunArgs, CronStartArgs, RunAgentArgs};
-use crate::config::{AppConfig, PlanningMeta, normalize_agent_name};
+use crate::config::{
+    AGENT_ROUTE_RUNTIME_CRON_PROMPT, AppConfig, PlanningMeta, normalize_agent_name,
+};
 use crate::fs::{PlanningPaths, display_path, ensure_dir};
 
 use super::{
@@ -637,12 +639,6 @@ fn execute_agent_phase(
     let Some(prompt) = effective_prompt(job) else {
         return Ok(());
     };
-    let agent_name = job
-        .front_matter
-        .agent
-        .as_deref()
-        .map(normalize_agent_name)
-        .ok_or_else(|| anyhow!("cron job `{}` has a prompt but no agent", job.name))?;
     let agent_prompt = render_agent_prompt(
         job,
         working_directory,
@@ -652,7 +648,8 @@ fn execute_agent_phase(
     );
     let run_args = RunAgentArgs {
         root: Some(root.to_path_buf()),
-        agent: Some(agent_name.clone()),
+        route_key: Some(AGENT_ROUTE_RUNTIME_CRON_PROMPT.to_string()),
+        agent: job.front_matter.agent.as_deref().map(normalize_agent_name),
         prompt: agent_prompt,
         instructions: None,
         model: None,

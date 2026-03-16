@@ -504,6 +504,99 @@ transport = "arg"
 
 #[cfg(unix)]
 #[test]
+fn merge_prefers_route_specific_agent_over_global_default() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let output_dir = temp.path().join("output");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&output_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_stub(
+        &bin_dir.join("gh"),
+        &[11, 12],
+        "https://github.com/example/pull/999",
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "global-stub"
+
+[agents.routing.commands."merge.run"]
+provider = "route-stub"
+
+[agents.commands.global-stub]
+command = "global-stub"
+args = ["{{payload}}"]
+transport = "arg"
+
+[agents.commands.route-stub]
+command = "route-stub"
+args = ["{{payload}}"]
+transport = "arg"
+"#,
+    )?;
+
+    fs::write(
+        bin_dir.join("global-stub"),
+        r#"#!/bin/sh
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/global-agent.txt"
+printf '%s' '{"merge_order":[11,12],"conflict_hotspots":[],"summary":"global"}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("global-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("global-stub"), permissions)?;
+
+    fs::write(
+        bin_dir.join("route-stub"),
+        r#"#!/bin/sh
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/route-agent.txt"
+printf '%s' '{"merge_order":[11,12],"conflict_hotspots":[],"summary":"route"}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("route-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("route-stub"), permissions)?;
+
+    commit_and_push_pull_ref(&repo_root, "feature/11", "one.txt", "one\n", 11)?;
+    commit_and_push_pull_ref(&repo_root, "feature/12", "two.txt", "two\n", 12)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "merge",
+            "--no-interactive",
+            "--pull-request",
+            "11",
+            "--pull-request",
+            "12",
+            "--validate",
+            "test -f one.txt",
+            "--validate",
+            "test -f two.txt",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(output_dir.join("route-agent.txt"))?,
+        "route-stub"
+    );
+    assert!(!output_dir.join("global-agent.txt").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn merge_infers_make_quality_validation_when_omitted() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

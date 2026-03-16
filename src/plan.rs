@@ -31,7 +31,9 @@ use crate::backlog::{
     write_rendered_backlog_item,
 };
 use crate::cli::{PlanArgs, RunAgentArgs};
-use crate::config::{LinearConfig, LinearConfigOverrides, load_required_planning_meta};
+use crate::config::{
+    AGENT_ROUTE_BACKLOG_PLAN, LinearConfig, LinearConfigOverrides, load_required_planning_meta,
+};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{IssueCreateSpec, IssueSummary, LinearService, ReqwestLinearClient};
@@ -325,6 +327,7 @@ fn generate_follow_up_questions(
     let prompt = render_question_prompt(root, request, max_questions)?;
     let output = run_agent_capture(&RunAgentArgs {
         root: Some(root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
         agent: overrides.agent.clone(),
         prompt,
         instructions: None,
@@ -353,6 +356,7 @@ fn generate_issue_plan(
     let prompt = render_issue_plan_prompt(root, request, follow_ups)?;
     let output = run_agent_capture(&RunAgentArgs {
         root: Some(root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
         agent: overrides.agent.clone(),
         prompt,
         instructions: None,
@@ -1693,6 +1697,7 @@ fn revise_issue_plan(
         render_issue_merge_prompt(root, request, follow_ups, plan, kept_indices, merge_groups)?;
     let output = run_agent_capture(&RunAgentArgs {
         root: Some(root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
         agent: None,
         prompt,
         instructions: None,

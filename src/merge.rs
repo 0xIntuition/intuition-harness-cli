@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
 use crate::cli::MergeArgs;
-use crate::config::{AgentConfigOverrides, AppConfig, PlanningMeta, load_required_planning_meta};
+use crate::config::{
+    AGENT_ROUTE_MERGE, AgentConfigOverrides, AppConfig, PlanningMeta, load_required_planning_meta,
+};
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, ensure_dir, ensure_workspace_path_is_safe,
     sibling_workspace_root, write_text_file,
@@ -849,6 +851,7 @@ fn run_agent_capture_in_dir(
         &planning_meta,
         &crate::cli::RunAgentArgs {
             root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_MERGE.to_string()),
             agent: overrides.provider,
             prompt: prompt.to_string(),
             instructions: None,

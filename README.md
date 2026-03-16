@@ -216,6 +216,10 @@ meta runtime config --json
 meta runtime config --api-key lin_api_work
 meta runtime config --default-profile work
 meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
+meta runtime config --route backlog --route-agent claude --route-model opus
+meta runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
+meta runtime config --clear-route backlog.plan
+meta runtime config --advanced-routing
 ```
 
 Legacy alias: `meta config`
@@ -230,9 +234,44 @@ The persisted config can store:
 - install-scoped Linear API key/default team values
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
-- default agent name
-- default model
-- default reasoning effort
+- global default agent/model/reasoning values
+- advanced family-level agent routing under `[agents.routing.families.<family>]`
+- advanced command-level agent routing under `[agents.routing.commands."<route>"]`
+
+Agent-backed routes resolve install-scoped settings in this order:
+
+1. command route override
+2. command family override
+3. repo default from `.metastack/meta.json` when present
+4. global default
+
+For an individual run, explicit CLI flags still win over the routed defaults:
+`--agent`/`--provider` first, then `--model`, then `--reasoning`.
+
+Use `meta runtime config --advanced-routing` for the dedicated routing dashboard, or use
+`--route`, `--route-agent`, `--route-model`, `--route-reasoning`, and `--clear-route` for
+non-interactive edits.
+
+Supported route families:
+
+- `backlog`
+- `context`
+- `linear`
+- `agents`
+- `runtime.cron`
+- `merge`
+
+Supported command route keys:
+
+- `backlog.plan`
+- `backlog.split`
+- `context.scan`
+- `context.reload`
+- `linear.issues.refine`
+- `agents.listen`
+- `agents.workflows.run`
+- `runtime.cron.prompt`
+- `merge.run`
 
 Example global config:
 
@@ -249,6 +288,15 @@ team = "MET"
 default_agent = "codex"
 default_model = "gpt-5.4"
 default_reasoning = "medium"
+
+[agents.routing.families.backlog]
+provider = "claude"
+model = "opus"
+reasoning = "high"
+
+[agents.routing.commands."backlog.plan"]
+provider = "codex"
+model = "gpt-5.3-codex"
 ```
 
 ### `runtime setup`
@@ -612,7 +660,15 @@ Reference:
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`, while interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
 ## Agent Configuration
 
-`meta scan`, `meta workflows run`, `meta plan`, `meta issues refine`, and `meta listen` resolve the configured local agent from the persisted config first, then fall back to built-in presets for `codex` and `claude` when referenced by name.
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+
+1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
+2. command route override
+3. command family override
+4. repo default from `.metastack/meta.json` when present
+5. global default
+
+After route resolution, metastack falls back to built-in presets for `codex` and `claude` when referenced by name.
 
 The built-in presets run `codex exec` and `claude -p`, and pass `--model=<value>` automatically when a default model is configured. For the built-in Codex preset, metastack also forces `workspace-write`, `--ask-for-approval never`, and the target working directory so unattended runs can write inside the issue workspace instead of inheriting a read-only default.
 

@@ -1360,6 +1360,312 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
 
 #[cfg(unix)]
 #[test]
+fn listen_once_prefers_command_route_agent_over_global_default() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "global-stub"
+
+[agents.routing.commands."agents.listen"]
+provider = "listen-stub"
+
+[agents.commands.global-stub]
+command = "global-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.listen-stub]
+command = "listen-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+
+    let global_stub_path = bin_dir.join("global-stub");
+    fs::write(
+        &global_stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/global.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&global_stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&global_stub_path, permissions)?;
+
+    let listen_stub_path = bin_dir.join("listen-stub");
+    fs::write(
+        &listen_stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/listen.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&listen_stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&listen_stub_path, permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-63",
+                        "identifier": "MET-63",
+                        "title": "Route listen agent",
+                        "description": "Verify listen routing",
+                        "url": "https://linear.app/issues/63",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack",
+                        "states": {
+                            "nodes": [
+                                {
+                                    "id": "state-1",
+                                    "name": "Todo",
+                                    "type": "unstarted"
+                                },
+                                {
+                                    "id": "state-2",
+                                    "name": "In Progress",
+                                    "type": "started"
+                                }
+                            ]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-63\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": listen_issue_detail_node(
+                    "issue-63",
+                    "MET-63",
+                    "Route listen agent",
+                    "Verify listen routing",
+                    "state-2",
+                    "In Progress",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-63",
+                        "identifier": "MET-63",
+                        "title": "Route listen agent",
+                        "description": "Verify listen routing",
+                        "url": "https://linear.app/issues/63",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-63",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MET-63"));
+
+    wait_for_path(&stub_dir.join("listen.txt"))?;
+    assert!(stub_dir.join("listen.txt").exists());
+    assert!(!stub_dir.join("global.txt").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_once_downloads_issue_attachment_context_for_agent() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;

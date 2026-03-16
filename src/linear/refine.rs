@@ -12,6 +12,7 @@ use crate::backlog::{
     write_issue_description,
 };
 use crate::cli::{IssueRefineArgs, LinearClientArgs, RunAgentArgs};
+use crate::config::AGENT_ROUTE_LINEAR_ISSUES_REFINE;
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
@@ -181,6 +182,7 @@ async fn refine_issue(
         )?;
         let output = run_agent_capture(&RunAgentArgs {
             root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_LINEAR_ISSUES_REFINE.to_string()),
             agent: args.agent.clone(),
             prompt,
             instructions: None,

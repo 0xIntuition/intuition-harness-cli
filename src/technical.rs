@@ -33,7 +33,7 @@ use crate::backlog::{
     write_rendered_backlog_item,
 };
 use crate::cli::{RunAgentArgs, SyncIssueArgs, TechnicalArgs};
-use crate::config::load_required_planning_meta;
+use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{IssueCreateSpec, IssueListFilters, IssueSummary};
@@ -658,6 +658,7 @@ fn generate_backlog_files(
     )?;
     let output = run_agent_capture(&RunAgentArgs {
         root: Some(root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_BACKLOG_SPLIT.to_string()),
         agent: None,
         prompt,
         instructions: None,

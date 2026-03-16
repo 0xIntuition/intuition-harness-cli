@@ -7,10 +7,11 @@ use crate::cli::{
     ContextArgs, ContextCommands, ContextDoctorArgs, ContextMapArgs, ContextReloadArgs,
     ContextShowArgs, ScanArgs,
 };
+use crate::config::AGENT_ROUTE_CONTEXT_RELOAD;
 use crate::config::{AppConfig, PlanningMeta, detect_supported_agents};
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::repo_target::RepoTarget;
-use crate::scan::{CodebaseContext, run_scan};
+use crate::scan::{CodebaseContext, run_scan, run_scan_for_route};
 use crate::workflow_contract::{
     InstructionSource, WorkflowInstructionBundle, no_repo_overlays_message,
     no_repo_scoped_instructions_message, render_repo_overlay_bundle,
@@ -151,9 +152,12 @@ fn run_context_show(args: &ContextShowArgs) -> Result<String> {
 }
 
 fn run_context_reload(args: &ContextReloadArgs) -> Result<String> {
-    let report = run_scan(&ScanArgs {
-        root: args.root.root.clone(),
-    })?;
+    let report = run_scan_for_route(
+        &ScanArgs {
+            root: args.root.root.clone(),
+        },
+        AGENT_ROUTE_CONTEXT_RELOAD,
+    )?;
     Ok(report.render())
 }
 
