@@ -1,0 +1,26 @@
+{
+  "linear": {
+    "profile": "repo-metastack-cli-a6b0e8743ba29983",
+    "team": "MET",
+    "project_id": "bfabc7c0-1185-4be2-b919-55254f98eef7"
+  },
+  "agent": {
+    "provider": "claude",
+    "model": "opus",
+    "reasoning": null
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer",
+    "refresh_policy": "reuse_and_refresh",
+    "instructions_path": null,
+    "poll_interval_seconds": 15
+  },
+  "plan": {
+    "interactive_follow_up_questions": 5
+  },
+  "issue_labels": {
+    "plan": null,
+    "technical": null
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "issue_id": "dd28c443-c7ea-4a20-bb0d-3b6040bc07a7",
+  "identifier": "MET-162",
+  "title": "Add `meta backlog review` with shared multi-agent review orchestration, Linear-first sync, and configurable defaults",
+  "url": "https://linear.app/metastack-backlog/issue/MET-162/add-meta-backlog-review-with-shared-multi-agent-review-orchestration",
+  "team_key": "MET",
+  "project_id": "bfabc7c0-1185-4be2-b919-55254f98eef7",
+  "project_name": "MetaStack CLI",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

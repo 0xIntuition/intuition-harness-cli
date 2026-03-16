@@ -1,0 +1,12 @@
+{
+  "issue_id": "ad01faec-f157-497e-b503-5407d098df64",
+  "identifier": "MET-153",
+  "title": "Create Command-Family Bootstraps and Shared App Contexts",
+  "url": "https://linear.app/metastack-backlog/issue/MET-153/create-command-family-bootstraps-and-shared-app-contexts",
+  "team_key": "MET",
+  "project_id": "bfabc7c0-1185-4be2-b919-55254f98eef7",
+  "project_name": "MetaStack CLI",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

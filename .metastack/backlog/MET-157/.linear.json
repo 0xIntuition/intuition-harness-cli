@@ -1,0 +1,88 @@
+{
+  "issue_id": "d174497a-2448-437e-a165-e21902392397",
+  "identifier": "MET-157",
+  "title": "Technical: Add issue readiness scoring and safe multi-ticket kickoff for small teams",
+  "url": "https://linear.app/metastack-backlog/issue/MET-157/technical-add-issue-readiness-scoring-and-safe-multi-ticket-kickoff",
+  "team_key": "MET",
+  "project_id": "bfabc7c0-1185-4be2-b919-55254f98eef7",
+  "project_name": "MetaStack CLI",
+  "parent_id": "b7340775-f00f-4a14-a877-f7a6765e9fb6",
+  "parent_identifier": "MET-145",
+  "managed_files": [
+    {
+      "path": "README.md",
+      "attachment_id": "991f01dc-adb2-485c-ba56-8039a794e00e",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/bc297d8d-87f2-4c4a-a8f2-c34b03bc2713/955a3ab7-eb0a-40de-8f19-ea3ec0683321"
+    },
+    {
+      "path": "artifacts/README.md",
+      "attachment_id": "1379f933-f535-43b6-89c1-29e53bd98229",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/072c9688-2134-4f66-9b86-ea03d4439d19/04f17220-dd56-42cd-b0f5-7e08a5dc7986"
+    },
+    {
+      "path": "artifacts/artifact-template.md",
+      "attachment_id": "80b51a61-4a6f-4e31-b62c-da8efcbf40ad",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/701a2879-2609-4523-b77d-0f69392b4cda/63bb283f-0633-46ee-9e7a-378860d0d3fa"
+    },
+    {
+      "path": "checklist.md",
+      "attachment_id": "d9b5f656-7f9b-4a00-825d-b86f256de6c1",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/1e8f6f6e-5cf7-4304-a7ee-c31f5e7dc270/89d16221-8bb1-418c-b058-3ea423e22a3a"
+    },
+    {
+      "path": "contacts.md",
+      "attachment_id": "d9acb43e-1d49-43a4-bb23-cc013fd8b5da",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/b2f8cbe0-072c-49db-b73e-c21ecab5934f/d76d8429-8034-470c-8d1b-eec4239c4697"
+    },
+    {
+      "path": "context/README.md",
+      "attachment_id": "41739715-5f5d-4d00-a1ef-f8438a01b091",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/7ee5c5e3-de7a-4a93-bd4d-d934b34b37ec/9b92e790-9453-40fa-9117-91414fec5af6"
+    },
+    {
+      "path": "context/context-note-template.md",
+      "attachment_id": "e629b0db-f9c6-4995-8095-aaad566d1673",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/3eb1f190-75c9-416d-a304-d2ff239f2009/c948cb63-4617-431c-9367-683829d0c2cd"
+    },
+    {
+      "path": "decisions.md",
+      "attachment_id": "404faef1-95ca-46a1-86a8-3a3becea0400",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/810e8b01-9a1e-4edd-a343-f6372d43ed4f/850c1d46-852a-4d16-9c17-204c1113ea69"
+    },
+    {
+      "path": "implementation.md",
+      "attachment_id": "b5e05099-517f-46d6-929b-8201f595ca97",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/acc122f8-5547-49de-b433-a07c79c3a1b2/72522930-cb55-47d0-8fde-65fa440c69b9"
+    },
+    {
+      "path": "proposed-prs.md",
+      "attachment_id": "2c7e686f-f6ec-41ea-aaf3-b5efd42f2c38",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/29b04093-3e4f-496a-8a24-69dd52e29562/ccac1996-04f2-4e28-a4fd-be68777f3265"
+    },
+    {
+      "path": "risks.md",
+      "attachment_id": "d1f46b05-3bf8-4bbc-9385-7f0c449e2221",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/b1607003-97ab-4e13-bc0c-76d5c93fa349/0909e24b-bddf-490e-ab07-cc8af1a2d349"
+    },
+    {
+      "path": "specification.md",
+      "attachment_id": "60f15380-2818-4938-b193-bbf3a579478c",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/1d8e1071-af77-48f1-ba7e-9591a26afeda/f61b8a92-7e82-4dc4-bf91-d0fc2290e4b7"
+    },
+    {
+      "path": "tasks/README.md",
+      "attachment_id": "f44415b0-ee52-4465-a2c4-efaaa92a9888",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/f273245f-ba72-4a98-aeea-71873c885f08/8c5abf7f-8fa8-44f7-a9bd-c019139b8c4c"
+    },
+    {
+      "path": "tasks/workstream-template.md",
+      "attachment_id": "edd6bc43-44e5-4a24-80f2-677eb38b2327",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/98161536-ec29-49b3-8d9e-4f03d15b0c69/37dd39b3-297c-43a0-aa02-2e52ee2785e4"
+    },
+    {
+      "path": "validation.md",
+      "attachment_id": "b7539b01-d009-4140-aa41-c6ca3e61915d",
+      "url": "https://uploads.linear.app/dff18dc9-9766-4dc9-a578-ae99593c1daf/d2260e68-7e44-4d38-b330-10de3f3dc4ab/1bd03812-d818-4dd9-889b-2617d36ec65c"
+    }
+  ]
+}

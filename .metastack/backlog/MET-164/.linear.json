@@ -1,0 +1,12 @@
+{
+  "issue_id": "3eaf2057-c36f-403a-b5d0-7926a7383059",
+  "identifier": "MET-164",
+  "title": "Add optional per-ticket agent selection for `meta agents listen` pickups",
+  "url": "https://linear.app/metastack-backlog/issue/MET-164/add-optional-per-ticket-agent-selection-for-meta-agents-listen-pickups",
+  "team_key": "MET",
+  "project_id": "bfabc7c0-1185-4be2-b919-55254f98eef7",
+  "project_name": "MetaStack CLI",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

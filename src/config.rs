@@ -1,0 +1,803 @@
+use std::collections::BTreeMap;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
+
+use crate::cli::{ListenRefreshPolicyArg, PromptTransportArg};
+use crate::fs::PlanningPaths;
+use crate::linear::{LinearService, ReqwestLinearClient};
+
+pub const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
+pub const METASTACK_CONFIG_ENV: &str = "METASTACK_CONFIG";
+pub const DEFAULT_LISTEN_POLL_INTERVAL_SECONDS: u64 = 7;
+pub const DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+pub const MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 1;
+pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+const SUPPORTED_AGENT_NAMES: &[&str] = &["codex", "claude"];
+const CODEX_AGENT_MODELS: &[&str] = &[
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5-codex",
+    "gpt-5-codex-mini",
+];
+const CLAUDE_AGENT_MODELS: &[&str] = &["sonnet", "opus", "haiku", "sonnet[1m]", "opusplan"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub linear: LinearSettings,
+    #[serde(default)]
+    pub agents: AgentSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningMeta {
+    #[serde(default)]
+    pub linear: PlanningLinearSettings,
+    #[serde(default)]
+    pub agent: PlanningAgentSettings,
+    #[serde(default)]
+    pub listen: PlanningListenSettings,
+    #[serde(default)]
+    pub plan: PlanningPlanSettings,
+    #[serde(default)]
+    pub issue_labels: PlanningIssueLabels,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinearSettings {
+    pub api_key: Option<String>,
+    #[serde(default = "default_linear_api_url")]
+    pub api_url: String,
+    pub team: Option<String>,
+    pub default_profile: Option<String>,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, LinearProfileSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinearProfileSettings {
+    pub api_key: Option<String>,
+    #[serde(default = "default_linear_api_url")]
+    pub api_url: String,
+    pub team: Option<String>,
+    pub team_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningLinearSettings {
+    pub profile: Option<String>,
+    pub team: Option<String>,
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningAgentSettings {
+    #[serde(alias = "agent")]
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningListenSettings {
+    pub required_label: Option<String>,
+    #[serde(default)]
+    pub assignment_scope: ListenAssignmentScope,
+    #[serde(default)]
+    pub refresh_policy: ListenRefreshPolicy,
+    pub instructions_path: Option<String>,
+    pub poll_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningPlanSettings {
+    pub interactive_follow_up_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningIssueLabels {
+    pub plan: Option<String>,
+    pub technical: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentSettings {
+    pub default_agent: Option<String>,
+    pub default_model: Option<String>,
+    pub default_reasoning: Option<String>,
+    #[serde(default)]
+    pub commands: BTreeMap<String, AgentCommandConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentCommandConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub transport: PromptTransport,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTransport {
+    #[default]
+    Arg,
+    Stdin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenAssignmentScope {
+    #[default]
+    Any,
+    Viewer,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenRefreshPolicy {
+    #[default]
+    ReuseAndRefresh,
+    RecreateFromOriginMain,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinearConfig {
+    pub api_key: String,
+    pub api_url: String,
+    pub default_team: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LinearConfigOverrides {
+    pub api_key: Option<String>,
+    pub api_url: Option<String>,
+    pub default_team: Option<String>,
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentConfigOverrides {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAgentConfig {
+    pub provider: String,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+}
+
+impl Default for LinearSettings {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            api_url: default_linear_api_url(),
+            team: None,
+            default_profile: None,
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for LinearProfileSettings {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            api_url: default_linear_api_url(),
+            team: None,
+            team_name: None,
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn load() -> Result<Self> {
+        let Some(path) = config_path_from_env_or_home() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(&path) {
+            Ok(contents) => toml::from_str(&contents)
+                .with_context(|| format!("failed to parse `{}`", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to read `{}`", path.display()))
+            }
+        }
+    }
+
+    pub fn save(&self) -> Result<PathBuf> {
+        let path = resolve_config_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create `{}`", parent.display()))?;
+        }
+
+        let contents = toml::to_string_pretty(self).context("failed to encode config as TOML")?;
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write `{}`", path.display()))?;
+        Ok(path)
+    }
+
+    pub fn resolve_agent_definition(&self, name: &str) -> Option<AgentCommandConfig> {
+        self.agents
+            .commands
+            .get(&normalize_agent_name(name))
+            .cloned()
+            .or_else(|| builtin_agent_definition(name))
+    }
+
+    pub fn set_agent_definition(&mut self, name: &str, definition: AgentCommandConfig) {
+        self.agents
+            .commands
+            .insert(normalize_agent_name(name), definition);
+    }
+}
+
+impl PlanningMeta {
+    pub fn load(root: &Path) -> Result<Self> {
+        let path = PlanningPaths::new(root).meta_path();
+
+        match fs::read_to_string(&path) {
+            Ok(contents) => {
+                let parsed: Self = serde_json::from_str(&contents)
+                    .with_context(|| format!("failed to parse `{}`", path.display()))?;
+                parsed
+                    .validate()
+                    .with_context(|| format!("invalid `{}`", path.display()))?;
+                Ok(parsed)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to read `{}`", path.display()))
+            }
+        }
+    }
+
+    pub fn save(&self, root: &Path) -> Result<PathBuf> {
+        self.validate().context("planning metadata is invalid")?;
+        let path = PlanningPaths::new(root).meta_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create `{}`", parent.display()))?;
+        }
+
+        let contents =
+            serde_json::to_string_pretty(self).context("failed to encode planning metadata")?;
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write `{}`", path.display()))?;
+        Ok(path)
+    }
+
+    pub fn interactive_follow_up_question_limit(&self) -> usize {
+        self.plan
+            .interactive_follow_up_questions
+            .unwrap_or(DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(interval) = self.listen.poll_interval_seconds {
+            validate_listen_poll_interval_seconds(interval)?;
+        }
+        if let Some(limit) = self.plan.interactive_follow_up_questions {
+            validate_interactive_plan_follow_up_question_limit(limit)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<PlanningMeta> {
+    let meta_path = PlanningPaths::new(root).meta_path();
+    if !meta_path.is_file() {
+        return Err(anyhow!(
+            "`meta {command_name}` requires repo setup. Run `meta runtime setup --root {}` and rerun.",
+            root.display()
+        ));
+    }
+    PlanningMeta::load(root)
+}
+
+impl PlanningListenSettings {
+    pub fn poll_interval_seconds(&self) -> u64 {
+        self.poll_interval_seconds
+            .unwrap_or(DEFAULT_LISTEN_POLL_INTERVAL_SECONDS)
+    }
+}
+
+impl PlanningIssueLabels {
+    pub fn plan_label(&self) -> String {
+        self.plan
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("plan")
+            .to_string()
+    }
+
+    pub fn technical_label(&self) -> String {
+        self.technical
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("technical")
+            .to_string()
+    }
+}
+
+impl LinearConfig {
+    pub fn new_with_root(root: Option<&Path>, overrides: LinearConfigOverrides) -> Result<Self> {
+        let app_config = AppConfig::load()?;
+        let planning_meta = match root {
+            Some(root) => PlanningMeta::load(root)?,
+            None => PlanningMeta::default(),
+        };
+
+        Self::from_sources(&app_config, &planning_meta, overrides)
+    }
+
+    pub fn from_sources(
+        app_config: &AppConfig,
+        planning_meta: &PlanningMeta,
+        overrides: LinearConfigOverrides,
+    ) -> Result<Self> {
+        let selected_profile = normalize_optional_owned(overrides.profile)
+            .or_else(|| normalize_optional_ref(planning_meta.linear.profile.as_deref()))
+            .or_else(|| normalize_optional_ref(app_config.linear.default_profile.as_deref()));
+
+        let explicit_api_key = normalize_optional_owned(overrides.api_key);
+        let explicit_api_url = normalize_optional_owned(overrides.api_url);
+        let explicit_team = normalize_optional_owned(overrides.default_team);
+
+        let profile = selected_profile
+            .as_deref()
+            .map(|name| resolve_named_profile(&app_config.linear, name))
+            .transpose()?;
+        let api_key = explicit_api_key
+            .or_else(|| profile.as_ref().and_then(ResolvedLinearProfile::api_key))
+            .or_else(|| normalize_optional_ref(app_config.linear.api_key.as_deref()))
+            .or_else(|| normalize_optional_owned(env::var("LINEAR_API_KEY").ok()))
+            .ok_or_else(Self::missing_auth_error)?;
+        let api_url = explicit_api_url
+            .or_else(|| profile.as_ref().map(ResolvedLinearProfile::api_url))
+            .or_else(|| normalize_optional_ref(Some(app_config.linear.api_url.as_str())))
+            .or_else(|| normalize_optional_owned(env::var("LINEAR_API_URL").ok()))
+            .unwrap_or_else(default_linear_api_url);
+        let default_team = explicit_team
+            .or_else(|| normalize_optional_ref(planning_meta.linear.team.as_deref()))
+            .or_else(|| profile.as_ref().and_then(ResolvedLinearProfile::team))
+            .or_else(|| normalize_optional_ref(app_config.linear.team.as_deref()))
+            .or_else(|| normalize_optional_owned(env::var("LINEAR_TEAM").ok()));
+
+        Ok(Self {
+            api_key,
+            api_url,
+            default_team,
+        })
+    }
+
+    pub fn missing_auth_error() -> anyhow::Error {
+        anyhow!(
+            "Linear auth is required for this command. Set LINEAR_API_KEY, run `meta runtime config`, or pass `--api-key <token>`."
+        )
+    }
+}
+
+pub async fn ensure_saved_issue_labels(
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+) -> Result<()> {
+    let labels = vec![
+        planning_meta.issue_labels.plan_label(),
+        planning_meta.issue_labels.technical_label(),
+    ];
+    let config = match LinearConfig::from_sources(
+        app_config,
+        planning_meta,
+        LinearConfigOverrides::default(),
+    ) {
+        Ok(config) => config,
+        Err(error) if error.to_string() == LinearConfig::missing_auth_error().to_string() => {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(default_team) = config.default_team.clone() else {
+        return Ok(());
+    };
+
+    let service = LinearService::new(ReqwestLinearClient::new(config)?, Some(default_team));
+    service.ensure_issue_labels_exist(None, &labels).await
+}
+
+pub fn resolve_agent_config(
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    overrides: AgentConfigOverrides,
+) -> Result<ResolvedAgentConfig> {
+    let provider = normalize_optional_owned(overrides.provider)
+        .or_else(|| normalize_optional_ref(planning_meta.agent.provider.as_deref()))
+        .or_else(|| normalize_optional_ref(app_config.agents.default_agent.as_deref()))
+        .map(|value| normalize_agent_name(&value))
+        .ok_or_else(|| {
+            anyhow!(
+                "no agent was selected. Pass `--agent <NAME>` or run `meta runtime config` to configure a default agent."
+            )
+        })?;
+    validate_agent_name(app_config, &provider)?;
+    let model = normalize_optional_owned(overrides.model)
+        .or_else(|| normalize_optional_ref(planning_meta.agent.model.as_deref()))
+        .or_else(|| normalize_optional_ref(app_config.agents.default_model.as_deref()));
+    validate_agent_model(&provider, model.as_deref())?;
+
+    Ok(ResolvedAgentConfig {
+        provider,
+        model,
+        reasoning: normalize_optional_owned(overrides.reasoning)
+            .or_else(|| normalize_optional_ref(planning_meta.agent.reasoning.as_deref()))
+            .or_else(|| normalize_optional_ref(app_config.agents.default_reasoning.as_deref())),
+    })
+}
+
+impl From<PromptTransportArg> for PromptTransport {
+    fn from(value: PromptTransportArg) -> Self {
+        match value {
+            PromptTransportArg::Arg => Self::Arg,
+            PromptTransportArg::Stdin => Self::Stdin,
+        }
+    }
+}
+
+impl From<ListenRefreshPolicyArg> for ListenRefreshPolicy {
+    fn from(value: ListenRefreshPolicyArg) -> Self {
+        match value {
+            ListenRefreshPolicyArg::ReuseAndRefresh => Self::ReuseAndRefresh,
+            ListenRefreshPolicyArg::RecreateFromOriginMain => Self::RecreateFromOriginMain,
+        }
+    }
+}
+
+pub fn resolve_config_path() -> Result<PathBuf> {
+    config_path_from_env_or_home().ok_or_else(|| {
+        anyhow!(
+            "could not determine a config path; set {} or HOME/XDG_CONFIG_HOME",
+            METASTACK_CONFIG_ENV
+        )
+    })
+}
+
+pub fn resolve_data_root() -> Result<PathBuf> {
+    let config_path = resolve_config_path()?;
+    data_root_from_config_path(&config_path)
+}
+
+pub(crate) fn data_root_from_config_path(config_path: &Path) -> Result<PathBuf> {
+    let config_parent = config_path.parent().ok_or_else(|| {
+        anyhow!(
+            "could not determine a MetaStack data root from config path `{}`",
+            config_path.display()
+        )
+    })?;
+
+    Ok(config_parent.join("data"))
+}
+
+pub fn normalize_agent_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+pub fn supported_agent_names() -> &'static [&'static str] {
+    SUPPORTED_AGENT_NAMES
+}
+
+pub fn supported_agent_models(name: &str) -> &'static [&'static str] {
+    match normalize_agent_name(name).as_str() {
+        "codex" => CODEX_AGENT_MODELS,
+        "claude" => CLAUDE_AGENT_MODELS,
+        _ => &[],
+    }
+}
+
+pub fn detect_supported_agents() -> Vec<String> {
+    supported_agent_names()
+        .iter()
+        .copied()
+        .filter(|name| command_exists(name))
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn builtin_agent_definition(name: &str) -> Option<AgentCommandConfig> {
+    let name = normalize_agent_name(name);
+    match name.as_str() {
+        "codex" => Some(AgentCommandConfig {
+            command: "codex".to_string(),
+            args: vec!["exec".to_string(), "{{model_arg}}".to_string()],
+            transport: PromptTransport::Arg,
+        }),
+        "claude" => Some(AgentCommandConfig {
+            command: "claude".to_string(),
+            args: vec!["-p".to_string(), "{{model_arg}}".to_string()],
+            transport: PromptTransport::Arg,
+        }),
+        _ => None,
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&paths).any(|entry| {
+        let candidate = entry.join(command);
+        if candidate.is_file() {
+            return true;
+        }
+
+        #[cfg(windows)]
+        {
+            let executable = entry.join(format!("{command}.exe"));
+            executable.is_file()
+        }
+
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    })
+}
+
+fn config_path_from_env_or_home() -> Option<PathBuf> {
+    if let Some(path) = env::var_os(METASTACK_CONFIG_ENV) {
+        return Some(PathBuf::from(path));
+    }
+
+    if let Some(path) = env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(path).join("metastack").join("config.toml"));
+    }
+
+    #[cfg(windows)]
+    if let Some(path) = env::var_os("APPDATA") {
+        return Some(PathBuf::from(path).join("metastack").join("config.toml"));
+    }
+
+    env::var_os("HOME").map(|path| {
+        PathBuf::from(path)
+            .join(".config")
+            .join("metastack")
+            .join("config.toml")
+    })
+}
+
+fn default_linear_api_url() -> String {
+    DEFAULT_LINEAR_API_URL.to_string()
+}
+
+pub fn validate_supported_agent(agent: &str) -> Result<()> {
+    let normalized = normalize_agent_name(agent);
+    if supported_agent_names()
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
+    {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "agent `{normalized}` is not supported; choose one of: {}",
+            supported_agent_names().join(", ")
+        ))
+    }
+}
+
+pub fn validate_agent_name(app_config: &AppConfig, agent: &str) -> Result<()> {
+    let normalized = normalize_agent_name(agent);
+    if app_config.resolve_agent_definition(&normalized).is_some() {
+        Ok(())
+    } else {
+        validate_supported_agent(&normalized)
+    }
+}
+
+pub fn validate_agent_model(agent: &str, model: Option<&str>) -> Result<()> {
+    let supported_models = supported_agent_models(agent);
+    if supported_models.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(model) = normalize_optional_ref(model)
+        && supported_models
+            .iter()
+            .all(|candidate| !candidate.eq_ignore_ascii_case(&model))
+    {
+        return Err(anyhow!(
+            "model `{model}` is not supported for agent `{}`; supported models: {}",
+            normalize_agent_name(agent),
+            supported_models.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn validate_interactive_plan_follow_up_question_limit(limit: usize) -> Result<()> {
+    if (MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT
+        ..=MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT)
+        .contains(&limit)
+    {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "interactive plan follow-up question limit must be between {} and {}; got {limit}",
+            MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
+            MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT
+        ))
+    }
+}
+
+pub fn validate_listen_poll_interval_seconds(interval: u64) -> Result<()> {
+    if interval >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen poll interval must be at least 1 second; got {interval}"
+        ))
+    }
+}
+
+fn resolve_named_profile<'a>(
+    settings: &'a LinearSettings,
+    name: &str,
+) -> Result<ResolvedLinearProfile<'a>> {
+    let profile = settings
+        .profiles
+        .get(name)
+        .ok_or_else(|| anyhow!("Linear profile `{name}` is not configured. Add it under `[linear.profiles.{name}]` or switch the selected profile."))?;
+    let mut missing = Vec::new();
+    if normalize_optional_ref(profile.api_key.as_deref()).is_none() {
+        missing.push("api_key");
+    }
+    if normalize_optional_ref(Some(profile.api_url.as_str())).is_none() {
+        missing.push("api_url");
+    }
+    if !missing.is_empty() {
+        return Err(anyhow!(
+            "Linear profile `{name}` is incomplete; missing required field{}: {}",
+            if missing.len() == 1 { "" } else { "s" },
+            missing.join(", ")
+        ));
+    }
+
+    Ok(ResolvedLinearProfile { profile })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedLinearProfile<'a> {
+    profile: &'a LinearProfileSettings,
+}
+
+impl ResolvedLinearProfile<'_> {
+    fn api_key(&self) -> Option<String> {
+        normalize_optional_ref(self.profile.api_key.as_deref())
+    }
+
+    fn api_url(&self) -> String {
+        normalize_optional_ref(Some(self.profile.api_url.as_str()))
+            .unwrap_or_else(default_linear_api_url)
+    }
+
+    fn team(&self) -> Option<String> {
+        normalize_optional_ref(self.profile.team.as_deref())
+    }
+}
+
+fn normalize_optional_owned(value: Option<String>) -> Option<String> {
+    value.and_then(|value| normalize_optional_ref(Some(value.as_str())))
+}
+
+fn normalize_optional_ref(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
+        PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    };
+
+    #[test]
+    fn interactive_plan_follow_up_limit_defaults_to_ten() {
+        assert_eq!(
+            PlanningMeta::default().interactive_follow_up_question_limit(),
+            DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT
+        );
+    }
+
+    #[test]
+    fn listen_poll_interval_defaults_to_seven_seconds() {
+        assert_eq!(
+            PlanningListenSettings::default().poll_interval_seconds(),
+            DEFAULT_LISTEN_POLL_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn planning_meta_validation_rejects_out_of_range_follow_up_limits() {
+        let mut meta = PlanningMeta {
+            plan: PlanningPlanSettings {
+                interactive_follow_up_questions: Some(0),
+            },
+            ..PlanningMeta::default()
+        };
+
+        assert_eq!(
+            meta.validate().unwrap_err().to_string(),
+            "interactive plan follow-up question limit must be between 1 and 10; got 0"
+        );
+
+        meta.plan.interactive_follow_up_questions = Some(11);
+        assert_eq!(
+            meta.validate().unwrap_err().to_string(),
+            "interactive plan follow-up question limit must be between 1 and 10; got 11"
+        );
+    }
+
+    #[test]
+    fn explicit_follow_up_limit_is_returned_when_configured() {
+        let meta = PlanningMeta {
+            plan: PlanningPlanSettings {
+                interactive_follow_up_questions: Some(4),
+            },
+            ..PlanningMeta::default()
+        };
+
+        assert_eq!(meta.interactive_follow_up_question_limit(), 4);
+    }
+
+    #[test]
+    fn explicit_listen_poll_interval_is_returned_when_configured() {
+        let settings = PlanningListenSettings {
+            poll_interval_seconds: Some(42),
+            ..PlanningListenSettings::default()
+        };
+
+        assert_eq!(settings.poll_interval_seconds(), 42);
+    }
+
+    #[test]
+    fn interactive_follow_up_limit_validation_accepts_values_in_range() {
+        assert!(validate_interactive_plan_follow_up_question_limit(1).is_ok());
+        assert!(validate_interactive_plan_follow_up_question_limit(10).is_ok());
+    }
+
+    #[test]
+    fn listen_poll_interval_validation_rejects_zero() {
+        assert_eq!(
+            validate_listen_poll_interval_seconds(0)
+                .unwrap_err()
+                .to_string(),
+            "listen poll interval must be at least 1 second; got 0"
+        );
+    }
+
+    #[test]
+    fn listen_poll_interval_validation_accepts_positive_values() {
+        assert!(validate_listen_poll_interval_seconds(1).is_ok());
+        assert!(validate_listen_poll_interval_seconds(60).is_ok());
+    }
+}

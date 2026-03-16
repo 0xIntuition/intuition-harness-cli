@@ -1,0 +1,8 @@
+{
+  "pid": null,
+  "poll_interval_seconds": 30,
+  "started_at": "2026-03-16T13:02:52.516887Z",
+  "updated_at": "2026-03-16T13:03:02.858888Z",
+  "log_path": ".metastack/cron/.runtime/scheduler.log",
+  "jobs": {}
+}
