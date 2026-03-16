@@ -1,0 +1,12 @@
+{
+  "merge_order": [
+    1
+  ],
+  "conflict_hotspots": [
+    "src/config.rs",
+    "src/config_command.rs",
+    "src/cli.rs",
+    "README.md"
+  ],
+  "summary": "Safest order is just PR #1 because it is the only selected change. The local aggregate branch `meta-merge/20260316T205946Z` is currently aligned with `main`, so execution-time conflict risk is low; the main review/merge hotspots are the broad shared surfaces this PR edits heavily: config modeling and validation (`src/config.rs`), config UI/command flow (`src/config_command.rs`), shared CLI args/runtime wiring (`src/cli.rs`), and user-facing docs (`README.md`)."
+}

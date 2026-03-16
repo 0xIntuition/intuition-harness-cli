@@ -5,8 +5,8 @@ use reqwest::Client;
 use crate::config::LinearConfig;
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
-    IssueLabelCreateRequest, IssueSummary, IssueUpdateRequest, LabelRef, ProjectSummary,
-    TeamSummary, UserRef,
+    IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
+    ProjectSummary, TeamSummary, UserRef,
 };
 
 mod attachments;
@@ -27,6 +27,7 @@ mod viewer;
 pub trait LinearClient: Send + Sync {
     async fn list_projects(&self, limit: usize) -> Result<Vec<ProjectSummary>>;
     async fn list_issues(&self, limit: usize) -> Result<Vec<IssueSummary>>;
+    async fn list_filtered_issues(&self, filters: &IssueListFilters) -> Result<Vec<IssueSummary>>;
     async fn list_all_issues(&self) -> Result<Vec<IssueSummary>>;
     async fn list_issue_labels(&self, team: Option<&str>) -> Result<Vec<LabelRef>>;
     async fn get_issue(&self, issue_id: &str) -> Result<IssueSummary>;
@@ -84,6 +85,10 @@ impl LinearClient for ReqwestLinearClient {
 
     async fn list_issues(&self, limit: usize) -> Result<Vec<IssueSummary>> {
         self.list_issues_resource(limit).await
+    }
+
+    async fn list_filtered_issues(&self, filters: &IssueListFilters) -> Result<Vec<IssueSummary>> {
+        self.list_filtered_issues_resource(filters).await
     }
 
     async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {

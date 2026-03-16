@@ -1,0 +1,12 @@
+{
+  "issue_id": "acadb27e-8bdd-4b95-a5bf-d9162742562b",
+  "identifier": "ENG-10093",
+  "title": "Open dashboards immediately and load Linear data asynchronously across listen, backlog tech, and backlog sync",
+  "url": "https://linear.app/0xintuition/issue/ENG-10093/open-dashboards-immediately-and-load-linear-data-asynchronously-across",
+  "team_key": "ENG",
+  "project_id": "5601d0a8-ba80-4cc0-b9f4-48f2b759e1a0",
+  "project_name": "CLI Harness",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

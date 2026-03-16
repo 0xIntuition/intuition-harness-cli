@@ -1,0 +1,25 @@
+{
+  "run_id": "20260316T205946Z",
+  "repository": {
+    "name_with_owner": "0xIntuition/metastack-cli",
+    "url": "https://github.com/0xIntuition/metastack-cli",
+    "default_branch": "main"
+  },
+  "selected_pull_requests": [
+    {
+      "number": 1,
+      "title": "ENG-10063: add advanced agent routing",
+      "body": "## Summary\n- add install-scoped advanced agent routing config with validated family and command route keys\n- wire agent-backed commands through the shared route resolver and expose route-aware runtime config surfaces\n- add coverage for routing precedence, config output/dashboard flows, and command-path route execution\n\n## Testing\n- make quality\n",
+      "url": "https://github.com/0xIntuition/metastack-cli/pull/1",
+      "headRefName": "eng-10063-add-advanced-agent-routing-config-resolver-config-surfaces-and",
+      "baseRefName": "main",
+      "updatedAt": "2026-03-16T20:46:23Z",
+      "author": {
+        "login": "kamescg"
+      }
+    }
+  ],
+  "source_root": "/Users/metasudo/workspace/intution/stack/metastack-cli",
+  "workspace_path": "/Users/metasudo/workspace/intution/stack/metastack-cli-workspace/merge-runs/20260316T205946Z",
+  "aggregate_branch": "meta-merge/20260316T205946Z"
+}

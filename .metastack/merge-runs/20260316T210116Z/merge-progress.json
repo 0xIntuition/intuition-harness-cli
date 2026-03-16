@@ -1,0 +1,9 @@
+{
+  "steps": [
+    {
+      "pull_request": 1,
+      "status": "conflict_resolved",
+      "detail": "Merged #1 after agent-assisted conflict resolution for src/config.rs"
+    }
+  ]
+}

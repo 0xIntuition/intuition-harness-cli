@@ -224,6 +224,22 @@ struct ListenCycleData {
 }
 
 impl ListenCycleData {
+    fn loading(scope: String, state_file: String) -> Self {
+        Self {
+            scope,
+            claimed_this_cycle: 0,
+            pending_issues: Vec::new(),
+            sessions: Vec::new(),
+            notes: vec![
+                "Starting dashboard before the first Linear refresh completes.".to_string(),
+                "Refreshing current Todo issues, listener sessions, and workspace state now."
+                    .to_string(),
+            ],
+            state_file,
+            rate_limits: None,
+        }
+    }
+
     fn demo(root: &Path) -> Self {
         Self::demo_at(root, DEMO_NOW_EPOCH_SECONDS)
     }
@@ -1664,6 +1680,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             poll_interval_seconds,
             demo_now - 7_351,
             initial_cycle,
+            false,
             move || {
                 let cycle = cycle.clone();
                 async move { Ok(cycle) }
@@ -1695,6 +1712,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         root: root.clone(),
         store,
         filters: IssueListFilters {
+            identifier: None,
             team: args.team.clone().or(config.default_team.clone()),
             project: args.project.clone(),
             project_id: if args.project.is_some() {
@@ -1753,12 +1771,21 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     }
 
     let started_at_epoch_seconds = now_epoch_seconds();
-    let initial_cycle = daemon.run_cycle().await?;
+    let initial_cycle = ListenCycleData::loading(
+        match (&daemon.filters.team, &daemon.filters.project) {
+            (Some(team), Some(project)) => format!("{team} / {project}"),
+            (Some(team), None) => team.clone(),
+            (None, Some(project)) => project.clone(),
+            (None, None) => "all teams".to_string(),
+        },
+        display_path(&daemon.store.paths().state_path, &daemon.root),
+    );
     run_live_loop(
         args,
         poll_interval_seconds,
         started_at_epoch_seconds,
         initial_cycle,
+        true,
         || daemon.run_cycle(),
     )
     .await
@@ -1791,6 +1818,7 @@ async fn run_live_loop<F, Fut>(
     poll_interval_seconds: u64,
     started_at_epoch_seconds: u64,
     initial_cycle: ListenCycleData,
+    refresh_immediately: bool,
     mut next_cycle: F,
 ) -> Result<()>
 where
@@ -1803,7 +1831,11 @@ where
             started_at_epoch_seconds,
             now_epoch_seconds: started_at_epoch_seconds,
             poll_interval_seconds,
-            next_refresh_seconds: poll_interval_seconds,
+            next_refresh_seconds: if refresh_immediately {
+                0
+            } else {
+                poll_interval_seconds
+            },
             dashboard_url: None,
         },
     );
@@ -1825,7 +1857,11 @@ where
     let mut terminal = Terminal::new(backend)?;
     let mut cycle = initial_cycle;
     let mut session_view = SessionListView::Active;
-    let mut next_refresh_at = Instant::now() + poll_interval;
+    let mut next_refresh_at = if refresh_immediately {
+        Instant::now()
+    } else {
+        Instant::now() + poll_interval
+    };
 
     loop {
         let now = now_epoch_seconds();
@@ -2351,8 +2387,8 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionPhase, TokenUsage, capture_workspace_snapshot, compact_identifier, format_duration,
-        format_number,
+        ListenCycleData, SessionPhase, TokenUsage, capture_workspace_snapshot, compact_identifier,
+        format_duration, format_number,
     };
     use std::fs;
     use std::process::Command;
@@ -2398,6 +2434,32 @@ mod tests {
         };
 
         assert_eq!(usage.display_compact(), "12,340");
+    }
+
+    #[test]
+    fn loading_cycle_starts_empty_and_explains_initial_refresh() {
+        let cycle = ListenCycleData::loading(
+            "MET / MetaStack CLI".to_string(),
+            ".metastack/agents/sessions/listen-state.json".to_string(),
+        );
+
+        assert_eq!(cycle.scope, "MET / MetaStack CLI");
+        assert_eq!(cycle.claimed_this_cycle, 0);
+        assert!(cycle.pending_issues.is_empty());
+        assert!(cycle.sessions.is_empty());
+        assert_eq!(
+            cycle.notes,
+            vec![
+                "Starting dashboard before the first Linear refresh completes.".to_string(),
+                "Refreshing current Todo issues, listener sessions, and workspace state now."
+                    .to_string(),
+            ]
+        );
+        assert_eq!(
+            cycle.state_file,
+            ".metastack/agents/sessions/listen-state.json"
+        );
+        assert_eq!(cycle.rate_limits, None);
     }
 
     #[test]

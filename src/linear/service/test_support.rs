@@ -5,8 +5,8 @@ use std::sync::{
 
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
-    IssueLabelCreateRequest, IssueSummary, IssueUpdateRequest, LabelRef, LinearClient, ProjectRef,
-    ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
+    IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
+    LinearClient, ProjectRef, ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -26,6 +26,7 @@ pub(super) struct FakeLinearClient {
     pub(super) created_comments: Arc<Mutex<Vec<(String, String)>>>,
     pub(super) updated_comments: Arc<Mutex<Vec<(String, String)>>>,
     pub(super) list_issues_calls: Arc<AtomicUsize>,
+    pub(super) list_filtered_issues_calls: Arc<AtomicUsize>,
     pub(super) list_all_issues_calls: Arc<AtomicUsize>,
 }
 
@@ -38,6 +39,53 @@ impl LinearClient for FakeLinearClient {
     async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
         self.list_issues_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.issues.clone())
+    }
+
+    async fn list_filtered_issues(&self, filters: &IssueListFilters) -> Result<Vec<IssueSummary>> {
+        self.list_filtered_issues_calls
+            .fetch_add(1, Ordering::SeqCst);
+        let mut issues = if self.all_issues.is_empty() {
+            self.issues.clone()
+        } else {
+            self.all_issues.clone()
+        };
+        if let Some(identifier) = filters.identifier.as_deref() {
+            issues.retain(|issue| issue.identifier.eq_ignore_ascii_case(identifier));
+        }
+        if let Some(team) = filters.team.as_deref() {
+            issues.retain(|issue| issue.team.key.eq_ignore_ascii_case(team));
+        }
+        if let Some(project) = filters.project.as_deref() {
+            issues.retain(|issue| {
+                issue
+                    .project
+                    .as_ref()
+                    .map(|entry| entry.name.eq_ignore_ascii_case(project))
+                    .unwrap_or(false)
+            });
+        }
+        if let Some(project_id) = filters.project_id.as_deref() {
+            issues.retain(|issue| {
+                issue
+                    .project
+                    .as_ref()
+                    .map(|entry| entry.id == project_id)
+                    .unwrap_or(false)
+            });
+        }
+        if let Some(state) = filters.state.as_deref() {
+            issues.retain(|issue| {
+                issue
+                    .state
+                    .as_ref()
+                    .map(|entry| entry.name.eq_ignore_ascii_case(state))
+                    .unwrap_or(false)
+            });
+        }
+        if issues.len() > filters.limit.max(1) {
+            issues.truncate(filters.limit.max(1));
+        }
+        Ok(issues)
     }
 
     async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {
