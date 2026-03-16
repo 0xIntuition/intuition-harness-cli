@@ -12,7 +12,7 @@
   },
   "listen": {
     "required_label": null,
-    "assignment_scope": "any",
+    "assignment_scope": "viewer",
     "refresh_policy": "reuse_and_refresh",
     "instructions_path": null,
     "poll_interval_seconds": null
