@@ -244,9 +244,33 @@ Agent-backed routes resolve install-scoped settings in this order:
 2. command family override
 3. global default
 
+For an individual run, explicit CLI flags still win over the routed defaults:
+`--agent`/`--provider` first, then `--model`, then `--reasoning`.
+
 Use `meta runtime config --advanced-routing` for the dedicated routing dashboard, or use
 `--route`, `--route-agent`, `--route-model`, `--route-reasoning`, and `--clear-route` for
 non-interactive edits.
+
+Supported route families:
+
+- `backlog`
+- `context`
+- `linear`
+- `agents`
+- `runtime.cron`
+- `merge`
+
+Supported command route keys:
+
+- `backlog.plan`
+- `backlog.split`
+- `context.scan`
+- `context.reload`
+- `linear.issues.refine`
+- `agents.listen`
+- `agents.workflows.run`
+- `runtime.cron.prompt`
+- `merge`
 
 Example global config:
 
