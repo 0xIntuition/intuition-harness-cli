@@ -1681,12 +1681,72 @@ impl Drop for TerminalCleanup {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
-        BacklogTemplateConflictAction, parse_backlog_template_conflict_action,
-        prompt_backlog_template_conflicts_with_io,
+        BacklogTemplateConflictAction, SetupApp, SetupViewData,
+        parse_backlog_template_conflict_action, prompt_backlog_template_conflicts_with_io,
     };
     use anyhow::Result;
+    use crate::config::{AgentSettings, AppConfig, PlanningAgentSettings, PlanningMeta};
     use std::io::Cursor;
+
+    #[test]
+    fn setup_app_refreshes_reasoning_options_when_model_changes() {
+        let view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig {
+                agents: AgentSettings {
+                    default_agent: Some("claude".to_string()),
+                    ..AgentSettings::default()
+                },
+                ..AppConfig::default()
+            },
+            app_config_changed: false,
+            planning_meta: PlanningMeta {
+                agent: PlanningAgentSettings {
+                    provider: Some("claude".to_string()),
+                    model: Some("opus".to_string()),
+                    reasoning: Some("high".to_string()),
+                },
+                ..PlanningMeta::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = SetupApp::new(&view);
+        assert_eq!(
+            app.reasoning.options(),
+            &[
+                "Leave unset".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ]
+        );
+        assert_eq!(app.reasoning.selected_label(), Some("high"));
+
+        let haiku_index = app
+            .model_field
+            .options()
+            .iter()
+            .position(|option| option == "haiku")
+            .expect("haiku model should be listed");
+        app.model_field.move_by(haiku_index as isize - app.model_field.selected() as isize);
+        app.sync_reasoning(None);
+
+        assert_eq!(
+            app.reasoning.options(),
+            &[
+                "Leave unset".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+            ]
+        );
+        assert_eq!(app.reasoning.selected(), 0);
+    }
 
     #[test]
     fn parse_backlog_template_conflict_action_accepts_supported_inputs() {
