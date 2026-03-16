@@ -358,7 +358,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui::lay
     let controls = match app.step {
         CreateStep::Title => "Type the title. Enter or Tab advances. Esc cancels the create flow.",
         CreateStep::Description => {
-            "Type the description. Enter inserts a newline. Tab advances. Shift+Tab goes back."
+            "Type the description. Enter advances. Shift+Enter adds a line. Tab advances. Shift+Tab goes back."
         }
         CreateStep::StatusPriority => {
             "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Shift+Tab goes back."
@@ -420,6 +420,13 @@ impl IssueCreateApp {
             KeyCode::Right => self.apply_action(IssueCreateAction::Right),
             KeyCode::Tab => self.apply_action(IssueCreateAction::Tab),
             KeyCode::BackTab => self.apply_action(IssueCreateAction::BackTab),
+            KeyCode::Enter
+                if self.step == CreateStep::Description
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.apply_text_key(key);
+                None
+            }
             KeyCode::Enter => self.apply_action(IssueCreateAction::Enter),
             KeyCode::Esc => self.apply_action(IssueCreateAction::Esc),
             _ => None,
@@ -471,7 +478,7 @@ impl IssueCreateApp {
                 None
             }
             CreateStep::Description => {
-                self.description.push('\n');
+                self.step = CreateStep::StatusPriority;
                 None
             }
             CreateStep::StatusPriority => match self.build_submission() {
@@ -679,9 +686,9 @@ mod tests {
         let _ = app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE));
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        let _ = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
-        let _ = app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let _ = app.apply_action(IssueCreateAction::Right);
         let _ = app.apply_action(IssueCreateAction::Down);
 
@@ -750,5 +757,19 @@ mod tests {
         assert_eq!(exit, None);
         assert_eq!(app.description.value(), "\n");
         assert_eq!(app.step, CreateStep::Description);
+    }
+
+    #[test]
+    fn issue_create_app_enter_advances_from_description() {
+        let mut app = IssueCreateApp::new(context(), IssueCreateFormPrefill::default())
+            .expect("app should build");
+        app.step = CreateStep::Description;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE));
+
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(exit, None);
+        assert_eq!(app.description.value(), "N");
+        assert_eq!(app.step, CreateStep::StatusPriority);
     }
 }

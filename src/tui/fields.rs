@@ -85,10 +85,7 @@ impl InputFieldState {
         }
     }
 
-    pub(crate) fn push(&mut self, ch: char) {
-        self.insert(ch);
-    }
-
+    #[cfg(test)]
     pub(crate) fn insert_newline(&mut self) -> bool {
         if self.mode != InputFieldMode::MultiLine {
             return false;

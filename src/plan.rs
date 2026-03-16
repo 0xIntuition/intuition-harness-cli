@@ -789,22 +789,15 @@ enum SessionAction {
 fn handle_request_step_key(app: &mut RequestApp, key: crossterm::event::KeyEvent) -> SessionAction {
     match key.code {
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let request = app.request.value().trim();
-            if request.is_empty() {
-                app.error = Some("Enter a planning request before continuing.".to_string());
-                SessionAction::None
-            } else {
-                app.error = None;
-                SessionAction::GenerateQuestions {
-                    request: request.to_string(),
-                }
-            }
+            submit_request_step(app)
         }
         KeyCode::Enter => {
-            if app.request.insert_newline() {
+            if key.modifiers.contains(KeyModifiers::SHIFT) && app.request.handle_key(key) {
                 app.error = None;
+                return SessionAction::None;
             }
-            SessionAction::None
+
+            submit_request_step(app)
         }
         _ => {
             if app.request.handle_key(key) {
@@ -841,37 +834,19 @@ fn handle_questions_step_key(
             SessionAction::None
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let Some(selected) = app.questions.get_mut(app.selected) else {
-                return SessionAction::None;
-            };
-            selected.state = if selected.answer.value().trim().is_empty() {
-                FollowUpAnswerState::Skipped
-            } else {
-                FollowUpAnswerState::Answered
-            };
-
-            if app.questions.iter().all(question_is_completed) {
-                app.error = None;
-                return SessionAction::GeneratePlan {
-                    request: app.request.clone(),
-                    follow_ups: collect_follow_up_responses(&app.questions),
-                };
-            }
-
-            if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
-                app.selected = index;
-            }
-            app.error = None;
-            SessionAction::None
+            submit_questions_step(app)
         }
         KeyCode::Enter => {
-            if let Some(question) = app.questions.get_mut(app.selected)
-                && question.answer.insert_newline()
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                && let Some(question) = app.questions.get_mut(app.selected)
+                && question.answer.handle_key(key)
             {
                 question.state = FollowUpAnswerState::Pending;
                 app.error = None;
+                return SessionAction::None;
             }
-            SessionAction::None
+
+            submit_questions_step(app)
         }
         _ => {
             if let Some(question) = app.questions.get_mut(app.selected)
@@ -883,6 +858,44 @@ fn handle_questions_step_key(
             SessionAction::None
         }
     }
+}
+
+fn submit_request_step(app: &mut RequestApp) -> SessionAction {
+    let request = app.request.value().trim();
+    if request.is_empty() {
+        app.error = Some("Enter a planning request before continuing.".to_string());
+        SessionAction::None
+    } else {
+        app.error = None;
+        SessionAction::GenerateQuestions {
+            request: request.to_string(),
+        }
+    }
+}
+
+fn submit_questions_step(app: &mut QuestionsApp) -> SessionAction {
+    let Some(selected) = app.questions.get_mut(app.selected) else {
+        return SessionAction::None;
+    };
+    selected.state = if selected.answer.value().trim().is_empty() {
+        FollowUpAnswerState::Skipped
+    } else {
+        FollowUpAnswerState::Answered
+    };
+
+    if app.questions.iter().all(question_is_completed) {
+        app.error = None;
+        return SessionAction::GeneratePlan {
+            request: app.request.clone(),
+            follow_ups: collect_follow_up_responses(&app.questions),
+        };
+    }
+
+    if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
+        app.selected = index;
+    }
+    app.error = None;
+    SessionAction::None
 }
 
 fn handle_questions_step_paste(app: &mut QuestionsApp, text: &str) {
@@ -1066,7 +1079,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type the planning request. Enter adds a line. Ctrl+S continues. Esc cancels.",
+        "Type the planning request. Enter continues. Shift+Enter adds a line. Esc cancels.",
     );
 }
 
@@ -1090,7 +1103,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         Line::from(selected.question.clone()),
         Line::from(""),
         Line::styled(
-            "Enter adds a line in the active answer. Ctrl+S moves to the next unanswered question, or generates the ticket plan once every answer is complete.",
+            "Enter marks the active answer complete and moves on. Shift+Enter adds a line. Once every answer is complete, Enter generates the ticket plan.",
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]))
@@ -1909,7 +1922,7 @@ mod tests {
     }
 
     #[test]
-    fn request_step_enter_adds_a_newline_instead_of_submitting() {
+    fn request_step_enter_submits_when_text_is_present() {
         let mut app = RequestApp {
             request: InputFieldState::multiline("Plan:"),
             error: Some("stale".to_string()),
@@ -1918,6 +1931,29 @@ mod tests {
         let action = handle_request_step_key(
             &mut app,
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+        );
+
+        match action {
+            SessionAction::GenerateQuestions { request } => assert_eq!(request, "Plan:"),
+            _ => panic!("expected enter to continue to question generation"),
+        }
+        assert_eq!(app.request.value(), "Plan:");
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn request_step_shift_enter_adds_a_newline() {
+        let mut app = RequestApp {
+            request: InputFieldState::multiline("Plan:"),
+            error: Some("stale".to_string()),
+        };
+
+        let action = handle_request_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
         );
 
         assert!(matches!(action, SessionAction::None));
@@ -1972,7 +2008,31 @@ mod tests {
     }
 
     #[test]
-    fn questions_step_enter_adds_a_newline_in_active_answer() {
+    fn questions_step_enter_marks_active_answer_complete_and_advances() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            questions: vec![
+                pending_question("How should it be validated?"),
+                pending_question("What should stay unchanged?"),
+            ],
+            selected: 0,
+            error: Some("stale".to_string()),
+        };
+
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.questions[0].answer.value(), "");
+        assert_eq!(app.questions[0].state, FollowUpAnswerState::Skipped);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn questions_step_shift_enter_adds_a_newline_in_active_answer() {
         let mut app = QuestionsApp {
             request: "Plan a new command".to_string(),
             questions: vec![pending_question("How should it be validated?")],
@@ -1982,7 +2042,10 @@ mod tests {
 
         let action = handle_questions_step_key(
             &mut app,
-            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
         );
 
         assert!(matches!(action, SessionAction::None));
