@@ -21,7 +21,17 @@ use crate::merge_dashboard::{
     MergeDashboardAction, MergeDashboardData, MergeDashboardExit, MergeDashboardOptions,
     MergeDashboardPullRequest, run_merge_dashboard,
 };
+use crate::progress::{
+    ProgressArtifact, ProgressOutputMode, ProgressStepDefinition, ProgressTracker,
+};
 use crate::scaffold::ensure_planning_layout;
+
+const STEP_PREPARE_WORKSPACE: &str = "prepare_workspace";
+const STEP_PLAN: &str = "plan_generation";
+const STEP_APPLY: &str = "merge_application";
+const STEP_VALIDATE: &str = "validation";
+const STEP_PUSH: &str = "push";
+const STEP_PUBLISH: &str = "publish_pr";
 
 #[derive(Debug, Clone, Serialize)]
 struct MergeDiscovery {
@@ -89,6 +99,7 @@ struct MergeContextArtifact {
 
 #[derive(Debug, Clone, Serialize)]
 struct MergeProgressArtifact {
+    run: ProgressArtifact,
     steps: Vec<MergeStepRecord>,
 }
 
@@ -285,6 +296,45 @@ struct MergeExecution {
     selected_count: usize,
 }
 
+struct MergeApplicationContext<'a> {
+    root: &'a Path,
+    workspace_path: &'a Path,
+    args: &'a MergeArgs,
+    repository: &'a GithubRepository,
+    selected_pull_requests: &'a [GithubPullRequest],
+    plan: &'a MergePlan,
+    run_dir: &'a Path,
+}
+
+fn merge_progress_steps() -> [ProgressStepDefinition; 6] {
+    [
+        ProgressStepDefinition {
+            key: STEP_PREPARE_WORKSPACE,
+            label: "Workspace preparation",
+        },
+        ProgressStepDefinition {
+            key: STEP_PLAN,
+            label: "Plan generation",
+        },
+        ProgressStepDefinition {
+            key: STEP_APPLY,
+            label: "Merge application",
+        },
+        ProgressStepDefinition {
+            key: STEP_VALIDATE,
+            label: "Validation",
+        },
+        ProgressStepDefinition {
+            key: STEP_PUSH,
+            label: "Push",
+        },
+        ProgressStepDefinition {
+            key: STEP_PUBLISH,
+            label: "PR publication",
+        },
+    ]
+}
+
 fn execute_merge_run(
     root: &Path,
     args: &MergeArgs,
@@ -296,10 +346,35 @@ fn execute_merge_run(
     ensure_dir(&paths.merge_runs_dir)?;
 
     let (run_id, run_dir) = reserve_run_dir(&paths)?;
+    let progress_mode = if args.no_interactive {
+        ProgressOutputMode::Text
+    } else {
+        ProgressOutputMode::Interactive
+    };
+    let mut tracker = ProgressTracker::start(
+        format!("meta merge progress ({})", repository.name_with_owner),
+        run_dir.join("progress.json"),
+        &merge_progress_steps(),
+        progress_mode,
+    )?;
 
     let aggregate_branch = format!("meta-merge/{run_id}");
+    tracker.start_step(
+        STEP_PREPARE_WORKSPACE,
+        format!("Preparing an isolated workspace for aggregate branch `{aggregate_branch}`."),
+    )?;
     let workspace_path =
-        prepare_workspace(root, &run_id, &aggregate_branch, &repository.default_branch)?;
+        match prepare_workspace(root, &run_id, &aggregate_branch, &repository.default_branch) {
+            Ok(path) => path,
+            Err(error) => {
+                tracker.fail_step(
+                    STEP_PREPARE_WORKSPACE,
+                    format!("Workspace preparation failed: {error:#}"),
+                    None,
+                )?;
+                return Err(error);
+            }
+        };
     let context_artifact = MergeContextArtifact {
         run_id: run_id.clone(),
         repository: repository.clone(),
@@ -309,42 +384,168 @@ fn execute_merge_run(
         aggregate_branch: aggregate_branch.clone(),
     };
     write_json_artifact(&run_dir.join("context.json"), &context_artifact)?;
+    tracker.complete_step(
+        STEP_PREPARE_WORKSPACE,
+        format!(
+            "Workspace ready at `{}` and checked out to `{aggregate_branch}`.",
+            workspace_path.display()
+        ),
+    )?;
 
     let plan_prompt =
         build_merge_plan_prompt(repository, &selected_pull_requests, &aggregate_branch);
     write_text_file(&run_dir.join("agent-plan-prompt.md"), &plan_prompt, true)?;
-    let plan = request_merge_plan(root, &workspace_path, args, &plan_prompt)?;
-    validate_merge_plan(&plan, &selected_pull_requests)?;
+    tracker.start_step(
+        STEP_PLAN,
+        format!(
+            "Creating the merge plan for {} selected pull request(s).",
+            selected_pull_requests.len()
+        ),
+    )?;
+    let plan = match request_merge_plan(root, &workspace_path, args, &plan_prompt) {
+        Ok(plan) => plan,
+        Err(error) => {
+            tracker.fail_step(
+                STEP_PLAN,
+                format!("Plan generation failed: {error:#}"),
+                None,
+            )?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_merge_plan(&plan, &selected_pull_requests) {
+        tracker.fail_step(
+            STEP_PLAN,
+            format!("Planner output was invalid: {error:#}"),
+            None,
+        )?;
+        return Err(error);
+    }
     write_json_artifact(&run_dir.join("plan.json"), &plan)?;
+    tracker.complete_step(
+        STEP_PLAN,
+        format!(
+            "Recorded merge order [{}].",
+            plan.merge_order
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )?;
 
-    let progress = apply_pull_requests(
-        root,
-        &workspace_path,
-        args,
-        repository,
-        &selected_pull_requests,
-        &plan,
-        &run_dir,
+    tracker.start_step(
+        STEP_APPLY,
+        format!(
+            "Applying {} pull request(s) in planner order.",
+            plan.merge_order.len()
+        ),
+    )?;
+    let progress = match apply_pull_requests(
+        MergeApplicationContext {
+            root,
+            workspace_path: &workspace_path,
+            args,
+            repository,
+            selected_pull_requests: &selected_pull_requests,
+            plan: &plan,
+            run_dir: &run_dir,
+        },
+        &mut tracker,
+    ) {
+        Ok(progress) => progress,
+        Err(error) => {
+            let detail = tracker
+                .artifact()
+                .active_detail
+                .clone()
+                .unwrap_or_else(|| "Merge application failed.".to_string());
+            tracker.fail_step(STEP_APPLY, format!("{detail} {error:#}"), None)?;
+            return Err(error);
+        }
+    };
+    tracker.complete_step(
+        STEP_APPLY,
+        format!(
+            "Applied {} pull request(s) to the aggregate branch.",
+            progress.len()
+        ),
     )?;
     write_json_artifact(
         &run_dir.join("merge-progress.json"),
-        &MergeProgressArtifact { steps: progress },
+        &MergeProgressArtifact {
+            run: tracker.artifact().clone(),
+            steps: progress.clone(),
+        },
     )?;
 
-    let validation = run_validation_commands(&workspace_path, validation_commands(root, args)?)?;
+    let validation_commands = match validation_commands(root, args) {
+        Ok(commands) => commands,
+        Err(error) => {
+            tracker.fail_step(
+                STEP_VALIDATE,
+                format!("Validation setup failed: {error:#}"),
+                None,
+            )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
+            return Err(error);
+        }
+    };
+    tracker.start_step(
+        STEP_VALIDATE,
+        format!(
+            "Running validation command(s): {}",
+            validation_commands.join(" && ")
+        ),
+    )?;
+    let validation = match run_validation_commands(&workspace_path, validation_commands) {
+        Ok(validation) => validation,
+        Err(error) => {
+            tracker.fail_step(
+                STEP_VALIDATE,
+                format!("Validation execution failed: {error:#}"),
+                None,
+            )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
+            return Err(error);
+        }
+    };
     write_json_artifact(&run_dir.join("validation.json"), &validation)?;
     if validation
         .commands
         .iter()
         .any(|record| record.exit_code != 0)
     {
+        let failing_command = validation
+            .commands
+            .iter()
+            .find(|record| record.exit_code != 0)
+            .map(|record| format!("`{}` exited with {}", record.command, record.exit_code))
+            .unwrap_or_else(|| "a validation command failed".to_string());
+        tracker.fail_step(
+            STEP_VALIDATE,
+            format!("{failing_command}. Publication was skipped."),
+            None,
+        )?;
+        write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
         bail!(
             "validation failed for aggregate branch `{}`; publication was skipped",
             aggregate_branch
         );
     }
+    tracker.complete_step(
+        STEP_VALIDATE,
+        format!(
+            "Validation passed for {} command(s).",
+            validation.commands.len()
+        ),
+    )?;
 
-    run_git(
+    tracker.start_step(
+        STEP_PUSH,
+        format!("Pushing aggregate branch `{aggregate_branch}` to origin."),
+    )?;
+    if let Err(error) = run_git(
         &workspace_path,
         &[
             "push",
@@ -352,20 +553,47 @@ fn execute_merge_run(
             "origin",
             aggregate_branch.as_str(),
         ],
-    )?;
+    ) {
+        tracker.fail_step(
+            STEP_PUSH,
+            format!("Push failed for `{aggregate_branch}`: {error:#}"),
+            None,
+        )?;
+        write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
+        return Err(error);
+    }
+    tracker.complete_step(STEP_PUSH, format!("Pushed `{aggregate_branch}` to origin."))?;
 
     let pr_title = aggregate_pr_title(&selected_pull_requests);
     let pr_body = aggregate_pr_body(repository, &selected_pull_requests, &plan, &run_id);
     let pr_body_path = run_dir.join("aggregate-pr-body.md");
     write_text_file(&pr_body_path, &pr_body, true)?;
-    let publication = gh.publish_aggregate_pull_request(
+    tracker.start_step(
+        STEP_PUBLISH,
+        format!(
+            "Publishing the aggregate pull request into `{}`.",
+            repository.default_branch
+        ),
+    )?;
+    let publication = match gh.publish_aggregate_pull_request(
         &workspace_path,
         repository,
         &aggregate_branch,
         &repository.default_branch,
         &pr_title,
         &pr_body_path,
-    )?;
+    ) {
+        Ok(publication) => publication,
+        Err(error) => {
+            tracker.fail_step(
+                STEP_PUBLISH,
+                format!("Aggregate PR publication failed: {error:#}"),
+                None,
+            )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
+            return Err(error);
+        }
+    };
     let publication_artifact = PublicationArtifact {
         aggregate_branch,
         title: pr_title,
@@ -373,12 +601,52 @@ fn execute_merge_run(
         action: publication.action.to_string(),
     };
     write_json_artifact(&run_dir.join("publication.json"), &publication_artifact)?;
+    tracker.complete_step(
+        STEP_PUBLISH,
+        format!(
+            "{} aggregate pull request {}.",
+            match publication_artifact.action.as_str() {
+                "updated" => "Updated",
+                _ => "Created",
+            },
+            publication_artifact.url
+        ),
+    )?;
+    tracker.finish_success(format!(
+        "{} aggregate pull request {}.",
+        match publication_artifact.action.as_str() {
+            "updated" => "Updated",
+            _ => "Created",
+        },
+        publication_artifact.url
+    ))?;
+    write_json_artifact(
+        &run_dir.join("merge-progress.json"),
+        &MergeProgressArtifact {
+            run: tracker.artifact().clone(),
+            steps: progress,
+        },
+    )?;
 
     Ok(MergeExecution {
         run_dir,
         publication: publication_artifact,
         selected_count: selected_pull_requests.len(),
     })
+}
+
+fn write_merge_progress_artifact(
+    run_dir: &Path,
+    tracker: &ProgressTracker,
+    steps: &[MergeStepRecord],
+) -> Result<()> {
+    write_json_artifact(
+        &run_dir.join("merge-progress.json"),
+        &MergeProgressArtifact {
+            run: tracker.artifact().clone(),
+            steps: steps.to_vec(),
+        },
+    )
 }
 
 fn reserve_run_dir(paths: &PlanningPaths) -> Result<(String, PathBuf)> {
@@ -580,68 +848,103 @@ fn validate_merge_plan(
 }
 
 fn apply_pull_requests(
-    root: &Path,
-    workspace_path: &Path,
-    args: &MergeArgs,
-    repository: &GithubRepository,
-    selected_pull_requests: &[GithubPullRequest],
-    plan: &MergePlan,
-    run_dir: &Path,
+    context: MergeApplicationContext<'_>,
+    tracker: &mut ProgressTracker,
 ) -> Result<Vec<MergeStepRecord>> {
-    let selected_by_number = selected_pull_requests
+    let selected_by_number = context
+        .selected_pull_requests
         .iter()
         .cloned()
         .map(|pr| (pr.number, pr))
         .collect::<BTreeMap<_, _>>();
     let mut steps = Vec::new();
 
-    for number in &plan.merge_order {
+    for number in &context.plan.merge_order {
         let Some(pr) = selected_by_number.get(number) else {
             bail!("merge planner referenced unselected pull request #{number}");
         };
+        tracker.update_detail(
+            STEP_APPLY,
+            format!(
+                "Fetching pull request #{} ({}) into the merge workspace.",
+                pr.number, pr.title
+            ),
+            Some(pr.number),
+        )?;
 
         let fetch_ref = format!(
             "+refs/pull/{}/head:refs/remotes/origin/pr/{}",
             pr.number, pr.number
         );
-        run_git(workspace_path, &["fetch", "origin", fetch_ref.as_str()])?;
+        run_git(
+            context.workspace_path,
+            &["fetch", "origin", fetch_ref.as_str()],
+        )?;
         let merge_target = format!("origin/pr/{}", pr.number);
+        tracker.update_detail(
+            STEP_APPLY,
+            format!(
+                "Applying pull request #{} ({}) onto the aggregate branch.",
+                pr.number, pr.title
+            ),
+            Some(pr.number),
+        )?;
         match run_git(
-            workspace_path,
+            context.workspace_path,
             &["merge", "--no-ff", "--no-edit", merge_target.as_str()],
         ) {
-            Ok(()) => steps.push(MergeStepRecord {
-                pull_request: pr.number,
-                status: "merged".to_string(),
-                detail: format!("Merged #{} into the aggregate branch", pr.number),
-            }),
+            Ok(()) => {
+                steps.push(MergeStepRecord {
+                    pull_request: pr.number,
+                    status: "merged".to_string(),
+                    detail: format!("Merged #{} into the aggregate branch", pr.number),
+                });
+                tracker.update_detail(
+                    STEP_APPLY,
+                    format!("Pull request #{} merged cleanly.", pr.number),
+                    Some(pr.number),
+                )?;
+            }
             Err(error) => {
-                let conflicted_files =
-                    git_stdout(workspace_path, &["diff", "--name-only", "--diff-filter=U"])?;
+                let conflicted_files = git_stdout(
+                    context.workspace_path,
+                    &["diff", "--name-only", "--diff-filter=U"],
+                )?;
                 if conflicted_files.trim().is_empty() {
                     return Err(error)
                         .with_context(|| format!("failed to merge pull request #{}", pr.number));
                 }
+                tracker.update_detail(
+                    STEP_APPLY,
+                    format!(
+                        "Conflict assistance invoked for pull request #{} across {}.",
+                        pr.number,
+                        conflicted_files.replace('\n', ", ")
+                    ),
+                    Some(pr.number),
+                )?;
 
                 let resolution_prompt = build_conflict_prompt(
-                    repository,
+                    context.repository,
                     pr,
-                    plan,
-                    workspace_path,
+                    context.plan,
+                    context.workspace_path,
                     conflicted_files.trim(),
                 )?;
                 write_text_file(
-                    &run_dir.join(format!("conflict-prompt-pr-{}.md", pr.number)),
+                    &context
+                        .run_dir
+                        .join(format!("conflict-prompt-pr-{}.md", pr.number)),
                     &resolution_prompt,
                     true,
                 )?;
                 let output = run_agent_capture_in_dir(
-                    root,
-                    workspace_path,
+                    context.root,
+                    context.workspace_path,
                     AgentConfigOverrides {
-                        provider: args.agent.clone(),
-                        model: args.model.clone(),
-                        reasoning: args.reasoning.clone(),
+                        provider: context.args.agent.clone(),
+                        model: context.args.model.clone(),
+                        reasoning: context.args.reasoning.clone(),
                     },
                     &resolution_prompt,
                     vec![(
@@ -650,14 +953,18 @@ fn apply_pull_requests(
                     )],
                 )?;
                 write_text_file(
-                    &run_dir.join(format!("conflict-resolution-pr-{}.md", pr.number)),
+                    &context
+                        .run_dir
+                        .join(format!("conflict-resolution-pr-{}.md", pr.number)),
                     &output,
                     true,
                 )?;
 
-                run_git(workspace_path, &["add", "-A"])?;
-                let unresolved =
-                    git_stdout(workspace_path, &["diff", "--name-only", "--diff-filter=U"])?;
+                run_git(context.workspace_path, &["add", "-A"])?;
+                let unresolved = git_stdout(
+                    context.workspace_path,
+                    &["diff", "--name-only", "--diff-filter=U"],
+                )?;
                 if !unresolved.trim().is_empty() {
                     bail!(
                         "merge conflict for pull request #{} remains unresolved after agent assistance: {}",
@@ -666,7 +973,7 @@ fn apply_pull_requests(
                     );
                 }
 
-                run_git(workspace_path, &["commit", "--no-edit"])?;
+                run_git(context.workspace_path, &["commit", "--no-edit"])?;
                 steps.push(MergeStepRecord {
                     pull_request: pr.number,
                     status: "conflict_resolved".to_string(),
@@ -676,6 +983,14 @@ fn apply_pull_requests(
                         conflicted_files.replace('\n', ", ")
                     ),
                 });
+                tracker.update_detail(
+                    STEP_APPLY,
+                    format!(
+                        "Pull request #{} merged after agent-assisted conflict resolution.",
+                        pr.number
+                    ),
+                    Some(pr.number),
+                )?;
             }
         }
     }

@@ -17,7 +17,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 #[cfg(test)]
 use ratatui::backend::TestBackend;
-use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -37,12 +37,12 @@ use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{IssueCreateSpec, IssueListFilters, IssueSummary};
+use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push;
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
 use crate::{LinearCommandContext, load_linear_command_context};
 
-const SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
 const ISSUE_PICKER_LIMIT: usize = 250;
 
 #[derive(Debug, Deserialize)]
@@ -1117,36 +1117,19 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
 }
 
 fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
-    let [area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9)])
-        .flex(Flex::Center)
-        .areas(frame.area());
-    let [panel] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70)])
-        .flex(Flex::Center)
-        .areas(area);
-    let loading = Paragraph::new(Text::from(vec![
-        Line::styled(
-            format!("{} {}", SPINNER_FRAMES[app.spinner_index], app.message),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Line::from(""),
-        Line::from(app.detail.clone()),
-        Line::from(""),
-        Line::styled(
-            "State: loading. The dashboard advances automatically when the agent responds.",
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Agent Working [loading]"),
-    )
-    .wrap(Wrap { trim: false });
-    frame.render_widget(loading, panel);
+    render_loading_panel(
+        frame,
+        frame.area(),
+        &LoadingPanelData {
+            title: "Agent Working [loading]".to_string(),
+            message: app.message.clone(),
+            detail: app.detail.clone(),
+            spinner_index: app.spinner_index,
+            status_line:
+                "State: loading. The dashboard advances automatically when the agent responds."
+                    .to_string(),
+        },
+    );
 }
 
 fn filtered_issue_indices(app: &IssuePickerApp) -> Vec<usize> {

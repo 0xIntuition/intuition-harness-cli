@@ -17,7 +17,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 #[cfg(test)]
 use ratatui::backend::TestBackend;
-use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -37,12 +37,12 @@ use crate::config::{
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{IssueCreateSpec, IssueSummary, LinearService, ReqwestLinearClient};
+use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::ensure_planning_layout;
 use crate::tui::fields::InputFieldState;
 
 const BACKLOG_STATE: &str = "Backlog";
 const NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS: usize = 3;
-const SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
 const SKIPPED_FOLLOW_UP_LABEL: &str = "Skipped intentionally.";
 
 #[derive(Debug, Clone)]
@@ -1364,36 +1364,19 @@ fn base_layout(frame: &mut Frame<'_>) -> Vec<Rect> {
 }
 
 fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
-    let [area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9)])
-        .flex(Flex::Center)
-        .areas(frame.area());
-    let [panel] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70)])
-        .flex(Flex::Center)
-        .areas(area);
-    let loading = Paragraph::new(Text::from(vec![
-        Line::styled(
-            format!("{} {}", SPINNER_FRAMES[app.spinner_index], app.message),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Line::from(""),
-        Line::from(app.detail.clone()),
-        Line::from(""),
-        Line::styled(
-            "State: loading. The dashboard advances automatically when the agent responds.",
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Agent Working [loading]"),
-    )
-    .wrap(Wrap { trim: false });
-    frame.render_widget(loading, panel);
+    render_loading_panel(
+        frame,
+        frame.area(),
+        &LoadingPanelData {
+            title: "Agent Working [loading]".to_string(),
+            message: app.message.clone(),
+            detail: app.detail.clone(),
+            spinner_index: app.spinner_index,
+            status_line:
+                "State: loading. The dashboard advances automatically when the agent responds."
+                    .to_string(),
+        },
+    );
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, error: Option<&str>, help: &str) {
