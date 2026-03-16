@@ -242,7 +242,8 @@ Agent-backed routes resolve install-scoped settings in this order:
 
 1. command route override
 2. command family override
-3. global default
+3. repo default from `.metastack/meta.json` when present
+4. global default
 
 For an individual run, explicit CLI flags still win over the routed defaults:
 `--agent`/`--provider` first, then `--model`, then `--reasoning`.
@@ -665,7 +666,8 @@ Agent-backed commands use stable route keys so different workflows can resolve d
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
 3. command family override
-4. global default
+4. repo default from `.metastack/meta.json` when present
+5. global default
 
 After route resolution, metastack falls back to built-in presets for `codex` and `claude` when referenced by name.
 
