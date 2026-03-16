@@ -49,6 +49,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 - Agent-backed commands such as `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen` must derive their project/repository identity from the resolved command root for the current run.
 - Install-scoped agent defaults may be routed per command family or per command key via `meta runtime config`; agent-backed commands should resolve those route-aware defaults before falling back to repo-scoped or global defaults, while still honoring explicit CLI overrides for the active run.
+- Built-in `codex` and `claude` runs use one shared provider adapter path and one precedence model for provider/model/reasoning resolution. Command output and dry-run paths should expose the resolved provider, model, reasoning, route key, and config source whenever that launch path is part of the ticket scope.
 - Default scope is the full top-level repository directory for that root, including monorepos. Only narrow the scope when the user explicitly requests a subproject.
 - Planning, backlog creation, and code changes must stay within that target repository. Do not spill into sibling repositories or parent directories.
 - For `meta listen`, the provided workspace checkout is the only local write root for implementation, validation, and backlog updates, even though the repository identity still comes from the active project checkout.
