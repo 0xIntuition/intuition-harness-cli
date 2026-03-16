@@ -23,8 +23,9 @@ use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
     DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, LinearConfig, LinearConfigOverrides,
     ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, ensure_saved_issue_labels,
-    normalize_agent_name, supported_agent_models, supported_agent_names, validate_agent_model,
-    validate_agent_name, validate_interactive_plan_follow_up_question_limit,
+    normalize_agent_name, supported_agent_models, supported_agent_names,
+    supported_reasoning_options, validate_agent_model, validate_agent_name,
+    validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
     validate_listen_poll_interval_seconds,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
@@ -67,7 +68,7 @@ struct SetupApp {
     project: InputFieldState,
     provider_field: SelectFieldState,
     model_field: SelectFieldState,
-    reasoning: InputFieldState,
+    reasoning: SelectFieldState,
     listen_label: InputFieldState,
     assignment_field: SelectFieldState,
     refresh_policy_field: SelectFieldState,
@@ -544,6 +545,15 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         {
             view.planning_meta.agent.model = None;
         }
+        if validate_agent_reasoning(
+            &selected_provider(view).unwrap_or_else(|| supported_agent_names()[0].to_string()),
+            view.planning_meta.agent.model.as_deref(),
+            view.planning_meta.agent.reasoning.as_deref(),
+        )
+        .is_err()
+        {
+            view.planning_meta.agent.reasoning = None;
+        }
     }
     if let Some(model) = &args.model {
         let provider =
@@ -551,9 +561,31 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         let model = normalize_optional(model);
         validate_agent_model(&provider, model.as_deref())?;
         view.planning_meta.agent.model = model;
+        if validate_agent_reasoning(
+            &provider,
+            view.planning_meta.agent.model.as_deref(),
+            view.planning_meta.agent.reasoning.as_deref(),
+        )
+        .is_err()
+        {
+            view.planning_meta.agent.reasoning = None;
+        }
     }
     if let Some(reasoning) = &args.reasoning {
-        view.planning_meta.agent.reasoning = normalize_optional(reasoning);
+        let provider = view
+            .planning_meta
+            .agent
+            .provider
+            .clone()
+            .or_else(|| view.app_config.agents.default_agent.clone())
+            .ok_or_else(|| anyhow!("repo reasoning requires a selected provider"))?;
+        let normalized = normalize_optional(reasoning);
+        validate_agent_reasoning(
+            &provider,
+            view.planning_meta.agent.model.as_deref(),
+            normalized.as_deref(),
+        )?;
+        view.planning_meta.agent.reasoning = normalized;
     }
     if let Some(label) = &args.listen_label {
         view.planning_meta.listen.required_label = normalize_optional(label);
@@ -678,13 +710,7 @@ impl SetupApp {
             ),
             provider_field: SelectFieldState::new(provider_options, provider_index),
             model_field: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
-            reasoning: InputFieldState::new(
-                view.planning_meta
-                    .agent
-                    .reasoning
-                    .clone()
-                    .unwrap_or_default(),
-            ),
+            reasoning: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             listen_label: InputFieldState::new(
                 view.planning_meta
                     .listen
@@ -751,6 +777,7 @@ impl SetupApp {
             error: None,
         };
         app.sync_models(view.planning_meta.agent.model.as_deref());
+        app.sync_reasoning(view.planning_meta.agent.reasoning.as_deref());
         app
     }
 
@@ -778,6 +805,37 @@ impl SetupApp {
             })
             .unwrap_or(0);
         self.model_field = SelectFieldState::new(options, selected);
+        self.sync_reasoning(None);
+    }
+
+    fn sync_reasoning(&mut self, preferred: Option<&str>) {
+        let current = preferred.map(str::to_string).or_else(|| {
+            self.reasoning
+                .selected_label()
+                .map(str::to_string)
+                .filter(|value| value != "Leave unset")
+        });
+        let mut options = vec!["Leave unset".to_string()];
+        options.extend(
+            supported_reasoning_options(
+                self.current_provider(),
+                match self.model_field.selected() {
+                    0 => None,
+                    _ => self.model_field.selected_label(),
+                },
+            )
+            .iter()
+            .map(|value| (*value).to_string()),
+        );
+        let selected = current
+            .as_deref()
+            .and_then(|value| {
+                options
+                    .iter()
+                    .position(|candidate| candidate.eq_ignore_ascii_case(value))
+            })
+            .unwrap_or(0);
+        self.reasoning = SelectFieldState::new(options, selected);
     }
 
     fn apply_action(&mut self, action: SetupAction) -> Option<SetupExit> {
@@ -812,6 +870,7 @@ impl SetupApp {
                     SetupStep::LinearAuth
                         | SetupStep::Provider
                         | SetupStep::Model
+                        | SetupStep::Reasoning
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
                 ) {
@@ -827,6 +886,7 @@ impl SetupApp {
                     SetupStep::LinearAuth
                         | SetupStep::Provider
                         | SetupStep::Model
+                        | SetupStep::Reasoning
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
                 ) {
@@ -872,9 +932,6 @@ impl SetupApp {
             SetupStep::Project => {
                 let _ = self.project.paste(text);
             }
-            SetupStep::Reasoning => {
-                let _ = self.reasoning.paste(text);
-            }
             SetupStep::ListenLabel => {
                 let _ = self.listen_label.paste(text);
             }
@@ -896,6 +953,7 @@ impl SetupApp {
             SetupStep::LinearAuth
             | SetupStep::Provider
             | SetupStep::Model
+            | SetupStep::Reasoning
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
             | SetupStep::Save => {}
@@ -913,9 +971,6 @@ impl SetupApp {
             }
             SetupStep::Project => {
                 let _ = self.project.handle_key(key);
-            }
-            SetupStep::Reasoning => {
-                let _ = self.reasoning.handle_key(key);
             }
             SetupStep::ListenLabel => {
                 let _ = self.listen_label.handle_key(key);
@@ -938,6 +993,7 @@ impl SetupApp {
             SetupStep::LinearAuth
             | SetupStep::Provider
             | SetupStep::Model
+            | SetupStep::Reasoning
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
             | SetupStep::Save => {}
@@ -956,13 +1012,16 @@ impl SetupApp {
                 self.provider_field.move_by(delta);
                 self.sync_models(None);
             }
-            SetupStep::Model => self.model_field.move_by(delta),
+            SetupStep::Model => {
+                self.model_field.move_by(delta);
+                self.sync_reasoning(None);
+            }
+            SetupStep::Reasoning => self.reasoning.move_by(delta),
             SetupStep::AssignmentScope => self.assignment_field.move_by(delta),
             SetupStep::RefreshPolicy => self.refresh_policy_field.move_by(delta),
             SetupStep::LinearApiKey
             | SetupStep::Team
             | SetupStep::Project
-            | SetupStep::Reasoning
             | SetupStep::ListenLabel
             | SetupStep::InstructionsPath
             | SetupStep::ListenPollInterval
@@ -986,6 +1045,13 @@ impl SetupApp {
         if let Some(provider) = provider.as_deref() {
             validate_agent_model(provider, model.as_deref())?;
         }
+        let reasoning = match self.reasoning.selected() {
+            0 => None,
+            _ => self.reasoning.selected_label().map(str::to_string),
+        };
+        if let Some(provider) = provider.as_deref() {
+            validate_agent_reasoning(provider, model.as_deref(), reasoning.as_deref())?;
+        }
         Ok(SubmittedSetup {
             api_key: match self.repo_auth_field.selected() {
                 1 => normalize_optional(self.api_key.value()),
@@ -996,7 +1062,7 @@ impl SetupApp {
             project_selector: normalize_optional(self.project.value()),
             provider,
             model,
-            reasoning: normalize_optional(self.reasoning.value()),
+            reasoning,
             listen_label: normalize_optional(self.listen_label.value()),
             assignment_scope: match self.assignment_field.selected() {
                 1 => ListenAssignmentScope::Viewer,
@@ -1021,6 +1087,7 @@ impl SubmittedSetup {
         if let Some(provider) = self.provider.as_deref() {
             validate_agent_name(&view.app_config, provider)?;
             validate_agent_model(provider, self.model.as_deref())?;
+            validate_agent_reasoning(provider, self.model.as_deref(), self.reasoning.as_deref())?;
         }
         if view.app_config.repo_linear_api_key(&view.root) != self.api_key {
             view.app_config
@@ -1252,13 +1319,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         ),
         SetupStep::Provider => render_select_panel(frame, area, &title, &app.provider_field),
         SetupStep::Model => render_select_panel(frame, area, &title, &app.model_field),
-        SetupStep::Reasoning => render_input_panel(
-            frame,
-            area,
-            &title,
-            &app.reasoning,
-            "Optional repo-scoped reasoning effort override for the selected provider.",
-        ),
+        SetupStep::Reasoning => render_select_panel(frame, area, &title, &app.reasoning),
         SetupStep::ListenLabel => render_input_panel(
             frame,
             area,
@@ -1335,7 +1396,10 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
                     .unwrap_or("Leave unset")
                     .to_string(),
             ),
-            ("Repo reasoning", summarize_optional(&app.reasoning)),
+            (
+                "Repo reasoning",
+                summarize_optional_select(&app.reasoning, "Leave unset"),
+            ),
             ("Listen label", summarize_optional(&app.listen_label)),
             (
                 "Assignee filter",
@@ -1380,6 +1444,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         SetupStep::LinearAuth
         | SetupStep::Provider
         | SetupStep::Model
+        | SetupStep::Reasoning
         | SetupStep::AssignmentScope
         | SetupStep::RefreshPolicy => {
             "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
@@ -1560,6 +1625,13 @@ fn parse_plan_limit(value: &str) -> Result<Option<usize>> {
 
 fn summarize_optional(field: &InputFieldState) -> String {
     normalize_optional(field.value()).unwrap_or_else(|| "unset".to_string())
+}
+
+fn summarize_optional_select(field: &SelectFieldState, unset_label: &str) -> String {
+    match field.selected_label() {
+        Some(value) if value != unset_label => value.to_string(),
+        _ => "unset".to_string(),
+    }
 }
 
 fn summarize_repo_auth(auth_field: &SelectFieldState, api_key: &InputFieldState) -> String {

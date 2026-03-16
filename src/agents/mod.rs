@@ -5,7 +5,8 @@ pub(crate) use execution::run_agent_capture;
 
 pub(crate) use brief::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 pub(crate) use execution::{
-    AgentExecutionOptions, command_args_for_invocation, resolve_agent_invocation_for_planning,
+    AgentExecutionOptions, command_args_for_invocation, render_invocation_diagnostics,
+    resolve_agent_invocation_for_planning,
 };
 
 #[cfg(test)]
@@ -18,7 +19,6 @@ mod tests {
     use anyhow::{Context, Result, bail};
     use tempfile::tempdir;
 
-    use super::execution::git_stdout;
     use super::{
         AgentBriefRequest, TicketMetadata, command_args_for_invocation,
         resolve_agent_invocation_for_planning, write_agent_brief,
@@ -321,5 +321,23 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .with_context(|| format!("failed to run `git {}`", args.join(" ")))?;
+        if !output.status.success() {
+            bail!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 }

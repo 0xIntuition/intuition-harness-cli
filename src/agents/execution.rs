@@ -4,12 +4,12 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::agent_provider::builtin_provider_adapter;
 use crate::cli::RunAgentArgs;
 use crate::config::{
-    AgentConfigOverrides, AppConfig, PlanningMeta, PromptTransport, normalize_agent_name,
-    resolve_agent_config,
+    AgentConfigOverrides, AgentConfigSource, AppConfig, PlanningMeta, PromptTransport,
+    normalize_agent_name, resolve_agent_config,
 };
-use crate::fs::canonicalize_existing_dir;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentExecutionOptions {
@@ -29,9 +29,56 @@ pub(crate) struct ResolvedAgentInvocation {
     pub(crate) args: Vec<String>,
     pub(crate) model: Option<String>,
     pub(crate) reasoning: Option<String>,
+    pub(crate) route_key: Option<String>,
+    pub(crate) family_key: Option<String>,
+    pub(crate) provider_source: AgentConfigSource,
+    pub(crate) model_source: Option<AgentConfigSource>,
+    pub(crate) reasoning_source: Option<AgentConfigSource>,
     pub(crate) transport: PromptTransport,
     pub(crate) payload: String,
-    pub(crate) builtin_preset: bool,
+    pub(crate) builtin_provider: bool,
+}
+
+pub(crate) fn render_invocation_diagnostics(invocation: &ResolvedAgentInvocation) -> Vec<String> {
+    vec![
+        format!("Resolved provider: {}", invocation.agent),
+        format!(
+            "Resolved model: {}",
+            invocation.model.as_deref().unwrap_or("unset")
+        ),
+        format!(
+            "Resolved reasoning: {}",
+            invocation.reasoning.as_deref().unwrap_or("unset")
+        ),
+        format!(
+            "Resolved route key: {}",
+            invocation.route_key.as_deref().unwrap_or("unset")
+        ),
+        format!(
+            "Resolved family key: {}",
+            invocation.family_key.as_deref().unwrap_or("unset")
+        ),
+        format!(
+            "Provider source: {}",
+            format_agent_config_source(&invocation.provider_source)
+        ),
+        format!(
+            "Model source: {}",
+            invocation
+                .model_source
+                .as_ref()
+                .map(format_agent_config_source)
+                .unwrap_or_else(|| "unset".to_string())
+        ),
+        format!(
+            "Reasoning source: {}",
+            invocation
+                .reasoning_source
+                .as_ref()
+                .map(format_agent_config_source)
+                .unwrap_or_else(|| "unset".to_string())
+        ),
+    ]
 }
 
 pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
@@ -61,6 +108,34 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     command.env(
         "METASTACK_AGENT_REASONING",
         invocation.reasoning.as_deref().unwrap_or(""),
+    );
+    command.env(
+        "METASTACK_AGENT_ROUTE_KEY",
+        invocation.route_key.as_deref().unwrap_or(""),
+    );
+    command.env(
+        "METASTACK_AGENT_FAMILY_KEY",
+        invocation.family_key.as_deref().unwrap_or(""),
+    );
+    command.env(
+        "METASTACK_AGENT_PROVIDER_SOURCE",
+        format_agent_config_source(&invocation.provider_source),
+    );
+    command.env(
+        "METASTACK_AGENT_MODEL_SOURCE",
+        invocation
+            .model_source
+            .as_ref()
+            .map(format_agent_config_source)
+            .unwrap_or_default(),
+    );
+    command.env(
+        "METASTACK_AGENT_REASONING_SOURCE",
+        invocation
+            .reasoning_source
+            .as_ref()
+            .map(format_agent_config_source)
+            .unwrap_or_default(),
     );
 
     let mut child = command.spawn().with_context(|| {
@@ -123,15 +198,7 @@ pub(crate) fn resolve_agent_invocation_for_planning(
         },
     )?;
     let agent_name = normalize_agent_name(&resolved.provider);
-    let builtin_preset = !config.agents.commands.contains_key(&agent_name)
-        && crate::config::builtin_agent_definition(&agent_name).is_some();
-    let mut definition = config
-        .resolve_agent_definition(&agent_name)
-        .ok_or_else(|| anyhow!("agent `{agent_name}` is not configured"))?;
-
-    if let Some(transport) = args.transport {
-        definition.transport = transport.into();
-    }
+    let builtin_provider = builtin_provider_adapter(&agent_name).is_some();
 
     let model = resolved.model;
     let reasoning = resolved.reasoning;
@@ -141,32 +208,63 @@ pub(crate) fn resolve_agent_invocation_for_planning(
         model.as_deref(),
         reasoning.as_deref(),
     );
-    let mut rendered_args = render_command_args(
-        &definition.args,
-        &args.prompt,
-        args.instructions.as_deref(),
-        model.as_deref(),
-        reasoning.as_deref(),
-        &payload,
-    );
-    if definition.transport == PromptTransport::Arg
-        && !definition
-            .args
-            .iter()
-            .any(|arg| arg.contains("{{payload}}") || arg.contains("{{prompt}}"))
-    {
-        rendered_args.push(payload.clone());
-    }
+    let (command, rendered_args, transport) =
+        if let Some(provider) = builtin_provider_adapter(&agent_name) {
+            let transport = args
+                .transport
+                .map(Into::into)
+                .unwrap_or_else(|| provider.transport());
+            let mut launch_args = provider.launch_args(model.as_deref(), reasoning.as_deref());
+            if transport == PromptTransport::Arg {
+                launch_args.push(payload.clone());
+            }
+            (
+                provider.launch_command().to_string(),
+                launch_args,
+                transport,
+            )
+        } else {
+            let mut definition = config
+                .resolve_agent_definition(&agent_name)
+                .ok_or_else(|| anyhow!("agent `{agent_name}` is not configured"))?;
+
+            if let Some(transport) = args.transport {
+                definition.transport = transport.into();
+            }
+
+            let mut rendered_args = render_command_args(
+                &definition.args,
+                &args.prompt,
+                args.instructions.as_deref(),
+                model.as_deref(),
+                reasoning.as_deref(),
+                &payload,
+            );
+            if definition.transport == PromptTransport::Arg
+                && !definition
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("{{payload}}") || arg.contains("{{prompt}}"))
+            {
+                rendered_args.push(payload.clone());
+            }
+            (definition.command, rendered_args, definition.transport)
+        };
 
     Ok(ResolvedAgentInvocation {
         agent: agent_name,
-        command: definition.command,
+        command,
         args: rendered_args,
         model,
         reasoning,
-        transport: definition.transport,
+        route_key: resolved.route_key,
+        family_key: resolved.family_key,
+        provider_source: resolved.provider_source,
+        model_source: resolved.model_source,
+        reasoning_source: resolved.reasoning_source,
+        transport,
         payload,
-        builtin_preset,
+        builtin_provider,
     })
 }
 
@@ -187,67 +285,13 @@ fn command_args_for_options(
     invocation: &ResolvedAgentInvocation,
     options: AgentExecutionOptions,
 ) -> Result<Vec<String>> {
-    if !invocation.builtin_preset || invocation.agent != "codex" {
+    if !invocation.builtin_provider {
         return Ok(invocation.args.clone());
     }
 
-    let mut args = vec![
-        "--sandbox".to_string(),
-        "workspace-write".to_string(),
-        "--ask-for-approval".to_string(),
-        "never".to_string(),
-    ];
-
-    if let Some(working_dir) = options.working_dir.as_deref() {
-        let workspace = canonicalize_existing_dir(working_dir)?;
-        args.push("--cd".to_string());
-        args.push(workspace.display().to_string());
-
-        for writable_root in codex_additional_writable_roots(&workspace)? {
-            args.push("--add-dir".to_string());
-            args.push(writable_root.display().to_string());
-        }
-    }
-
-    args.extend(invocation.args.clone());
-    Ok(args)
-}
-
-fn codex_additional_writable_roots(workspace: &Path) -> Result<Vec<PathBuf>> {
-    let mut writable_roots = Vec::new();
-
-    for args in [
-        ["rev-parse", "--path-format=absolute", "--git-dir"].as_slice(),
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"].as_slice(),
-    ] {
-        let path = git_stdout(workspace, args)?;
-        let candidate = PathBuf::from(path);
-        if candidate.exists() && candidate != workspace {
-            writable_roots.push(candidate);
-        }
-    }
-
-    writable_roots.sort();
-    writable_roots.dedup();
-    Ok(writable_roots)
-}
-
-pub(crate) fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run `git {}`", args.join(" ")))?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    builtin_provider_adapter(&invocation.agent)
+        .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
+        .prepare_command_args(&invocation.args, options.working_dir.as_deref())
 }
 
 fn render_agent_payload(
@@ -317,4 +361,14 @@ fn render_command_args(
             }
         })
         .collect()
+}
+
+pub(crate) fn format_agent_config_source(source: &AgentConfigSource) -> String {
+    match source {
+        AgentConfigSource::ExplicitOverride => "explicit_override".to_string(),
+        AgentConfigSource::CommandRoute(route) => format!("command_route:{route}"),
+        AgentConfigSource::FamilyRoute(route) => format!("family_route:{route}"),
+        AgentConfigSource::RepoDefault => "repo_default".to_string(),
+        AgentConfigSource::GlobalDefault => "global_default".to_string(),
+    }
 }

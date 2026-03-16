@@ -765,6 +765,220 @@ fi
 
 #[cfg(unix)]
 #[test]
+fn builtin_repo_provider_defaults_override_global_builtin_defaults() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "agent": {
+    "provider": "claude",
+    "model": "sonnet",
+    "reasoning": "medium"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "low"
+"#
+        ),
+    )?;
+
+    for name in ["claude", "codex"] {
+        let stub_path = bin_dir.join(name);
+        fs::write(
+            &stub_path,
+            r##"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "__NAME__" > "$TEST_OUTPUT_DIR/bin-$count.txt"
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent-$count.txt"
+printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model-$count.txt"
+printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning-$count.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source-$count.txt"
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"questions":[]}'
+else
+  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Builtin repo defaults win","description":"Ensure repo-scoped builtin provider defaults beat global builtin defaults.","acceptance_criteria":["`meta plan` resolves repo-scoped builtin provider defaults"],"priority":2}]}'
+fi
+"##
+            .replace("__NAME__", name),
+        )?;
+        let mut permissions = fs::metadata(&stub_path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&stub_path, permissions)?;
+    }
+
+    let teams_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack",
+                        "states": {
+                            "nodes": [{
+                                "id": "state-backlog",
+                                "name": "Backlog",
+                                "type": "backlog"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let projects_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let issue_labels_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueLabels");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabels": {
+                    "nodes": [{
+                        "id": "label-plan",
+                        "name": "plan"
+                    }]
+                }
+            }
+        }));
+    });
+    let create_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"title\":\"Builtin repo defaults win\"")
+            .body_includes("\"stateId\":\"state-backlog\"")
+            .body_includes("\"labelIds\":[\"label-plan\"]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-79",
+                        "identifier": "MET-79",
+                        "title": "Builtin repo defaults win",
+                        "description": "Ensure repo-scoped builtin provider defaults beat global builtin defaults.",
+                        "url": "https://linear.app/issues/79",
+                        "priority": 2,
+                        "updatedAt": "2026-03-16T01:10:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--no-interactive",
+            "--request",
+            "Use the repo-scoped builtin provider defaults",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MET-79"));
+
+    teams_mock.assert_calls(1);
+    projects_mock.assert_calls(1);
+    issue_labels_mock.assert_calls(1);
+    create_issue_mock.assert_calls(1);
+    assert_eq!(fs::read_to_string(stub_dir.join("bin-1.txt"))?, "claude");
+    assert_eq!(fs::read_to_string(stub_dir.join("agent-1.txt"))?, "claude");
+    assert_eq!(fs::read_to_string(stub_dir.join("model-1.txt"))?, "sonnet");
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("reasoning-1.txt"))?,
+        "medium"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("provider-source-1.txt"))?,
+        "repo_default"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_agent_overrides_beat_repo_and_global_defaults() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

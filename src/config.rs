@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_provider::{
+    builtin_provider_adapter, builtin_provider_model_keys, builtin_provider_names,
+    builtin_provider_reasoning_keys,
+};
 use crate::cli::{ListenRefreshPolicyArg, PromptTransportArg};
 use crate::fs::PlanningPaths;
 use crate::linear::{LinearService, ReqwestLinearClient};
@@ -25,18 +29,6 @@ pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
-const SUPPORTED_AGENT_NAMES: &[&str] = &["codex", "claude"];
-const CODEX_AGENT_MODELS: &[&str] = &[
-    "gpt-5.4",
-    "gpt-5.3-codex",
-    "gpt-5.2-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-mini",
-    "gpt-5-codex",
-    "gpt-5-codex-mini",
-];
-const CLAUDE_AGENT_MODELS: &[&str] = &["sonnet", "opus", "haiku", "sonnet[1m]", "opusplan"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -225,15 +217,17 @@ pub struct ResolvedAgentRoute {
     pub provider: String,
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    pub source: AgentRouteSource,
+    pub provider_source: AgentConfigSource,
+    pub model_source: Option<AgentConfigSource>,
+    pub reasoning_source: Option<AgentConfigSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentRouteSource {
+pub enum AgentConfigSource {
     ExplicitOverride,
+    CommandRoute(String),
+    FamilyRoute(String),
     RepoDefault,
-    CommandDefault(String),
-    FamilyDefault(String),
     GlobalDefault,
 }
 
@@ -242,6 +236,11 @@ pub struct ResolvedAgentConfig {
     pub provider: String,
     pub model: Option<String>,
     pub reasoning: Option<String>,
+    pub route_key: Option<String>,
+    pub family_key: Option<String>,
+    pub provider_source: AgentConfigSource,
+    pub model_source: Option<AgentConfigSource>,
+    pub reasoning_source: Option<AgentConfigSource>,
 }
 
 impl Default for LinearSettings {
@@ -312,12 +311,6 @@ impl AppConfig {
             .or_else(|| builtin_agent_definition(name))
     }
 
-    pub fn set_agent_definition(&mut self, name: &str, definition: AgentCommandConfig) {
-        self.agents
-            .commands
-            .insert(normalize_agent_name(name), definition);
-    }
-
     pub fn repo_linear_api_key(&self, root: &Path) -> Option<String> {
         self.linear
             .repo_auth
@@ -380,9 +373,18 @@ impl AppConfig {
         if let Some(provider) = normalize_optional_ref(self.agents.default_agent.as_deref()) {
             validate_agent_name(self, &provider)?;
             validate_agent_model(&provider, self.agents.default_model.as_deref())?;
+            validate_agent_reasoning(
+                &provider,
+                self.agents.default_model.as_deref(),
+                self.agents.default_reasoning.as_deref(),
+            )?;
         } else if normalize_optional_ref(self.agents.default_model.as_deref()).is_some() {
             return Err(anyhow!(
                 "global default model requires a global default agent under `[agents]`"
+            ));
+        } else if normalize_optional_ref(self.agents.default_reasoning.as_deref()).is_some() {
+            return Err(anyhow!(
+                "global default reasoning requires a global default agent under `[agents]`"
             ));
         }
         Ok(())
@@ -459,6 +461,22 @@ impl PlanningMeta {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(provider) = normalize_optional_ref(self.agent.provider.as_deref()) {
+            validate_agent_model(&provider, self.agent.model.as_deref())?;
+            validate_agent_reasoning(
+                &provider,
+                self.agent.model.as_deref(),
+                self.agent.reasoning.as_deref(),
+            )?;
+        } else if normalize_optional_ref(self.agent.model.as_deref()).is_some() {
+            return Err(anyhow!(
+                "repo default model requires a repo default provider under `.metastack/meta.json`"
+            ));
+        } else if normalize_optional_ref(self.agent.reasoning.as_deref()).is_some() {
+            return Err(anyhow!(
+                "repo default reasoning requires a repo default provider under `.metastack/meta.json`"
+            ));
+        }
         if let Some(interval) = self.listen.poll_interval_seconds {
             validate_listen_poll_interval_seconds(interval)?;
         }
@@ -639,6 +657,7 @@ pub fn resolve_agent_config(
     };
 
     let provider = explicit_provider
+        .clone()
         .or_else(|| route.as_ref().map(|resolved| resolved.provider.clone()))
         .or_else(|| normalize_optional_ref(planning_meta.agent.provider.as_deref()))
         .or_else(|| normalize_optional_ref(app_config.agents.default_agent.as_deref()))
@@ -649,23 +668,59 @@ pub fn resolve_agent_config(
             )
         })?;
     validate_agent_name(app_config, &provider)?;
-    let model = normalize_optional_owned(overrides.model)
-        .or_else(|| route.as_ref().and_then(|resolved| resolved.model.clone()))
-        .or_else(|| normalize_optional_ref(planning_meta.agent.model.as_deref()))
-        .or_else(|| normalize_optional_ref(app_config.agents.default_model.as_deref()));
+    let (model, model_source) = resolve_optional_agent_value(
+        normalize_optional_owned(overrides.model),
+        route
+            .as_ref()
+            .and_then(|resolved| resolved.model.clone())
+            .zip(
+                route
+                    .as_ref()
+                    .and_then(|resolved| resolved.model_source.clone()),
+            ),
+        None,
+        normalize_optional_ref(planning_meta.agent.model.as_deref()),
+        normalize_optional_ref(app_config.agents.default_model.as_deref()),
+    );
     validate_agent_model(&provider, model.as_deref())?;
+    let (reasoning, reasoning_source) = resolve_optional_agent_value(
+        normalize_optional_owned(overrides.reasoning),
+        route
+            .as_ref()
+            .and_then(|resolved| resolved.reasoning.clone())
+            .zip(
+                route
+                    .as_ref()
+                    .and_then(|resolved| resolved.reasoning_source.clone()),
+            ),
+        None,
+        normalize_optional_ref(planning_meta.agent.reasoning.as_deref()),
+        normalize_optional_ref(app_config.agents.default_reasoning.as_deref()),
+    );
+    validate_agent_reasoning(&provider, model.as_deref(), reasoning.as_deref())?;
 
     Ok(ResolvedAgentConfig {
         provider,
         model,
-        reasoning: normalize_optional_owned(overrides.reasoning)
+        reasoning,
+        route_key: route.as_ref().map(|resolved| resolved.route_key.clone()),
+        family_key: route.as_ref().map(|resolved| resolved.family_key.clone()),
+        provider_source: explicit_provider
+            .map(|_| AgentConfigSource::ExplicitOverride)
             .or_else(|| {
                 route
                     .as_ref()
-                    .and_then(|resolved| resolved.reasoning.clone())
+                    .map(|resolved| resolved.provider_source.clone())
             })
-            .or_else(|| normalize_optional_ref(planning_meta.agent.reasoning.as_deref()))
-            .or_else(|| normalize_optional_ref(app_config.agents.default_reasoning.as_deref())),
+            .unwrap_or_else(|| {
+                if normalize_optional_ref(planning_meta.agent.provider.as_deref()).is_some() {
+                    AgentConfigSource::RepoDefault
+                } else {
+                    AgentConfigSource::GlobalDefault
+                }
+            }),
+        model_source,
+        reasoning_source,
     })
 }
 
@@ -798,15 +853,15 @@ pub fn resolve_agent_route(
     let global_provider = normalize_optional_ref(app_config.agents.default_agent.as_deref())
         .map(|value| normalize_agent_name(&value));
 
-    let (provider, source) = if let Some(provider) = explicit_provider.clone() {
-        (provider, AgentRouteSource::ExplicitOverride)
+    let (provider, provider_source) = if let Some(provider) = explicit_provider.clone() {
+        (provider, AgentConfigSource::ExplicitOverride)
     } else if let Some(provider) = route_command
         .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
         .map(|value| normalize_agent_name(&value))
     {
         (
             provider,
-            AgentRouteSource::CommandDefault(definition.key.to_string()),
+            AgentConfigSource::CommandRoute(definition.key.to_string()),
         )
     } else if let Some(provider) = route_family
         .and_then(|config| normalize_optional_ref(config.provider.as_deref()))
@@ -814,12 +869,12 @@ pub fn resolve_agent_route(
     {
         (
             provider,
-            AgentRouteSource::FamilyDefault(definition.family.to_string()),
+            AgentConfigSource::FamilyRoute(definition.family.to_string()),
         )
     } else if let Some(provider) = repo_provider.clone() {
-        (provider, AgentRouteSource::RepoDefault)
+        (provider, AgentConfigSource::RepoDefault)
     } else if let Some(provider) = global_provider {
-        (provider, AgentRouteSource::GlobalDefault)
+        (provider, AgentConfigSource::GlobalDefault)
     } else {
         return Err(anyhow!(
             "no agent was selected for route `{}`. Pass `--agent <NAME>` or configure a route or global default with `meta runtime config`.",
@@ -828,30 +883,60 @@ pub fn resolve_agent_route(
     };
     validate_agent_name(app_config, &provider)?;
 
-    let model = normalize_optional_owned(overrides.model)
-        .or_else(|| {
-            route_command.and_then(|config| normalize_optional_ref(config.model.as_deref()))
-        })
-        .or_else(|| route_family.and_then(|config| normalize_optional_ref(config.model.as_deref())))
-        .or_else(|| normalize_optional_ref(planning_meta.agent.model.as_deref()))
-        .or_else(|| normalize_optional_ref(app_config.agents.default_model.as_deref()));
+    let (model, model_source) = resolve_optional_agent_value(
+        normalize_optional_owned(overrides.model),
+        route_command
+            .and_then(|config| normalize_optional_ref(config.model.as_deref()))
+            .map(|value| {
+                (
+                    value,
+                    AgentConfigSource::CommandRoute(definition.key.to_string()),
+                )
+            }),
+        route_family
+            .and_then(|config| normalize_optional_ref(config.model.as_deref()))
+            .map(|value| {
+                (
+                    value,
+                    AgentConfigSource::FamilyRoute(definition.family.to_string()),
+                )
+            }),
+        normalize_optional_ref(planning_meta.agent.model.as_deref()),
+        normalize_optional_ref(app_config.agents.default_model.as_deref()),
+    );
     validate_agent_model(&provider, model.as_deref())?;
+    let (reasoning, reasoning_source) = resolve_optional_agent_value(
+        normalize_optional_owned(overrides.reasoning),
+        route_command
+            .and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
+            .map(|value| {
+                (
+                    value,
+                    AgentConfigSource::CommandRoute(definition.key.to_string()),
+                )
+            }),
+        route_family
+            .and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
+            .map(|value| {
+                (
+                    value,
+                    AgentConfigSource::FamilyRoute(definition.family.to_string()),
+                )
+            }),
+        normalize_optional_ref(planning_meta.agent.reasoning.as_deref()),
+        normalize_optional_ref(app_config.agents.default_reasoning.as_deref()),
+    );
+    validate_agent_reasoning(&provider, model.as_deref(), reasoning.as_deref())?;
 
     Ok(ResolvedAgentRoute {
         route_key: definition.key.to_string(),
         family_key: definition.family.to_string(),
         provider,
         model,
-        reasoning: normalize_optional_owned(overrides.reasoning)
-            .or_else(|| {
-                route_command.and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
-            })
-            .or_else(|| {
-                route_family.and_then(|config| normalize_optional_ref(config.reasoning.as_deref()))
-            })
-            .or_else(|| normalize_optional_ref(planning_meta.agent.reasoning.as_deref()))
-            .or_else(|| normalize_optional_ref(app_config.agents.default_reasoning.as_deref())),
-        source,
+        reasoning,
+        provider_source,
+        model_source,
+        reasoning_source,
     })
 }
 
@@ -903,15 +988,15 @@ pub fn normalize_agent_name(name: &str) -> String {
 }
 
 pub fn supported_agent_names() -> &'static [&'static str] {
-    SUPPORTED_AGENT_NAMES
+    builtin_provider_names()
 }
 
-pub fn supported_agent_models(name: &str) -> &'static [&'static str] {
-    match normalize_agent_name(name).as_str() {
-        "codex" => CODEX_AGENT_MODELS,
-        "claude" => CLAUDE_AGENT_MODELS,
-        _ => &[],
-    }
+pub fn supported_agent_models(name: &str) -> Vec<&'static str> {
+    builtin_provider_model_keys(name)
+}
+
+pub fn supported_reasoning_options(agent: &str, model: Option<&str>) -> Vec<&'static str> {
+    builtin_provider_reasoning_keys(agent, model)
 }
 
 pub fn detect_supported_agents() -> Vec<String> {
@@ -924,20 +1009,7 @@ pub fn detect_supported_agents() -> Vec<String> {
 }
 
 pub fn builtin_agent_definition(name: &str) -> Option<AgentCommandConfig> {
-    let name = normalize_agent_name(name);
-    match name.as_str() {
-        "codex" => Some(AgentCommandConfig {
-            command: "codex".to_string(),
-            args: vec!["exec".to_string(), "{{model_arg}}".to_string()],
-            transport: PromptTransport::Arg,
-        }),
-        "claude" => Some(AgentCommandConfig {
-            command: "claude".to_string(),
-            args: vec!["-p".to_string(), "{{model_arg}}".to_string()],
-            transport: PromptTransport::Arg,
-        }),
-        _ => None,
-    }
+    builtin_provider_adapter(name).map(|provider| provider.command_definition())
 }
 
 fn command_exists(command: &str) -> bool {
@@ -990,6 +1062,31 @@ fn default_linear_api_url() -> String {
     DEFAULT_LINEAR_API_URL.to_string()
 }
 
+fn resolve_optional_agent_value(
+    explicit: Option<String>,
+    command_route: Option<(String, AgentConfigSource)>,
+    family_route: Option<(String, AgentConfigSource)>,
+    repo_default: Option<String>,
+    global_default: Option<String>,
+) -> (Option<String>, Option<AgentConfigSource>) {
+    if let Some(value) = explicit {
+        return (Some(value), Some(AgentConfigSource::ExplicitOverride));
+    }
+    if let Some((value, source)) = command_route {
+        return (Some(value), Some(source));
+    }
+    if let Some((value, source)) = family_route {
+        return (Some(value), Some(source));
+    }
+    if let Some(value) = repo_default {
+        return (Some(value), Some(AgentConfigSource::RepoDefault));
+    }
+    if let Some(value) = global_default {
+        return (Some(value), Some(AgentConfigSource::GlobalDefault));
+    }
+    (None, None)
+}
+
 pub fn validate_supported_agent(agent: &str) -> Result<()> {
     let normalized = normalize_agent_name(agent);
     if supported_agent_names()
@@ -1029,6 +1126,42 @@ pub fn validate_agent_model(agent: &str, model: Option<&str>) -> Result<()> {
             "model `{model}` is not supported for agent `{}`; supported models: {}",
             normalize_agent_name(agent),
             supported_models.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn validate_agent_reasoning(
+    agent: &str,
+    model: Option<&str>,
+    reasoning: Option<&str>,
+) -> Result<()> {
+    let Some(reasoning) = normalize_optional_ref(reasoning) else {
+        return Ok(());
+    };
+    let supported_reasoning = supported_reasoning_options(agent, model);
+    if supported_reasoning.is_empty() {
+        if supported_agent_models(agent).is_empty() {
+            return Ok(());
+        }
+
+        return Err(anyhow!(
+            "reasoning `{reasoning}` requires an explicit supported model for agent `{}`; choose one of: {}",
+            normalize_agent_name(agent),
+            supported_agent_models(agent).join(", ")
+        ));
+    }
+
+    if supported_reasoning
+        .iter()
+        .all(|candidate| !candidate.eq_ignore_ascii_case(&reasoning))
+    {
+        return Err(anyhow!(
+            "reasoning `{reasoning}` is not supported for agent `{}` and model `{}`; supported reasoning: {}",
+            normalize_agent_name(agent),
+            model.unwrap_or(""),
+            supported_reasoning.join(", ")
         ));
     }
 
@@ -1148,13 +1281,25 @@ fn validate_agent_route_config(
     }
 
     if normalize_optional_ref(route.model.as_deref()).is_some() {
-        let provider = provider.ok_or_else(|| {
+        let provider = provider.clone().ok_or_else(|| {
             anyhow!(
                 "{context} sets a model but no provider can be resolved from the route, family, or global defaults"
             )
         })?;
         validate_agent_model(&provider, route.model.as_deref())
             .with_context(|| format!("{context} has an invalid model"))?;
+    }
+    if normalize_optional_ref(route.reasoning.as_deref()).is_some() {
+        let provider = provider.clone().ok_or_else(|| {
+            anyhow!(
+                "{context} sets reasoning but no provider can be resolved from the route, family, or global defaults"
+            )
+        })?;
+        let model = normalize_optional_ref(route.model.as_deref())
+            .or_else(|| fallback.and_then(|config| normalize_optional_ref(config.model.as_deref())))
+            .or_else(|| normalize_optional_ref(app_config.agents.default_model.as_deref()));
+        validate_agent_reasoning(&provider, model.as_deref(), route.reasoning.as_deref())
+            .with_context(|| format!("{context} has invalid reasoning"))?;
     }
 
     Ok(())
@@ -1170,7 +1315,8 @@ mod tests {
         DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
         PlanningAgentSettings, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
         normalize_agent_route_key, resolve_agent_config, resolve_agent_route,
-        validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+        validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
+        validate_listen_poll_interval_seconds,
     };
 
     #[test]
@@ -1295,8 +1441,8 @@ mod tests {
         assert_eq!(plan.model.as_deref(), Some("gpt-5.3-codex"));
         assert_eq!(plan.reasoning.as_deref(), Some("low"));
         assert!(matches!(
-            plan.source,
-            super::AgentRouteSource::CommandDefault(_)
+            plan.provider_source,
+            super::AgentConfigSource::CommandRoute(_)
         ));
 
         let split = resolve_agent_route(
@@ -1310,8 +1456,8 @@ mod tests {
         assert_eq!(split.model.as_deref(), Some("opus"));
         assert_eq!(split.reasoning.as_deref(), Some("high"));
         assert!(matches!(
-            split.source,
-            super::AgentRouteSource::FamilyDefault(_)
+            split.provider_source,
+            super::AgentConfigSource::FamilyRoute(_)
         ));
     }
 
@@ -1459,8 +1605,8 @@ mod tests {
         assert_eq!(plan.model.as_deref(), Some("gpt-5.3-codex"));
         assert_eq!(plan.reasoning.as_deref(), Some("low"));
         assert!(matches!(
-            plan.source,
-            super::AgentRouteSource::CommandDefault(_)
+            plan.provider_source,
+            super::AgentConfigSource::CommandRoute(_)
         ));
 
         let split = resolve_agent_route(
@@ -1474,8 +1620,8 @@ mod tests {
         assert_eq!(split.model.as_deref(), Some("opus"));
         assert_eq!(split.reasoning.as_deref(), Some("high"));
         assert!(matches!(
-            split.source,
-            super::AgentRouteSource::FamilyDefault(_)
+            split.provider_source,
+            super::AgentConfigSource::FamilyRoute(_)
         ));
     }
 
@@ -1548,5 +1694,39 @@ mod tests {
         assert_eq!(unrouted.provider, "codex");
         assert_eq!(unrouted.model.as_deref(), Some("gpt-5.3-codex"));
         assert_eq!(unrouted.reasoning.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn validate_agent_reasoning_rejects_invalid_builtin_reasoning() {
+        let error = validate_agent_reasoning("claude", Some("haiku"), Some("high"))
+            .expect_err("haiku should reject high reasoning");
+        assert!(
+            error
+                .to_string()
+                .contains("supported reasoning: low, medium")
+        );
+    }
+
+    #[test]
+    fn app_config_validation_rejects_invalid_global_reasoning_combinations() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("claude".to_string()),
+                default_model: Some("haiku".to_string()),
+                default_reasoning: Some("high".to_string()),
+                routing: AgentRoutingSettings::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+
+        let error = config
+            .validate()
+            .expect_err("global reasoning should be validated");
+        assert!(
+            error
+                .to_string()
+                .contains("supported reasoning: low, medium")
+        );
     }
 }

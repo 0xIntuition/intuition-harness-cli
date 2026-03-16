@@ -11,7 +11,8 @@ use toml::Value;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::agents::{
-    AgentExecutionOptions, command_args_for_invocation, resolve_agent_invocation_for_planning,
+    AgentExecutionOptions, command_args_for_invocation, render_invocation_diagnostics,
+    resolve_agent_invocation_for_planning,
 };
 use crate::cli::{RunAgentArgs, ScanArgs};
 use crate::config::{
@@ -484,6 +485,9 @@ fn run_scan_agent_with_dashboard(
         invocation.command,
         command_args.join(" ")
     )?;
+    for line in render_invocation_diagnostics(&invocation) {
+        writeln!(log, "{line}")?;
+    }
     writeln!(log)?;
 
     let mut command = Command::new(&invocation.command);

@@ -1,3 +1,4 @@
+mod agent_provider;
 mod agents;
 mod backlog;
 mod cli;
