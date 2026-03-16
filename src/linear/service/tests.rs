@@ -50,7 +50,6 @@ async fn list_issues_uses_filtered_query_and_applies_filters() {
         vec!["MET-12"]
     );
     assert_eq!(client.list_filtered_issues_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(client.list_all_issues_calls.load(Ordering::SeqCst), 0);
     assert_eq!(client.list_issues_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -172,10 +171,6 @@ impl LinearClient for DuplicateThenVisibleLabelClient {
         unreachable!("list_filtered_issues is not used in these tests")
     }
 
-    async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {
-        unreachable!("list_all_issues is not used in these tests")
-    }
-
     async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {
         let mut labels = self.initial_labels.clone();
         labels.push(label("label-technical", "technical"));
@@ -274,10 +269,6 @@ impl LinearClient for DuplicateLabelClient {
 
     async fn list_filtered_issues(&self, _filters: &IssueListFilters) -> Result<Vec<IssueSummary>> {
         unreachable!("list_filtered_issues is not used in these tests")
-    }
-
-    async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {
-        unreachable!("list_all_issues is not used in these tests")
     }
 
     async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {

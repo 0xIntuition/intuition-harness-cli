@@ -12,7 +12,7 @@
   "listen": {
     "required_label": null,
     "assignment_scope": "any",
-    "refresh_policy": "reuse_and_refresh",
+    "refresh_policy": "recreate_from_origin_main",
     "instructions_path": null,
     "poll_interval_seconds": 20
   },

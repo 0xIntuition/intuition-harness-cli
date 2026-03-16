@@ -1712,7 +1712,6 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         root: root.clone(),
         store,
         filters: IssueListFilters {
-            identifier: None,
             team: args.team.clone().or(config.default_team.clone()),
             project: args.project.clone(),
             project_id: if args.project.is_some() {

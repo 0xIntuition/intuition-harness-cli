@@ -182,10 +182,6 @@ impl ReqwestLinearClient {
         .await
     }
 
-    pub(super) async fn list_all_issues_resource(&self) -> Result<Vec<IssueSummary>> {
-        self.collect_issues(None, None).await
-    }
-
     pub(super) async fn get_issue_resource(&self, issue_id: &str) -> Result<IssueSummary> {
         let query = format!(
             r#"
@@ -337,14 +333,6 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
 fn render_issue_filter(filters: &IssueListFilters) -> Value {
     let mut filter = serde_json::Map::new();
 
-    if let Some(identifier) = filters.identifier.as_deref() {
-        filter.insert(
-            "identifier".to_string(),
-            json!({
-                "eq": identifier,
-            }),
-        );
-    }
     if let Some(team) = filters.team.as_deref() {
         filter.insert(
             "team".to_string(),

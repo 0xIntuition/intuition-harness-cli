@@ -27,7 +27,6 @@ pub(super) struct FakeLinearClient {
     pub(super) updated_comments: Arc<Mutex<Vec<(String, String)>>>,
     pub(super) list_issues_calls: Arc<AtomicUsize>,
     pub(super) list_filtered_issues_calls: Arc<AtomicUsize>,
-    pub(super) list_all_issues_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -49,9 +48,6 @@ impl LinearClient for FakeLinearClient {
         } else {
             self.all_issues.clone()
         };
-        if let Some(identifier) = filters.identifier.as_deref() {
-            issues.retain(|issue| issue.identifier.eq_ignore_ascii_case(identifier));
-        }
         if let Some(team) = filters.team.as_deref() {
             issues.retain(|issue| issue.team.key.eq_ignore_ascii_case(team));
         }
@@ -86,11 +82,6 @@ impl LinearClient for FakeLinearClient {
             issues.truncate(filters.limit.max(1));
         }
         Ok(issues)
-    }
-
-    async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {
-        self.list_all_issues_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.all_issues.clone())
     }
 
     async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {

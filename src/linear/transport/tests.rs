@@ -9,62 +9,6 @@ use crate::linear::{
 };
 
 #[tokio::test]
-async fn reqwest_client_collects_issue_pages_until_end() {
-    let server = MockServer::start();
-    let api_url = server.url("/graphql");
-    let first_page = server.mock(|when, then| {
-        when.method(POST)
-            .path("/graphql")
-            .body_includes("query Issues")
-            .body_includes("\"after\":null");
-        then.status(200).json_body(json!({
-            "data": {
-                "issues": {
-                    "nodes": [issue_node("MET-11")],
-                    "pageInfo": {
-                        "hasNextPage": true,
-                        "endCursor": "cursor-1"
-                    }
-                }
-            }
-        }));
-    });
-    let second_page = server.mock(|when, then| {
-        when.method(POST)
-            .path("/graphql")
-            .body_includes("query Issues")
-            .body_includes("\"after\":\"cursor-1\"");
-        then.status(200).json_body(json!({
-            "data": {
-                "issues": {
-                    "nodes": [issue_node("MET-12")],
-                    "pageInfo": {
-                        "hasNextPage": false,
-                        "endCursor": "cursor-2"
-                    }
-                }
-            }
-        }));
-    });
-    let client = client(api_url);
-
-    let issues = client
-        .list_all_issues()
-        .await
-        .expect("pagination should succeed");
-
-    assert_eq!(
-        issues
-            .iter()
-            .map(|issue| issue.identifier.as_str())
-            .collect::<Vec<_>>(),
-        vec!["MET-11", "MET-12"]
-    );
-    first_page.assert_calls(1);
-    second_page.assert_calls(1);
-}
-
-#[tokio::test]
 async fn reqwest_client_honors_issue_limit_without_extra_pages() {
     let server = MockServer::start();
     let api_url = server.url("/graphql");
@@ -120,7 +64,6 @@ async fn reqwest_client_sends_server_side_issue_filters() {
         when.method(POST)
             .path("/graphql")
             .body_includes("query Issues")
-            .body_includes("\"identifier\":{\"eq\":\"MET-11\"}")
             .body_includes("\"team\":{\"key\":{\"eq\":\"MET\"}}")
             .body_includes("\"project\":{\"id\":{\"eq\":\"project-1\"}}")
             .body_includes("\"state\":{\"name\":{\"eq\":\"Todo\"}}");
@@ -140,7 +83,6 @@ async fn reqwest_client_sends_server_side_issue_filters() {
 
     let issues = client
         .list_filtered_issues(&IssueListFilters {
-            identifier: Some("MET-11".to_string()),
             team: Some("MET".to_string()),
             project: None,
             project_id: Some("project-1".to_string()),
