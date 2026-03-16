@@ -20,34 +20,3 @@ Store execution artifacts here: design sketches, schema drafts, trace logs, snap
 1. Each artifact should state purpose and owner.
 2. If an artifact drives a decision, link the decision ID from `../decisions.md`.
 3. If an artifact becomes authoritative, link it from `../index.md`.
-
-
-# Example of Artifact
-
-```
-# Artifact: <name>
-
-Last updated: {{TODAY}}
-
-## Purpose
-
-What this artifact proves or documents.
-
-## Inputs
-
-- Input 1
-- Input 2
-
-## Output
-
-Concise result summary.
-
-## Linked Decisions
-
-- Decision ID(s) in `../decisions.md`:
-
-## Follow-ups
-
-- [ ] Follow-up action 1
-- [ ] Follow-up action 2
-```

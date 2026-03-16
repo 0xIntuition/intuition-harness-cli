@@ -2,9 +2,9 @@
 
 ## Command Proofs
 
-- `meta technical {{parent_identifier}}`
-- `meta sync pull {{issue_identifier}}`
-- `meta sync push {{issue_identifier}}`
+- `meta backlog sync pull {{issue_identifier}}`
+- `meta backlog sync push {{issue_identifier}}`
+- Add focused command proofs for the changed flows
 
 ## Notes
 

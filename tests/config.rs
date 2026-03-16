@@ -101,7 +101,6 @@ fn setup_updates_repo_defaults_with_flags_and_resolves_project_name() -> Result<
         &config_path,
         format!(
             r#"[linear]
-api_key = "linear-token"
 api_url = "{api_url}"
 team = "MET"
 
@@ -115,7 +114,7 @@ default_model = "gpt-5.4"
     let projects_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .header("authorization", "linear-token")
+            .header("authorization", "repo-token")
             .body_includes("query Projects");
         then.status(200).json_body(json!({
             "data": {
@@ -141,7 +140,7 @@ default_model = "gpt-5.4"
     let teams_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .header("authorization", "linear-token")
+            .header("authorization", "repo-token")
             .body_includes("query Teams");
         then.status(200).json_body(json!({
             "data": {
@@ -159,7 +158,7 @@ default_model = "gpt-5.4"
     let labels_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .header("authorization", "linear-token")
+            .header("authorization", "repo-token")
             .body_includes("query IssueLabels")
             .body_includes("\"key\":{\"eq\":\"MET\"}");
         then.status(200).json_body(json!({
@@ -177,7 +176,7 @@ default_model = "gpt-5.4"
     let create_plan_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .header("authorization", "linear-token")
+            .header("authorization", "repo-token")
             .body_includes("mutation CreateIssueLabel")
             .body_includes("\"name\":\"planning\"");
         then.status(200).json_body(json!({
@@ -192,7 +191,7 @@ default_model = "gpt-5.4"
     let create_technical_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .header("authorization", "linear-token")
+            .header("authorization", "repo-token")
             .body_includes("mutation CreateIssueLabel")
             .body_includes("\"name\":\"engineering\"");
         then.status(200).json_body(json!({
@@ -204,6 +203,21 @@ default_model = "gpt-5.4"
             }
         }));
     });
+    let create_listen_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "repo-token")
+            .body_includes("mutation CreateIssueLabel")
+            .body_includes("\"name\":\"agent\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabelCreate": {
+                    "success": true,
+                    "issueLabel": { "id": "label-listen", "name": "agent" }
+                }
+            }
+        }));
+    });
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -211,6 +225,8 @@ default_model = "gpt-5.4"
             "setup",
             "--root",
             repo_root.to_string_lossy().as_ref(),
+            "--api-key",
+            "repo-token",
             "--team",
             "MET",
             "--project",
@@ -244,9 +260,13 @@ default_model = "gpt-5.4"
     let planning_meta: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo_root.join(".metastack/meta.json"))?)?;
 
-    assert!(config.contains("api_key = \"linear-token\""));
+    assert!(!config.contains("repo-token"));
     assert!(config.contains("team = \"MET\""));
     assert!(!config.contains("project-42"));
+    assert_eq!(
+        planning_meta["linear"]["api_key"].as_str(),
+        Some("repo-token")
+    );
     assert_eq!(planning_meta["linear"]["team"].as_str(), Some("MET"));
     assert_eq!(
         planning_meta["linear"]["project_id"].as_str(),
@@ -288,6 +308,7 @@ default_model = "gpt-5.4"
     labels_mock.assert();
     create_plan_mock.assert();
     create_technical_mock.assert();
+    create_listen_mock.assert();
 
     Ok(())
 }
@@ -566,6 +587,7 @@ default_model = "gpt-5.4"
         repo_root.join(".metastack/meta.json"),
         r#"{
   "linear": {
+    "api_key": null,
     "profile": null,
     "team": "MET",
     "project_id": "project-very-long-1234567890"
@@ -641,6 +663,7 @@ default_model = "gpt-5.4"
         repo_root.join(".metastack/meta.json"),
         r#"{
   "linear": {
+    "api_key": null,
     "profile": "ops profile west",
     "team": "MET",
     "project_id": "project-very-long-1234567890"
@@ -685,8 +708,8 @@ default_model = "gpt-5.4"
         .stdout(predicate::str::contains("Questions"))
         .stdout(predicate::str::contains("Summary"))
         .stdout(predicate::str::contains("agent ticket needing extra room"))
-        .stdout(predicate::str::contains("13. Plan label"))
-        .stdout(predicate::str::contains("14. Tech label"));
+        .stdout(predicate::str::contains("14. Plan label"))
+        .stdout(predicate::str::contains("15. Tech label"));
 
     Ok(())
 }

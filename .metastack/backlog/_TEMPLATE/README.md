@@ -1,6 +1,6 @@
 # Backlog Item Template
 
-This folder is copied by `scripts/planning/new-backlog-item.sh`.
+This directory is the canonical backlog template embedded into `meta setup`, `meta plan`, and `meta backlog tech`.
 
 ## Required Files
 
@@ -11,6 +11,8 @@ This folder is copied by `scripts/planning/new-backlog-item.sh`.
 - `proposed-prs.md`: PR slices and merge sequencing
 - `decisions.md`: decision log
 - `risks.md`: risk register and open questions
+- `implementation.md`: concrete implementation touchpoints
+- `validation.md`: command proofs and evidence notes
 
 ## Supporting Folders
 
@@ -26,3 +28,4 @@ This folder is copied by `scripts/planning/new-backlog-item.sh`.
    - `{{TODAY}}`
 2. Keep this template lightweight. Add large docs only when needed.
 3. Use relative links that resolve from each file's own directory.
+4. `index.md` is the required root document for both planning and technical generation.

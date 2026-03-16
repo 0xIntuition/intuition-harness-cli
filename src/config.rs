@@ -73,6 +73,7 @@ pub struct LinearProfileSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanningLinearSettings {
+    pub api_key: Option<String>,
     pub profile: Option<String>,
     pub team: Option<String>,
     pub project_id: Option<String>,
@@ -365,6 +366,7 @@ impl LinearConfig {
             .map(|name| resolve_named_profile(&app_config.linear, name))
             .transpose()?;
         let api_key = explicit_api_key
+            .or_else(|| normalize_optional_ref(planning_meta.linear.api_key.as_deref()))
             .or_else(|| profile.as_ref().and_then(ResolvedLinearProfile::api_key))
             .or_else(|| normalize_optional_ref(app_config.linear.api_key.as_deref()))
             .or_else(|| normalize_optional_owned(env::var("LINEAR_API_KEY").ok()))
@@ -398,10 +400,19 @@ pub async fn ensure_saved_issue_labels(
     app_config: &AppConfig,
     planning_meta: &PlanningMeta,
 ) -> Result<()> {
-    let labels = vec![
+    let mut labels = vec![
         planning_meta.issue_labels.plan_label(),
         planning_meta.issue_labels.technical_label(),
     ];
+    if let Some(required_label) = planning_meta
+        .listen
+        .required_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        labels.push(required_label.to_string());
+    }
     let config = match LinearConfig::from_sources(
         app_config,
         planning_meta,

@@ -518,6 +518,9 @@ pub struct SetupArgs {
     /// Repository root containing `.metastack/meta.json`.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Update the repo-scoped Linear API key used only for this repository.
+    #[arg(long, hide_env_values = true)]
+    pub api_key: Option<String>,
     /// Update the repo-scoped named Linear profile binding.
     #[arg(long)]
     pub profile: Option<String>,

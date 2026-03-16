@@ -59,7 +59,9 @@ struct SetupReport {
 #[derive(Debug, Clone)]
 struct SetupApp {
     step: SetupStep,
-    profile: InputFieldState,
+    profile: Option<String>,
+    repo_auth_field: SelectFieldState,
+    api_key: InputFieldState,
     team: InputFieldState,
     project: InputFieldState,
     provider_field: SelectFieldState,
@@ -79,6 +81,7 @@ struct SetupApp {
 
 #[derive(Debug, Clone)]
 struct SubmittedSetup {
+    api_key: Option<String>,
     profile: Option<String>,
     team: Option<String>,
     project_selector: Option<String>,
@@ -104,7 +107,8 @@ enum SetupExit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SetupStep {
-    Profile,
+    LinearAuth,
+    LinearApiKey,
     Team,
     Project,
     Provider,
@@ -122,9 +126,10 @@ enum SetupStep {
 }
 
 impl SetupStep {
-    fn all() -> [Self; 15] {
+    fn all() -> [Self; 16] {
         [
-            Self::Profile,
+            Self::LinearAuth,
+            Self::LinearApiKey,
             Self::Team,
             Self::Project,
             Self::Provider,
@@ -161,7 +166,8 @@ impl SetupStep {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Profile => "Linear profile",
+            Self::LinearAuth => "Linear auth",
+            Self::LinearApiKey => "Project Linear API key",
             Self::Team => "Default team",
             Self::Project => "Default project",
             Self::Provider => "Repo agent",
@@ -181,7 +187,8 @@ impl SetupStep {
 
     fn compact_label(self) -> &'static str {
         match self {
-            Self::Profile => "Profile",
+            Self::LinearAuth => "Linear auth",
+            Self::LinearApiKey => "API key",
             Self::Team => "Team",
             Self::Project => "Project",
             Self::Provider => "Agent",
@@ -201,7 +208,8 @@ impl SetupStep {
 
     fn panel_label(self) -> &'static str {
         match self {
-            Self::Profile => "Repo Linear profile",
+            Self::LinearAuth => "Project-specific Linear auth",
+            Self::LinearApiKey => "Repo Linear API key",
             Self::Team => "Repo default Linear team",
             Self::Project => "Repo default Linear project",
             Self::Provider => "Repo default agent/provider",
@@ -405,8 +413,11 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         ));
     }
     lines.push(format!(
-        "Repo Linear profile: {}",
-        display_optional(view.planning_meta.linear.profile.as_deref())
+        "Repo Linear auth: {}",
+        display_repo_auth(
+            view.planning_meta.linear.api_key.as_deref(),
+            view.planning_meta.linear.profile.as_deref()
+        )
     ));
     lines.push(format!(
         "Repo default team: {}",
@@ -467,7 +478,8 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
 }
 
 fn has_direct_updates(args: &SetupArgs) -> bool {
-    args.profile.is_some()
+    args.api_key.is_some()
+        || args.profile.is_some()
         || args.team.is_some()
         || args.project.is_some()
         || args.project_id.is_some()
@@ -497,6 +509,9 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         let profile = normalize_optional(profile);
         validate_profile(&view.app_config, profile.as_deref())?;
         view.planning_meta.linear.profile = profile;
+    }
+    if let Some(api_key) = &args.api_key {
+        view.planning_meta.linear.api_key = normalize_optional(api_key);
     }
     if let Some(team) = &args.team {
         view.planning_meta.linear.team = normalize_optional(team);
@@ -627,11 +642,19 @@ impl SetupApp {
             .unwrap_or(0);
 
         let mut app = Self {
-            step: SetupStep::Profile,
-            profile: InputFieldState::new(
+            step: SetupStep::LinearAuth,
+            profile: view.planning_meta.linear.profile.clone(),
+            repo_auth_field: SelectFieldState::new(
+                vec![
+                    "Inherit shared or configured Linear auth".to_string(),
+                    "Set a Linear API key for this project".to_string(),
+                ],
+                usize::from(view.planning_meta.linear.api_key.is_some()),
+            ),
+            api_key: InputFieldState::new(
                 view.planning_meta
                     .linear
-                    .profile
+                    .api_key
                     .clone()
                     .unwrap_or_default(),
             ),
@@ -776,7 +799,8 @@ impl SetupApp {
             SetupAction::Up => {
                 if matches!(
                     self.step,
-                    SetupStep::Provider
+                    SetupStep::LinearAuth
+                        | SetupStep::Provider
                         | SetupStep::Model
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
@@ -790,7 +814,8 @@ impl SetupApp {
             SetupAction::Down => {
                 if matches!(
                     self.step,
-                    SetupStep::Provider
+                    SetupStep::LinearAuth
+                        | SetupStep::Provider
                         | SetupStep::Model
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
@@ -828,8 +853,8 @@ impl SetupApp {
     fn handle_paste(&mut self, text: &str) {
         self.error = None;
         match self.step {
-            SetupStep::Profile => {
-                let _ = self.profile.paste(text);
+            SetupStep::LinearApiKey => {
+                let _ = self.api_key.paste(text);
             }
             SetupStep::Team => {
                 let _ = self.team.paste(text);
@@ -858,7 +883,8 @@ impl SetupApp {
             SetupStep::TechnicalLabel => {
                 let _ = self.technical_label.paste(text);
             }
-            SetupStep::Provider
+            SetupStep::LinearAuth
+            | SetupStep::Provider
             | SetupStep::Model
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
@@ -869,8 +895,8 @@ impl SetupApp {
     fn apply_text_key(&mut self, key: KeyEvent) {
         self.error = None;
         match self.step {
-            SetupStep::Profile => {
-                let _ = self.profile.handle_key(key);
+            SetupStep::LinearApiKey => {
+                let _ = self.api_key.handle_key(key);
             }
             SetupStep::Team => {
                 let _ = self.team.handle_key(key);
@@ -899,7 +925,8 @@ impl SetupApp {
             SetupStep::TechnicalLabel => {
                 let _ = self.technical_label.handle_key(key);
             }
-            SetupStep::Provider
+            SetupStep::LinearAuth
+            | SetupStep::Provider
             | SetupStep::Model
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
@@ -909,6 +936,12 @@ impl SetupApp {
 
     fn move_selection(&mut self, delta: isize) {
         match self.step {
+            SetupStep::LinearAuth => {
+                self.repo_auth_field.move_by(delta);
+                if self.repo_auth_field.selected() == 0 {
+                    self.api_key = InputFieldState::new(String::new());
+                }
+            }
             SetupStep::Provider => {
                 self.provider_field.move_by(delta);
                 self.sync_models(None);
@@ -916,7 +949,7 @@ impl SetupApp {
             SetupStep::Model => self.model_field.move_by(delta),
             SetupStep::AssignmentScope => self.assignment_field.move_by(delta),
             SetupStep::RefreshPolicy => self.refresh_policy_field.move_by(delta),
-            SetupStep::Profile
+            SetupStep::LinearApiKey
             | SetupStep::Team
             | SetupStep::Project
             | SetupStep::Reasoning
@@ -943,10 +976,12 @@ impl SetupApp {
         if let Some(provider) = provider.as_deref() {
             validate_agent_model(provider, model.as_deref())?;
         }
-        let profile = normalize_optional(self.profile.value());
-        validate_profile(&AppConfig::load()?, profile.as_deref())?;
         Ok(SubmittedSetup {
-            profile,
+            api_key: match self.repo_auth_field.selected() {
+                1 => normalize_optional(self.api_key.value()),
+                _ => None,
+            },
+            profile: self.profile.clone(),
             team: normalize_optional(self.team.value()),
             project_selector: normalize_optional(self.project.value()),
             provider,
@@ -977,6 +1012,7 @@ impl SubmittedSetup {
             validate_agent_name(&view.app_config, provider)?;
             validate_agent_model(provider, self.model.as_deref())?;
         }
+        view.planning_meta.linear.api_key = self.api_key.clone();
         view.planning_meta.linear.profile = self.profile.clone();
         view.planning_meta.linear.team = self.team.clone();
         view.planning_meta.linear.project_id =
@@ -1178,12 +1214,13 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
     };
 
     match app.step {
-        SetupStep::Profile => render_input_panel(
+        SetupStep::LinearAuth => render_select_panel(frame, area, &title, &app.repo_auth_field),
+        SetupStep::LinearApiKey => render_input_panel(
             frame,
             area,
             &title,
-            &app.profile,
-            "Optional named Linear profile configured under [linear.profiles.<name>]. Leave blank to inherit global auth.",
+            &app.api_key,
+            "Paste a repo-specific Linear API key, or leave blank to inherit shared auth.",
         ),
         SetupStep::Team => render_input_panel(
             frame,
@@ -1264,7 +1301,10 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
     let summary = summary_lines(
         area.width,
         &[
-            ("Linear profile", summarize_optional(&app.profile)),
+            (
+                "Linear auth",
+                summarize_repo_auth(&app.repo_auth_field, &app.api_key),
+            ),
             ("Default team", summarize_optional(&app.team)),
             ("Project selector", summarize_optional(&app.project)),
             (
@@ -1323,7 +1363,8 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
 
 fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
     let controls = match app.step {
-        SetupStep::Provider
+        SetupStep::LinearAuth
+        | SetupStep::Provider
         | SetupStep::Model
         | SetupStep::AssignmentScope
         | SetupStep::RefreshPolicy => {
@@ -1436,6 +1477,20 @@ fn display_optional(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn display_repo_auth(api_key: Option<&str>, profile: Option<&str>) -> String {
+    if api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        "project-specific API key".to_string()
+    } else if let Some(profile) = profile.map(str::trim).filter(|value| !value.is_empty()) {
+        format!("inherited ({profile})")
+    } else {
+        "inherited".to_string()
+    }
+}
+
 fn display_poll_interval(interval: Option<u64>) -> String {
     match interval {
         Some(interval) => format!("{interval}s"),
@@ -1491,6 +1546,15 @@ fn parse_plan_limit(value: &str) -> Result<Option<usize>> {
 
 fn summarize_optional(field: &InputFieldState) -> String {
     normalize_optional(field.value()).unwrap_or_else(|| "unset".to_string())
+}
+
+fn summarize_repo_auth(auth_field: &SelectFieldState, api_key: &InputFieldState) -> String {
+    match auth_field.selected() {
+        1 if normalize_optional(api_key.value()).is_some() => {
+            "project-specific API key".to_string()
+        }
+        _ => "inherited".to_string(),
+    }
 }
 
 fn snapshot(backend: &TestBackend) -> String {

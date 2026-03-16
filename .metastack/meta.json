@@ -1,23 +1,24 @@
 {
   "linear": {
-    "profile": "repo-metastack-cli-a6b0e8743ba29983",
-    "team": "MET",
-    "project_id": "bfabc7c0-1185-4be2-b919-55254f98eef7"
+    "api_key": "lin_api_zGokcmNEkJAmhrZ8Aqfbg5N0h8CCA98z6A3nf0QE",
+    "profile": null,
+    "team": "ENG",
+    "project_id": "5601d0a8-ba80-4cc0-b9f4-48f2b759e1a0"
   },
   "agent": {
-    "provider": "claude",
-    "model": "opus",
+    "provider": "codex",
+    "model": null,
     "reasoning": null
   },
   "listen": {
-    "required_label": "agent",
-    "assignment_scope": "viewer",
+    "required_label": null,
+    "assignment_scope": "any",
     "refresh_policy": "reuse_and_refresh",
     "instructions_path": null,
-    "poll_interval_seconds": 15
+    "poll_interval_seconds": null
   },
   "plan": {
-    "interactive_follow_up_questions": 5
+    "interactive_follow_up_questions": null
   },
   "issue_labels": {
     "plan": null,

@@ -224,6 +224,95 @@ team = "MET"
 
 #[cfg(unix)]
 #[test]
+fn issues_command_uses_repo_scoped_api_key_over_global_auth() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let right_server = MockServer::start();
+    let right_api_url = right_server.url("/graphql");
+
+    fs::create_dir_all(repo_root.join(".metastack"))?;
+    fs::write(
+        repo_root.join(".metastack/meta.json"),
+        r#"{
+  "linear": {
+    "api_key": "repo-token",
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "global-token"
+api_url = "{right_api_url}"
+team = "PER"
+"#
+        ),
+    )?;
+
+    let issues_mock = right_server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "repo-token")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-selected",
+                        "identifier": "MET-210",
+                        "title": "Repo auth issue",
+                        "description": "Issue returned by repo-scoped auth",
+                        "url": "https://linear.app/issues/MET-210",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "Repo Project"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    cli()
+        .current_dir(&repo_root)
+        .env_remove("LINEAR_API_KEY")
+        .env_remove("LINEAR_API_URL")
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "issues",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--api-url",
+            &right_api_url,
+            "list",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MET-210"));
+
+    issues_mock.assert();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn projects_command_uses_repo_selected_profile_and_team_over_global_defaults()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;

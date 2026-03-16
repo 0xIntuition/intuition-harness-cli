@@ -1,8 +1,16 @@
 use std::sync::atomic::Ordering;
 
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
+
 use super::{
     LinearService,
     test_support::{FakeLinearClient, comment, issue, issue_for_team, label, project, team},
+};
+use crate::linear::{
+    AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
+    IssueLabelCreateRequest, IssueSummary, IssueUpdateRequest, LabelRef, LinearClient,
+    ProjectSummary, TeamSummary, UserRef,
 };
 use crate::linear::{IssueCreateSpec, IssueEditSpec, IssueListFilters};
 
@@ -141,6 +149,204 @@ async fn ensure_issue_labels_exist_creates_only_missing_labels() {
     assert_eq!(created.len(), 1);
     assert_eq!(created[0].team_id, "team-MET");
     assert_eq!(created[0].name, "technical");
+}
+
+#[derive(Clone)]
+struct DuplicateThenVisibleLabelClient {
+    teams: Vec<TeamSummary>,
+    initial_labels: Vec<LabelRef>,
+}
+
+#[async_trait]
+impl LinearClient for DuplicateThenVisibleLabelClient {
+    async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
+        unreachable!("list_projects is not used in these tests")
+    }
+
+    async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
+        unreachable!("list_issues is not used in these tests")
+    }
+
+    async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {
+        unreachable!("list_all_issues is not used in these tests")
+    }
+
+    async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {
+        let mut labels = self.initial_labels.clone();
+        labels.push(label("label-technical", "technical"));
+        Ok(labels)
+    }
+
+    async fn get_issue(&self, _issue_id: &str) -> Result<IssueSummary> {
+        unreachable!("get_issue is not used in these tests")
+    }
+
+    async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
+        Ok(self.teams.clone())
+    }
+
+    async fn viewer(&self) -> Result<UserRef> {
+        unreachable!("viewer is not used in these tests")
+    }
+
+    async fn create_issue(&self, _request: IssueCreateRequest) -> Result<IssueSummary> {
+        unreachable!("create_issue is not used in these tests")
+    }
+
+    async fn create_issue_label(&self, _request: IssueLabelCreateRequest) -> Result<LabelRef> {
+        Err(anyhow!("Linear request failed: duplicate label name"))
+    }
+
+    async fn update_issue(
+        &self,
+        _issue_id: &str,
+        _request: IssueUpdateRequest,
+    ) -> Result<IssueSummary> {
+        unreachable!("update_issue is not used in these tests")
+    }
+
+    async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
+        unreachable!("create_comment is not used in these tests")
+    }
+
+    async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
+        unreachable!("update_comment is not used in these tests")
+    }
+
+    async fn upload_file(
+        &self,
+        _filename: &str,
+        _content_type: &str,
+        _contents: Vec<u8>,
+    ) -> Result<String> {
+        unreachable!("upload_file is not used in these tests")
+    }
+
+    async fn create_attachment(
+        &self,
+        _request: AttachmentCreateRequest,
+    ) -> Result<AttachmentSummary> {
+        unreachable!("create_attachment is not used in these tests")
+    }
+
+    async fn delete_attachment(&self, _attachment_id: &str) -> Result<()> {
+        unreachable!("delete_attachment is not used in these tests")
+    }
+
+    async fn download_file(&self, _url: &str) -> Result<Vec<u8>> {
+        unreachable!("download_file is not used in these tests")
+    }
+}
+
+#[tokio::test]
+async fn ensure_issue_labels_exist_ignores_duplicate_create_when_label_is_visible_on_retry() {
+    let client = DuplicateThenVisibleLabelClient {
+        teams: vec![team("MET", &[("state-1", "Todo")])],
+        initial_labels: vec![label("label-plan", "plan")],
+    };
+    let service = LinearService::new(client, Some("MET".to_string()));
+
+    service
+        .ensure_issue_labels_exist(None, &["technical".to_string()])
+        .await
+        .expect("duplicate label race should be tolerated when the label already exists");
+}
+
+#[derive(Clone)]
+struct DuplicateLabelClient {
+    teams: Vec<TeamSummary>,
+}
+
+#[async_trait]
+impl LinearClient for DuplicateLabelClient {
+    async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
+        unreachable!("list_projects is not used in these tests")
+    }
+
+    async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
+        unreachable!("list_issues is not used in these tests")
+    }
+
+    async fn list_all_issues(&self) -> Result<Vec<IssueSummary>> {
+        unreachable!("list_all_issues is not used in these tests")
+    }
+
+    async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_issue(&self, _issue_id: &str) -> Result<IssueSummary> {
+        unreachable!("get_issue is not used in these tests")
+    }
+
+    async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
+        Ok(self.teams.clone())
+    }
+
+    async fn viewer(&self) -> Result<UserRef> {
+        unreachable!("viewer is not used in these tests")
+    }
+
+    async fn create_issue(&self, _request: IssueCreateRequest) -> Result<IssueSummary> {
+        unreachable!("create_issue is not used in these tests")
+    }
+
+    async fn create_issue_label(&self, _request: IssueLabelCreateRequest) -> Result<LabelRef> {
+        Err(anyhow!("Linear request failed: duplicate label name"))
+    }
+
+    async fn update_issue(
+        &self,
+        _issue_id: &str,
+        _request: IssueUpdateRequest,
+    ) -> Result<IssueSummary> {
+        unreachable!("update_issue is not used in these tests")
+    }
+
+    async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
+        unreachable!("create_comment is not used in these tests")
+    }
+
+    async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
+        unreachable!("update_comment is not used in these tests")
+    }
+
+    async fn upload_file(
+        &self,
+        _filename: &str,
+        _content_type: &str,
+        _contents: Vec<u8>,
+    ) -> Result<String> {
+        unreachable!("upload_file is not used in these tests")
+    }
+
+    async fn create_attachment(
+        &self,
+        _request: AttachmentCreateRequest,
+    ) -> Result<AttachmentSummary> {
+        unreachable!("create_attachment is not used in these tests")
+    }
+
+    async fn delete_attachment(&self, _attachment_id: &str) -> Result<()> {
+        unreachable!("delete_attachment is not used in these tests")
+    }
+
+    async fn download_file(&self, _url: &str) -> Result<Vec<u8>> {
+        unreachable!("download_file is not used in these tests")
+    }
+}
+
+#[tokio::test]
+async fn ensure_issue_labels_exist_ignores_duplicate_create_when_linear_already_rejected_it() {
+    let client = DuplicateLabelClient {
+        teams: vec![team("MET", &[("state-1", "Todo")])],
+    };
+    let service = LinearService::new(client, Some("MET".to_string()));
+
+    service
+        .ensure_issue_labels_exist(None, &["technical".to_string()])
+        .await
+        .expect("duplicate label responses should not fail repo setup");
 }
 
 #[tokio::test]

@@ -10,4 +10,4 @@
 
 - CLI entrypoints:
 - Linear mutations/queries:
-- `.planning/backlog` files:
+- `.metastack/backlog` files:

@@ -41,14 +41,30 @@ where
                 continue;
             }
 
-            let created = self
+            match self
                 .client
                 .create_issue_label(IssueLabelCreateRequest {
                     team_id: team.id.clone(),
                     name: label.clone(),
                 })
-                .await?;
-            available_names.insert(created.name);
+                .await
+            {
+                Ok(created) => {
+                    available_names.insert(created.name);
+                }
+                Err(error) if is_duplicate_label_error(&error) => {
+                    let refreshed_labels = self.client.list_issue_labels(Some(&team.key)).await?;
+                    if let Some(existing) = refreshed_labels
+                        .into_iter()
+                        .find(|existing| existing.name.eq_ignore_ascii_case(&label))
+                    {
+                        available_names.insert(existing.name);
+                    }
+                    available_names.insert(label.clone());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         Ok(())
@@ -228,6 +244,13 @@ pub(super) fn normalize_requested_labels(labels: &[String]) -> Vec<String> {
     }
 
     requested
+}
+
+fn is_duplicate_label_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("duplicate label name")
 }
 
 pub(super) fn render_missing_project_error(project_selector: &str, team: Option<&str>) -> String {

@@ -1,4 +1,4 @@
-# {{issue_title}}
+# {{BACKLOG_TITLE}}
 
 ## Parent Issue
 
@@ -23,3 +23,9 @@ Describe the implementation plan, affected command paths, and any service or fil
 
 - [ ] `cargo test`
 - [ ] Add focused command proofs for the changed flows
+
+## Definition of Done
+
+- [ ] Scope and non-goals are captured.
+- [ ] Implementation plan links to concrete repo paths.
+- [ ] Validation evidence is recorded in `validation.md`.

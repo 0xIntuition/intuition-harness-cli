@@ -259,13 +259,14 @@ Scaffold repo-local `.metastack/` state and inspect or update repo-scoped defaul
 meta runtime setup
 meta runtime setup --json
 meta runtime setup --team MET --project "MetaStack CLI"
+meta runtime setup --api-key lin_api_repo --team MET --project "MetaStack CLI"
 meta runtime setup --provider codex --model gpt-5.4 --reasoning medium
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
 
 Legacy alias: `meta setup`
 
-`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `tmp/_TEMPLATE`, validates repo-selected profiles and agents against the install-scoped config, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `tmp/_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a repo-scoped Linear API key when a project needs its own token, validates any repo-selected profiles and agents against the install-scoped config, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
 
 If setup finds canonical template files with local changes, interactive TTY runs prompt for `overwrite`, `skip`, or `cancel`. Non-interactive paths such as `--json` and direct flag updates stop with a clear error instead of silently overwriting those backlog template files.
 
@@ -276,6 +277,7 @@ Example repo-scoped config:
 ```json
 {
   "linear": {
+    "api_key": null,
     "profile": "work",
     "team": "MET",
     "project_id": "project-42"
@@ -296,7 +298,7 @@ Example repo-scoped config:
 
 Precedence is consistent across the CLI:
 
-- Linear-backed commands use `CLI flag override -> repo .metastack/meta.json/profile -> global config -> LINEAR_* environment fallback`
+- Linear-backed commands use `CLI flag override -> repo .metastack/meta.json/api_key -> repo .metastack/meta.json/profile -> global config -> LINEAR_* environment fallback`
 - Agent-backed launches use `CLI override -> repo .metastack/meta.json -> global config`
 
 ### `merge`
@@ -608,7 +610,7 @@ Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, including the default project used for new issues, issue listing, dashboards, and `meta listen` when no explicit project flag is passed. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`, while interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. During `meta setup` saves, metastack checks that the effective plan and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, including an optional repo-specific Linear API key, the default project used for new issues, issue listing, dashboards, and `meta listen` when no explicit project flag is passed. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`, while interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. During `meta setup` saves, metastack checks that the effective plan and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
 ## Agent Configuration
 
 `meta scan`, `meta workflows run`, `meta plan`, `meta issues refine`, and `meta listen` resolve the configured local agent from the persisted config first, then fall back to built-in presets for `codex` and `claude` when referenced by name.

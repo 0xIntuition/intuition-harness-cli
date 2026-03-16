@@ -35,8 +35,9 @@ Supported front matter keys:
 Prompt templates can reference workflow parameters plus shared variables such as:
 
 - `{{repo_root}}`
-- `{{effective_instructions}}`
-- `{{project_rules}}`
+- `{{workflow_contract}}` for the full injected workflow contract, repo scope block, repo overlays, and repo-scoped instructions
+- `{{effective_instructions}}` for only the optional repo-scoped instructions file from `.metastack/meta.json`
+- `{{project_rules}}` for only repo overlay content from `AGENTS.md` and legacy `WORKFLOW.md`
 - `{{context_bundle}}`
 - `{{repo_map}}`
 - `{{validation_steps}}`
