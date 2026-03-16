@@ -829,6 +829,29 @@ mod tests {
     }
 
     #[test]
+    fn html_refresh_uses_dashboard_cadence_not_linear_poll_interval() {
+        let cycle = ListenCycleData::demo(Path::new("."));
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 42,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 42,
+                dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
+            },
+        );
+
+        let html = render_html(&data);
+
+        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"1\">"));
+        assert!(html.contains("<dt>Dashboard refresh</dt><dd>1s</dd>"));
+        assert!(html.contains("<dt>Linear refresh</dt><dd>42s</dd>"));
+        assert!(!html.contains("<meta http-equiv=\"refresh\" content=\"42\">"));
+    }
+
+    #[test]
     fn html_can_render_completed_session_view() {
         let mut cycle = ListenCycleData::demo(Path::new("."));
         let mut completed = cycle
