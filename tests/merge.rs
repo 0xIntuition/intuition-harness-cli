@@ -478,6 +478,9 @@ transport = "arg"
         ])
         .assert()
         .success()
+        .stdout(predicate::str::contains("Phase 1/6: Workspace preparation"))
+        .stdout(predicate::str::contains("Phase 3/6: Merge application"))
+        .stdout(predicate::str::contains("Phase 6/6: PR publication"))
         .stdout(predicate::str::contains(
             "Created aggregate PR https://github.com/example/pull/999",
         ));
@@ -491,13 +494,90 @@ transport = "arg"
 
     assert!(run_dir.join("context.json").is_file());
     assert!(run_dir.join("plan.json").is_file());
+    assert!(run_dir.join("progress.json").is_file());
     assert!(run_dir.join("merge-progress.json").is_file());
     assert!(run_dir.join("validation.json").is_file());
     assert!(run_dir.join("publication.json").is_file());
     assert!(fs::read_to_string(run_dir.join("publication.json"))?.contains("created"));
+    let progress = fs::read_to_string(run_dir.join("progress.json"))?;
+    assert!(progress.contains("\"status\": \"succeeded\""));
+    assert!(progress.contains("\"current_phase_key\": \"publish_pr\""));
     let context = fs::read_to_string(run_dir.join("context.json"))?;
     assert!(context.contains("\"aggregate_branch\""));
     assert!(context.contains("-workspace/merge-runs/"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_persists_failed_progress_when_validation_stops_the_run() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let agent_stub = temp.path().join("merge-agent-stub");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_stub(
+        &bin_dir.join("gh"),
+        &[21],
+        "https://github.com/example/pull/1001",
+    )?;
+    write_agent_stub(&agent_stub, &[21])?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "{}"
+transport = "arg"
+"#,
+            agent_stub.display()
+        ),
+    )?;
+
+    commit_and_push_pull_ref(&repo_root, "feature/21", "one.txt", "one\n", 21)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "merge",
+            "--no-interactive",
+            "--pull-request",
+            "21",
+            "--validate",
+            "false",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Phase 4/6: Validation"))
+        .stderr(predicate::str::contains(
+            "validation failed for aggregate branch",
+        ));
+
+    let run_root = repo_root.join(".metastack/merge-runs");
+    let mut run_dirs = fs::read_dir(&run_root)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    run_dirs.sort();
+    let run_dir = run_dirs.pop().expect("merge run should exist");
+
+    assert!(run_dir.join("progress.json").is_file());
+    assert!(run_dir.join("validation.json").is_file());
+    assert!(!run_dir.join("publication.json").exists());
+
+    let progress = fs::read_to_string(run_dir.join("progress.json"))?;
+    assert!(progress.contains("\"status\": \"failed\""));
+    assert!(progress.contains("\"current_phase_key\": \"validation\""));
+    assert!(progress.contains("Publication was skipped."));
 
     Ok(())
 }

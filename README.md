@@ -370,18 +370,20 @@ meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "ma
 Behavior summary:
 
 - `--json` emits the resolved GitHub repository metadata plus the open PR list used by the dashboard and planner.
-- Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, and launch immediately.
+- Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
-- `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly.
+- `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
 - Publication is gated on those validation commands succeeding; when validation fails, the aggregate branch artifacts are kept locally and no GitHub PR is created or updated.
+- Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
 
 - `context.json` with the repository, selected PR set, aggregate branch, and isolated workspace path
 - `agent-plan-prompt.md` with the exact planner prompt sent to the configured local agent
 - `plan.json` with the agent-selected merge order and conflict hotspots
-- `merge-progress.json` with per-PR outcomes
+- `progress.json` with the current phase, active substep detail, phase states, and the full structured event trail needed to reconstruct success and failure paths
+- `merge-progress.json` with the structured run snapshot plus per-PR outcomes
 - `validation.json` with the executed validation commands and captured output
 - `aggregate-pr-body.md` with the Markdown body used when creating or updating the aggregate PR
 - `publication.json` with the aggregate PR publication result
