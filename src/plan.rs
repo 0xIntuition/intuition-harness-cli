@@ -2109,7 +2109,10 @@ mod tests {
                 assert_eq!(request, "Plan a new command");
                 assert_eq!(follow_ups.len(), 2);
                 assert_eq!(follow_ups[1].question, "How should it be validated?");
-                assert_eq!(follow_ups[1].answer, "Direct command-path proofs and targeted tests");
+                assert_eq!(
+                    follow_ups[1].answer,
+                    "Direct command-path proofs and targeted tests"
+                );
                 assert!(!follow_ups[1].skipped);
             }
             _ => panic!("expected the last enter to generate a plan"),
