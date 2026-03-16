@@ -480,6 +480,10 @@ transport = "arg"
         .success()
         .stdout(predicate::str::contains("Phase 1/6: Workspace preparation"))
         .stdout(predicate::str::contains("Phase 3/6: Merge application"))
+        .stdout(predicate::str::contains(
+            "Applying pull request #11 (PR 11) onto the aggregate branch.",
+        ))
+        .stdout(predicate::str::contains("Pull request #12 merged cleanly."))
         .stdout(predicate::str::contains("Phase 6/6: PR publication"))
         .stdout(predicate::str::contains(
             "Created aggregate PR https://github.com/example/pull/999",
@@ -502,6 +506,8 @@ transport = "arg"
     let progress = fs::read_to_string(run_dir.join("progress.json"))?;
     assert!(progress.contains("\"status\": \"succeeded\""));
     assert!(progress.contains("\"current_phase_key\": \"publish_pr\""));
+    assert!(progress.contains("\"pull_request\": 11"));
+    assert!(progress.contains("\"pull_request\": 12"));
     let context = fs::read_to_string(run_dir.join("context.json"))?;
     assert!(context.contains("\"aggregate_branch\""));
     assert!(context.contains("-workspace/merge-runs/"));
@@ -1084,6 +1090,10 @@ transport = "arg"
     let run_dir = run_dirs.pop().expect("merge run should exist");
 
     assert!(run_dir.join("conflict-resolution-pr-22.md").is_file());
+    let progress = fs::read_to_string(run_dir.join("progress.json"))?;
+    assert!(progress.contains("\"pull_request\": 22"));
+    assert!(progress.contains("Conflict assistance invoked for pull request #22"));
+    assert!(progress.contains("agent-assisted conflict resolution"));
     assert!(fs::read_to_string(run_dir.join("merge-progress.json"))?.contains("conflict_resolved"));
 
     Ok(())
