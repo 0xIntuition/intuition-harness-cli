@@ -79,7 +79,16 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             runtime_line("Tokens", &data.runtime.tokens, Color::Magenta),
             runtime_line("Rate Limits", &data.runtime.rate_limits, Color::LightBlue),
             runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
-            runtime_line("Next refresh", &data.runtime.next_refresh, Color::Yellow),
+            runtime_line(
+                "Dashboard refresh",
+                &data.runtime.dashboard_refresh,
+                Color::Yellow,
+            ),
+            runtime_line(
+                "Linear refresh",
+                &data.runtime.linear_refresh,
+                Color::LightYellow,
+            ),
         ]))
         .wrap(Wrap { trim: true })
         .block(
@@ -144,7 +153,16 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         runtime_line("Rate Limits", &data.runtime.rate_limits, Color::LightBlue),
         runtime_line("Project", &data.runtime.project, Color::White),
         runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
-        runtime_line("Next refresh", &data.runtime.next_refresh, Color::Yellow),
+        runtime_line(
+            "Dashboard refresh",
+            &data.runtime.dashboard_refresh,
+            Color::Yellow,
+        ),
+        runtime_line(
+            "Linear refresh",
+            &data.runtime.linear_refresh,
+            Color::LightYellow,
+        ),
     ];
     let runtime = Paragraph::new(Text::from(runtime_lines))
         .wrap(Wrap { trim: true })
@@ -408,7 +426,8 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
-                next_refresh_seconds: 15,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
                 dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
             },
         );
@@ -444,7 +463,8 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
-                next_refresh_seconds: 15,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
                 dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
             },
         );
@@ -473,7 +493,8 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
-                next_refresh_seconds: 15,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
                 dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
             },
         );
