@@ -234,7 +234,7 @@ The persisted config can store:
 - install-scoped Linear API key/default team values
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
-- global default agent/model/reasoning values
+- global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
 - advanced family-level agent routing under `[agents.routing.families.<family>]`
 - advanced command-level agent routing under `[agents.routing.commands."<route>"]`
 
@@ -247,6 +247,18 @@ Agent-backed routes resolve install-scoped settings in this order:
 
 For an individual run, explicit CLI flags still win over the routed defaults:
 `--agent`/`--provider` first, then `--model`, then `--reasoning`.
+
+For the built-in providers, `--reasoning`, `default_reasoning`, and `route_reasoning` are validated
+against the selected provider/model catalog instead of being accepted as free text. The dashboards
+now render reasoning as a select field tied to the current provider/model choice.
+
+Built-in reasoning options shipped in-repo:
+
+- `codex` `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5-codex`, `gpt-5-codex-mini`: `low`, `medium`, `high`
+- `claude` `sonnet`, `opus`: `low`, `medium`, `high`
+- `claude` `haiku`: `low`, `medium`
+- `claude` `sonnet[1m]`: `medium`, `high`
+- `claude` `opusplan`: `high`
 
 Use `meta runtime config --advanced-routing` for the dedicated routing dashboard, or use
 `--route`, `--route-agent`, `--route-model`, `--route-reasoning`, and `--clear-route` for
@@ -314,7 +326,7 @@ meta runtime setup --listen-label agent --assignment-scope viewer --refresh-poli
 
 Legacy alias: `meta setup`
 
-`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `tmp/_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and agents against the install-scoped config, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `tmp/_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
 
 If setup finds canonical template files with local changes, interactive TTY runs prompt for `overwrite`, `skip`, or `cancel`. Non-interactive paths such as `--json` and direct flag updates stop with a clear error instead of silently overwriting those backlog template files.
 
@@ -677,9 +689,9 @@ Agent-backed commands use stable route keys so different workflows can resolve d
 4. repo default from `.metastack/meta.json` when present
 5. global default
 
-After route resolution, metastack falls back to built-in presets for `codex` and `claude` when referenced by name.
+Workflow playbooks can still declare a built-in provider, but that value is now only used as the final fallback when the explicit, route, repo, and global config layers do not select one.
 
-The built-in presets run `codex exec` and `claude -p`, and pass `--model=<value>` automatically when a default model is configured. For the built-in Codex preset, metastack also forces `workspace-write`, `--ask-for-approval never`, and the target working directory so unattended runs can write inside the issue workspace instead of inheriting a read-only default.
+The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. For the built-in Codex adapter, metastack also forces `workspace-write`, `--ask-for-approval never`, and the target working directory so unattended runs can write inside the issue workspace instead of inheriting a read-only default.
 
 Agent launches receive:
 
@@ -696,7 +708,17 @@ For `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `me
 - `METASTACK_AGENT_PROMPT`
 - `METASTACK_AGENT_INSTRUCTIONS`
 - `METASTACK_AGENT_MODEL`
+- `METASTACK_AGENT_REASONING`
+- `METASTACK_AGENT_ROUTE_KEY`
+- `METASTACK_AGENT_FAMILY_KEY`
+- `METASTACK_AGENT_PROVIDER_SOURCE`
+- `METASTACK_AGENT_MODEL_SOURCE`
+- `METASTACK_AGENT_REASONING_SOURCE`
 - `METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH` when the issue has downloaded attachment context
+
+`meta agents workflows run --dry-run` now prints the resolved provider/model/reasoning plus their
+resolution sources. `meta context scan` also writes the same diagnostics into the scan agent log so
+misrouting can be proved from the persisted runtime evidence.
 
 If you need to override the built-in launch command, you can still customize the persisted agent command in the config file:
 

@@ -20,10 +20,11 @@ use serde::Serialize;
 
 use crate::cli::ConfigArgs;
 use crate::config::{
-    AgentRouteConfig, AgentRouteScope, AgentRouteSource, AppConfig, builtin_agent_definition,
-    detect_supported_agents, normalize_agent_name, normalize_agent_route_key, resolve_agent_route,
-    supported_agent_models, supported_agent_names, supported_agent_route_definitions,
-    supported_agent_route_families, validate_agent_model, validate_agent_name,
+    AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, detect_supported_agents,
+    normalize_agent_name, normalize_agent_route_key, resolve_agent_route, supported_agent_models,
+    supported_agent_names, supported_agent_route_definitions, supported_agent_route_families,
+    supported_reasoning_options, validate_agent_model, validate_agent_name,
+    validate_agent_reasoning,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
@@ -260,14 +261,19 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
         let normalized = normalize_agent_name(default_agent);
         validate_agent_name(&view.app_config, &normalized)?;
         view.app_config.agents.default_agent = Some(normalized.clone());
-        if let Some(definition) = builtin_agent_definition(&normalized) {
-            view.app_config
-                .set_agent_definition(&normalized, definition);
-        }
         if validate_agent_model(&normalized, view.app_config.agents.default_model.as_deref())
             .is_err()
         {
             view.app_config.agents.default_model = None;
+        }
+        if validate_agent_reasoning(
+            &normalized,
+            view.app_config.agents.default_model.as_deref(),
+            view.app_config.agents.default_reasoning.as_deref(),
+        )
+        .is_err()
+        {
+            view.app_config.agents.default_reasoning = None;
         }
     }
     if let Some(default_model) = &args.default_model {
@@ -277,7 +283,14 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
         view.app_config.agents.default_model = normalized;
     }
     if let Some(default_reasoning) = &args.default_reasoning {
-        view.app_config.agents.default_reasoning = normalize_optional(default_reasoning);
+        let selected_agent = selected_global_agent(&view.app_config);
+        let normalized = normalize_optional(default_reasoning);
+        validate_agent_reasoning(
+            &selected_agent,
+            view.app_config.agents.default_model.as_deref(),
+            normalized.as_deref(),
+        )?;
+        view.app_config.agents.default_reasoning = normalized;
     }
     apply_route_updates(&mut view.app_config, args)?;
     view.app_config.validate()?;
@@ -356,6 +369,23 @@ fn apply_route_updates(app_config: &mut AppConfig, args: &ConfigArgs) -> Result<
     }
     if let Some(reasoning) = args.route_reasoning.as_deref() {
         updated.reasoning = normalize_optional(reasoning);
+    }
+    let effective_provider = updated.provider.clone().or_else(|| {
+        resolve_agent_route(
+            app_config,
+            &crate::config::PlanningMeta::default(),
+            &normalized,
+            crate::config::AgentConfigOverrides::default(),
+        )
+        .ok()
+        .map(|resolved| resolved.provider)
+    });
+    if let Some(provider) = effective_provider.as_deref() {
+        validate_agent_reasoning(
+            provider,
+            updated.model.as_deref(),
+            updated.reasoning.as_deref(),
+        )?;
     }
 
     let route_config = if updated.provider.is_none()
@@ -503,7 +533,7 @@ struct ConfigApp {
     api_key: InputFieldState,
     team: InputFieldState,
     default_profile: InputFieldState,
-    default_reasoning: InputFieldState,
+    default_reasoning: SelectFieldState,
     agent_field: SelectFieldState,
     model_field: SelectFieldState,
     detected_agents: Vec<String>,
@@ -552,19 +582,14 @@ impl ConfigApp {
                     .clone()
                     .unwrap_or_default(),
             ),
-            default_reasoning: InputFieldState::new(
-                view.app_config
-                    .agents
-                    .default_reasoning
-                    .clone()
-                    .unwrap_or_default(),
-            ),
+            default_reasoning: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             agent_field: SelectFieldState::new(agent_options, agent_index),
             model_field: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             detected_agents: view.detected_agents.clone(),
             error: None,
         };
         app.sync_models(view.app_config.agents.default_model.as_deref());
+        app.sync_reasoning(view.app_config.agents.default_reasoning.as_deref());
         app
     }
 
@@ -592,6 +617,37 @@ impl ConfigApp {
             })
             .unwrap_or(0);
         self.model_field = SelectFieldState::new(options, selected);
+        self.sync_reasoning(None);
+    }
+
+    fn sync_reasoning(&mut self, preferred: Option<&str>) {
+        let current = preferred.map(str::to_string).or_else(|| {
+            self.default_reasoning
+                .selected_label()
+                .map(str::to_string)
+                .filter(|value| value != "Leave unset")
+        });
+        let mut options = vec!["Leave unset".to_string()];
+        options.extend(
+            supported_reasoning_options(
+                self.current_agent(),
+                match self.model_field.selected() {
+                    0 => None,
+                    _ => self.model_field.selected_label(),
+                },
+            )
+            .iter()
+            .map(|value| (*value).to_string()),
+        );
+        let selected = current
+            .as_deref()
+            .and_then(|value| {
+                options
+                    .iter()
+                    .position(|candidate| candidate.eq_ignore_ascii_case(value))
+            })
+            .unwrap_or(0);
+        self.default_reasoning = SelectFieldState::new(options, selected);
     }
 
     fn apply_action(&mut self, action: ConfigAction) -> Option<ConfigDashboardExit> {
@@ -626,6 +682,9 @@ impl ConfigApp {
                     self.sync_models(None);
                 } else if self.step == ConfigStep::Model {
                     self.model_field.move_by(-1);
+                    self.sync_reasoning(None);
+                } else if self.step == ConfigStep::DefaultReasoning {
+                    self.default_reasoning.move_by(-1);
                 } else {
                     self.step = self.step.previous();
                 }
@@ -638,6 +697,9 @@ impl ConfigApp {
                     self.sync_models(None);
                 } else if self.step == ConfigStep::Model {
                     self.model_field.move_by(1);
+                    self.sync_reasoning(None);
+                } else if self.step == ConfigStep::DefaultReasoning {
+                    self.default_reasoning.move_by(1);
                 } else {
                     self.step = self.step.next();
                 }
@@ -660,10 +722,10 @@ impl ConfigApp {
                     ConfigStep::DefaultProfile => {
                         let _ = self.default_profile.handle_key(key);
                     }
-                    ConfigStep::DefaultReasoning => {
-                        let _ = self.default_reasoning.handle_key(key);
-                    }
-                    ConfigStep::Agent | ConfigStep::Model | ConfigStep::Save => {}
+                    ConfigStep::DefaultReasoning
+                    | ConfigStep::Agent
+                    | ConfigStep::Model
+                    | ConfigStep::Save => {}
                 }
                 None
             }
@@ -689,10 +751,8 @@ impl ConfigApp {
             ConfigStep::DefaultProfile => {
                 let _ = self.default_profile.paste(text);
             }
-            ConfigStep::DefaultReasoning => {
-                let _ = self.default_reasoning.paste(text);
-            }
             ConfigStep::Agent | ConfigStep::Model | ConfigStep::Save => {}
+            ConfigStep::DefaultReasoning => {}
         }
     }
 
@@ -704,6 +764,15 @@ impl ConfigApp {
         };
         validate_agent_name(&AppConfig::load()?, &default_agent)?;
         validate_agent_model(&default_agent, default_model.as_deref())?;
+        let default_reasoning = match self.default_reasoning.selected() {
+            0 => None,
+            _ => self.default_reasoning.selected_label().map(str::to_string),
+        };
+        validate_agent_reasoning(
+            &default_agent,
+            default_model.as_deref(),
+            default_reasoning.as_deref(),
+        )?;
         let app_config = AppConfig::load()?;
         let default_profile = normalize_optional(self.default_profile.value());
         validate_default_profile(&app_config, default_profile.as_deref())?;
@@ -714,7 +783,7 @@ impl ConfigApp {
             default_profile,
             default_agent,
             default_model,
-            default_reasoning: normalize_optional(self.default_reasoning.value()),
+            default_reasoning,
         })
     }
 }
@@ -724,16 +793,17 @@ impl SubmittedConfig {
         validate_default_profile(&view.app_config, self.default_profile.as_deref())?;
         validate_agent_name(&view.app_config, &self.default_agent)?;
         validate_agent_model(&self.default_agent, self.default_model.as_deref())?;
+        validate_agent_reasoning(
+            &self.default_agent,
+            self.default_model.as_deref(),
+            self.default_reasoning.as_deref(),
+        )?;
         view.app_config.linear.api_key = self.api_key.clone();
         view.app_config.linear.team = self.team.clone();
         view.app_config.linear.default_profile = self.default_profile.clone();
         view.app_config.agents.default_agent = Some(self.default_agent.clone());
         view.app_config.agents.default_model = self.default_model.clone();
         view.app_config.agents.default_reasoning = self.default_reasoning.clone();
-        if let Some(definition) = builtin_agent_definition(&self.default_agent) {
-            view.app_config
-                .set_agent_definition(&self.default_agent, definition);
-        }
         Ok(())
     }
 }
@@ -800,7 +870,7 @@ struct AdvancedRoutingApp {
     route_field: SelectFieldState,
     agent_field: SelectFieldState,
     model_field: SelectFieldState,
-    reasoning: InputFieldState,
+    reasoning: SelectFieldState,
     agent_options: Vec<String>,
     app_config: AppConfig,
     error: Option<String>,
@@ -843,7 +913,7 @@ impl AdvancedRoutingApp {
             route_field: SelectFieldState::new(route_options, 0),
             agent_field: SelectFieldState::new(agent_options.clone(), 0),
             model_field: SelectFieldState::new(vec!["Inherit".to_string()], 0),
-            reasoning: InputFieldState::new(String::new()),
+            reasoning: SelectFieldState::new(vec!["Inherit".to_string()], 0),
             agent_options,
             app_config: view.app_config.clone(),
             error: None,
@@ -886,8 +956,8 @@ impl AdvancedRoutingApp {
             })
             .unwrap_or(0);
         self.agent_field = SelectFieldState::new(self.agent_options.clone(), agent_index);
-        self.reasoning = InputFieldState::new(route_config.reasoning.unwrap_or_default());
         self.sync_models(route_config.model.as_deref())?;
+        self.sync_reasoning(route_config.reasoning.as_deref())?;
         Ok(())
     }
 
@@ -913,18 +983,51 @@ impl AdvancedRoutingApp {
             })
             .unwrap_or(0);
         self.model_field = SelectFieldState::new(options, selected);
+        self.sync_reasoning(None)?;
+        Ok(())
+    }
+
+    fn sync_reasoning(&mut self, preferred: Option<&str>) -> Result<()> {
+        let provider = self
+            .selected_agent_override()
+            .map(Ok)
+            .unwrap_or_else(|| self.effective_provider_for_selected_route())
+            .ok();
+        let current = preferred.map(str::to_string).or_else(|| {
+            self.reasoning
+                .selected_label()
+                .map(str::to_string)
+                .filter(|value| value != "Inherit")
+        });
+        let mut options = vec!["Inherit".to_string()];
+        if let Some(provider) = provider.as_deref() {
+            options.extend(
+                supported_reasoning_options(
+                    provider,
+                    match self.model_field.selected() {
+                        0 => None,
+                        _ => self.model_field.selected_label(),
+                    },
+                )
+                .iter()
+                .map(|value| (*value).to_string()),
+            );
+        }
+        let selected = current
+            .as_deref()
+            .and_then(|value| {
+                options
+                    .iter()
+                    .position(|candidate| candidate.eq_ignore_ascii_case(value))
+            })
+            .unwrap_or(0);
+        self.reasoning = SelectFieldState::new(options, selected);
         Ok(())
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<ConfigDashboardExit> {
         match key.code {
-            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {
-                self.error = None;
-                if self.step == AdvancedRoutingStep::Reasoning {
-                    let _ = self.reasoning.handle_key(key);
-                }
-                None
-            }
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => None,
             KeyCode::Up => self.apply_action(ConfigAction::Up),
             KeyCode::Down => self.apply_action(ConfigAction::Down),
             KeyCode::Tab => self.apply_action(ConfigAction::Tab),
@@ -935,12 +1038,7 @@ impl AdvancedRoutingApp {
         }
     }
 
-    fn handle_paste(&mut self, text: &str) {
-        self.error = None;
-        if self.step == AdvancedRoutingStep::Reasoning {
-            let _ = self.reasoning.paste(text);
-        }
-    }
+    fn handle_paste(&mut self, _text: &str) {}
 
     fn apply_action(&mut self, action: ConfigAction) -> Option<ConfigDashboardExit> {
         match action {
@@ -982,8 +1080,14 @@ impl AdvancedRoutingApp {
                             self.error = Some(error.to_string());
                         }
                     }
-                    AdvancedRoutingStep::Model => self.model_field.move_by(-1),
-                    AdvancedRoutingStep::Reasoning | AdvancedRoutingStep::Save => {
+                    AdvancedRoutingStep::Model => {
+                        self.model_field.move_by(-1);
+                        if let Err(error) = self.sync_reasoning(None) {
+                            self.error = Some(error.to_string());
+                        }
+                    }
+                    AdvancedRoutingStep::Reasoning => self.reasoning.move_by(-1),
+                    AdvancedRoutingStep::Save => {
                         self.step = self.step.previous();
                     }
                 }
@@ -1004,8 +1108,14 @@ impl AdvancedRoutingApp {
                             self.error = Some(error.to_string());
                         }
                     }
-                    AdvancedRoutingStep::Model => self.model_field.move_by(1),
-                    AdvancedRoutingStep::Reasoning | AdvancedRoutingStep::Save => {
+                    AdvancedRoutingStep::Model => {
+                        self.model_field.move_by(1);
+                        if let Err(error) = self.sync_reasoning(None) {
+                            self.error = Some(error.to_string());
+                        }
+                    }
+                    AdvancedRoutingStep::Reasoning => self.reasoning.move_by(1),
+                    AdvancedRoutingStep::Save => {
                         self.step = self.step.next();
                     }
                 }
@@ -1021,7 +1131,10 @@ impl AdvancedRoutingApp {
             Some("Inherit") | None => None,
             Some(value) => Some(value.to_string()),
         };
-        let reasoning = normalize_optional(self.reasoning.value());
+        let reasoning = match self.reasoning.selected_label() {
+            Some("Inherit") | None => None,
+            Some(value) => Some(value.to_string()),
+        };
         if let Some(provider) = provider.as_deref() {
             validate_agent_name(&self.app_config, provider)?;
         }
@@ -1032,6 +1145,9 @@ impl AdvancedRoutingApp {
             && let Some(provider) = effective_provider.as_deref()
         {
             validate_agent_model(provider, Some(model))?;
+        }
+        if let Some(provider) = effective_provider.as_deref() {
+            validate_agent_reasoning(provider, model.as_deref(), reasoning.as_deref())?;
         }
         let config = AgentRouteConfig {
             provider,
@@ -1245,13 +1361,7 @@ fn render_advanced_step_panel(frame: &mut Frame<'_>, app: &AdvancedRoutingApp, a
         AdvancedRoutingStep::Route => render_select_panel(frame, area, &title, &app.route_field),
         AdvancedRoutingStep::Agent => render_select_panel(frame, area, &title, &app.agent_field),
         AdvancedRoutingStep::Model => render_select_panel(frame, area, &title, &app.model_field),
-        AdvancedRoutingStep::Reasoning => render_input_panel(
-            frame,
-            area,
-            &title,
-            &app.reasoning,
-            "Leave blank to inherit reasoning for the selected route.",
-        ),
+        AdvancedRoutingStep::Reasoning => render_select_panel(frame, area, &title, &app.reasoning),
         AdvancedRoutingStep::Save => render_save_panel(frame, area),
     }
 }
@@ -1282,10 +1392,10 @@ fn render_advanced_summary_panel(frame: &mut Frame<'_>, app: &AdvancedRoutingApp
 fn render_advanced_footer(frame: &mut Frame<'_>, app: &AdvancedRoutingApp, area: Rect) {
     let controls = match app.step {
         AdvancedRoutingStep::Reasoning => {
-            "Type or paste the override. Up/Down changes steps. Enter advances. Esc cancels."
+            "Use Up/Down to choose the override. Enter advances. Esc cancels."
         }
         AdvancedRoutingStep::Save => {
-            "Press Enter to save. Choosing Inherit plus blank reasoning clears the selected route."
+            "Press Enter to save. Choosing Inherit reasoning clears the selected override."
         }
         _ => "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
     };
@@ -1328,7 +1438,7 @@ fn summarize_route_line(app_config: &AppConfig, entry: &RouteEntry) -> String {
                     entry.key,
                     route.provider,
                     route.model.as_deref().unwrap_or("inherit"),
-                    summarize_route_source(&route.source)
+                    summarize_route_source(&route.provider_source)
                 ),
                 Err(error) => format!("{} -> error: {}", entry.key, error),
             }
@@ -1343,13 +1453,13 @@ fn summarize_raw_route_config(config: &AgentRouteConfig) -> String {
     format!("{provider} / {model} / {reasoning}")
 }
 
-fn summarize_route_source(source: &AgentRouteSource) -> String {
+fn summarize_route_source(source: &AgentConfigSource) -> String {
     match source {
-        AgentRouteSource::ExplicitOverride => "explicit".to_string(),
-        AgentRouteSource::RepoDefault => "repo".to_string(),
-        AgentRouteSource::CommandDefault(key) => format!("command:{key}"),
-        AgentRouteSource::FamilyDefault(key) => format!("family:{key}"),
-        AgentRouteSource::GlobalDefault => "global".to_string(),
+        AgentConfigSource::ExplicitOverride => "explicit".to_string(),
+        AgentConfigSource::RepoDefault => "repo".to_string(),
+        AgentConfigSource::CommandRoute(key) => format!("command:{key}"),
+        AgentConfigSource::FamilyRoute(key) => format!("family:{key}"),
+        AgentConfigSource::GlobalDefault => "global".to_string(),
     }
 }
 
@@ -1512,13 +1622,9 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         ),
         ConfigStep::Agent => render_select_panel(frame, area, &title, &app.agent_field),
         ConfigStep::Model => render_select_panel(frame, area, &title, &app.model_field),
-        ConfigStep::DefaultReasoning => render_input_panel(
-            frame,
-            area,
-            &title,
-            &app.default_reasoning,
-            "Optional default reasoning effort passed through to supported local agents.",
-        ),
+        ConfigStep::DefaultReasoning => {
+            render_select_panel(frame, area, &title, &app.default_reasoning)
+        }
         ConfigStep::Save => render_save_panel(frame, area),
     }
 }
@@ -1549,7 +1655,7 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             ),
             (
                 "Default reasoning",
-                summarize_optional_value(&app.default_reasoning),
+                summarize_optional_select(&app.default_reasoning, "Leave unset"),
             ),
             (
                 "Detected agents",
@@ -1569,13 +1675,10 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
 
 fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
     let controls = match app.step {
-        ConfigStep::ApiKey
-        | ConfigStep::Team
-        | ConfigStep::DefaultProfile
-        | ConfigStep::DefaultReasoning => {
+        ConfigStep::ApiKey | ConfigStep::Team | ConfigStep::DefaultProfile => {
             "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
-        ConfigStep::Agent | ConfigStep::Model => {
+        ConfigStep::Agent | ConfigStep::Model | ConfigStep::DefaultReasoning => {
             "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
         ConfigStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",
@@ -1647,6 +1750,13 @@ fn summarize_optional_value(field: &InputFieldState) -> String {
     normalize_optional(field.value()).unwrap_or_else(|| "unset".to_string())
 }
 
+fn summarize_optional_select(field: &SelectFieldState, unset_label: &str) -> String {
+    match field.selected_label() {
+        Some(value) if value != unset_label => value.to_string(),
+        _ => "unset".to_string(),
+    }
+}
+
 fn summary_lines(width: u16, entries: &[(&str, String)]) -> Vec<Line<'static>> {
     let compact = width < 40;
     let mut lines = Vec::new();
@@ -1688,5 +1798,128 @@ impl Drop for TerminalCleanup {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
         let _ = execute!(stdout, LeaveAlternateScreen);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use anyhow::Result;
+
+    use super::{AdvancedRoutingApp, ConfigApp, ConfigViewData};
+    use crate::config::{AgentSettings, AppConfig};
+
+    #[test]
+    fn config_app_refreshes_reasoning_options_when_model_changes() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                agents: AgentSettings {
+                    default_agent: Some("claude".to_string()),
+                    default_model: Some("opus".to_string()),
+                    default_reasoning: Some("high".to_string()),
+                    ..AgentSettings::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = ConfigApp::new(&view);
+        assert_eq!(
+            app.default_reasoning.options(),
+            &[
+                "Leave unset".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ]
+        );
+        assert_eq!(app.default_reasoning.selected_label(), Some("high"));
+
+        let haiku_index = app
+            .model_field
+            .options()
+            .iter()
+            .position(|option| option == "haiku")
+            .expect("haiku model should be listed");
+        app.model_field
+            .move_by(haiku_index as isize - app.model_field.selected() as isize);
+        app.sync_reasoning(None);
+
+        assert_eq!(
+            app.default_reasoning.options(),
+            &[
+                "Leave unset".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+            ]
+        );
+        assert_eq!(app.default_reasoning.selected(), 0);
+    }
+
+    #[test]
+    fn advanced_routing_app_refreshes_reasoning_options_when_model_changes() -> Result<()> {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                agents: AgentSettings {
+                    default_agent: Some("claude".to_string()),
+                    ..AgentSettings::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = AdvancedRoutingApp::new(&view)?;
+        let claude_index = app
+            .agent_field
+            .options()
+            .iter()
+            .position(|option| option == "claude")
+            .expect("claude provider should be listed");
+        app.agent_field
+            .move_by(claude_index as isize - app.agent_field.selected() as isize);
+        app.sync_models(None)?;
+
+        let opusplan_index = app
+            .model_field
+            .options()
+            .iter()
+            .position(|option| option == "opusplan")
+            .expect("opusplan model should be listed");
+        app.model_field
+            .move_by(opusplan_index as isize - app.model_field.selected() as isize);
+        app.sync_reasoning(Some("high"))?;
+
+        assert_eq!(
+            app.reasoning.options(),
+            &["Inherit".to_string(), "high".to_string()]
+        );
+        assert_eq!(app.reasoning.selected_label(), Some("high"));
+
+        let haiku_index = app
+            .model_field
+            .options()
+            .iter()
+            .position(|option| option == "haiku")
+            .expect("haiku model should be listed");
+        app.model_field
+            .move_by(haiku_index as isize - app.model_field.selected() as isize);
+        app.sync_reasoning(None)?;
+
+        assert_eq!(
+            app.reasoning.options(),
+            &[
+                "Inherit".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+            ]
+        );
+        assert_eq!(app.reasoning.selected(), 0);
+
+        Ok(())
     }
 }

@@ -155,6 +155,8 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/prompt.txt"
 printf '%s' "$METASTACK_CRON_JOB_COMMAND_EXIT_CODE" > "$TEST_OUTPUT_DIR/command-exit-code.txt"
 printf '%s' "$METASTACK_CRON_JOB_LOG_PATH" > "$TEST_OUTPUT_DIR/log-path.txt"
 printf '%s' "$METASTACK_CRON_JOB_WORKING_DIRECTORY" > "$TEST_OUTPUT_DIR/working-directory.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
 if [ -f "$PWD/shell-output.txt" ]; then
   cat "$PWD/shell-output.txt" > "$TEST_OUTPUT_DIR/observed-shell.txt"
 fi
@@ -219,6 +221,20 @@ fi
         fs::read_to_string(output_dir.join("log-path.txt"))?,
         ".metastack/cron/.runtime/logs/nightly.log"
     );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("provider-source.txt"))?,
+        "explicit_override"
+    );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("route-key.txt"))?,
+        "runtime.cron.prompt"
+    );
+    let runtime_log = fs::read_to_string(
+        temp.path()
+            .join(".metastack/cron/.runtime/logs/nightly.log"),
+    )?;
+    assert!(runtime_log.contains("Resolved provider: stub"));
+    assert!(runtime_log.contains("Resolved route key: runtime.cron.prompt"));
 
     Ok(())
 }

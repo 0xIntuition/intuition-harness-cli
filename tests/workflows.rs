@@ -51,6 +51,333 @@ fn workflows_explain_describes_ticket_implementation_contract() -> Result<(), Bo
     Ok(())
 }
 
+#[test]
+fn workflows_dry_run_reports_resolved_agent_diagnostics() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "agent": {
+    "provider": "claude",
+    "model": "sonnet",
+    "reasoning": "medium"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "low"
+"#,
+    )?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "backlog-planning",
+            "--dry-run",
+            "--param",
+            "request=Plan the next release",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resolved provider: claude"))
+        .stdout(predicate::str::contains("Resolved model: sonnet"))
+        .stdout(predicate::str::contains("Resolved reasoning: medium"))
+        .stdout(predicate::str::contains("Provider source: repo_default"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workflows_run_executes_builtin_codex_provider_adapter() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/builtin-proof.md"),
+        r#"---
+name: builtin-proof
+summary: Minimal workflow for builtin provider execution.
+provider: codex
+model: gpt-5.4
+reasoning: medium
+---
+
+Summarize the builtin provider launch behavior.
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "medium"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
+printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
+printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
+printf 'codex builtin ok'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "builtin-proof",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider `codex`"))
+        .stdout(predicate::str::contains("codex builtin ok"));
+
+    let args = fs::read_to_string(stub_dir.join("args.txt"))?;
+    assert!(args.contains("--sandbox"));
+    assert!(args.contains("workspace-write"));
+    assert!(args.contains("--ask-for-approval"));
+    assert!(args.contains("never"));
+    assert!(args.contains("exec"));
+    assert!(args.contains("--model=gpt-5.4"));
+    assert!(args.contains("--reasoning=medium"));
+    assert!(args.contains("Summarize the builtin provider launch behavior."));
+    assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "codex");
+    assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "gpt-5.4");
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("reasoning.txt"))?,
+        "medium"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workflows_run_executes_builtin_claude_provider_adapter() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/builtin-proof.md"),
+        r#"---
+name: builtin-proof
+summary: Minimal workflow for builtin provider execution.
+provider: claude
+model: sonnet
+reasoning: high
+---
+
+Summarize the builtin provider launch behavior.
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "claude"
+default_model = "sonnet"
+default_reasoning = "high"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("claude");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
+printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
+printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
+printf 'claude builtin ok'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "builtin-proof",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider `claude`"))
+        .stdout(predicate::str::contains("claude builtin ok"));
+
+    let args = fs::read_to_string(stub_dir.join("args.txt"))?;
+    assert!(args.contains("-p"));
+    assert!(args.contains("--model=sonnet"));
+    assert!(!args.contains("--reasoning="));
+    assert!(args.contains("Summarize the builtin provider launch behavior."));
+    assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
+    assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
+    assert_eq!(fs::read_to_string(stub_dir.join("reasoning.txt"))?, "high");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workflows_run_provider_override_skips_incompatible_route_model_and_reasoning()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "agent": {
+    "provider": "claude",
+    "model": "sonnet",
+    "reasoning": "medium"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        repo_root.join(".metastack/workflows/provider-override-proof.md"),
+        r#"---
+name: provider-override-proof
+summary: Verify provider overrides skip incompatible route defaults.
+provider: codex
+---
+
+Summarize the resolved provider selection.
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "low"
+
+[agents.routing.commands."agents.workflows.run"]
+provider = "codex"
+model = "gpt-5.4"
+reasoning = "high"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("claude");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
+printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
+printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_MODEL_SOURCE" > "$TEST_OUTPUT_DIR/model-source.txt"
+printf '%s' "$METASTACK_AGENT_REASONING_SOURCE" > "$TEST_OUTPUT_DIR/reasoning-source.txt"
+printf 'claude override ok'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "provider-override-proof",
+            "--provider",
+            "claude",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider `claude`"))
+        .stdout(predicate::str::contains("claude override ok"));
+
+    let args = fs::read_to_string(stub_dir.join("args.txt"))?;
+    assert!(args.contains("-p"));
+    assert!(args.contains("--model=sonnet"));
+    assert!(!args.contains("--model=gpt-5.4"));
+    assert!(!args.contains("--reasoning="));
+    assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
+    assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("reasoning.txt"))?,
+        "medium"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("provider-source.txt"))?,
+        "explicit_override"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("model-source.txt"))?,
+        "repo_default"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("reasoning-source.txt"))?,
+        "repo_default"
+    );
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn workflows_run_resolves_linear_issue_and_executes_selected_provider() -> Result<(), Box<dyn Error>>

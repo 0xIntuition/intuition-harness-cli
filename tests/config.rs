@@ -316,6 +316,68 @@ default_model = "gpt-5.4"
 }
 
 #[test]
+fn config_builtin_defaults_do_not_persist_builtin_command_override_entries()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--default-agent",
+            "codex",
+            "--default-model",
+            "gpt-5.4",
+            "--default-reasoning",
+            "medium",
+        ])
+        .assert()
+        .success();
+
+    let saved = fs::read_to_string(config_path)?;
+    assert!(saved.contains("default_agent = \"codex\""));
+    assert!(saved.contains("default_reasoning = \"medium\""));
+    assert!(!saved.contains("[agents.commands.codex]"));
+
+    Ok(())
+}
+
+#[test]
+fn config_rejects_invalid_builtin_reasoning_for_selected_model() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "claude"
+default_model = "haiku"
+"#,
+    )?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--default-reasoning",
+            "high",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("supported reasoning: low, medium"));
+
+    Ok(())
+}
+
+#[test]
 fn setup_rejects_ambiguous_project_names() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -541,7 +603,7 @@ team = "MetaStack Team West"
 [agents]
 default_agent = "codex"
 default_model = "gpt-5.4"
-default_reasoning = "deep review mode for long-running local planning"
+default_reasoning = "high"
 "#,
     )?;
 
@@ -561,7 +623,7 @@ default_reasoning = "deep review mode for long-running local planning"
         .success()
         .stdout(predicate::str::contains("Steps"))
         .stdout(predicate::str::contains("Default reasoning"))
-        .stdout(predicate::str::contains("deep review mode"))
+        .stdout(predicate::str::contains("high"))
         .stdout(predicate::str::contains("MetaStack Team West"))
         .stdout(predicate::str::contains("Summary"));
 
@@ -596,7 +658,7 @@ default_model = "gpt-5.4"
   "agent": {
     "provider": "claude",
     "model": "opus",
-    "reasoning": "very-high"
+    "reasoning": "high"
   },
   "listen": {
     "required_label": "agent-ticket-needing-extra-room",
@@ -671,7 +733,7 @@ default_model = "gpt-5.4"
   "agent": {
     "provider": "codex",
     "model": "gpt-5.4",
-    "reasoning": "high effort repo planning review"
+    "reasoning": "high"
   },
   "listen": {
     "required_label": "agent ticket needing extra room",

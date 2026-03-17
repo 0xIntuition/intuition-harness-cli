@@ -6,14 +6,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use crate::agents::run_agent_capture;
+use crate::agents::{
+    render_invocation_diagnostics, resolve_agent_invocation_for_planning, run_agent_capture,
+};
 use crate::cli::{
     LinearClientArgs, RunAgentArgs, WorkflowCommands, WorkflowRunArgs, WorkflowsArgs,
 };
-use crate::config::{
-    AGENT_ROUTE_AGENTS_WORKFLOWS_RUN, AgentConfigOverrides, AppConfig, PlanningMeta,
-    resolve_agent_route,
-};
+use crate::config::{AGENT_ROUTE_AGENTS_WORKFLOWS_RUN, AppConfig, PlanningMeta};
 use crate::context::{
     load_codebase_context_bundle, load_effective_instructions, load_project_rules_bundle,
     load_workflow_contract, render_repo_map,
@@ -121,52 +120,60 @@ async fn run_workflow(args: &WorkflowRunArgs) -> Result<String> {
     let prompt = render_template(&workflow.prompt_template, &values)?;
     let app_config = AppConfig::load()?;
     let planning_meta = PlanningMeta::load(&root)?;
-    let routed_provider = resolve_agent_route(
-        &app_config,
-        &planning_meta,
-        AGENT_ROUTE_AGENTS_WORKFLOWS_RUN,
-        AgentConfigOverrides {
-            provider: args.provider.clone(),
-            model: None,
-            reasoning: None,
-        },
-    )
-    .ok()
-    .map(|resolved| resolved.provider);
-    let provider = args
-        .provider
-        .clone()
-        .or(routed_provider)
-        .unwrap_or_else(|| workflow.provider.clone());
+    let run_args = RunAgentArgs {
+        root: Some(root.clone()),
+        route_key: Some(AGENT_ROUTE_AGENTS_WORKFLOWS_RUN.to_string()),
+        agent: args.provider.clone(),
+        prompt: prompt.clone(),
+        instructions: instructions.clone(),
+        model: args.model.clone(),
+        reasoning: args.reasoning.clone(),
+        transport: None,
+    };
+    let invocation =
+        match resolve_agent_invocation_for_planning(&app_config, &planning_meta, &run_args) {
+            Ok(invocation) => invocation,
+            Err(error)
+                if args.provider.is_none()
+                    && error.to_string().contains("no agent was selected") =>
+            {
+                resolve_agent_invocation_for_planning(
+                    &app_config,
+                    &planning_meta,
+                    &RunAgentArgs {
+                        agent: Some(workflow.provider.clone()),
+                        ..run_args.clone()
+                    },
+                )?
+            }
+            Err(error) => return Err(error),
+        };
+    let diagnostics = render_invocation_diagnostics(&invocation);
 
     if args.dry_run {
         return Ok(render_dry_run(
             &root,
             workflow,
-            &provider,
+            &invocation.agent,
+            &diagnostics,
             instructions.as_deref(),
             &prompt,
         ));
     }
 
     let output = run_agent_capture(&RunAgentArgs {
-        root: Some(root.clone()),
-        route_key: Some(AGENT_ROUTE_AGENTS_WORKFLOWS_RUN.to_string()),
-        agent: Some(provider.clone()),
-        prompt,
-        instructions,
-        model: args.model.clone(),
-        reasoning: args.reasoning.clone(),
-        transport: None,
+        agent: Some(invocation.agent.clone()),
+        ..run_args
     })?;
 
     let mut lines = vec![
         format!(
             "Ran workflow `{}` with provider `{}`.",
-            workflow.name, provider
+            workflow.name, invocation.agent
         ),
         format!("Source: `{}`", workflow.source_label(&root)),
     ];
+    lines.extend(diagnostics);
 
     if !workflow.validation.is_empty() {
         lines.push(String::new());
@@ -398,6 +405,7 @@ fn render_dry_run(
     root: &Path,
     workflow: &WorkflowPlaybook,
     provider: &str,
+    diagnostics: &[String],
     instructions: Option<&str>,
     prompt: &str,
 ) -> String {
@@ -408,6 +416,7 @@ fn render_dry_run(
         String::new(),
         "Validation steps:".to_string(),
     ];
+    lines.extend(diagnostics.iter().cloned());
     if workflow.validation.is_empty() {
         lines.push("- No explicit validation steps were defined.".to_string());
     } else {

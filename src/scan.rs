@@ -11,7 +11,8 @@ use toml::Value;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::agents::{
-    AgentExecutionOptions, command_args_for_invocation, resolve_agent_invocation_for_planning,
+    AgentExecutionOptions, apply_invocation_environment, command_args_for_invocation,
+    render_invocation_diagnostics, resolve_agent_invocation_for_planning,
 };
 use crate::cli::{RunAgentArgs, ScanArgs};
 use crate::config::{
@@ -484,6 +485,9 @@ fn run_scan_agent_with_dashboard(
         invocation.command,
         command_args.join(" ")
     )?;
+    for line in render_invocation_diagnostics(&invocation) {
+        writeln!(log, "{line}")?;
+    }
     writeln!(log)?;
 
     let mut command = Command::new(&invocation.command);
@@ -493,19 +497,11 @@ fn run_scan_agent_with_dashboard(
     }
     command.stdout(Stdio::from(log.try_clone()?));
     command.stderr(Stdio::from(log.try_clone()?));
-    command.env("METASTACK_AGENT_NAME", &invocation.agent);
-    command.env("METASTACK_AGENT_PROMPT", &args.prompt);
-    command.env(
-        "METASTACK_AGENT_INSTRUCTIONS",
-        args.instructions.as_deref().unwrap_or(""),
-    );
-    command.env(
-        "METASTACK_AGENT_MODEL",
-        invocation.model.as_deref().unwrap_or(""),
-    );
-    command.env(
-        "METASTACK_AGENT_REASONING",
-        invocation.reasoning.as_deref().unwrap_or(""),
+    apply_invocation_environment(
+        &mut command,
+        &invocation,
+        &args.prompt,
+        args.instructions.as_deref(),
     );
     for (key, value) in &options.extra_env {
         command.env(key, value);

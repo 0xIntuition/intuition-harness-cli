@@ -1340,6 +1340,8 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             state_path.to_string_lossy().as_ref(),
         ));
 
+    wait_for_terminal_session_state(&state_path)?;
+
     meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
@@ -1431,6 +1433,8 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/global.txt"
         &listen_stub_path,
         r#"#!/bin/sh
 printf '%s' "$1" > "$TEST_OUTPUT_DIR/listen.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
 "#,
     )?;
     let mut permissions = fs::metadata(&listen_stub_path)?.permissions();
@@ -1660,8 +1664,18 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/listen.txt"
         .stdout(predicate::str::contains("MET-63"));
 
     wait_for_path(&stub_dir.join("listen.txt"))?;
+    wait_for_path(&stub_dir.join("provider-source.txt"))?;
+    wait_for_path(&stub_dir.join("route-key.txt"))?;
     assert!(stub_dir.join("listen.txt").exists());
     assert!(!stub_dir.join("global.txt").exists());
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("provider-source.txt"))?,
+        "command_route:agents.listen"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("route-key.txt"))?,
+        "agents.listen"
+    );
 
     Ok(())
 }
@@ -2321,6 +2335,336 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
     assert!(
         fs::read_to_string(stub_dir.join("payload.txt"))?.contains("Backlog identifier: MET-50")
     );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_executes_repo_selected_builtin_claude_provider() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "agent": {
+    "provider": "claude",
+    "model": "sonnet",
+    "reasoning": "high"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "low"
+"#,
+        ),
+    )?;
+
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args.txt"
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
+printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
+printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
+printf 'claude listen ok'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+printf 'codex fallback invoked' > "$TEST_OUTPUT_DIR/codex.txt"
+exit 99
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-64",
+                        "identifier": "MET-64",
+                        "title": "Builtin Claude listen agent",
+                        "description": "Verify repo-selected builtin provider resolution",
+                        "url": "https://linear.app/issues/64",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack",
+                        "states": {
+                            "nodes": [
+                                {
+                                    "id": "state-1",
+                                    "name": "Todo",
+                                    "type": "unstarted"
+                                },
+                                {
+                                    "id": "state-2",
+                                    "name": "In Progress",
+                                    "type": "started"
+                                }
+                            ]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-64\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": listen_issue_detail_node(
+                    "issue-64",
+                    "MET-64",
+                    "Builtin Claude listen agent",
+                    "Verify repo-selected builtin provider resolution",
+                    "state-2",
+                    "In Progress",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-64",
+                        "identifier": "MET-64",
+                        "title": "Builtin Claude listen agent",
+                        "description": "Verify repo-selected builtin provider resolution",
+                        "url": "https://linear.app/issues/64",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-64",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MET-64"));
+
+    wait_for_path(&stub_dir.join("claude-args.txt"))?;
+    wait_for_path(&stub_dir.join("provider-source.txt"))?;
+    assert!(!stub_dir.join("codex.txt").exists());
+
+    let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
+    assert!(args.contains("-p"));
+    assert!(args.contains("--model=sonnet"));
+    assert!(!args.contains("--reasoning="));
+    assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
+    assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
+    assert_eq!(fs::read_to_string(stub_dir.join("reasoning.txt"))?, "high");
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("provider-source.txt"))?,
+        "repo_default"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("route-key.txt"))?,
+        "agents.listen"
+    );
+
+    let listen_log = fs::read_to_string(listen_log_path(&config_path, &repo_root, "MET-64")?)?;
+    assert!(listen_log.contains("Resolved provider: claude"));
+    assert!(listen_log.contains("Resolved model: sonnet"));
+    assert!(listen_log.contains("Resolved reasoning: high"));
+    assert!(listen_log.contains("Provider source: repo_default"));
 
     Ok(())
 }

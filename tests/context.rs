@@ -271,6 +271,8 @@ transport = "arg"
     fs::write(
         &stub_path,
         r#"#!/bin/sh
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
 mkdir -p .metastack/codebase
 for pair in \
   "ARCHITECTURE.md:# Architecture" \
@@ -311,6 +313,18 @@ done
         fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),
         "# Architecture"
     );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("provider-source.txt"))?,
+        "explicit_override"
+    );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("route-key.txt"))?,
+        "context.reload"
+    );
+    let scan_log = fs::read_to_string(repo_root.join(".metastack/agents/sessions/scan.log"))?;
+    assert!(scan_log.contains("Resolved provider: scan-stub"));
+    assert!(scan_log.contains("Resolved route key: context.reload"));
+    assert!(scan_log.contains("Provider source: explicit_override"));
 
     Ok(())
 }
@@ -370,6 +384,7 @@ transport = "arg"
         &scan_stub_path,
         r#"#!/bin/sh
 printf 'scan-stub' > "$TEST_OUTPUT_DIR/scan-agent.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/scan-route.txt"
 mkdir -p .metastack/codebase
 for pair in \
   "ARCHITECTURE.md:# Scan Architecture" \
@@ -390,6 +405,7 @@ done
         &reload_stub_path,
         r#"#!/bin/sh
 printf 'reload-stub' > "$TEST_OUTPUT_DIR/reload-agent.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/reload-route.txt"
 mkdir -p .metastack/codebase
 for pair in \
   "ARCHITECTURE.md:# Reload Architecture" \
@@ -432,6 +448,10 @@ done
         "scan-stub"
     );
     assert_eq!(
+        fs::read_to_string(output_dir.join("scan-route.txt"))?,
+        "context.scan"
+    );
+    assert_eq!(
         fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),
         "# Scan Architecture"
     );
@@ -453,6 +473,10 @@ done
     assert_eq!(
         fs::read_to_string(output_dir.join("reload-agent.txt"))?,
         "reload-stub"
+    );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("reload-route.txt"))?,
+        "context.reload"
     );
     assert_eq!(
         fs::read_to_string(repo_root.join(".metastack/codebase/ARCHITECTURE.md"))?.trim(),

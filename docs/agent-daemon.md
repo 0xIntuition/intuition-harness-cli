@@ -62,6 +62,18 @@ Repo-scoped listen settings in `.metastack/meta.json`:
 - `listen.instructions_path`: optional markdown file merged into the shared injected workflow contract for launched-agent instructions.
 - `listen.poll_interval_seconds`: default Linear refresh cadence for `meta listen` when `--poll-interval` is not passed.
 
+Listen worker agent selection uses the shared built-in provider resolver:
+
+1. explicit worker overrides such as `--agent`, `--model`, and `--reasoning`
+2. the `agents.listen` command route override from `meta runtime config`
+3. the `agents` route family override
+4. repo defaults from `.metastack/meta.json`
+5. install-scoped global defaults
+
+When the selected provider is one of the built-in adapters, the listen worker also emits the
+resolved provider/model/reasoning, route key, and config sources through the common launch
+diagnostics and `METASTACK_AGENT_*` environment variables before the provider process starts.
+
 ## Runtime Modules
 
 - `src/listen/mod.rs`: command entrypoint, polling loop, shared snapshot model, state persistence, filtering, attachment-context download, workpad bootstrap, hidden listen worker flow, and prompt/instruction injection.
@@ -70,6 +82,7 @@ Repo-scoped listen settings in `.metastack/meta.json`:
 - `src/listen/workspace.rs`: clone-backed ticket workspace path, refresh, and branch preparation helpers.
 - `src/listen/workpad.rs`: deterministic bootstrap workpad rendering.
 - `src/agents.rs`: reusable brief-generation and agent-launch helpers shared by `meta listen`, `meta scan`, and the planning flows.
+- `src/agent_provider.rs`: built-in provider adapter catalog and launch behavior for `codex` and `claude`.
 - `src/workflow_contract.rs`: shared injected workflow contract composition plus optional repo overlay loading.
 - `src/listen/store.rs`: install-scoped project identity, metadata, lock, and session-store
   helpers.

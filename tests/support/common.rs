@@ -544,6 +544,26 @@ fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Er
 }
 
 #[cfg(unix)]
+fn wait_for_terminal_session_state(path: &Path) -> Result<(), Box<dyn Error>> {
+    for _ in 0..300 {
+        if let Ok(contents) = fs::read_to_string(path)
+            && !contents.contains("\"phase\": \"claimed\"")
+            && !contents.contains("\"phase\": \"brief_ready\"")
+            && !contents.contains("\"phase\": \"running\"")
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(format!(
+        "timed out waiting for `{}` to reach a terminal session state",
+        path.display()
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

@@ -5,7 +5,10 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
+use crate::agents::{
+    apply_invocation_environment, command_args_for_invocation, render_invocation_diagnostics,
+    resolve_agent_invocation_for_planning,
+};
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
@@ -436,6 +439,17 @@ fn execute_agent_turn(
             now_timestamp()
         )
         .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+        writeln!(
+            log,
+            "command: {} {}",
+            invocation.command,
+            command_args.join(" ")
+        )
+        .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+        for line in render_invocation_diagnostics(&invocation) {
+            writeln!(log, "{line}")
+                .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+        }
     }
     let stdout = fs::OpenOptions::new()
         .create(true)
@@ -453,19 +467,11 @@ fn execute_agent_turn(
     command.args(&command_args);
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
-    command.env("METASTACK_AGENT_NAME", &invocation.agent);
-    command.env("METASTACK_AGENT_PROMPT", &run_args.prompt);
-    command.env(
-        "METASTACK_AGENT_INSTRUCTIONS",
-        run_args.instructions.as_deref().unwrap_or(""),
-    );
-    command.env(
-        "METASTACK_AGENT_MODEL",
-        invocation.model.as_deref().unwrap_or(""),
-    );
-    command.env(
-        "METASTACK_AGENT_REASONING",
-        invocation.reasoning.as_deref().unwrap_or(""),
+    apply_invocation_environment(
+        &mut command,
+        &invocation,
+        &run_args.prompt,
+        run_args.instructions.as_deref(),
     );
     command.env("CI", "1");
     command.env("METASTACK_LISTEN_UNATTENDED", "1");

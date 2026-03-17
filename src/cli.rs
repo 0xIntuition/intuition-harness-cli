@@ -42,6 +42,34 @@ Examples:
   meta runtime setup --root . --team MET --project \"MetaStack CLI\"
   meta runtime cron status --root .";
 
+const RUNTIME_CONFIG_HELP: &str = "\
+Resolution precedence for built-in provider/model/reasoning:
+  1. explicit CLI overrides such as --agent/--provider, --model, and --reasoning
+  2. command route override
+  3. family route override
+  4. repo defaults from `meta runtime setup`
+  5. install defaults from `meta runtime config`
+
+Built-in provider catalog:
+  codex: gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex,
+         gpt-5.1-codex-mini, gpt-5-codex, gpt-5-codex-mini
+         reasoning: low, medium, high
+  claude: sonnet, opus (low, medium, high)
+          haiku (low, medium)
+          sonnet[1m] (medium, high)
+          opusplan (high)
+
+Confirm the effective selection before launch:
+  meta agents workflows run ticket-implementation --root . --dry-run";
+
+const RUNTIME_SETUP_HELP: &str = "\
+Repo defaults written by `meta runtime setup` participate in the built-in resolution order:
+  explicit CLI override -> command route -> family route -> repo default -> install default
+
+Built-in provider/model/reasoning combinations are validated before they are saved.
+Use `meta agents workflows run ... --dry-run` or `meta context scan --root .` to confirm the
+resolved provider, model, reasoning, route key, and config source before or during execution.";
+
 const DASHBOARD_HELP_EXAMPLES: &str = "\
 Examples:
   meta dashboard linear --team MET --project \"MetaStack CLI\"
@@ -220,7 +248,7 @@ pub struct WorkflowRunArgs {
     /// Override the configured default model for this workflow run.
     #[arg(long)]
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for this workflow run.
+    /// Override the resolved built-in reasoning option for this workflow run.
     #[arg(long)]
     pub reasoning: Option<String>,
     /// Render the resolved instructions and prompt without launching the provider.
@@ -309,7 +337,7 @@ pub struct MergeArgs {
     /// Override the configured default model for merge planning and conflict help.
     #[arg(long)]
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for merge planning and conflict help.
+    /// Override the resolved built-in reasoning option for merge planning and conflict help.
     #[arg(long)]
     pub reasoning: Option<String>,
     /// Render the merge dashboard once to an in-memory buffer and print the snapshot.
@@ -465,7 +493,7 @@ pub struct PlanArgs {
     /// Override the configured default model for this planning run.
     #[arg(long)]
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for this planning run.
+    /// Override the resolved built-in reasoning option for this planning run.
     #[arg(long)]
     pub reasoning: Option<String>,
     /// Skip the ratatui workflow and run directly from flags/stdin context.
@@ -474,6 +502,7 @@ pub struct PlanArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = RUNTIME_CONFIG_HELP)]
 pub struct ConfigArgs {
     /// Repository root to resolve when compatibility with older invocations is needed.
     #[arg(long, value_name = "PATH", default_value = ".")]
@@ -493,7 +522,7 @@ pub struct ConfigArgs {
     /// Update the default model.
     #[arg(long)]
     pub default_model: Option<String>,
-    /// Update the global default reasoning effort.
+    /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
@@ -508,7 +537,7 @@ pub struct ConfigArgs {
     /// Update the model override for `--route`.
     #[arg(long)]
     pub route_model: Option<String>,
-    /// Update the reasoning override for `--route`.
+    /// Update the built-in reasoning override for `--route`.
     #[arg(long)]
     pub route_reasoning: Option<String>,
     /// Launch the dedicated advanced agent-routing dashboard instead of the primary simple config flow.
@@ -532,6 +561,7 @@ pub struct ConfigArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = RUNTIME_SETUP_HELP)]
 pub struct SetupArgs {
     /// Repository root containing `.metastack/meta.json`.
     #[arg(long, value_name = "PATH", default_value = ".")]
@@ -557,7 +587,7 @@ pub struct SetupArgs {
     /// Update the repo-scoped default model.
     #[arg(long)]
     pub model: Option<String>,
-    /// Update the repo-scoped default reasoning effort.
+    /// Update the repo-scoped default built-in reasoning option.
     #[arg(long)]
     pub reasoning: Option<String>,
     /// Update the label required for `meta listen` pickup.
@@ -720,7 +750,7 @@ pub struct ListenRunArgs {
     /// Override the configured default model for launched listen workers.
     #[arg(long)]
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for launched listen workers.
+    /// Override the resolved built-in reasoning option for launched listen workers.
     #[arg(long)]
     pub reasoning: Option<String>,
 }
@@ -738,7 +768,7 @@ pub struct TechnicalArgs {
     /// Override the configured default model for backlog generation.
     #[arg(long)]
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for backlog generation.
+    /// Override the resolved built-in reasoning option for backlog generation.
     #[arg(long)]
     pub reasoning: Option<String>,
 }
@@ -816,7 +846,7 @@ pub struct ListenWorkerArgs {
     /// Override the configured default model for this worker.
     #[arg(long)]
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for this worker.
+    /// Override the resolved built-in reasoning option for this worker.
     #[arg(long)]
     pub reasoning: Option<String>,
 }
@@ -833,7 +863,7 @@ pub struct RunAgentArgs {
     pub instructions: Option<String>,
     /// Override the configured default model for this launch.
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for this launch.
+    /// Override the resolved built-in reasoning option for this launch.
     pub reasoning: Option<String>,
     /// Override the configured transport for this launch.
     pub transport: Option<PromptTransportArg>,
@@ -1048,7 +1078,7 @@ pub struct IssueRefineArgs {
     /// Override the configured default model for refinement.
     #[arg(long)]
     pub model: Option<String>,
-    /// Override the configured default reasoning effort for refinement.
+    /// Override the resolved built-in reasoning option for refinement.
     #[arg(long)]
     pub reasoning: Option<String>,
 }

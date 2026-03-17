@@ -8,7 +8,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
+use crate::agents::{
+    apply_invocation_environment, command_args_for_invocation, format_agent_config_source,
+    resolve_agent_invocation_for_planning,
+};
 use crate::cli::MergeArgs;
 use crate::config::{
     AGENT_ROUTE_MERGE, AgentConfigOverrides, AppConfig, PlanningMeta, load_required_planning_meta,
@@ -95,6 +98,19 @@ struct MergeContextArtifact {
     source_root: String,
     workspace_path: String,
     aggregate_branch: String,
+    agent_resolution: AgentResolutionArtifact,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgentResolutionArtifact {
+    provider: String,
+    model: Option<String>,
+    reasoning: Option<String>,
+    route_key: Option<String>,
+    family_key: Option<String>,
+    provider_source: String,
+    model_source: Option<String>,
+    reasoning_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -375,15 +391,6 @@ fn execute_merge_run(
                 return Err(error);
             }
         };
-    let context_artifact = MergeContextArtifact {
-        run_id: run_id.clone(),
-        repository: repository.clone(),
-        selected_pull_requests: selected_pull_requests.clone(),
-        source_root: root.display().to_string(),
-        workspace_path: workspace_path.display().to_string(),
-        aggregate_branch: aggregate_branch.clone(),
-    };
-    write_json_artifact(&run_dir.join("context.json"), &context_artifact)?;
     tracker.complete_step(
         STEP_PREPARE_WORKSPACE,
         format!(
@@ -395,6 +402,17 @@ fn execute_merge_run(
     let plan_prompt =
         build_merge_plan_prompt(repository, &selected_pull_requests, &aggregate_branch);
     write_text_file(&run_dir.join("agent-plan-prompt.md"), &plan_prompt, true)?;
+    let resolution = resolve_merge_agent_resolution(root, args, &plan_prompt)?;
+    let context_artifact = MergeContextArtifact {
+        run_id: run_id.clone(),
+        repository: repository.clone(),
+        selected_pull_requests: selected_pull_requests.clone(),
+        source_root: root.display().to_string(),
+        workspace_path: workspace_path.display().to_string(),
+        aggregate_branch: aggregate_branch.clone(),
+        agent_resolution: resolution,
+    };
+    write_json_artifact(&run_dir.join("context.json"), &context_artifact)?;
     tracker.start_step(
         STEP_PLAN,
         format!(
@@ -1152,6 +1170,44 @@ fn parse_json_block<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
     Ok(serde_json::from_str(&value[start..=end])?)
 }
 
+fn resolve_merge_agent_resolution(
+    root: &Path,
+    args: &MergeArgs,
+    prompt: &str,
+) -> Result<AgentResolutionArtifact> {
+    let config = AppConfig::load()?;
+    let planning_meta = PlanningMeta::load(root)?;
+    let invocation = resolve_agent_invocation_for_planning(
+        &config,
+        &planning_meta,
+        &crate::cli::RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_MERGE.to_string()),
+            agent: args.agent.clone(),
+            prompt: prompt.to_string(),
+            instructions: None,
+            model: args.model.clone(),
+            reasoning: args.reasoning.clone(),
+            transport: None,
+        },
+    )?;
+
+    Ok(AgentResolutionArtifact {
+        provider: invocation.agent,
+        model: invocation.model,
+        reasoning: invocation.reasoning,
+        route_key: invocation.route_key,
+        family_key: invocation.family_key,
+        provider_source: format_agent_config_source(&invocation.provider_source),
+        model_source: invocation
+            .model_source
+            .map(|source| format_agent_config_source(&source)),
+        reasoning_source: invocation
+            .reasoning_source
+            .map(|source| format_agent_config_source(&source)),
+    })
+}
+
 fn run_agent_capture_in_dir(
     root: &Path,
     workspace_path: &Path,
@@ -1183,16 +1239,7 @@ fn run_agent_capture_in_dir(
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    command.env("METASTACK_AGENT_NAME", &invocation.agent);
-    command.env("METASTACK_AGENT_PROMPT", prompt);
-    command.env(
-        "METASTACK_AGENT_MODEL",
-        invocation.model.as_deref().unwrap_or(""),
-    );
-    command.env(
-        "METASTACK_AGENT_REASONING",
-        invocation.reasoning.as_deref().unwrap_or(""),
-    );
+    apply_invocation_environment(&mut command, &invocation, prompt, None);
     for (key, value) in extra_env {
         command.env(key, value);
     }
