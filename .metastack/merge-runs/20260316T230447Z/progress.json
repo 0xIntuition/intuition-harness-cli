@@ -1,0 +1,74 @@
+{
+  "title": "meta merge progress (0xIntuition/metastack-cli)",
+  "status": "running",
+  "current_phase": "Plan generation",
+  "current_phase_key": "plan_generation",
+  "active_detail": "Creating the merge plan for 1 selected pull request(s).",
+  "started_at": "2026-03-16T23:04:47.199785+00:00",
+  "updated_at": "2026-03-16T23:04:51.863414+00:00",
+  "finished_at": null,
+  "steps": [
+    {
+      "key": "prepare_workspace",
+      "label": "Workspace preparation",
+      "state": "complete",
+      "detail": "Workspace ready at `/Users/metasudo/workspace/intution/stack/metastack-cli-workspace/merge-runs/20260316T230447Z` and checked out to `meta-merge/20260316T230447Z`."
+    },
+    {
+      "key": "plan_generation",
+      "label": "Plan generation",
+      "state": "running",
+      "detail": "Creating the merge plan for 1 selected pull request(s)."
+    },
+    {
+      "key": "merge_application",
+      "label": "Merge application",
+      "state": "pending",
+      "detail": null
+    },
+    {
+      "key": "validation",
+      "label": "Validation",
+      "state": "pending",
+      "detail": null
+    },
+    {
+      "key": "push",
+      "label": "Push",
+      "state": "pending",
+      "detail": null
+    },
+    {
+      "key": "publish_pr",
+      "label": "PR publication",
+      "state": "pending",
+      "detail": null
+    }
+  ],
+  "events": [
+    {
+      "timestamp": "2026-03-16T23:04:47.202989+00:00",
+      "phase_key": "prepare_workspace",
+      "phase_label": "Workspace preparation",
+      "state": "running",
+      "detail": "Preparing an isolated workspace for aggregate branch `meta-merge/20260316T230447Z`.",
+      "pull_request": null
+    },
+    {
+      "timestamp": "2026-03-16T23:04:51.862851+00:00",
+      "phase_key": "prepare_workspace",
+      "phase_label": "Workspace preparation",
+      "state": "complete",
+      "detail": "Workspace ready at `/Users/metasudo/workspace/intution/stack/metastack-cli-workspace/merge-runs/20260316T230447Z` and checked out to `meta-merge/20260316T230447Z`.",
+      "pull_request": null
+    },
+    {
+      "timestamp": "2026-03-16T23:04:51.863414+00:00",
+      "phase_key": "plan_generation",
+      "phase_label": "Plan generation",
+      "state": "running",
+      "detail": "Creating the merge plan for 1 selected pull request(s).",
+      "pull_request": null
+    }
+  ]
+}
