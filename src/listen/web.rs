@@ -133,7 +133,7 @@ pub fn render_html(data: &ListenDashboardData) -> String {
 }
 
 fn render_html_with_view(data: &ListenDashboardData, view: SessionListView) -> String {
-    let refresh_seconds = data.runtime.next_refresh_seconds.clamp(1, 5);
+    let refresh_seconds = data.runtime.dashboard_refresh_seconds.max(1);
     let counts = data.session_counts();
     let sessions = data.sessions_for_view(view);
     let mut html = String::new();
@@ -209,7 +209,12 @@ fn render_html_with_view(data: &ListenDashboardData, view: SessionListView) -> S
         data.runtime.dashboard_url.as_deref(),
         &data.runtime.dashboard,
     );
-    detail_row(&mut html, "Next refresh", &data.runtime.next_refresh);
+    detail_row(
+        &mut html,
+        "Dashboard refresh",
+        &data.runtime.dashboard_refresh,
+    );
+    detail_row(&mut html, "Linear refresh", &data.runtime.linear_refresh);
     html.push_str("</dl></section>");
 
     html.push_str("<section class=\"section-card\"><div class=\"section-header\"><div>");
@@ -406,8 +411,9 @@ fn fallback_dashboard() -> ListenDashboardData {
             project: "n/a".to_string(),
             dashboard: "n/a".to_string(),
             dashboard_url: None,
-            next_refresh: "n/a".to_string(),
-            next_refresh_seconds: 1,
+            dashboard_refresh: "1s".to_string(),
+            dashboard_refresh_seconds: 1,
+            linear_refresh: "n/a".to_string(),
             current_epoch_seconds: 0,
         },
         pending_issues: Vec::new(),
@@ -804,7 +810,8 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
-                next_refresh_seconds: 12,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 12,
                 dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
             },
         );
@@ -816,7 +823,32 @@ mod tests {
         assert!(html.contains("Agent sessions"));
         assert!(html.contains("href=\"/?view=completed\""));
         assert!(html.contains("MET-13"));
-        assert!(html.contains("Next refresh"));
+        assert!(html.contains("Dashboard refresh"));
+        assert!(html.contains("Linear refresh"));
+        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"1\">"));
+    }
+
+    #[test]
+    fn html_refresh_uses_dashboard_cadence_not_linear_poll_interval() {
+        let cycle = ListenCycleData::demo(Path::new("."));
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 42,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 42,
+                dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
+            },
+        );
+
+        let html = render_html(&data);
+
+        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"1\">"));
+        assert!(html.contains("<dt>Dashboard refresh</dt><dd>1s</dd>"));
+        assert!(html.contains("<dt>Linear refresh</dt><dd>42s</dd>"));
+        assert!(!html.contains("<meta http-equiv=\"refresh\" content=\"42\">"));
     }
 
     #[test]
@@ -839,7 +871,8 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
-                next_refresh_seconds: 12,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 12,
                 dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
             },
         );

@@ -1,0 +1,12 @@
+{
+  "issue_id": "77c33fb2-170f-4c6d-909f-190176c67cc9",
+  "identifier": "ENG-10096",
+  "title": "Unify built-in agent provider resolution, adapter architecture, and reasoning selection for Codex and Claude",
+  "url": "https://linear.app/0xintuition/issue/ENG-10096/unify-built-in-agent-provider-resolution-adapter-architecture-and",
+  "team_key": "ENG",
+  "project_id": "5601d0a8-ba80-4cc0-b9f4-48f2b759e1a0",
+  "project_name": "CLI Harness",
+  "parent_id": null,
+  "parent_identifier": null,
+  "managed_files": []
+}

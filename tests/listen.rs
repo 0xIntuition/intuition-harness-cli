@@ -104,7 +104,8 @@ fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn 
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Next refresh: 42s"));
+        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Linear refresh: 42s"));
 
     Ok(())
 }
@@ -144,7 +145,8 @@ fn listen_cli_poll_interval_overrides_repo_default() -> Result<(), Box<dyn Error
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Next refresh: 9s"));
+        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Linear refresh: 9s"));
 
     Ok(())
 }

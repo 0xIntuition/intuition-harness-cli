@@ -382,18 +382,20 @@ meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "ma
 Behavior summary:
 
 - `--json` emits the resolved GitHub repository metadata plus the open PR list used by the dashboard and planner.
-- Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, and launch immediately.
+- Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
-- `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly.
+- `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
 - Publication is gated on those validation commands succeeding; when validation fails, the aggregate branch artifacts are kept locally and no GitHub PR is created or updated.
+- Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
 
 - `context.json` with the repository, selected PR set, aggregate branch, and isolated workspace path
 - `agent-plan-prompt.md` with the exact planner prompt sent to the configured local agent
 - `plan.json` with the agent-selected merge order and conflict hotspots
-- `merge-progress.json` with per-PR outcomes
+- `progress.json` with the current phase, active substep detail, phase states, and the full structured event trail needed to reconstruct success and failure paths
+- `merge-progress.json` with the structured run snapshot plus per-PR outcomes
 - `validation.json` with the executed validation commands and captured output
 - `aggregate-pr-body.md` with the Markdown body used when creating or updating the aggregate PR
 - `publication.json` with the aggregate PR publication result
@@ -477,6 +479,8 @@ Side effects:
 - runs the shell command first when configured, then the optional agent in the same working directory
 - creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
 
+In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`.
+
 Cron job files use this shape:
 
 ```md
@@ -505,6 +509,8 @@ meta backlog plan --no-interactive --request "Plan a dashboard for feature intak
 Legacy alias: `meta plan`
 
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
+
+Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow.
 
 For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values.
 
@@ -612,6 +618,7 @@ Notes:
 
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
+- In the interactive create/edit forms, multiline descriptions advance on `Enter` and insert a newline on `Shift+Enter`
 - `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
 - `meta dashboard linear` is the preferred Linear dashboard path; bare `meta dashboard` remains a compatibility alias during migration
 
@@ -628,6 +635,8 @@ Run the unattended agent daemon. The listener watches Todo issues, applies repo-
 Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
+
+The live dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried.
 
 Examples:
 

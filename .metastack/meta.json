@@ -5,9 +5,9 @@
     "project_id": "5601d0a8-ba80-4cc0-b9f4-48f2b759e1a0"
   },
   "agent": {
-    "provider": "codex",
-    "model": null,
-    "reasoning": null
+    "provider": "claude",
+    "model": "opus",
+    "reasoning": "high"
   },
   "listen": {
     "required_label": null,

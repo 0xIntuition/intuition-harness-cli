@@ -1,0 +1,25 @@
+{
+  "run_id": "20260316T230447Z",
+  "repository": {
+    "name_with_owner": "0xIntuition/metastack-cli",
+    "url": "https://github.com/0xIntuition/metastack-cli",
+    "default_branch": "main"
+  },
+  "selected_pull_requests": [
+    {
+      "number": 7,
+      "title": "ENG-10095: Update meta agents listen dashboard refresh cadence",
+      "body": "## Summary\n- decouple the live listen dashboard refresh cadence from the Linear poll interval\n- refresh dashboard session data from persisted listen state every second while keeping Linear polling configurable\n- add focused coverage for state-snapshot dashboard refresh behavior\n\n## Testing\n- cargo test cycle_state_snapshot_refreshes_sessions_without_resetting_linear_data -- --nocapture\n- cargo test listen_render_once_demo_outputs_dashboard_snapshot -- --nocapture\n- cargo test listen_uses_repo_configured_poll_interval_by_default -- --nocapture",
+      "url": "https://github.com/0xIntuition/metastack-cli/pull/7",
+      "headRefName": "eng-10095-update-meta-agents-listen-dashboard-interface",
+      "baseRefName": "main",
+      "updatedAt": "2026-03-16T22:50:23Z",
+      "author": {
+        "login": "kamescg"
+      }
+    }
+  ],
+  "source_root": "/Users/metasudo/workspace/intution/stack/metastack-cli",
+  "workspace_path": "/Users/metasudo/workspace/intution/stack/metastack-cli-workspace/merge-runs/20260316T230447Z",
+  "aggregate_branch": "meta-merge/20260316T230447Z"
+}

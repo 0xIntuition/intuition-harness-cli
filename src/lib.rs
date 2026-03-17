@@ -13,6 +13,7 @@ mod listen;
 mod merge;
 mod merge_dashboard;
 mod plan;
+mod progress;
 mod repo_target;
 mod scaffold;
 mod scan;

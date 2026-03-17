@@ -299,7 +299,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     let footer = Paragraph::new(Text::from(vec![
         Line::from("Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections."),
         Line::from(
-            "Type to edit text fields. In Prompt, Enter adds a line. Ctrl+S or Enter on other rows creates the job. Esc cancels.",
+            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline. Ctrl+S also creates the job. Esc cancels.",
         ),
         Line::from(
             app.error
@@ -374,7 +374,10 @@ impl CronInitApp {
                 self.next_field();
                 return None;
             }
-            KeyCode::Enter if self.focus == CronField::Prompt => {
+            KeyCode::Enter
+                if self.focus == CronField::Prompt
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
                 let _ = self.prompt.insert_newline();
                 return None;
             }
@@ -1086,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_from_prompt_adds_a_newline_instead_of_submitting() {
+    fn shift_enter_from_prompt_adds_a_newline_instead_of_submitting() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
@@ -1099,11 +1102,38 @@ mod tests {
         );
         app.focus = CronField::Prompt;
 
-        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
 
         assert!(exit.is_none());
         assert_eq!(app.prompt.value(), "\n");
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn enter_from_prompt_submits_the_form() {
+        let mut app = CronInitApp::new(
+            CronInitFormContext {
+                agent_options: vec!["codex".to_string()],
+            },
+            CronInitFormPrefill {
+                name: Some("nightly".to_string()),
+                command: Some("echo hello".to_string()),
+                prompt: Some("Summarize failures".to_string()),
+                ..CronInitFormPrefill::default()
+            },
+        );
+        app.focus = CronField::Prompt;
+
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match exit {
+            Some(CronInitFormExit::Submitted(values)) => {
+                assert_eq!(values.name, "nightly");
+                assert_eq!(values.command, "echo hello");
+                assert_eq!(values.prompt.as_deref(), Some("Summarize failures"));
+            }
+            other => panic!("expected submitted exit, got {other:?}"),
+        }
     }
 
     #[test]
