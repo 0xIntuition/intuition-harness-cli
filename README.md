@@ -578,6 +578,7 @@ Browse issues from the repo default Linear project, then pull or push the select
 meta backlog sync --api-key "$LINEAR_API_KEY"
 meta backlog sync --api-key "$LINEAR_API_KEY" pull MET-35
 meta backlog sync --api-key "$LINEAR_API_KEY" push MET-35
+meta backlog sync --api-key "$LINEAR_API_KEY" push MET-35 --update-description
 ```
 
 Legacy alias: `meta sync`
@@ -587,9 +588,23 @@ Side effects:
 - bare `meta backlog sync` opens a ratatui issue browser scoped by `.metastack/meta.json` `linear.project_id`
 - `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
 - `pull` restores CLI-managed attachment files into the same directory when present
-- `pull` writes `.metastack/backlog/<ISSUE_ID>/.linear.json`
-- `push` updates the Linear description from `index.md`
-- `push` replaces only CLI-managed attachments, leaving unrelated Linear attachments untouched
+- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash` and `remote_hash` baselines alongside the existing issue metadata
+- when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
+- in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
+- `push` replaces only CLI-managed attachments by default, leaving unrelated Linear attachments untouched
+- `push` leaves the Linear issue description unchanged unless you pass `--update-description`
+- `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
+- during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
+
+The sync dashboard and render-once snapshot also show each issue's local sync state:
+
+- `synced`: current local and remote hashes still match the stored baselines
+- `local-ahead`: local tracked backlog files changed since the last stored baseline, but the Linear issue did not
+- `remote-ahead`: the Linear issue changed since the last stored baseline, but the local backlog packet did not
+- `diverged`: both local backlog files and the Linear issue changed since the last stored baseline
+- `unlinked`: the local packet is missing or the existing `.linear.json` predates hash baselines
+
+Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded so repeat no-op syncs remain `synced`.
 
 ### `linear issues`, `linear projects`, and `dashboard`
 
