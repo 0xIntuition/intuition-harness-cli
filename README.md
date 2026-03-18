@@ -697,6 +697,8 @@ Sandbox and permission handling depends on the command path:
 
 Listen pickup now runs a preflight before the worker starts: workspace write access must succeed locally, the configured Linear API host must be reachable over the network, authenticated Linear API access must succeed, and the resolved built-in launch command must expose the required unrestricted mode for that provider.
 
+This is intentionally stricter than Codex `--full-auto`: in `codex-cli 0.115.0`, `codex exec --help` documents `--full-auto` as `--sandbox workspace-write`, which is still too restrictive for unattended listen workers that need network, git, GitHub, and Linear mutations.
+
 Agent launches receive:
 
 For `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen`, the rendered agent prompt also includes a shared repo-target contract derived from the resolved command root:

@@ -119,7 +119,7 @@ pub(super) fn verify_listen_command_capabilities(
                 return Ok(());
             }
             bail!(
-                "listen worker for `codex` requires unrestricted execution; command args were: {}",
+                "listen worker for `codex` requires `--dangerously-bypass-approvals-and-sandbox`; `codex exec --full-auto` remains sandboxed (`workspace-write`) and is not sufficient for listen. Command args were: {}",
                 command_args.join(" ")
             );
         }
@@ -150,7 +150,7 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::tempdir;
 
-    use super::{ListenPreflightRequest, run_listen_preflight};
+    use super::{ListenPreflightRequest, run_listen_preflight, verify_listen_command_capabilities};
     use crate::config::{AppConfig, LinearConfig, PlanningMeta};
     use crate::linear::{
         AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
@@ -311,6 +311,36 @@ mod tests {
                 .to_string()
                 .contains("failed to access Linear API during listen preflight")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn codex_listen_capability_check_rejects_workspace_write_alias() {
+        let error = verify_listen_command_capabilities(
+            "codex",
+            &[
+                "--full-auto".to_string(),
+                "--cd".to_string(),
+                "/tmp/workspace".to_string(),
+                "exec".to_string(),
+            ],
+        )
+        .expect_err("codex listen should reject sandboxed full-auto mode");
+
+        assert!(error.to_string().contains("--full-auto"));
+        assert!(error.to_string().contains("workspace-write"));
+    }
+
+    #[test]
+    fn claude_listen_capability_check_accepts_bypass_permission_mode() -> Result<()> {
+        verify_listen_command_capabilities(
+            "claude",
+            &[
+                "--permission-mode=bypassPermissions".to_string(),
+                "-p".to_string(),
+                "--model=sonnet".to_string(),
+            ],
+        )?;
         Ok(())
     }
 }
