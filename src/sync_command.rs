@@ -26,6 +26,7 @@ const MANAGED_ATTACHMENT_MARKER: &str = "metastack-cli";
 
 pub async fn run_sync_dashboard_command(
     client_args: &LinearClientArgs,
+    project: Option<String>,
     options: SyncDashboardOptions,
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
@@ -35,15 +36,29 @@ pub async fn run_sync_dashboard_command(
         default_team,
         default_project_id,
     } = load_linear_command_context(client_args, None)?;
-    let project_id = default_project_id.ok_or_else(|| {
-        anyhow!(
-            "`meta backlog sync` requires a repo default project. Run `meta runtime setup --root . --project <PROJECT>` and rerun."
-        )
-    })?;
+
+    let (applied_project, applied_project_id) = if project.is_some() {
+        (project, None)
+    } else {
+        let pid = default_project_id.ok_or_else(|| {
+            anyhow!(
+                "`meta backlog sync` requires a project. Pass `--project \"Project Name\"` or run `meta runtime setup --root . --project <PROJECT>`."
+            )
+        })?;
+        (None, Some(pid))
+    };
+
+    let dashboard_label = applied_project
+        .as_deref()
+        .map(|name| name.to_string())
+        .or_else(|| applied_project_id.clone())
+        .unwrap_or_default();
+
     let issues = service
         .list_issues(IssueListFilters {
             team: default_team,
-            project_id: Some(project_id.clone()),
+            project: applied_project,
+            project_id: applied_project_id,
             limit: usize::MAX,
             ..IssueListFilters::default()
         })
@@ -51,7 +66,7 @@ pub async fn run_sync_dashboard_command(
 
     match run_sync_dashboard(
         DashboardData {
-            title: format!("meta backlog sync ({project_id})"),
+            title: format!("meta backlog sync ({dashboard_label})"),
             issues,
         },
         options,

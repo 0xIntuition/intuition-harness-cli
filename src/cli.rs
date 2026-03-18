@@ -779,6 +779,9 @@ pub struct SyncArgs {
     pub client: LinearClientArgs,
     #[command(subcommand)]
     pub command: Option<SyncCommands>,
+    /// Filter issues by Linear project name (overrides the repo default project).
+    #[arg(long)]
+    pub project: Option<String>,
     /// Render the sync dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
     pub render_once: bool,
