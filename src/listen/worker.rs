@@ -85,6 +85,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, &args.issue);
     if let Err(error) = preflight::run_listen_preflight(
+        &service,
+        &linear_config,
         &app_config,
         &planning_meta,
         preflight::ListenPreflightRequest {
@@ -94,7 +96,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             reasoning: args.reasoning.as_deref(),
             require_write_access: true,
         },
-    ) {
+    )
+    .await
+    {
         write_preflight_failure(&log_path, &error)?;
         let backlog_progress = backlog_issue
             .as_ref()

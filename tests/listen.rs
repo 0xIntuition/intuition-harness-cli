@@ -53,12 +53,16 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() {
 
 #[cfg(unix)]
 #[test]
-fn listen_check_reports_codex_config_status_without_polling_linear() -> Result<(), Box<dyn Error>> {
+fn listen_check_reports_codex_config_status_and_linear_api_validation() -> Result<(), Box<dyn Error>>
+{
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let home_dir = temp.path().join("home");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(home_dir.join(".codex"))?;
@@ -76,6 +80,15 @@ fn listen_check_reports_codex_config_status_without_polling_linear() -> Result<(
   }
 }
 "#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
     )?;
     fs::write(
         home_dir.join(".codex/config.toml"),
@@ -116,11 +129,25 @@ exit 0
     fs::set_permissions(&codex_path, permissions)?;
 
     init_repo_with_origin(&repo_root)?;
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
 
     let current_path = std::env::var("PATH")?;
     meta()
         .current_dir(&repo_root)
-        .env_remove("LINEAR_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
         .env("HOME", &home_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
@@ -139,7 +166,12 @@ exit 0
         .stdout(predicate::str::contains(
             "sandbox_mode = \"danger-full-access\"",
         ))
+        .stdout(predicate::str::contains("Linear API endpoint is reachable"))
+        .stdout(predicate::str::contains(
+            "Linear API authentication succeeded.",
+        ))
         .stdout(predicate::str::contains("mcp_servers.linear.enabled=false"));
+    viewer_mock.assert_calls(1);
 
     Ok(())
 }

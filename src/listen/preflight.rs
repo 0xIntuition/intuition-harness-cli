@@ -1,8 +1,11 @@
 use std::env;
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use reqwest::Url;
 use toml::Value;
 
 use crate::agents::{
@@ -10,7 +13,8 @@ use crate::agents::{
     validate_invocation_command_surface,
 };
 use crate::cli::RunAgentArgs;
-use crate::config::{AGENT_ROUTE_AGENTS_LISTEN, AppConfig, PlanningMeta};
+use crate::config::{AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta};
+use crate::linear::{LinearClient, LinearService};
 
 pub(super) struct ListenPreflightRequest<'a> {
     pub(super) working_dir: &'a Path,
@@ -91,15 +95,25 @@ pub(super) fn is_missing_agent_selection(error: &anyhow::Error) -> bool {
         .contains("no agent was selected for route `agents.listen`")
 }
 
-pub(super) fn run_listen_preflight(
+pub(super) async fn run_listen_preflight<C>(
+    service: &LinearService<C>,
+    linear_config: &LinearConfig,
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    request: ListenPreflightRequest<'_>,
+) -> Result<ListenPreflightReport>
+where
+    C: LinearClient,
+{
+    let report = run_listen_provider_preflight(app_config, planning_meta, request)?;
+    complete_listen_preflight(service, linear_config, report).await
+}
+
+pub(super) fn run_listen_provider_preflight(
     app_config: &AppConfig,
     planning_meta: &PlanningMeta,
     request: ListenPreflightRequest<'_>,
 ) -> Result<ListenPreflightReport> {
-    if request.require_write_access {
-        verify_workspace_write_access(request.working_dir)?;
-    }
-
     let invocation = resolve_agent_invocation_for_planning(
         app_config,
         planning_meta,
@@ -119,6 +133,13 @@ pub(super) fn run_listen_preflight(
     verify_listen_command_capabilities(&invocation.agent, &command_args)?;
 
     let mut report = ListenPreflightReport::new(invocation.agent.clone());
+    if request.require_write_access {
+        verify_workspace_write_access(request.working_dir)?;
+        report.push_check(format!(
+            "Workspace `{}` is writable.",
+            request.working_dir.display()
+        ));
+    }
     report.push_check(format!("Resolved listen command: `{attempted_command}`"));
 
     match invocation.agent.as_str() {
@@ -127,6 +148,24 @@ pub(super) fn run_listen_preflight(
         _ => {}
     }
 
+    Ok(report)
+}
+
+pub(super) async fn complete_listen_preflight<C>(
+    service: &LinearService<C>,
+    linear_config: &LinearConfig,
+    mut report: ListenPreflightReport,
+) -> Result<ListenPreflightReport>
+where
+    C: LinearClient,
+{
+    verify_network_connectivity(&linear_config.api_url)?;
+    report.push_check(format!(
+        "Linear API endpoint is reachable at `{}`.",
+        linear_config.api_url
+    ));
+    verify_linear_api_access(service).await?;
+    report.push_check("Linear API authentication succeeded.");
     Ok(report)
 }
 
@@ -142,6 +181,46 @@ pub(super) fn verify_workspace_write_access(workspace_path: &Path) -> Result<()>
         .with_context(|| format!("workspace `{}` is not writable", workspace_path.display()))?;
     fs::remove_file(&probe_path)
         .with_context(|| format!("failed to remove `{}`", probe_path.display()))?;
+    Ok(())
+}
+
+pub(super) fn verify_network_connectivity(api_url: &str) -> Result<()> {
+    let url = Url::parse(api_url)
+        .with_context(|| format!("failed to parse Linear API URL `{api_url}` for preflight"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("Linear API URL `{api_url}` does not include a hostname"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("Linear API URL `{api_url}` does not include a known port"))?;
+    let mut last_error = None;
+    for address in (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve `{host}:{port}` during listen preflight"))?
+    {
+        match TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    let detail = last_error
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "no addresses available".to_string());
+    bail!("failed to connect to `{host}:{port}` during listen preflight: {detail}");
+}
+
+pub(super) async fn verify_linear_api_access<C>(service: &LinearService<C>) -> Result<()>
+where
+    C: LinearClient,
+{
+    service
+        .viewer()
+        .await
+        .context("failed to access Linear API during listen preflight")?;
     Ok(())
 }
 
@@ -331,21 +410,213 @@ pub(super) fn verify_listen_command_capabilities(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::env;
     use std::fs;
+    use std::net::TcpListener;
     use std::sync::{Mutex, OnceLock};
 
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
+    use async_trait::async_trait;
     use tempfile::tempdir;
 
     use super::{
-        ListenPreflightReport, display_setting, load_codex_global_config_status,
-        verify_claude_listen_prerequisites, verify_listen_command_capabilities,
+        ListenPreflightReport, ListenPreflightRequest, display_setting,
+        load_codex_global_config_status, run_listen_preflight, verify_claude_listen_prerequisites,
+        verify_listen_command_capabilities,
+    };
+    use crate::config::{
+        AgentCommandConfig, AgentSettings, AppConfig, LinearConfig, PlanningMeta, PromptTransport,
+    };
+    use crate::linear::{
+        AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
+        IssueLabelCreateRequest, IssueListFilters, IssueSummary, LabelRef, LinearClient,
+        LinearService, ProjectSummary, TeamSummary, UserRef,
     };
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn stub_app_config() -> AppConfig {
+        AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("stub".to_string()),
+                commands: BTreeMap::from([(
+                    "stub".to_string(),
+                    AgentCommandConfig {
+                        command: "stub-agent".to_string(),
+                        args: vec!["{{payload}}".to_string()],
+                        transport: PromptTransport::Arg,
+                    },
+                )]),
+                ..AgentSettings::default()
+            },
+            ..AppConfig::default()
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct StubLinearClient {
+        viewer_error: Option<String>,
+    }
+
+    #[async_trait]
+    impl LinearClient for StubLinearClient {
+        async fn list_projects(&self, _: usize) -> Result<Vec<ProjectSummary>> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn list_issues(&self, _: usize) -> Result<Vec<IssueSummary>> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn list_filtered_issues(&self, _: &IssueListFilters) -> Result<Vec<IssueSummary>> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn list_issue_labels(&self, _: Option<&str>) -> Result<Vec<LabelRef>> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn get_issue(&self, _: &str) -> Result<IssueSummary> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn viewer(&self) -> Result<UserRef> {
+            if let Some(error) = &self.viewer_error {
+                Err(anyhow!(error.clone()))
+            } else {
+                Ok(UserRef {
+                    id: "viewer-1".to_string(),
+                    name: "Viewer".to_string(),
+                    email: Some("viewer@example.com".to_string()),
+                })
+            }
+        }
+
+        async fn create_issue(&self, _: IssueCreateRequest) -> Result<IssueSummary> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn create_issue_label(&self, _: IssueLabelCreateRequest) -> Result<LabelRef> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn update_issue(
+            &self,
+            _: &str,
+            _: crate::linear::IssueUpdateRequest,
+        ) -> Result<IssueSummary> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn create_comment(&self, _: &str, _: String) -> Result<IssueComment> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn update_comment(&self, _: &str, _: String) -> Result<IssueComment> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn upload_file(&self, _: &str, _: &str, _: Vec<u8>) -> Result<String> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn create_attachment(&self, _: AttachmentCreateRequest) -> Result<AttachmentSummary> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn delete_attachment(&self, _: &str) -> Result<()> {
+            unreachable!("unused in preflight tests")
+        }
+
+        async fn download_file(&self, _: &str) -> Result<Vec<u8>> {
+            unreachable!("unused in preflight tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn listen_preflight_reports_linear_connectivity_and_viewer_access() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace = temp.path();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let linear_config = LinearConfig {
+            api_key: "token".to_string(),
+            api_url: format!("http://{}/graphql", listener.local_addr()?),
+            default_team: None,
+        };
+        let service = LinearService::new(
+            StubLinearClient { viewer_error: None },
+            linear_config.default_team.clone(),
+        );
+
+        let report = run_listen_preflight(
+            &service,
+            &linear_config,
+            &stub_app_config(),
+            &PlanningMeta::default(),
+            ListenPreflightRequest {
+                working_dir: workspace,
+                agent: None,
+                model: None,
+                reasoning: None,
+                require_write_access: false,
+            },
+        )
+        .await?;
+
+        let rendered = report.render();
+        assert!(rendered.contains("Linear API endpoint is reachable"));
+        assert!(rendered.contains("Linear API authentication succeeded."));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listen_preflight_fails_when_linear_viewer_check_fails() {
+        let temp = tempdir().expect("tempdir");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let linear_config = LinearConfig {
+            api_key: "token".to_string(),
+            api_url: format!(
+                "http://{}/graphql",
+                listener.local_addr().expect("local addr")
+            ),
+            default_team: None,
+        };
+        let service = LinearService::new(
+            StubLinearClient {
+                viewer_error: Some("viewer rejected".to_string()),
+            },
+            linear_config.default_team.clone(),
+        );
+
+        let error = run_listen_preflight(
+            &service,
+            &linear_config,
+            &stub_app_config(),
+            &PlanningMeta::default(),
+            ListenPreflightRequest {
+                working_dir: temp.path(),
+                agent: None,
+                model: None,
+                reasoning: None,
+                require_write_access: false,
+            },
+        )
+        .await
+        .expect_err("viewer failure should fail preflight");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to access Linear API during listen preflight")
+        );
     }
 
     #[test]
