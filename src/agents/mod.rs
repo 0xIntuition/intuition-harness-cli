@@ -311,6 +311,46 @@ mod tests {
     }
 
     #[test]
+    fn builtin_codex_execution_omits_reasoning_override_when_unset() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("codex".to_string()),
+                prompt: "Ship setup flow".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        assert_eq!(invocation.args[0], "exec");
+        assert_eq!(invocation.args[1], "--model=gpt-5.4");
+        assert!(!invocation.args.iter().any(|arg| arg == "-c"));
+        assert!(
+            !invocation
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("reasoning.effort="))
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn builtin_codex_listen_execution_uses_unrestricted_permissions() -> Result<()> {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
@@ -420,6 +460,45 @@ mod tests {
         assert_eq!(invocation.args[0], "-p");
         assert_eq!(invocation.args[1], "--model=sonnet");
         assert_eq!(invocation.args[2], "--effort=max");
+
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_claude_execution_omits_effort_when_reasoning_is_unset() -> Result<()> {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: None,
+                default_model: Some("sonnet".to_string()),
+                default_reasoning: None,
+                routing: Default::default(),
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let invocation = resolve_agent_invocation_for_planning(
+            &config,
+            &PlanningMeta::default(),
+            &RunAgentArgs {
+                root: None,
+                route_key: None,
+                agent: Some("claude".to_string()),
+                prompt: "Draft the review summary".to_string(),
+                instructions: None,
+                model: None,
+                reasoning: None,
+                transport: None,
+            },
+        )?;
+
+        assert_eq!(invocation.args[0], "-p");
+        assert_eq!(invocation.args[1], "--model=sonnet");
+        assert!(
+            !invocation
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("--effort="))
+        );
 
         Ok(())
     }
