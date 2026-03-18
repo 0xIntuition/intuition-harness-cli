@@ -1,4 +1,5 @@
 pub mod dashboard;
+mod preflight;
 mod state;
 mod store;
 mod web;
@@ -35,7 +36,7 @@ use crate::cli::{
     ListenSessionResumeArgs, ListenWorkerArgs,
 };
 use crate::config::{
-    LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
+    AppConfig, LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
     PlanningMeta, load_required_planning_meta,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
@@ -361,6 +362,8 @@ struct AgentDaemon<C> {
     filters: IssueListFilters,
     max_pickups: usize,
     linear_config: LinearConfig,
+    app_config: AppConfig,
+    planning_meta: PlanningMeta,
     worker_agent: Option<String>,
     worker_model: Option<String>,
     worker_reasoning: Option<String>,
@@ -919,6 +922,37 @@ where
                 ));
             }
         };
+        if let Err(error) = preflight::run_listen_preflight(
+            &self.service,
+            &self.linear_config,
+            &self.app_config,
+            &self.planning_meta,
+            preflight::ListenPreflightRequest {
+                workspace_path: &workspace.workspace_path,
+                agent: self.worker_agent.as_deref(),
+                model: self.worker_model.as_deref(),
+                reasoning: self.worker_reasoning.as_deref(),
+            },
+        )
+        .await
+        {
+            let log_path = self.agent_log_path(&detailed_issue.identifier);
+            let _ = worker::write_preflight_failure(&log_path, &error);
+            return Ok(self.build_session(
+                &detailed_issue,
+                SessionPhase::Blocked,
+                compact_session_summary([
+                    Some("Blocked | missing exec capability".to_string()),
+                    Some(truncate_summary(&error.to_string(), 72)),
+                ]),
+                SessionArtifacts {
+                    workspace: Some(&workspace),
+                    log_path: Some(log_path.display().to_string()),
+                    ..SessionArtifacts::default()
+                },
+                updated_at_epoch_seconds,
+            ));
+        }
         let backlog_issue = match self
             .ensure_backlog_issue(&detailed_issue, &workspace.workspace_path)
             .await
@@ -1641,6 +1675,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let root = resolve_source_project_root(&requested_root)?;
     let planning_meta = load_required_planning_meta(&root, "listen")?;
     ensure_planning_layout(&root, false)?;
+    let app_config = AppConfig::load()?;
     let poll_interval_seconds = resolve_listen_poll_interval_seconds(args, &planning_meta);
 
     if args.demo {
@@ -1735,6 +1770,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         },
         max_pickups: args.max_pickups.max(1),
         linear_config: config.clone(),
+        app_config,
+        planning_meta: planning_meta.clone(),
         worker_agent: args.agent.clone(),
         worker_model: args.model.clone(),
         worker_reasoning: args.reasoning.clone(),

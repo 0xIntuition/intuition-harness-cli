@@ -173,7 +173,9 @@ printf 'codex builtin ok'
     assert!(args.contains("never"));
     assert!(args.contains("exec"));
     assert!(args.contains("--model=gpt-5.4"));
-    assert!(args.contains("--reasoning=medium"));
+    assert!(args.contains("-c"));
+    assert!(args.contains("reasoning.effort=\"medium\""));
+    assert!(!args.contains("--reasoning="));
     assert!(args.contains("Summarize the builtin provider launch behavior."));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "codex");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "gpt-5.4");
@@ -255,6 +257,7 @@ printf 'claude builtin ok'
     let args = fs::read_to_string(stub_dir.join("args.txt"))?;
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
+    assert!(args.contains("--effort=high"));
     assert!(!args.contains("--reasoning="));
     assert!(args.contains("Summarize the builtin provider launch behavior."));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");

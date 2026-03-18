@@ -7,6 +7,14 @@ use crate::config::{AgentCommandConfig, PromptTransport, normalize_agent_name};
 use crate::fs::canonicalize_existing_dir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinInvocationContext {
+    Planning,
+    Scan,
+    Listen,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinReasoningOption {
     pub key: &'static str,
     pub label: &'static str,
@@ -27,6 +35,7 @@ pub trait BuiltinProviderAdapter: Sync {
         &self,
         launch_args: &[String],
         working_dir: Option<&Path>,
+        context: BuiltinInvocationContext,
     ) -> Result<Vec<String>>;
 
     fn command_definition(&self) -> AgentCommandConfig {
@@ -50,11 +59,19 @@ const REASONING_HIGH: BuiltinReasoningOption = BuiltinReasoningOption {
     key: "high",
     label: "High",
 };
+const REASONING_MAX: BuiltinReasoningOption = BuiltinReasoningOption {
+    key: "max",
+    label: "Max",
+};
 
-const REASONING_LOW_MEDIUM: &[BuiltinReasoningOption] = &[REASONING_LOW, REASONING_MEDIUM];
 const REASONING_LOW_MEDIUM_HIGH: &[BuiltinReasoningOption] =
     &[REASONING_LOW, REASONING_MEDIUM, REASONING_HIGH];
-const REASONING_HIGH_ONLY: &[BuiltinReasoningOption] = &[REASONING_HIGH];
+const REASONING_LOW_MEDIUM_HIGH_MAX: &[BuiltinReasoningOption] = &[
+    REASONING_LOW,
+    REASONING_MEDIUM,
+    REASONING_HIGH,
+    REASONING_MAX,
+];
 
 const CODEX_MODELS: &[BuiltinModelCatalogEntry] = &[
     BuiltinModelCatalogEntry {
@@ -94,27 +111,25 @@ const CODEX_MODELS: &[BuiltinModelCatalogEntry] = &[
 const CLAUDE_MODELS: &[BuiltinModelCatalogEntry] = &[
     BuiltinModelCatalogEntry {
         key: "sonnet",
-        reasoning_options: REASONING_LOW_MEDIUM_HIGH,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "opus",
-        reasoning_options: REASONING_LOW_MEDIUM_HIGH,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "haiku",
-        reasoning_options: REASONING_LOW_MEDIUM,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "sonnet[1m]",
-        reasoning_options: REASONING_MEDIUM_HIGH,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
     BuiltinModelCatalogEntry {
         key: "opusplan",
-        reasoning_options: REASONING_HIGH_ONLY,
+        reasoning_options: REASONING_LOW_MEDIUM_HIGH_MAX,
     },
 ];
-
-const REASONING_MEDIUM_HIGH: &[BuiltinReasoningOption] = &[REASONING_MEDIUM, REASONING_HIGH];
 
 struct CodexProviderAdapter;
 struct ClaudeProviderAdapter;
@@ -134,7 +149,8 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
             args.push(format!("--model={model}"));
         }
         if let Some(reasoning) = reasoning.map(str::trim).filter(|value| !value.is_empty()) {
-            args.push(format!("--reasoning={reasoning}"));
+            args.push("-c".to_string());
+            args.push(format!("reasoning.effort=\"{reasoning}\""));
         }
         args
     }
@@ -147,13 +163,19 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
         &self,
         launch_args: &[String],
         working_dir: Option<&Path>,
+        context: BuiltinInvocationContext,
     ) -> Result<Vec<String>> {
-        let mut args = vec![
-            "--sandbox".to_string(),
-            "workspace-write".to_string(),
-            "--ask-for-approval".to_string(),
-            "never".to_string(),
-        ];
+        let mut args = match context {
+            BuiltinInvocationContext::Listen => {
+                vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]
+            }
+            _ => vec![
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "--ask-for-approval".to_string(),
+                "never".to_string(),
+            ],
+        };
 
         if let Some(working_dir) = working_dir {
             let workspace = canonicalize_existing_dir(working_dir)?;
@@ -185,6 +207,9 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
             args.push(format!("--model={model}"));
         }
+        if let Some(reasoning) = _reasoning.map(str::trim).filter(|value| !value.is_empty()) {
+            args.push(format!("--effort={reasoning}"));
+        }
         args
     }
 
@@ -196,8 +221,14 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         &self,
         launch_args: &[String],
         _working_dir: Option<&Path>,
+        context: BuiltinInvocationContext,
     ) -> Result<Vec<String>> {
-        Ok(launch_args.to_vec())
+        let mut args = Vec::new();
+        if context == BuiltinInvocationContext::Listen {
+            args.push("--permission-mode=bypassPermissions".to_string());
+        }
+        args.extend(launch_args.to_vec());
+        Ok(args)
     }
 }
 
