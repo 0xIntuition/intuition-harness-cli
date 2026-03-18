@@ -2392,6 +2392,15 @@ default_reasoning = "low"
     fs::write(
         &claude_path,
         r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
@@ -2409,6 +2418,23 @@ printf 'claude listen ok'
     fs::write(
         &codex_path,
         r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
 printf 'codex fallback invoked' > "$TEST_OUTPUT_DIR/codex.txt"
 exit 99
 "#,

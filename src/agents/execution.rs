@@ -134,6 +134,32 @@ pub(crate) fn apply_invocation_environment(
     );
 }
 
+pub(crate) fn attempted_command(command: &str, command_args: &[String]) -> String {
+    format!("{command} {}", command_args.join(" "))
+}
+
+pub(crate) fn validate_invocation_command_surface(
+    invocation: &ResolvedAgentInvocation,
+    command_args: &[String],
+) -> Result<String> {
+    let attempted = attempted_command(&invocation.command, command_args);
+    if invocation.builtin_provider {
+        builtin_provider_adapter(&invocation.agent)
+            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
+            .validate_command_args(command_args)
+            .with_context(|| {
+                format!(
+                    "built-in provider `{}` launch validation failed before running `{attempted}` (model: {}, reasoning: {})",
+                    invocation.agent,
+                    invocation.model.as_deref().unwrap_or("unset"),
+                    invocation.reasoning.as_deref().unwrap_or("unset"),
+                )
+            })?;
+    }
+
+    Ok(attempted)
+}
+
 pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     let config = AppConfig::load()?;
     let planning_meta = match args.root.as_deref() {
@@ -142,7 +168,7 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     };
     let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, args)?;
     let command_args = command_args_for_invocation(&invocation, None)?;
-    let attempted_command = format!("{} {}", invocation.command, command_args.join(" "));
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
 
     let mut command = Command::new(&invocation.command);
     command.args(&command_args);

@@ -6,7 +6,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Url;
 
-use crate::agents::{command_args_for_invocation, resolve_agent_invocation_for_planning};
+use crate::agents::{
+    command_args_for_invocation, resolve_agent_invocation_for_planning,
+    validate_invocation_command_surface,
+};
 use crate::cli::RunAgentArgs;
 use crate::config::{AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta};
 use crate::linear::{LinearClient, LinearService};
@@ -47,6 +50,7 @@ where
         },
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(request.workspace_path))?;
+    validate_invocation_command_surface(&invocation, &command_args)?;
     verify_listen_command_capabilities(&invocation.agent, &command_args)?;
     Ok(())
 }

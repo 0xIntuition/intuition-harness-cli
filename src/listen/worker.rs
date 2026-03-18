@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::agents::{
     apply_invocation_environment, command_args_for_invocation, render_invocation_diagnostics,
-    resolve_agent_invocation_for_planning,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
@@ -484,6 +484,7 @@ fn execute_agent_turn(
         &run_args,
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(context.workspace_path))?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
     let log_path = agent_log_path(context.source_root, &issue.identifier);
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
@@ -590,8 +591,8 @@ fn execute_agent_turn(
 
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch agent `{}` with command `{}`",
-            invocation.agent, invocation.command
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
         )
     })?;
 

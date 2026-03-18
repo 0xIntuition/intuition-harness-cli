@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
@@ -37,6 +40,7 @@ pub trait BuiltinProviderAdapter: Sync {
         working_dir: Option<&Path>,
         context: BuiltinInvocationContext,
     ) -> Result<Vec<String>>;
+    fn validate_command_args(&self, command_args: &[String]) -> Result<()>;
 
     fn command_definition(&self) -> AgentCommandConfig {
         AgentCommandConfig {
@@ -191,6 +195,86 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
         args.extend(launch_args.to_vec());
         Ok(args)
     }
+
+    fn validate_command_args(&self, command_args: &[String]) -> Result<()> {
+        let exec_index = command_args
+            .iter()
+            .position(|arg| arg == "exec")
+            .ok_or_else(|| anyhow::anyhow!("built-in codex launch args are missing `exec`"))?;
+
+        let top_level_args = &command_args[..exec_index];
+        let exec_args = &command_args[exec_index + 1..];
+
+        validate_help_surface(
+            "codex",
+            &["--help"],
+            &[
+                (
+                    top_level_args.iter().any(|arg| arg == "--sandbox"),
+                    "top-level sandbox flags",
+                    &[FlagSupport::new(
+                        "--sandbox",
+                        &["--sandbox <SANDBOX_MODE>", "-s, --sandbox <SANDBOX_MODE>"],
+                    )][..],
+                ),
+                (
+                    top_level_args
+                        .iter()
+                        .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+                    "top-level sandbox flags",
+                    &[FlagSupport::new(
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        &["--dangerously-bypass-approvals-and-sandbox"],
+                    )][..],
+                ),
+                (
+                    top_level_args.iter().any(|arg| arg == "--ask-for-approval"),
+                    "top-level approval flags",
+                    &[FlagSupport::new(
+                        "--ask-for-approval",
+                        &[
+                            "--ask-for-approval <APPROVAL_POLICY>",
+                            "-a, --ask-for-approval <APPROVAL_POLICY>",
+                        ],
+                    )][..],
+                ),
+                (
+                    top_level_args.iter().any(|arg| arg == "--cd"),
+                    "top-level working-directory flags",
+                    &[FlagSupport::new("--cd", &["--cd <DIR>", "-C, --cd <DIR>"])][..],
+                ),
+                (
+                    top_level_args.iter().any(|arg| arg == "--add-dir"),
+                    "top-level writable-root flags",
+                    &[FlagSupport::new("--add-dir", &["--add-dir <DIR>"])][..],
+                ),
+            ],
+        )?;
+        validate_help_surface(
+            "codex",
+            &["exec", "--help"],
+            &[
+                (
+                    exec_args.iter().any(|arg| arg.starts_with("--model=")),
+                    "exec model flags",
+                    &[FlagSupport::new(
+                        "--model",
+                        &["--model <MODEL>", "-m, --model <MODEL>"],
+                    )][..],
+                ),
+                (
+                    exec_args.iter().any(|arg| arg == "-c"),
+                    "exec config flags",
+                    &[FlagSupport::new(
+                        "-c",
+                        &["-c, --config <key=value>", "--config <key=value>"],
+                    )][..],
+                ),
+            ],
+        )?;
+
+        Ok(())
+    }
 }
 
 impl BuiltinProviderAdapter for ClaudeProviderAdapter {
@@ -229,6 +313,40 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         }
         args.extend(launch_args.to_vec());
         Ok(args)
+    }
+
+    fn validate_command_args(&self, command_args: &[String]) -> Result<()> {
+        validate_help_surface(
+            "claude",
+            &["-p", "--help"],
+            &[
+                (
+                    command_args.iter().any(|arg| arg == "-p"),
+                    "print-mode flags",
+                    &[FlagSupport::new("-p", &["-p, --print", "--print"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| arg.starts_with("--model=")),
+                    "model flags",
+                    &[FlagSupport::new("--model", &["--model <model>"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| arg.starts_with("--effort=")),
+                    "effort flags",
+                    &[FlagSupport::new("--effort", &["--effort <level>"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| {
+                        arg == "--permission-mode" || arg.starts_with("--permission-mode=")
+                    }),
+                    "permission-mode flags",
+                    &[FlagSupport::new(
+                        "--permission-mode",
+                        &["--permission-mode <mode>"],
+                    )][..],
+                ),
+            ],
+        )
     }
 }
 
@@ -310,4 +428,107 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[derive(Clone, Copy)]
+struct FlagSupport {
+    emitted_flag: &'static str,
+    accepted_patterns: &'static [&'static str],
+}
+
+impl FlagSupport {
+    const fn new(emitted_flag: &'static str, accepted_patterns: &'static [&'static str]) -> Self {
+        Self {
+            emitted_flag,
+            accepted_patterns,
+        }
+    }
+}
+
+static HELP_OUTPUT_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn validate_help_surface(
+    command: &str,
+    help_args: &[&str],
+    checks: &[(bool, &str, &[FlagSupport])],
+) -> Result<()> {
+    if checks.iter().all(|(required, _, _)| !*required) {
+        return Ok(());
+    }
+
+    let help_output = cached_help_output(command, help_args)?;
+    for (required, scope, flags) in checks.iter().copied() {
+        if !required {
+            continue;
+        }
+        for flag in flags {
+            if flag
+                .accepted_patterns
+                .iter()
+                .all(|pattern| !help_output.contains(*pattern))
+            {
+                bail!(
+                    "installed `{}` {} does not advertise emitted flag `{}`; checked `{}`",
+                    command,
+                    scope,
+                    flag.emitted_flag,
+                    std::iter::once(command)
+                        .chain(help_args.iter().copied())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cached_help_output(command: &str, help_args: &[&str]) -> Result<String> {
+    let path_key = env::var("PATH").unwrap_or_default();
+    let cache_key = std::iter::once(command)
+        .chain(help_args.iter().copied())
+        .chain(std::iter::once(path_key.as_str()))
+        .collect::<Vec<_>>()
+        .join("\u{0}");
+    let cache = HELP_OUTPUT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    {
+        let cache_guard = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("built-in CLI help cache lock is poisoned"))?;
+        if let Some(output) = cache_guard.get(&cache_key) {
+            return Ok(output.clone());
+        }
+    }
+
+    let output = Command::new(command)
+        .args(help_args)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run `{}` while validating built-in CLI flags",
+                std::iter::once(command)
+                    .chain(help_args.iter().copied())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "`{}` failed while validating built-in CLI flags: {}",
+            std::iter::once(command)
+                .chain(help_args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let help_output = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut cache_guard = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("built-in CLI help cache lock is poisoned"))?;
+    cache_guard.insert(cache_key, help_output.clone());
+    Ok(help_output)
 }

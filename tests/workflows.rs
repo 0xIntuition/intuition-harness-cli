@@ -137,6 +137,23 @@ default_reasoning = "medium"
     fs::write(
         &stub_path,
         r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
@@ -225,6 +242,15 @@ default_reasoning = "high"
     fs::write(
         &stub_path,
         r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
@@ -263,6 +289,93 @@ printf 'claude builtin ok'
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
     assert_eq!(fs::read_to_string(stub_dir.join("reasoning.txt"))?, "high");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workflows_run_fails_fast_when_builtin_codex_help_surface_drift_is_detected()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    fs::create_dir_all(&bin_dir)?;
+
+    fs::write(
+        repo_root.join(".metastack/workflows/builtin-proof.md"),
+        r#"---
+name: builtin-proof
+summary: Minimal workflow for builtin provider execution.
+provider: codex
+model: gpt-5.4
+reasoning: medium
+---
+
+Summarize the builtin provider launch behavior.
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "medium"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+EOF
+  exit 0
+fi
+printf 'unexpected launch'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "workflows",
+            "run",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "builtin-proof",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "built-in provider `codex` launch validation failed before running",
+        ))
+        .stderr(predicate::str::contains("model: gpt-5.4"))
+        .stderr(predicate::str::contains("reasoning: medium"))
+        .stderr(predicate::str::contains("codex --sandbox workspace-write"))
+        .stderr(predicate::str::contains("codex exec --help"))
+        .stderr(predicate::str::contains(
+            "does not advertise emitted flag `-c`",
+        ));
 
     Ok(())
 }
@@ -320,6 +433,15 @@ reasoning = "high"
     fs::write(
         &stub_path,
         r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
