@@ -255,10 +255,7 @@ now render reasoning as a select field tied to the current provider/model choice
 Built-in reasoning options shipped in-repo:
 
 - `codex` `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5-codex`, `gpt-5-codex-mini`: `low`, `medium`, `high`
-- `claude` `sonnet`, `opus`: `low`, `medium`, `high`
-- `claude` `haiku`: `low`, `medium`
-- `claude` `sonnet[1m]`: `medium`, `high`
-- `claude` `opusplan`: `high`
+- `claude` `sonnet`, `opus`, `haiku`, `sonnet[1m]`, `opusplan`: `low`, `medium`, `high`, `max`
 
 Use `meta runtime config --advanced-routing` for the dedicated routing dashboard, or use
 `--route`, `--route-agent`, `--route-model`, `--route-reasoning`, and `--clear-route` for
@@ -691,7 +688,16 @@ Agent-backed commands use stable route keys so different workflows can resolve d
 
 Workflow playbooks can still declare a built-in provider, but that value is now only used as the final fallback when the explicit, route, repo, and global config layers do not select one.
 
-The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. For the built-in Codex adapter, metastack also forces `workspace-write`, `--ask-for-approval never`, and the target working directory so unattended runs can write inside the issue workspace instead of inheriting a read-only default.
+The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
+
+Sandbox and permission handling depends on the command path:
+
+- `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
+- `meta context scan`, `meta backlog plan`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
+
+Listen pickup now runs a preflight before the worker starts: workspace write access must succeed locally, the configured Linear API host must be reachable over the network, authenticated Linear API access must succeed, and the resolved built-in launch command must expose the required unrestricted mode for that provider.
+
+This is intentionally stricter than Codex `--full-auto`: in `codex-cli 0.115.0`, `codex exec --help` documents `--full-auto` as `--sandbox workspace-write`, which is still too restrictive for unattended listen workers that need network, git, GitHub, and Linear mutations.
 
 Agent launches receive:
 

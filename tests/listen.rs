@@ -1254,7 +1254,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             .is_file()
     );
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 2);
     teams_mock.assert_calls(1);
     issue_detail_mock.assert_calls(1);
     create_backlog_mock.assert_calls(0);
@@ -2304,7 +2304,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         .success()
         .stdout(predicate::str::contains("MET-50"));
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 2);
     teams_mock.assert_calls(1);
     update_issue_mock.assert_calls(1);
     parent_detail_mock.assert_calls(1);
@@ -2392,6 +2392,15 @@ default_reasoning = "low"
     fs::write(
         &claude_path,
         r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
 printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
@@ -2409,6 +2418,23 @@ printf 'claude listen ok'
     fs::write(
         &codex_path,
         r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
 printf 'codex fallback invoked' > "$TEST_OUTPUT_DIR/codex.txt"
 exit 99
 "#,
@@ -2645,8 +2671,10 @@ exit 99
     assert!(!stub_dir.join("codex.txt").exists());
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
+    assert!(args.contains("--permission-mode=bypassPermissions"));
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
+    assert!(args.contains("--effort=high"));
     assert!(!args.contains("--reasoning="));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
@@ -2896,7 +2924,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         .success()
         .stdout(predicate::str::contains("MET-52"));
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 2);
     teams_mock.assert_calls(1);
     issue_detail_mock.assert_calls(1);
     update_issue_mock.assert_calls(1);

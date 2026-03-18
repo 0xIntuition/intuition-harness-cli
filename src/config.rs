@@ -1945,12 +1945,12 @@ mod tests {
 
     #[test]
     fn validate_agent_reasoning_rejects_invalid_builtin_reasoning() {
-        let error = validate_agent_reasoning("claude", Some("haiku"), Some("high"))
-            .expect_err("haiku should reject high reasoning");
+        let error = validate_agent_reasoning("claude", Some("haiku"), Some("xhigh"))
+            .expect_err("claude should reject unsupported reasoning");
         assert!(
             error
                 .to_string()
-                .contains("supported reasoning: low, medium")
+                .contains("supported reasoning: low, medium, high, max")
         );
     }
 
@@ -1960,7 +1960,7 @@ mod tests {
             agents: AgentSettings {
                 default_agent: Some("claude".to_string()),
                 default_model: Some("haiku".to_string()),
-                default_reasoning: Some("high".to_string()),
+                default_reasoning: Some("xhigh".to_string()),
                 routing: AgentRoutingSettings::default(),
                 commands: BTreeMap::new(),
             },
@@ -1973,7 +1973,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported reasoning: low, medium")
+                .contains("supported reasoning: low, medium, high, max")
         );
     }
 }
