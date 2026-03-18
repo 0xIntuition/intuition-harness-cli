@@ -140,7 +140,11 @@ pub(super) fn run_listen_provider_preflight(
             request.working_dir.display()
         ));
     }
-    report.push_check(format!("Resolved listen command: `{attempted_command}`"));
+    let display_command = attempted_command
+        .lines()
+        .next()
+        .unwrap_or(&attempted_command);
+    report.push_check(format!("Resolved listen command: `{display_command} ...`"));
 
     match invocation.agent.as_str() {
         "codex" => verify_codex_listen_prerequisites(&mut report)?,
