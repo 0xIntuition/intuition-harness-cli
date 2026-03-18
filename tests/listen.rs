@@ -51,6 +51,178 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() {
         .stdout(predicate::str::contains("MET-13"));
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_check_reports_codex_config_status_without_polling_linear() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(home_dir.join(".codex"))?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "reasoning": "high"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        home_dir.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.linear]
+enabled = true
+"#,
+    )?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+exit 0
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env_remove("LINEAR_API_KEY")
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "agents",
+            "listen",
+            "--check",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Listen preflight passed for provider `codex`.",
+        ))
+        .stdout(predicate::str::contains("approval_policy = \"never\""))
+        .stdout(predicate::str::contains(
+            "sandbox_mode = \"danger-full-access\"",
+        ))
+        .stdout(predicate::str::contains("mcp_servers.linear.enabled=false"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_fails_fast_on_codex_preflight_before_linear_auth() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&home_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4"
+  }
+}
+"#,
+    )?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+exit 0
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env_remove("LINEAR_API_KEY")
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("approval_policy = \"never\""))
+        .stderr(predicate::str::contains(
+            "sandbox_mode = \"danger-full-access\"",
+        ))
+        .stderr(predicate::str::contains("LINEAR_API_KEY").not());
+
+    Ok(())
+}
+
 #[test]
 fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
@@ -1254,7 +1426,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             .is_file()
     );
 
-    assert!(viewer_mock.calls() >= 2);
+    assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
     issue_detail_mock.assert_calls(1);
     create_backlog_mock.assert_calls(0);
@@ -2304,7 +2476,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         .success()
         .stdout(predicate::str::contains("MET-50"));
 
-    assert!(viewer_mock.calls() >= 2);
+    assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
     update_issue_mock.assert_calls(1);
     parent_detail_mock.assert_calls(1);
@@ -2924,7 +3096,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
         .success()
         .stdout(predicate::str::contains("MET-52"));
 
-    assert!(viewer_mock.calls() >= 2);
+    assert!(viewer_mock.calls() >= 1);
     teams_mock.assert_calls(1);
     issue_detail_mock.assert_calls(1);
     update_issue_mock.assert_calls(1);

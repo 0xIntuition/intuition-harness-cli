@@ -923,19 +923,16 @@ where
             }
         };
         if let Err(error) = preflight::run_listen_preflight(
-            &self.service,
-            &self.linear_config,
             &self.app_config,
             &self.planning_meta,
             preflight::ListenPreflightRequest {
-                workspace_path: &workspace.workspace_path,
+                working_dir: &workspace.workspace_path,
                 agent: self.worker_agent.as_deref(),
                 model: self.worker_model.as_deref(),
                 reasoning: self.worker_reasoning.as_deref(),
+                require_write_access: true,
             },
-        )
-        .await
-        {
+        ) {
             let log_path = self.agent_log_path(&detailed_issue.identifier);
             let _ = worker::write_preflight_failure(&log_path, &error);
             return Ok(self.build_session(
@@ -1734,6 +1731,34 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         )
         .await?;
         return Ok(());
+    }
+
+    let startup_preflight = preflight::run_listen_preflight(
+        &app_config,
+        &planning_meta,
+        preflight::ListenPreflightRequest {
+            working_dir: &root,
+            agent: args.agent.as_deref(),
+            model: args.model.as_deref(),
+            reasoning: args.reasoning.as_deref(),
+            require_write_access: false,
+        },
+    );
+    if args.check {
+        match startup_preflight {
+            Ok(report) => {
+                println!("{}", preflight::render_listen_preflight_report(Ok(&report)));
+                return Ok(());
+            }
+            Err(error) => {
+                bail!("{}", preflight::render_listen_preflight_report(Err(&error)));
+            }
+        }
+    }
+    match startup_preflight {
+        Ok(report) => preflight::emit_listen_preflight_warnings(&report),
+        Err(error) if preflight::is_missing_agent_selection(&error) => {}
+        Err(error) => return Err(error),
     }
 
     let config = LinearConfig::new_with_root(
