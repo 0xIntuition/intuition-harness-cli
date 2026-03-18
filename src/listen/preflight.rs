@@ -13,7 +13,9 @@ use crate::agents::{
     validate_invocation_command_surface,
 };
 use crate::cli::RunAgentArgs;
-use crate::config::{AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta};
+use crate::config::{
+    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta, no_agent_selected_route_key,
+};
 use crate::linear::{LinearClient, LinearService};
 
 pub(super) struct ListenPreflightRequest<'a> {
@@ -90,9 +92,7 @@ pub(super) fn render_listen_preflight_report(
 }
 
 pub(super) fn is_missing_agent_selection(error: &anyhow::Error) -> bool {
-    error
-        .to_string()
-        .contains("no agent was selected for route `agents.listen`")
+    no_agent_selected_route_key(error) == Some(AGENT_ROUTE_AGENTS_LISTEN)
 }
 
 pub(super) async fn run_listen_preflight<C>(
