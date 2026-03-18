@@ -374,8 +374,9 @@ impl SetupReport {
     fn render(&self) -> String {
         let verb = if self.changed { "saved" } else { "unchanged" };
         format!(
-            "Repo setup {verb}. Repo defaults: {}.",
-            self.metastack_meta_path.display()
+            "Repo setup {verb}. Repo defaults: {}.\n{}",
+            self.metastack_meta_path.display(),
+            listen_prerequisites_summary()
         )
     }
 }
@@ -480,7 +481,15 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
             "technical"
         )
     ));
+    lines.push(format!(
+        "Listen prerequisites: {}",
+        listen_prerequisites_summary()
+    ));
     lines.join("\n")
+}
+
+fn listen_prerequisites_summary() -> &'static str {
+    "Built-in Codex listen runs require `~/.codex/config.toml` with `approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus `[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require `claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `meta agents listen --check --root .` to verify."
 }
 
 fn has_direct_updates(args: &SetupArgs) -> bool {

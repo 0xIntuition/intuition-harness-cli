@@ -192,7 +192,16 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
             }
         }
 
-        args.extend(launch_args.to_vec());
+        if context == BuiltinInvocationContext::Listen
+            && launch_args.first().map(String::as_str) == Some("exec")
+        {
+            args.push("exec".to_string());
+            args.push("-c".to_string());
+            args.push("mcp_servers.linear.enabled=false".to_string());
+            args.extend(launch_args.iter().skip(1).cloned());
+        } else {
+            args.extend(launch_args.to_vec());
+        }
         Ok(args)
     }
 

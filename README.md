@@ -94,6 +94,22 @@ If you are ready to supervise issue execution:
 meta agents listen --team MET --project "MetaStack CLI"
 ```
 
+## Listen Prerequisites
+
+Before running `meta agents listen` with the built-in providers:
+
+- Built-in Codex workers require `~/.codex/config.toml` to include:
+
+```toml
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+```
+
+- Remove `[mcp_servers.linear]` from the Codex config when possible. The harness also forces `-c mcp_servers.linear.enabled=false` for listen workers as defense in depth.
+- Built-in Claude workers require `claude` on `PATH`.
+- Built-in Claude listen runs should not inherit `ANTHROPIC_API_KEY`; headless listen is expected to use the local Claude subscription instead of an API-key override.
+- Run `meta agents listen --check` to validate the active listen provider prerequisites plus Linear reachability/auth without starting the daemon.
+
 `meta runtime setup` bootstraps the repo-local `.metastack/` workspace:
 
 ```text
@@ -323,7 +339,13 @@ meta runtime setup --listen-label agent --assignment-scope viewer --refresh-poli
 
 Legacy alias: `meta setup`
 
-`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `tmp/_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+
+For unattended `meta agents listen` runs, setup should be paired with a provider preflight:
+
+- Codex requires `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`, and `[mcp_servers.linear]` should be removed or disabled.
+- Claude requires `claude` on `PATH` and `ANTHROPIC_API_KEY` unset so the local subscription is used.
+- Run `meta agents listen --check --root .` to verify the current machine before starting the daemon.
 
 If setup finds canonical template files with local changes, interactive TTY runs prompt for `overwrite`, `skip`, or `cancel`. Non-interactive paths such as `--json` and direct flag updates stop with a clear error instead of silently overwriting those backlog template files.
 
@@ -654,11 +676,25 @@ Examples:
 
 ```bash
 meta agents listen --demo --render-once
+meta agents listen --check --root .
 meta agents listen --team MET --project "MetaStack CLI" --once
 meta agents listen --team MET --project "MetaStack CLI"
 meta agents listen --team MET --project "MetaStack CLI" --dashboard-port 4050
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
+
+Listen prerequisites:
+
+- Codex: `~/.codex/config.toml` must include:
+
+```toml
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+```
+
+- Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; `meta agents listen` also passes `-c mcp_servers.linear.enabled=false` as a defense-in-depth override.
+- Claude: `claude` must be on `PATH`, and `ANTHROPIC_API_KEY` should be unset for unattended subscription-backed runs.
+- `meta agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
 
 Outputs:
 
@@ -710,7 +746,7 @@ Sandbox and permission handling depends on the command path:
 - `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
 - `meta context scan`, `meta backlog plan`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
 
-Listen pickup now runs a preflight before the worker starts: workspace write access must succeed locally, the configured Linear API host must be reachable over the network, authenticated Linear API access must succeed, and the resolved built-in launch command must expose the required unrestricted mode for that provider.
+Listen startup now runs a provider preflight before polling Linear, and worker pickup reruns it inside the workspace before the first agent turn. Codex checks require a readable `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` and warn when `[mcp_servers.linear]` is configured. Claude checks require `claude` on `PATH` and fail fast when `ANTHROPIC_API_KEY` is set. Both providers also validate that the resolved built-in launch command exposes the required unrestricted mode for unattended listen runs.
 
 This is intentionally stricter than Codex `--full-auto`: in `codex-cli 0.115.0`, `codex exec --help` documents `--full-auto` as `--sandbox workspace-write`, which is still too restrictive for unattended listen workers that need network, git, GitHub, and Linear mutations.
 

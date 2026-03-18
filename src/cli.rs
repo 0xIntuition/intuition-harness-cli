@@ -66,7 +66,14 @@ Repo defaults written by `meta runtime setup` participate in the built-in resolu
 
 Built-in provider/model/reasoning combinations are validated before they are saved.
 Use `meta agents workflows run ... --dry-run` or `meta context scan --root .` to confirm the
-resolved provider, model, reasoning, route key, and config source before or during execution.";
+resolved provider, model, reasoning, route key, and config source before or during execution.
+
+Listen prerequisites:
+  codex: `~/.codex/config.toml` must set `approval_policy = \"never\"`
+         and `sandbox_mode = \"danger-full-access\"`, and Linear MCP should be removed or
+         disabled with `-c mcp_servers.linear.enabled=false`
+  claude: `claude` must be on PATH and `ANTHROPIC_API_KEY` should be unset
+  verify: `meta agents listen --check --root .`";
 
 const DASHBOARD_HELP_EXAMPLES: &str = "\
 Examples:
@@ -727,6 +734,9 @@ pub struct ListenRunArgs {
     /// Local port for the browser dashboard served by the live listener.
     #[arg(long, default_value_t = 4000)]
     pub dashboard_port: u16,
+    /// Run listen prerequisite checks and exit without polling Linear or starting the daemon.
+    #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
+    pub check: bool,
     /// Execute a single live poll cycle and print a textual summary.
     #[arg(long)]
     pub once: bool,

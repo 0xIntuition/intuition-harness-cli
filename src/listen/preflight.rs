@@ -1,24 +1,98 @@
+use std::env;
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Url;
+use toml::Value;
 
 use crate::agents::{
     command_args_for_invocation, resolve_agent_invocation_for_planning,
     validate_invocation_command_surface,
 };
 use crate::cli::RunAgentArgs;
-use crate::config::{AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta};
+use crate::config::{
+    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta, no_agent_selected_route_key,
+};
 use crate::linear::{LinearClient, LinearService};
 
 pub(super) struct ListenPreflightRequest<'a> {
-    pub(super) workspace_path: &'a Path,
+    pub(super) working_dir: &'a Path,
     pub(super) agent: Option<&'a str>,
     pub(super) model: Option<&'a str>,
     pub(super) reasoning: Option<&'a str>,
+    pub(super) require_write_access: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ListenPreflightReport {
+    provider: String,
+    checks: Vec<String>,
+    warnings: Vec<String>,
+}
+
+impl ListenPreflightReport {
+    fn new(provider: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            checks: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn push_check(&mut self, check: impl Into<String>) {
+        self.checks.push(check.into());
+    }
+
+    fn push_warning(&mut self, warning: impl Into<String>) {
+        self.warnings.push(warning.into());
+    }
+
+    pub(super) fn render(&self) -> String {
+        let mut lines = vec![format!(
+            "Listen preflight passed for provider `{}`.",
+            self.provider
+        )];
+
+        for check in &self.checks {
+            lines.push(format!("- {check}"));
+        }
+
+        for warning in &self.warnings {
+            lines.push(format!("Warning: {warning}"));
+        }
+
+        lines.join("\n")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CodexGlobalConfigStatus {
+    path: PathBuf,
+    approval_policy: Option<String>,
+    sandbox_mode: Option<String>,
+    linear_mcp_configured: bool,
+}
+
+pub(super) fn emit_listen_preflight_warnings(report: &ListenPreflightReport) {
+    for warning in &report.warnings {
+        eprintln!("listen preflight warning: {warning}");
+    }
+}
+
+pub(super) fn render_listen_preflight_report(
+    result: Result<&ListenPreflightReport, &anyhow::Error>,
+) -> String {
+    match result {
+        Ok(report) => report.render(),
+        Err(error) => format!("Listen preflight failed.\n{error}"),
+    }
+}
+
+pub(super) fn is_missing_agent_selection(error: &anyhow::Error) -> bool {
+    no_agent_selected_route_key(error) == Some(AGENT_ROUTE_AGENTS_LISTEN)
 }
 
 pub(super) async fn run_listen_preflight<C>(
@@ -27,14 +101,19 @@ pub(super) async fn run_listen_preflight<C>(
     app_config: &AppConfig,
     planning_meta: &PlanningMeta,
     request: ListenPreflightRequest<'_>,
-) -> Result<()>
+) -> Result<ListenPreflightReport>
 where
     C: LinearClient,
 {
-    verify_workspace_write_access(request.workspace_path)?;
-    verify_network_connectivity(&linear_config.api_url)?;
-    verify_linear_api_access(service).await?;
+    let report = run_listen_provider_preflight(app_config, planning_meta, request)?;
+    complete_listen_preflight(service, linear_config, report).await
+}
 
+pub(super) fn run_listen_provider_preflight(
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    request: ListenPreflightRequest<'_>,
+) -> Result<ListenPreflightReport> {
     let invocation = resolve_agent_invocation_for_planning(
         app_config,
         planning_meta,
@@ -49,10 +128,49 @@ where
             transport: None,
         },
     )?;
-    let command_args = command_args_for_invocation(&invocation, Some(request.workspace_path))?;
-    validate_invocation_command_surface(&invocation, &command_args)?;
+    let command_args = command_args_for_invocation(&invocation, Some(request.working_dir))?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
     verify_listen_command_capabilities(&invocation.agent, &command_args)?;
-    Ok(())
+
+    let mut report = ListenPreflightReport::new(invocation.agent.clone());
+    if request.require_write_access {
+        verify_workspace_write_access(request.working_dir)?;
+        report.push_check(format!(
+            "Workspace `{}` is writable.",
+            request.working_dir.display()
+        ));
+    }
+    let display_command = attempted_command
+        .lines()
+        .next()
+        .unwrap_or(&attempted_command);
+    report.push_check(format!("Resolved listen command: `{display_command} ...`"));
+
+    match invocation.agent.as_str() {
+        "codex" => verify_codex_listen_prerequisites(&mut report)?,
+        "claude" => verify_claude_listen_prerequisites(&mut report)?,
+        _ => {}
+    }
+
+    Ok(report)
+}
+
+pub(super) async fn complete_listen_preflight<C>(
+    service: &LinearService<C>,
+    linear_config: &LinearConfig,
+    mut report: ListenPreflightReport,
+) -> Result<ListenPreflightReport>
+where
+    C: LinearClient,
+{
+    verify_network_connectivity(&linear_config.api_url)?;
+    report.push_check(format!(
+        "Linear API endpoint is reachable at `{}`.",
+        linear_config.api_url
+    ));
+    verify_linear_api_access(service).await?;
+    report.push_check("Linear API authentication succeeded.");
+    Ok(report)
 }
 
 pub(super) fn verify_workspace_write_access(workspace_path: &Path) -> Result<()> {
@@ -110,6 +228,154 @@ where
     Ok(())
 }
 
+fn verify_codex_listen_prerequisites(report: &mut ListenPreflightReport) -> Result<()> {
+    verify_command_on_path("codex")?;
+    report.push_check("`codex` is available on PATH.");
+
+    let status = load_codex_global_config_status()?;
+    let mut missing_settings = Vec::new();
+
+    if status.approval_policy.as_deref() != Some("never") {
+        missing_settings.push("approval_policy = \"never\"");
+    }
+    if status.sandbox_mode.as_deref() != Some("danger-full-access") {
+        missing_settings.push("sandbox_mode = \"danger-full-access\"");
+    }
+
+    if !missing_settings.is_empty() {
+        bail!(
+            "Listen requires the Codex global config at `~/.codex/config.toml` (resolved to `{}`) to include:\n{}\nCurrent values:\n- approval_policy = {}\n- sandbox_mode = {}",
+            status.path.display(),
+            missing_settings.join("\n"),
+            display_setting(status.approval_policy.as_deref()),
+            display_setting(status.sandbox_mode.as_deref()),
+        );
+    }
+
+    report.push_check(format!(
+        "Codex global config loaded from `{}`.",
+        status.path.display()
+    ));
+    report.push_check("`approval_policy = \"never\"` is configured.");
+    report.push_check("`sandbox_mode = \"danger-full-access\"` is configured.");
+
+    if status.linear_mcp_configured {
+        report.push_warning(format!(
+            "Linear MCP is configured in `{}`. Linear MCP should be removed from codex config because the harness manages Linear directly. Disable it with `-c mcp_servers.linear.enabled=false` or remove `[mcp_servers.linear]`.",
+            status.path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn verify_claude_listen_prerequisites(report: &mut ListenPreflightReport) -> Result<()> {
+    verify_command_on_path("claude")?;
+    report.push_check("`claude` is available on PATH.");
+
+    if env::var_os("ANTHROPIC_API_KEY")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        bail!(
+            "Listen cannot launch built-in `claude` workers while `ANTHROPIC_API_KEY` is set. Headless listen should use the local Claude subscription without that override."
+        );
+    }
+
+    report.push_check("`ANTHROPIC_API_KEY` is not set.");
+    Ok(())
+}
+
+fn verify_command_on_path(command: &str) -> Result<()> {
+    let Some(paths) = env::var_os("PATH") else {
+        bail!("listen requires `{command}` on PATH, but PATH is not set");
+    };
+
+    let available = env::split_paths(&paths).any(|entry| {
+        let candidate = entry.join(command);
+        if candidate.is_file() {
+            return true;
+        }
+
+        #[cfg(windows)]
+        {
+            entry.join(format!("{command}.exe")).is_file()
+        }
+
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    });
+
+    if !available {
+        bail!("listen requires `{command}` on PATH");
+    }
+
+    Ok(())
+}
+
+fn load_codex_global_config_status() -> Result<CodexGlobalConfigStatus> {
+    let path = resolve_codex_global_config_path()?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "Listen requires the Codex global config at `~/.codex/config.toml` (resolved to `{}`) to exist and include:\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"",
+                path.display()
+            );
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read `{}`", path.display()));
+        }
+    };
+
+    let value: Value = toml::from_str(&contents).with_context(|| {
+        format!(
+            "failed to parse `{}`. Listen requires:\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"",
+            path.display()
+        )
+    })?;
+
+    Ok(CodexGlobalConfigStatus {
+        approval_policy: value
+            .get("approval_policy")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        sandbox_mode: value
+            .get("sandbox_mode")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        linear_mcp_configured: value
+            .get("mcp_servers")
+            .and_then(Value::as_table)
+            .and_then(|servers| servers.get("linear"))
+            .is_some(),
+        path,
+    })
+}
+
+fn resolve_codex_global_config_path() -> Result<PathBuf> {
+    if let Some(home) = env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".codex").join("config.toml"));
+    }
+
+    #[cfg(windows)]
+    if let Some(home) = env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(home).join(".codex").join("config.toml"));
+    }
+
+    bail!(
+        "listen requires `~/.codex/config.toml`, but HOME is not set. Configure HOME or add:\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\""
+    )
+}
+
+fn display_setting(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{value}\""))
+        .unwrap_or_else(|| "<missing>".to_string())
+}
+
 pub(super) fn verify_listen_command_capabilities(
     agent: &str,
     command_args: &[String],
@@ -148,19 +414,52 @@ pub(super) fn verify_listen_command_capabilities(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::env;
+    use std::fs;
     use std::net::TcpListener;
+    use std::sync::{Mutex, OnceLock};
 
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use tempfile::tempdir;
 
-    use super::{ListenPreflightRequest, run_listen_preflight, verify_listen_command_capabilities};
-    use crate::config::{AppConfig, LinearConfig, PlanningMeta};
+    use super::{
+        ListenPreflightReport, ListenPreflightRequest, display_setting,
+        load_codex_global_config_status, run_listen_preflight, verify_claude_listen_prerequisites,
+        verify_listen_command_capabilities,
+    };
+    use crate::config::{
+        AgentCommandConfig, AgentSettings, AppConfig, LinearConfig, PlanningMeta, PromptTransport,
+    };
     use crate::linear::{
         AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
         IssueLabelCreateRequest, IssueListFilters, IssueSummary, LabelRef, LinearClient,
         LinearService, ProjectSummary, TeamSummary, UserRef,
     };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn stub_app_config() -> AppConfig {
+        AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("stub".to_string()),
+                commands: BTreeMap::from([(
+                    "stub".to_string(),
+                    AgentCommandConfig {
+                        command: "stub-agent".to_string(),
+                        args: vec!["{{payload}}".to_string()],
+                        transport: PromptTransport::Arg,
+                    },
+                )]),
+                ..AgentSettings::default()
+            },
+            ..AppConfig::default()
+        }
+    }
 
     #[derive(Debug, Clone)]
     struct StubLinearClient {
@@ -247,7 +546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listen_preflight_accepts_reachable_linear_api_and_viewer_access() -> Result<()> {
+    async fn listen_preflight_reports_linear_connectivity_and_viewer_access() -> Result<()> {
         let temp = tempdir()?;
         let workspace = temp.path();
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -261,36 +560,42 @@ mod tests {
             linear_config.default_team.clone(),
         );
 
-        run_listen_preflight(
+        let report = run_listen_preflight(
             &service,
             &linear_config,
-            &AppConfig::default(),
+            &stub_app_config(),
             &PlanningMeta::default(),
             ListenPreflightRequest {
-                workspace_path: workspace,
-                agent: Some("claude"),
-                model: Some("sonnet"),
-                reasoning: Some("high"),
+                working_dir: workspace,
+                agent: None,
+                model: None,
+                reasoning: None,
+                require_write_access: false,
             },
         )
         .await?;
 
+        let rendered = report.render();
+        assert!(rendered.contains("Linear API endpoint is reachable"));
+        assert!(rendered.contains("Linear API authentication succeeded."));
         Ok(())
     }
 
     #[tokio::test]
-    async fn listen_preflight_rejects_missing_linear_api_access() -> Result<()> {
-        let temp = tempdir()?;
-        let workspace = temp.path();
-        let listener = TcpListener::bind("127.0.0.1:0")?;
+    async fn listen_preflight_fails_when_linear_viewer_check_fails() {
+        let temp = tempdir().expect("tempdir");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let linear_config = LinearConfig {
             api_key: "token".to_string(),
-            api_url: format!("http://{}/graphql", listener.local_addr()?),
+            api_url: format!(
+                "http://{}/graphql",
+                listener.local_addr().expect("local addr")
+            ),
             default_team: None,
         };
         let service = LinearService::new(
             StubLinearClient {
-                viewer_error: Some("unauthorized".to_string()),
+                viewer_error: Some("viewer rejected".to_string()),
             },
             linear_config.default_team.clone(),
         );
@@ -298,24 +603,117 @@ mod tests {
         let error = run_listen_preflight(
             &service,
             &linear_config,
-            &AppConfig::default(),
+            &stub_app_config(),
             &PlanningMeta::default(),
             ListenPreflightRequest {
-                workspace_path: workspace,
-                agent: Some("claude"),
-                model: Some("sonnet"),
-                reasoning: Some("high"),
+                working_dir: temp.path(),
+                agent: None,
+                model: None,
+                reasoning: None,
+                require_write_access: false,
             },
         )
         .await
-        .expect_err("viewer access should be required");
+        .expect_err("viewer failure should fail preflight");
 
         assert!(
             error
                 .to_string()
                 .contains("failed to access Linear API during listen preflight")
         );
+    }
+
+    #[test]
+    fn codex_config_status_reads_required_fields_and_linear_mcp() -> Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        let temp = tempdir()?;
+        let codex_dir = temp.path().join(".codex");
+        fs::create_dir_all(&codex_dir)?;
+        fs::write(
+            codex_dir.join("config.toml"),
+            r#"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.linear]
+enabled = true
+"#,
+        )?;
+
+        let original_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", temp.path());
+        }
+        let status = load_codex_global_config_status()?;
+        if let Some(value) = original_home {
+            unsafe {
+                env::set_var("HOME", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("HOME");
+            }
+        }
+
+        assert_eq!(status.approval_policy.as_deref(), Some("never"));
+        assert_eq!(status.sandbox_mode.as_deref(), Some("danger-full-access"));
+        assert!(status.linear_mcp_configured);
         Ok(())
+    }
+
+    #[test]
+    fn claude_preflight_rejects_anthropic_api_key_override() {
+        let _guard = env_lock().lock().expect("env lock");
+        let mut report = ListenPreflightReport::new("claude");
+        let original_path = env::var_os("PATH");
+        let original_api_key = env::var_os("ANTHROPIC_API_KEY");
+        let temp = tempdir().expect("tempdir");
+        let claude_path = temp.path().join("claude");
+        fs::write(&claude_path, "#!/bin/sh\nexit 0\n").expect("write claude stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&claude_path)
+                .expect("claude metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&claude_path, permissions).expect("chmod claude stub");
+        }
+        unsafe {
+            env::set_var("PATH", temp.path());
+            env::set_var("ANTHROPIC_API_KEY", "token");
+        }
+
+        let error = verify_claude_listen_prerequisites(&mut report)
+            .expect_err("ANTHROPIC_API_KEY should be rejected");
+
+        if let Some(value) = original_path {
+            unsafe {
+                env::set_var("PATH", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("PATH");
+            }
+        }
+        if let Some(value) = original_api_key {
+            unsafe {
+                env::set_var("ANTHROPIC_API_KEY", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("ANTHROPIC_API_KEY");
+            }
+        }
+
+        assert!(error.to_string().contains("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn display_setting_formats_missing_and_present_values() {
+        assert_eq!(display_setting(None), "<missing>");
+        assert_eq!(display_setting(Some("never")), "\"never\"");
     }
 
     #[test]

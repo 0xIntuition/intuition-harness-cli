@@ -930,10 +930,11 @@ where
             &self.app_config,
             &self.planning_meta,
             preflight::ListenPreflightRequest {
-                workspace_path: &workspace.workspace_path,
+                working_dir: &workspace.workspace_path,
                 agent: self.worker_agent.as_deref(),
                 model: self.worker_model.as_deref(),
                 reasoning: self.worker_reasoning.as_deref(),
+                require_write_access: true,
             },
         )
         .await
@@ -1738,6 +1739,27 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         return Ok(());
     }
 
+    let startup_provider_preflight = match preflight::run_listen_provider_preflight(
+        &app_config,
+        &planning_meta,
+        preflight::ListenPreflightRequest {
+            working_dir: &root,
+            agent: args.agent.as_deref(),
+            model: args.model.as_deref(),
+            reasoning: args.reasoning.as_deref(),
+            require_write_access: false,
+        },
+    ) {
+        Ok(report) => Some(report),
+        Err(error) if !args.check && preflight::is_missing_agent_selection(&error) => None,
+        Err(error) => {
+            if args.check {
+                bail!("{}", preflight::render_listen_preflight_report(Err(&error)));
+            }
+            return Err(error);
+        }
+    };
+
     let config = LinearConfig::new_with_root(
         Some(&root),
         LinearConfigOverrides {
@@ -1751,6 +1773,27 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let _lock = store.acquire_listener_lock(std::process::id())?;
     let client = ReqwestLinearClient::new(config.clone())?;
     let service = LinearService::new(client, config.default_team.clone());
+    if let Some(provider_report) = startup_provider_preflight {
+        let startup_preflight =
+            preflight::complete_listen_preflight(&service, &config, provider_report).await;
+        if args.check {
+            match startup_preflight {
+                Ok(report) => {
+                    println!("{}", preflight::render_listen_preflight_report(Ok(&report)));
+                    return Ok(());
+                }
+                Err(error) => {
+                    bail!("{}", preflight::render_listen_preflight_report(Err(&error)));
+                }
+            }
+        }
+        match startup_preflight {
+            Ok(report) => preflight::emit_listen_preflight_warnings(&report),
+            Err(error) => return Err(error),
+        }
+    } else if args.check {
+        unreachable!("`--check` exits on provider preflight failures before Linear validation");
+    }
     let viewer = if planning_meta.listen.assignment_scope == ListenAssignmentScope::Viewer {
         Some(service.viewer().await?)
     } else {
