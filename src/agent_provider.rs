@@ -286,12 +286,12 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         "claude"
     }
 
-    fn launch_args(&self, model: Option<&str>, _reasoning: Option<&str>) -> Vec<String> {
+    fn launch_args(&self, model: Option<&str>, reasoning: Option<&str>) -> Vec<String> {
         let mut args = vec!["-p".to_string()];
         if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
             args.push(format!("--model={model}"));
         }
-        if let Some(reasoning) = _reasoning.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(reasoning) = reasoning.map(str::trim).filter(|value| !value.is_empty()) {
             args.push(format!("--effort={reasoning}"));
         }
         args
