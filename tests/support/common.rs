@@ -344,7 +344,7 @@ fn commit_and_push_pull_ref(
 
 #[cfg(unix)]
 fn wait_for_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    for _ in 0..4800 {
+    for _ in 0..800 {
         if path.exists() {
             return Ok(());
         }
@@ -527,7 +527,7 @@ fn team_payload() -> serde_json::Value {
 
 #[cfg(unix)]
 fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
-    for _ in 0..1200 {
+    for _ in 0..300 {
         if let Ok(contents) = fs::read_to_string(path)
             && contents.contains(expected)
         {
