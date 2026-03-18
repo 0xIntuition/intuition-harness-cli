@@ -858,6 +858,8 @@ where
                     .map(|project| project.name.clone()),
                 parent_id: Some(parent_issue.id.clone()),
                 parent_identifier: Some(parent_issue.identifier.clone()),
+                local_hash: None,
+                remote_hash: None,
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
         )?;

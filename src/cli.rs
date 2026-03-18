@@ -794,16 +794,26 @@ pub struct SyncArgs {
 #[derive(Debug, Clone, Subcommand)]
 pub enum SyncCommands {
     /// Pull a Linear issue into `.metastack/backlog/<ISSUE_ID>/`.
-    Pull(SyncIssueArgs),
-    /// Push a local backlog item back to Linear.
-    Push(SyncIssueArgs),
+    Pull(SyncPullArgs),
+    /// Push CLI-managed backlog files back to Linear. `index.md` stays local unless `--update-description` is passed.
+    Push(SyncPushArgs),
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct SyncIssueArgs {
+pub struct SyncPullArgs {
     /// Existing issue identifier, for example MET-35.
     #[arg(value_name = "IDENTIFIER")]
     pub issue: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SyncPushArgs {
+    /// Existing issue identifier, for example MET-35.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issue: String,
+    /// Also update the Linear issue description from `.metastack/backlog/<ISSUE>/index.md`.
+    #[arg(long)]
+    pub update_description: bool,
 }
 
 #[derive(Debug, Clone, Args)]

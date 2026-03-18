@@ -56,6 +56,17 @@ fn backlog_help_lists_tech_and_sync_commands() {
 }
 
 #[test]
+fn backlog_sync_push_help_describes_opt_in_description_updates() {
+    cli()
+        .args(["backlog", "sync", "push", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--update-description"))
+        .stdout(predicate::str::contains("index.md"))
+        .stdout(predicate::str::contains("stays local unless"));
+}
+
+#[test]
 fn legacy_config_alias_prints_runtime_hint() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
