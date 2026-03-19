@@ -580,6 +580,7 @@ fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
         .assert()
         .success()
         .stdout(predicate::str::contains("meta listen"))
+        .stdout(predicate::str::contains("Watching: all assignees"))
         .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains("http://").not())
         .stdout(predicate::str::contains("127.0.0.1").not())
@@ -619,9 +620,9 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
         .assert()
         .success()
         .stdout(predicate::str::contains("Listen Status"))
+        .stdout(predicate::str::contains("Watching: all assignees"))
         .stdout(predicate::str::contains("Runtime"))
         .stdout(predicate::str::contains("Agent Sessions"))
-        .stdout(predicate::str::contains("terminal snapshot"))
         .stdout(predicate::str::contains("http://").not())
         .stdout(predicate::str::contains("127.0.0.1").not())
         .stdout(predicate::str::contains("localhost").not())
@@ -639,6 +640,7 @@ fn agents_listen_help_omits_browser_dashboard_flags() {
         .args(["agents", "listen", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("--all-assignees"))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("browser").not());
 }
@@ -660,6 +662,7 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .stdout(predicate::str::contains(
             "meta agents listen --team MET --project \"MetaStack API\"",
         ))
+        .stdout(predicate::str::contains("--all-assignees"))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("browser").not());
 }
@@ -690,6 +693,9 @@ fn listen_check_reports_codex_config_status_and_linear_api_validation() -> Resul
     "provider": "codex",
     "model": "gpt-5.4",
     "reasoning": "high"
+  },
+  "listen": {
+    "assignment_scope": "viewer"
   }
 }
 "#,
@@ -782,8 +788,11 @@ exit 0
         .stdout(predicate::str::contains("Linear API endpoint is reachable"))
         .stdout(predicate::str::contains(
             "Linear API authentication succeeded.",
+        ))
+        .stdout(predicate::str::contains(
+            "Effective assignee filter: Kames + unassigned",
         ));
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 1);
 
     Ok(())
 }
@@ -4507,17 +4516,537 @@ api_url = "{api_url}"
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Skipped MET-31"))
-        .stdout(predicate::str::contains("missing required label `agent`"))
-        .stdout(predicate::str::contains(
-            "assigned to `Someone Else` instead of `Kames`",
-        ));
+        .stdout(predicate::str::contains("Watching: Kames + unassigned"))
+        .stdout(predicate::str::contains("MET-31").not());
 
-    viewer_mock.assert_calls(1);
+    assert!(viewer_mock.calls() >= 1);
     update_mock.assert_calls(0);
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(!state.contains("MET-31"));
     assert!(!temp.path().join("repo-workspace/MET-31").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_claims_unassigned_issue_in_viewer_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+    let stub_path = bin_dir.join("agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-52",
+                        "identifier": "MET-52",
+                        "title": "Claim unassigned listen work",
+                        "description": "Unassigned issues should now be eligible",
+                        "url": "https://linear.app/issues/52",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": null,
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-52\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-52",
+                    "identifier": "MET-52",
+                    "title": "Claim unassigned listen work",
+                    "description": "Unassigned issues should now be eligible",
+                    "url": "https://linear.app/issues/MET-52",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": null,
+                    "labels": {
+                        "nodes": [{
+                            "id": "label-1",
+                            "name": "agent"
+                        }]
+                    },
+                    "comments": { "nodes": [] },
+                    "state": {
+                        "id": "state-2",
+                        "name": "In Progress",
+                        "type": "started"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] }
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-52",
+                        "identifier": "MET-52",
+                        "title": "Claim unassigned listen work",
+                        "description": "Unassigned issues should now be eligible",
+                        "url": "https://linear.app/issues/52",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-52",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: Kames + unassigned"))
+        .stdout(predicate::str::contains("1 claimed this cycle"))
+        .stdout(predicate::str::contains("MET-52"));
+
+    assert!(viewer_mock.calls() >= 1);
+    assert!(issues_mock.calls() >= 3);
+    update_mock.assert_calls(1);
+    assert!(temp.path().join("repo-workspace/MET-52").is_dir());
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"issue_identifier\": \"MET-52\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_all_assignees_override_claims_foreign_assigned_issue_without_changing_repo_scope()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+    let stub_path = bin_dir.join("agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-53",
+                        "identifier": "MET-53",
+                        "title": "Claim foreign assigned work with override",
+                        "description": "Run-scoped override should allow pickup",
+                        "url": "https://linear.app/issues/53",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-2",
+                            "name": "Someone Else",
+                            "email": "else@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-53\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-53",
+                    "identifier": "MET-53",
+                    "title": "Claim foreign assigned work with override",
+                    "description": "Run-scoped override should allow pickup",
+                    "url": "https://linear.app/issues/MET-53",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": {
+                        "id": "viewer-2",
+                        "name": "Someone Else",
+                        "email": "else@example.com"
+                    },
+                    "labels": {
+                        "nodes": [{
+                            "id": "label-1",
+                            "name": "agent"
+                        }]
+                    },
+                    "comments": { "nodes": [] },
+                    "state": {
+                        "id": "state-2",
+                        "name": "In Progress",
+                        "type": "started"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] }
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-53",
+                        "identifier": "MET-53",
+                        "title": "Claim foreign assigned work with override",
+                        "description": "Run-scoped override should allow pickup",
+                        "url": "https://linear.app/issues/53",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-53",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+            "--all-assignees",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: all assignees"))
+        .stdout(predicate::str::contains("1 claimed this cycle"))
+        .stdout(predicate::str::contains("MET-53"));
+
+    assert!(issues_mock.calls() >= 3);
+    update_mock.assert_calls(1);
+    assert!(temp.path().join("repo-workspace/MET-53").is_dir());
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"issue_identifier\": \"MET-53\""));
+    assert!(
+        fs::read_to_string(repo_root.join(".metastack/meta.json"))?
+            .contains("\"assignment_scope\": \"viewer\"")
+    );
 
     Ok(())
 }

@@ -16,7 +16,7 @@ use crate::cli::RunAgentArgs;
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta, no_agent_selected_route_key,
 };
-use crate::linear::{LinearClient, LinearService};
+use crate::linear::{LinearClient, LinearService, UserRef};
 
 pub(super) struct ListenPreflightRequest<'a> {
     pub(super) working_dir: &'a Path,
@@ -31,6 +31,7 @@ pub(super) struct ListenPreflightReport {
     provider: String,
     checks: Vec<String>,
     warnings: Vec<String>,
+    viewer: Option<UserRef>,
 }
 
 impl ListenPreflightReport {
@@ -39,6 +40,7 @@ impl ListenPreflightReport {
             provider: provider.into(),
             checks: Vec::new(),
             warnings: Vec::new(),
+            viewer: None,
         }
     }
 
@@ -48,6 +50,10 @@ impl ListenPreflightReport {
 
     fn push_warning(&mut self, warning: impl Into<String>) {
         self.warnings.push(warning.into());
+    }
+
+    pub(super) fn viewer(&self) -> Option<&UserRef> {
+        self.viewer.as_ref()
     }
 
     pub(super) fn render(&self) -> String {
@@ -169,7 +175,7 @@ where
         "Linear API endpoint is reachable at `{}`.",
         linear_config.api_url
     ));
-    verify_linear_api_access(service).await?;
+    report.viewer = Some(verify_linear_api_access(service).await?);
     report.push_check("Linear API authentication succeeded.");
     Ok(report)
 }
@@ -218,15 +224,14 @@ pub(super) fn verify_network_connectivity(api_url: &str) -> Result<()> {
     bail!("failed to connect to `{host}:{port}` during listen preflight: {detail}");
 }
 
-pub(super) async fn verify_linear_api_access<C>(service: &LinearService<C>) -> Result<()>
+pub(super) async fn verify_linear_api_access<C>(service: &LinearService<C>) -> Result<UserRef>
 where
     C: LinearClient,
 {
     service
         .viewer()
         .await
-        .context("failed to access Linear API during listen preflight")?;
-    Ok(())
+        .context("failed to access Linear API during listen preflight")
 }
 
 fn verify_codex_listen_prerequisites(report: &mut ListenPreflightReport) -> Result<()> {

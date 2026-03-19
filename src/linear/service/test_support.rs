@@ -4,9 +4,10 @@ use std::sync::{
 };
 
 use crate::linear::{
-    AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
-    IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
-    LinearClient, ProjectRef, ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
+    AttachmentCreateRequest, AttachmentSummary, IssueAssigneeFilter, IssueComment,
+    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, IssueSummary,
+    IssueUpdateRequest, LabelRef, LinearClient, ProjectRef, ProjectSummary, TeamRef, TeamSummary,
+    UserRef, WorkflowState,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -77,6 +78,18 @@ impl LinearClient for FakeLinearClient {
                     .map(|entry| entry.name.eq_ignore_ascii_case(state))
                     .unwrap_or(false)
             });
+        }
+        match &filters.assignee {
+            IssueAssigneeFilter::Any => {}
+            IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(true)
+                });
+            }
         }
         if issues.len() > filters.limit.max(1) {
             issues.truncate(filters.limit.max(1));
