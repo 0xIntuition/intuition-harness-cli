@@ -198,6 +198,8 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
                 scan_document_file_names().join(","),
             ),
         ],
+        capture_output: false,
+        continuation: None,
     };
 
     progress.set_step(

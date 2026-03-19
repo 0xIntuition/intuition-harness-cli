@@ -342,6 +342,437 @@ fi
 
 #[cfg(unix)]
 #[test]
+fn plan_builtin_codex_reuses_session_across_non_interactive_phases() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "high"
+"#,
+        ),
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+Usage: codex [OPTIONS] [PROMPT]
+  --sandbox <SANDBOX_MODE>
+  --ask-for-approval <APPROVAL_POLICY>
+  --cd <DIR>
+  --add-dir <DIR>
+EOF
+  exit 0
+fi
+
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+Usage: codex exec [OPTIONS] [PROMPT]
+  --model <MODEL>
+  -c, --config <key=value>
+  --json
+EOF
+  exit 0
+fi
+
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+for arg in "$@"; do
+  printf '%s\n' "$arg"
+  last="$arg"
+done > "$TEST_OUTPUT_DIR/args-$count.txt"
+printf '%s' "$last" > "$TEST_OUTPUT_DIR/payload-$count.txt"
+
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' '{"type":"thread.started","thread_id":"thread-codex-1"}'
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"questions\":[\"Which area should be prioritized?\"]}"}}'
+  exit 0
+fi
+
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-codex-1"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"summary\":\"Create one ticket.\",\"issues\":[{\"title\":\"Reuse the planning session\",\"description\":\"Keep one Codex session alive across multi-phase planning.\",\"acceptance_criteria\":[\"The second planning phase resumes the first session\"],\"priority\":2}]}"}}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueLabels");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabels": {
+                    "nodes": [{
+                        "id": "label-plan",
+                        "name": "plan"
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"title\":\"Reuse the planning session\"")
+            .body_includes("\"projectId\":\"project-1\"")
+            .body_includes("\"stateId\":\"state-backlog\"")
+            .body_includes("\"labelIds\":[\"label-plan\"]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-51",
+                        "identifier": "MET-51",
+                        "title": "Reuse the planning session",
+                        "description": "Keep one Codex session alive across multi-phase planning.",
+                        "url": "https://linear.app/issues/51",
+                        "priority": 2,
+                        "updatedAt": "2026-03-19T19:00:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--agent",
+            "codex",
+            "--no-interactive",
+            "--request",
+            "Plan the runtime session reuse work",
+            "--answer",
+            "Prioritize backlog planning first",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
+        .stdout(predicate::str::contains("MET-51"));
+
+    let first_args = fs::read_to_string(stub_dir.join("args-1.txt"))?;
+    assert!(first_args.contains("exec"));
+    assert!(first_args.contains("--json"));
+    assert!(!first_args.contains("resume"));
+
+    let second_args = fs::read_to_string(stub_dir.join("args-2.txt"))?;
+    assert!(second_args.contains("exec"));
+    assert!(second_args.contains("resume"));
+    assert!(second_args.contains("thread-codex-1"));
+    assert!(second_args.contains("--json"));
+
+    let second_payload = fs::read_to_string(stub_dir.join("payload-2.txt"))?;
+    assert!(second_payload.contains("Prioritize backlog planning first"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_builtin_claude_retries_fresh_after_invalid_resume() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "claude"
+default_model = "haiku"
+default_reasoning = "low"
+"#,
+        ),
+    )?;
+
+    let stub_path = bin_dir.join("claude");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--help" ]; then
+    cat <<'EOF'
+Usage: claude [options] [command] [prompt]
+  -p, --print
+  --model <model>
+  --effort <level>
+  --output-format <format>
+  --permission-mode <mode>
+EOF
+    exit 0
+  fi
+done
+
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+has_resume=0
+for arg in "$@"; do
+  printf '%s\n' "$arg"
+  last="$arg"
+  if [ "$arg" = "--resume" ]; then
+    has_resume=1
+  fi
+done > "$TEST_OUTPUT_DIR/args-$count.txt"
+printf '%s' "$last" > "$TEST_OUTPUT_DIR/payload-$count.txt"
+
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"type":"result","subtype":"success","result":"{\"questions\":[\"Which ticket should land first?\"]}","session_id":"stale-session"}'
+  exit 0
+fi
+
+if [ "$has_resume" -eq 1 ]; then
+  printf '%s' 'No conversation found with session ID: stale-session' >&2
+  exit 1
+fi
+
+printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Create one ticket after retry.\",\"issues\":[{\"title\":\"Retry Claude planning fresh\",\"description\":\"Recover from an invalid resume target with one fresh retry.\",\"acceptance_criteria\":[\"A stale Claude resume handle retries once without failing the command\"],\"priority\":2}]}","session_id":"fresh-session"}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueLabels");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabels": {
+                    "nodes": [{
+                        "id": "label-plan",
+                        "name": "plan"
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"title\":\"Retry Claude planning fresh\"")
+            .body_includes("\"projectId\":\"project-1\"")
+            .body_includes("\"stateId\":\"state-backlog\"")
+            .body_includes("\"labelIds\":[\"label-plan\"]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-52",
+                        "identifier": "MET-52",
+                        "title": "Retry Claude planning fresh",
+                        "description": "Recover from an invalid resume target with one fresh retry.",
+                        "url": "https://linear.app/issues/52",
+                        "priority": 2,
+                        "updatedAt": "2026-03-19T19:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--agent",
+            "claude",
+            "--no-interactive",
+            "--request",
+            "Plan the retry behavior for invalid resume targets",
+            "--answer",
+            "Handle the retry in the shared runtime layer",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
+        .stdout(predicate::str::contains("MET-52"));
+
+    let second_args = fs::read_to_string(stub_dir.join("args-2.txt"))?;
+    assert!(second_args.contains("--resume"));
+    assert!(second_args.contains("stale-session"));
+    assert!(second_args.contains("--output-format=json"));
+
+    let third_args = fs::read_to_string(stub_dir.join("args-3.txt"))?;
+    assert!(!third_args.contains("--resume"));
+    assert!(third_args.contains("--output-format=json"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn plan_no_interactive_resolves_repo_meta_project_name_to_project_id() -> Result<(), Box<dyn Error>>
 {
     let temp = tempdir()?;
@@ -817,6 +1248,7 @@ if [ "__NAME__" = "claude" ] && [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -851,9 +1283,9 @@ printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model-$count.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning-$count.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source-$count.txt"
 if [ "$count" -eq 1 ]; then
-  printf '%s' '{"questions":[]}'
+  printf '%s' '{"type":"result","subtype":"success","result":"{\"questions\":[]}","session_id":"session-1"}'
 else
-  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Builtin repo defaults win","description":"Ensure repo-scoped builtin provider defaults beat global builtin defaults.","acceptance_criteria":["`meta plan` resolves repo-scoped builtin provider defaults"],"priority":2}]}'
+  printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Create one ticket.\",\"issues\":[{\"title\":\"Builtin repo defaults win\",\"description\":\"Ensure repo-scoped builtin provider defaults beat global builtin defaults.\",\"acceptance_criteria\":[\"`meta plan` resolves repo-scoped builtin provider defaults\"],\"priority\":2}]}","session_id":"session-1"}'
 fi
 "##
             .replace("__NAME__", name),
