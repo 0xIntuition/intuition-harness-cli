@@ -773,6 +773,192 @@ printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Creat
 
 #[cfg(unix)]
 #[test]
+fn plan_interactive_preserves_explicit_builtin_overrides_across_resumed_phases()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        r#"[linear]
+api_key = "token"
+
+[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "high"
+"#,
+    )?;
+
+    let codex_stub = bin_dir.join("codex");
+    fs::write(
+        &codex_stub,
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/codex-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+Usage: codex [OPTIONS] [PROMPT]
+  --sandbox <SANDBOX_MODE>
+  --ask-for-approval <APPROVAL_POLICY>
+  --cd <DIR>
+  --add-dir <DIR>
+EOF
+  exit 0
+fi
+
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+Usage: codex exec [OPTIONS] [PROMPT]
+  --model <MODEL>
+  -c, --config <key=value>
+  --json
+EOF
+  exit 0
+fi
+
+printf '%s' '{"type":"thread.started","thread_id":"unexpected-codex-session"}'
+printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"questions\":[]}"}}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_stub)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_stub, permissions)?;
+
+    let claude_stub = bin_dir.join("claude");
+    fs::write(
+        &claude_stub,
+        r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--help" ]; then
+    cat <<'EOF'
+Usage: claude [options] [command] [prompt]
+  -p, --print
+  --model <model>
+  --effort <level>
+  --output-format <format>
+  --permission-mode <mode>
+EOF
+    exit 0
+  fi
+done
+
+count_file="$TEST_OUTPUT_DIR/claude-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+
+for arg in "$@"; do
+  printf '%s\n' "$arg"
+done > "$TEST_OUTPUT_DIR/claude-args-$count.txt"
+
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"type":"result","subtype":"success","result":"{\"questions\":[]}","session_id":"interactive-session"}'
+  exit 0
+fi
+
+printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Keep one interactive ticket.\",\"issues\":[{\"title\":\"Preserve interactive overrides\",\"description\":\"Keep explicit builtin overrides active across interactive planning phases.\",\"acceptance_criteria\":[\"Interactive phase two resumes the explicit provider session\"],\"priority\":2}]}","session_id":"interactive-session"}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_stub)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_stub, permissions)?;
+
+    let meta_command = test_command();
+    let meta_bin = meta_command.get_program().to_os_string();
+    let current_path = std::env::var("PATH")?;
+
+    let expect_script = format!(
+        r#"
+set timeout 10
+spawn -noecho {meta_bin} plan --root {repo_root} --agent claude --model haiku --reasoning low
+expect {{
+  -re "Planning Request" {{}}
+}}
+send -- "Plan the interactive continuation flow\r"
+after 1200
+send -- "\033"
+expect eof
+"#,
+        meta_bin = tcl_escape(&meta_bin.to_string_lossy()),
+        repo_root = tcl_escape(&repo_root.display().to_string()),
+    );
+
+    let output = ProcessCommand::new("expect")
+        .arg("-c")
+        .arg(expect_script)
+        .current_dir(&repo_root)
+        .env("HOME", isolated_home_dir())
+        .env("XDG_CONFIG_HOME", isolated_home_dir().join(".config"))
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "interactive plan failed: stdout=`{}` stderr=`{}`",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let first_args = fs::read_to_string(stub_dir.join("claude-args-1.txt"))?;
+    assert!(first_args.contains("-p"));
+    assert!(first_args.contains("--model=haiku"));
+    assert!(first_args.contains("--effort=low"));
+    assert!(first_args.contains("--output-format=json"));
+    assert!(!first_args.contains("--resume"));
+
+    let second_args = fs::read_to_string(stub_dir.join("claude-args-2.txt"))?;
+    assert!(second_args.contains("-p"));
+    assert!(second_args.contains("--model=haiku"));
+    assert!(second_args.contains("--effort=low"));
+    assert!(second_args.contains("--output-format=json"));
+    assert!(second_args.contains("--resume"));
+    assert!(second_args.contains("interactive-session"));
+
+    assert!(!stub_dir.join("codex-count.txt").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn tcl_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+}
+
+#[cfg(unix)]
+#[test]
 fn plan_no_interactive_resolves_repo_meta_project_name_to_project_id() -> Result<(), Box<dyn Error>>
 {
     let temp = tempdir()?;

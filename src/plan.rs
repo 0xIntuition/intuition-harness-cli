@@ -149,6 +149,7 @@ enum PlanStageKind {
 
 struct PlanSessionApp {
     stage: PlanStage,
+    agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
     pending: Option<PendingPlanJob>,
 }
@@ -269,6 +270,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
             &root,
             args.request.clone(),
             planning_meta.interactive_follow_up_question_limit(),
+            agent_overrides.clone(),
         )? {
             InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
             InteractivePlanExit::Confirmed(plan) => plan,
@@ -682,6 +684,7 @@ fn run_interactive_plan_session(
     root: &Path,
     prefill: Option<String>,
     follow_up_question_limit: usize,
+    agent_overrides: PlanningAgentOverrides,
 ) -> Result<InteractivePlanExit> {
     let mut app = PlanSessionApp {
         stage: PlanStage::Request(RequestApp {
@@ -690,6 +693,7 @@ fn run_interactive_plan_session(
             ),
             error: None,
         }),
+        agent_overrides,
         continuation: None,
         pending: None,
     };
@@ -1770,6 +1774,7 @@ fn start_question_generation(
             request,
             request_attachments,
             follow_up_question_limit,
+            app.agent_overrides.clone(),
             app.continuation.clone(),
         ),
         previous_stage,
@@ -1802,6 +1807,7 @@ fn start_plan_generation(
             request_attachments,
             follow_ups,
             revision,
+            app.agent_overrides.clone(),
             app.continuation.clone(),
         ),
         previous_stage,
@@ -1826,6 +1832,7 @@ fn start_plan_revision(app: &mut PlanSessionApp, root: &Path, review: ReviewApp)
             root.to_path_buf(),
             review,
             next_revision,
+            app.agent_overrides.clone(),
             app.continuation.clone(),
         ),
         previous_stage,
@@ -1837,6 +1844,7 @@ fn spawn_questions_job(
     request: String,
     request_attachments: Vec<PromptImageAttachment>,
     follow_up_question_limit: usize,
+    agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
 ) -> Receiver<PlanWorkerReport> {
     let (sender, receiver) = mpsc::channel();
@@ -1847,7 +1855,7 @@ fn spawn_questions_job(
             &request,
             request_attachments.clone(),
             follow_up_question_limit,
-            &PlanningAgentOverrides::default(),
+            &agent_overrides,
             &mut continuation,
         )
         .map(|questions| PlanWorkerOutcome::Questions {
@@ -1869,6 +1877,7 @@ fn spawn_plan_job(
     request_attachments: Vec<PromptImageAttachment>,
     follow_ups: Vec<FollowUpResponse>,
     revision: usize,
+    agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
 ) -> Receiver<PlanWorkerReport> {
     let (sender, receiver) = mpsc::channel();
@@ -1880,7 +1889,7 @@ fn spawn_plan_job(
             &request,
             &follow_ups,
             attachments,
-            &PlanningAgentOverrides::default(),
+            &agent_overrides,
             &mut continuation,
         )
         .and_then(|plan| {
@@ -1907,6 +1916,7 @@ fn spawn_plan_revision_job(
     root: PathBuf,
     review: ReviewApp,
     revision: usize,
+    agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
 ) -> Receiver<PlanWorkerReport> {
     let (sender, receiver) = mpsc::channel();
@@ -1920,6 +1930,7 @@ fn spawn_plan_revision_job(
             &review.plan,
             &review_kept_indices(&review),
             &review_merge_groups(&review),
+            &agent_overrides,
             &mut continuation,
         )
         .and_then(|plan| {
@@ -1960,6 +1971,7 @@ fn revise_issue_plan(
     plan: &PlannedIssueSet,
     kept_indices: &[usize],
     merge_groups: &BTreeMap<usize, Vec<usize>>,
+    overrides: &PlanningAgentOverrides,
     continuation: &mut Option<AgentContinuation>,
 ) -> Result<PlannedIssueSet> {
     let prompt =
@@ -1968,11 +1980,11 @@ fn revise_issue_plan(
         &RunAgentArgs {
             root: Some(root.to_path_buf()),
             route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
-            agent: None,
+            agent: overrides.agent.clone(),
             prompt,
             instructions: None,
-            model: None,
-            reasoning: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
             transport: None,
             attachments: collect_prompt_attachments(request_attachments, follow_ups),
         },
@@ -2031,14 +2043,15 @@ mod tests {
     use super::{
         FollowUpAnswerState, FollowUpQuestions, FollowUpResponse, LoadingApp, PendingPlanJob,
         PlanSessionApp, PlanStage, PlanWorkerOutcome, PlanWorkerReport, PlannedIssueDraft,
-        PlannedIssueSet, QuestionAnswer, QuestionsApp, RequestApp, ReviewApp,
-        ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app,
-        handle_questions_step_key, handle_questions_step_paste, handle_request_step_key,
-        handle_request_step_paste, next_incomplete_question, parse_agent_json,
-        process_pending_plan_job, render_issue_merge_prompt, render_loading_frame,
-        render_plan_session, render_question_prompt, render_questions_form_frame,
-        render_request_form_frame, render_review_form_frame, review_kept_indices, review_marker,
-        review_merge_groups, review_submission_action, selected_issue_plan, snapshot,
+        PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
+        ReviewApp, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
+        build_review_app, handle_questions_step_key, handle_questions_step_paste,
+        handle_request_step_key, handle_request_step_paste, next_incomplete_question,
+        parse_agent_json, process_pending_plan_job, render_issue_merge_prompt,
+        render_loading_frame, render_plan_session, render_question_prompt,
+        render_questions_form_frame, render_request_form_frame, render_review_form_frame,
+        review_kept_indices, review_marker, review_merge_groups, review_submission_action,
+        selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
@@ -2696,6 +2709,7 @@ mod tests {
                             ),
                             error: None,
                         }),
+                        agent_overrides: PlanningAgentOverrides::default(),
                         continuation: None,
                         pending: None,
                     },
@@ -2713,6 +2727,7 @@ mod tests {
                                 .to_string(),
                             spinner_index: 0,
                         }),
+                        agent_overrides: PlanningAgentOverrides::default(),
                         continuation: None,
                         pending: None,
                     },
@@ -2940,6 +2955,7 @@ mod tests {
                 detail: "Reviewing the request.".to_string(),
                 spinner_index: 0,
             }),
+            agent_overrides: PlanningAgentOverrides::default(),
             continuation: None,
             pending: Some(PendingPlanJob {
                 receiver,
