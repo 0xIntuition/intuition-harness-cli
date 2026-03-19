@@ -1520,6 +1520,19 @@ fn normalize_issue_state_name(state_name: &str) -> String {
     state_name.trim().to_ascii_lowercase()
 }
 
+fn listen_scope_label(
+    team: Option<&str>,
+    project_selector: Option<&str>,
+    project_label: &str,
+) -> String {
+    match (team, project_selector) {
+        (Some(team), Some(_)) => format!("{team} / {project_label}"),
+        (Some(team), None) => team.to_string(),
+        (None, Some(_)) => project_label.to_string(),
+        (None, None) => "all teams".to_string(),
+    }
+}
+
 pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     let projects = ListenProjectStore::list_projects()?;
     if projects.is_empty() {
@@ -1834,12 +1847,11 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
 
     let started_at_epoch_seconds = now_epoch_seconds();
     let initial_cycle = ListenCycleData::loading(
-        match (&daemon.filters.team, &daemon.filters.project) {
-            (Some(team), Some(project)) => format!("{team} / {project}"),
-            (Some(team), None) => team.clone(),
-            (None, Some(project)) => project.clone(),
-            (None, None) => "all teams".to_string(),
-        },
+        listen_scope_label(
+            daemon.filters.team.as_deref(),
+            daemon.store.identity().project_selector.as_deref(),
+            &daemon.store.identity().project_label,
+        ),
         display_path(&daemon.store.paths().state_path, &daemon.root),
     );
     run_live_loop(
@@ -2482,7 +2494,7 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         ListenCycleData, ListenState, SessionPhase, TokenUsage, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number,
+        compact_identifier, format_duration, format_number, listen_scope_label,
     };
     use std::fs;
     use std::path::Path;
@@ -2646,6 +2658,20 @@ mod tests {
             "expected src.rs in status entries: {:?}",
             updated.status_entries
         );
+    }
+
+    #[test]
+    fn listen_scope_label_uses_effective_default_project_identity() {
+        assert_eq!(
+            listen_scope_label(Some("MET"), Some("project-default"), "project-default"),
+            "MET / project-default"
+        );
+    }
+
+    #[test]
+    fn listen_scope_label_falls_back_to_team_without_project_scope() {
+        assert_eq!(listen_scope_label(Some("MET"), None, "All projects"), "MET");
+        assert_eq!(listen_scope_label(None, None, "All projects"), "all teams");
     }
 
     fn run_git(repo: &std::path::Path, args: &[&str]) -> anyhow::Result<()> {
