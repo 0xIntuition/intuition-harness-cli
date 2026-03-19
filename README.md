@@ -759,16 +759,27 @@ When `$METASTACK_CONFIG` points to a custom config file, the listener store live
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from
 the existing config path rules, for example `~/.config/metastack/data/`. Each project is stored in
 `listen/projects/<PROJECT_KEY>/` with `project.json`, `session.json`, an active-listener lock, and
-per-issue logs.
+per-issue logs. `session.json` remains the source of truth for tracked agent sessions; session
+cleanup rewrites only the selected `AgentSession` records and preserves the project metadata, active
+listener lock, and unrelated logs. Completed sessions older than the default 24-hour TTL are pruned
+automatically when the store is loaded, while blocked sessions are retained until explicitly
+cleared.
 
 Stored-session management commands:
 
 ```bash
 meta listen sessions list
 meta listen sessions inspect
-meta listen sessions clear
+meta listen sessions clear ENG-1234
+meta listen sessions clear --blocked
+meta listen sessions clear --completed
+meta listen sessions clear --stale
+meta listen sessions clear --all
 meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
+
+`meta listen sessions clear` is record-only cleanup. It never kills worker processes, and it refuses
+to remove any targeted session whose stored PID is still alive.
 
 Reference:
 

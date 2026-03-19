@@ -45,9 +45,12 @@ use crate::linear::{
 use crate::listen::workpad::{extract_requirements, render_bootstrap_workpad};
 use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
 use crate::scaffold::ensure_planning_layout;
-use state::ListenState;
 pub use state::{AgentSession, PendingIssue, SessionPhase, TokenUsage};
-use store::{ListenProjectStore, StoredListenProjectSummary, resolve_source_project_root};
+use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
+use store::{
+    ListenProjectStore, SessionSelector, StoredListenProjectSummary, pid_is_running,
+    resolve_source_project_root,
+};
 
 const TODO_STATE: &str = "Todo";
 const BACKLOG_STATE: &str = "Backlog";
@@ -528,6 +531,29 @@ fn compact_blocked_summary(
     ])
 }
 
+fn mark_running_session_stale(
+    session: &mut AgentSession,
+    issue_identifier: &str,
+    fallback_log_path: &Path,
+    pid: u32,
+) {
+    let log_path = session
+        .log_path
+        .clone()
+        .unwrap_or_else(|| fallback_log_path.display().to_string());
+    session.phase = SessionPhase::Blocked;
+    session.log_path = Some(log_path.clone());
+    session.summary = compact_session_summary([
+        Some("Blocked | worker died".to_string()),
+        Some(format!("stale pid {pid}")),
+        Some(log_reference_summary(Path::new(&log_path))),
+    ]);
+    session.updated_at_epoch_seconds = now_epoch_seconds();
+    if session.issue_identifier.is_empty() {
+        session.issue_identifier = issue_identifier.to_string();
+    }
+}
+
 fn render_listen_backlog_file(
     relative_path: &str,
     contents: String,
@@ -634,6 +660,22 @@ where
         state: &mut ListenState,
         notes: &mut Vec<String>,
     ) -> Result<()> {
+        let pruned = state.prune_completed_sessions_older_than(
+            now_epoch_seconds(),
+            COMPLETED_SESSION_TTL_SECONDS,
+        );
+        if !pruned.is_empty() {
+            notes.push(format!(
+                "Pruned {} completed session(s) older than the 24-hour TTL: {}.",
+                pruned.len(),
+                pruned
+                    .iter()
+                    .map(|session| session.issue_identifier.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
         let existing_sessions = state.sessions.clone();
         let mut reconciled = Vec::with_capacity(existing_sessions.len());
 
@@ -689,6 +731,23 @@ where
             if matches!(session.phase, SessionPhase::Running)
                 && session.pid.is_some_and(pid_is_running)
             {
+                reconciled.push(session);
+                continue;
+            }
+
+            if matches!(session.phase, SessionPhase::Running)
+                && let Some(pid) = session.pid
+            {
+                mark_running_session_stale(
+                    &mut session,
+                    &issue.identifier,
+                    &self.agent_log_path(&issue.identifier),
+                    pid,
+                );
+                notes.push(format!(
+                    "{} worker pid {} was no longer running; marked the stored session blocked instead of auto-resuming it.",
+                    session.issue_identifier, pid
+                ));
                 reconciled.push(session);
                 continue;
             }
@@ -1625,9 +1684,34 @@ pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String>
     let store = resolve_session_store(&args.target)?;
     let label = store.identity().project_label.clone();
     let key = store.identity().project_key.clone();
-    store.clear()?;
+    let selector = clear_selector(args);
+    let outcome = store.clear_sessions(&selector)?;
+    if outcome.cleared_sessions.is_empty() {
+        return Ok(format!(
+            "No stored MetaListen sessions matched {} for project `{label}` ({key}); {} tracked session(s) remain.",
+            selector.display_label(),
+            outcome.remaining_sessions
+        ));
+    }
+
+    let cleared = outcome
+        .cleared_sessions
+        .iter()
+        .map(|session| {
+            format!(
+                "{} [{}]",
+                session.issue_identifier,
+                session.phase.display_label()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     Ok(format!(
-        "Cleared stored MetaListen session data for project `{label}` ({key})."
+        "Cleared {} stored MetaListen session(s) matched by {} for project `{label}` ({key}): {}. {} tracked session(s) remain.",
+        outcome.cleared_sessions.len(),
+        selector.display_label(),
+        cleared,
+        outcome.remaining_sessions
     ))
 }
 
@@ -1877,6 +1961,20 @@ fn store_summary(store: &ListenProjectStore) -> Result<StoredListenProjectSummar
                 store.identity().project_key
             )
         })
+}
+
+fn clear_selector(args: &ListenSessionClearArgs) -> SessionSelector {
+    if let Some(identifier) = args.issue_identifier.as_deref() {
+        SessionSelector::IssueIdentifier(identifier.to_string())
+    } else if args.blocked {
+        SessionSelector::Blocked
+    } else if args.completed {
+        SessionSelector::Completed
+    } else if args.stale {
+        SessionSelector::Stale
+    } else {
+        SessionSelector::All
+    }
 }
 
 async fn run_live_loop<F, Fut, S>(
@@ -2359,17 +2457,6 @@ fn render_issue_attachment_manifest(
     lines.join("\n")
 }
 
-fn pid_is_running(pid: u32) -> bool {
-    Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(true)
-}
-
 fn now_timestamp() -> String {
     Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
@@ -2449,8 +2536,9 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListenCycleData, ListenState, SessionPhase, TokenUsage, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number,
+        AgentSession, ListenCycleData, ListenState, SessionPhase, TokenUsage,
+        capture_workspace_snapshot, compact_identifier, format_duration, format_number,
+        mark_running_session_stale,
     };
     use std::fs;
     use std::path::Path;
@@ -2497,6 +2585,42 @@ mod tests {
         };
 
         assert_eq!(usage.display_compact(), "12,340");
+    }
+
+    #[test]
+    fn dead_running_session_is_marked_blocked_and_stale() {
+        let mut session = AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-10163".to_string(),
+            issue_title: "Listen cleanup".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/eng-10163".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            brief_path: Some(".metastack/agents/briefs/ENG-10163.md".to_string()),
+            backlog_issue_identifier: Some("TECH-1".to_string()),
+            backlog_issue_title: Some("Backlog".to_string()),
+            backlog_path: Some(".metastack/backlog/TECH-1".to_string()),
+            workspace_path: Some("/tmp/ENG-10163".to_string()),
+            branch: Some("eng-10163".to_string()),
+            workpad_comment_id: Some("comment-1".to_string()),
+            updated_at_epoch_seconds: 1,
+            pid: Some(42_424),
+            session_id: Some("session-1".to_string()),
+            turns: Some(2),
+            tokens: TokenUsage::default(),
+            log_path: Some("logs/ENG-10163.log".to_string()),
+        };
+
+        mark_running_session_stale(&mut session, "ENG-10163", Path::new("fallback.log"), 42_424);
+
+        assert_eq!(session.phase, SessionPhase::Blocked);
+        assert_eq!(session.workspace_path.as_deref(), Some("/tmp/ENG-10163"));
+        assert_eq!(session.log_path.as_deref(), Some("logs/ENG-10163.log"));
+        assert!(session.summary.contains("Blocked | worker died"));
+        assert!(session.summary.contains("stale pid 42424"));
+        assert!(session.summary.contains("see logs/ENG-10163.log"));
     }
 
     #[test]

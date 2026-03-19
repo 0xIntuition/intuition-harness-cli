@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::tui::prompt_images::PromptImageAttachment;
 
@@ -667,7 +667,7 @@ pub enum ListenSessionCommands {
     List(ListenSessionListArgs),
     /// Inspect one stored MetaListen project session.
     Inspect(ListenSessionInspectArgs),
-    /// Clear one stored MetaListen project session.
+    /// Clear selected stored MetaListen project sessions.
     Clear(ListenSessionClearArgs),
     /// Resume listening for a stored MetaListen project session.
     Resume(Box<ListenSessionResumeArgs>),
@@ -693,9 +693,30 @@ pub struct ListenSessionInspectArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(group(
+    ArgGroup::new("selector")
+        .required(true)
+        .multiple(false)
+        .args(["issue_identifier", "blocked", "completed", "stale", "all"])
+))]
 pub struct ListenSessionClearArgs {
     #[command(flatten)]
     pub target: ListenSessionTargetArgs,
+    /// Clear the stored session for this issue identifier, for example ENG-1234.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issue_identifier: Option<String>,
+    /// Clear only blocked stored sessions.
+    #[arg(long)]
+    pub blocked: bool,
+    /// Clear only completed stored sessions.
+    #[arg(long)]
+    pub completed: bool,
+    /// Clear only stored sessions whose worker pid is no longer running.
+    #[arg(long)]
+    pub stale: bool,
+    /// Clear every stored session record for the selected project.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, Args)]
