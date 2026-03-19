@@ -20,11 +20,12 @@ use serde::Serialize;
 
 use crate::cli::ConfigArgs;
 use crate::config::{
-    AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, detect_supported_agents,
-    normalize_agent_name, normalize_agent_route_key, resolve_agent_route, supported_agent_models,
-    supported_agent_names, supported_agent_route_definitions, supported_agent_route_families,
-    supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning,
+    AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, VelocityAutoAssign,
+    detect_supported_agents, normalize_agent_name, normalize_agent_route_key, resolve_agent_route,
+    supported_agent_models, supported_agent_names, supported_agent_route_definitions,
+    supported_agent_route_families, supported_reasoning_options, validate_agent_model,
+    validate_agent_name, validate_agent_reasoning, validate_backlog_default_priority,
+    validate_backlog_labels,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
@@ -181,6 +182,43 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         display_optional(view.app_config.agents.default_reasoning.as_deref())
     ));
     lines.push(format!(
+        "Backlog default assignee: {}",
+        display_optional(view.app_config.backlog.default_assignee.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default state: {}",
+        display_optional(view.app_config.backlog.default_state.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default priority: {}",
+        view.app_config
+            .backlog
+            .default_priority
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Backlog default labels: {}",
+        render_label_summary(&view.app_config.backlog.default_labels)
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity project: {}",
+        display_optional(view.app_config.backlog.velocity_defaults.project.as_deref())
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity state: {}",
+        display_optional(view.app_config.backlog.velocity_defaults.state.as_deref())
+    ));
+    lines.push(format!(
+        "Zero-prompt auto-assign: {}",
+        view.app_config
+            .backlog
+            .velocity_defaults
+            .auto_assign
+            .map(render_velocity_auto_assign)
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
         "Advanced route overrides: {}",
         render_route_override_summary(&view.app_config)
     ));
@@ -217,6 +255,20 @@ fn display_optional(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn render_label_summary(labels: &[String]) -> String {
+    if labels.is_empty() {
+        "unset".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn render_velocity_auto_assign(value: VelocityAutoAssign) -> String {
+    match value {
+        VelocityAutoAssign::Viewer => "viewer".to_string(),
+    }
+}
+
 fn mask_secret(value: Option<&str>) -> String {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) if value.len() <= 6 => "*".repeat(value.len()),
@@ -236,6 +288,13 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.default_agent.is_some()
         || args.default_model.is_some()
         || args.default_reasoning.is_some()
+        || args.default_assignee.is_some()
+        || args.default_state.is_some()
+        || args.default_priority.is_some()
+        || !args.default_labels.is_empty()
+        || args.velocity_project.is_some()
+        || args.velocity_state.is_some()
+        || args.velocity_auto_assign.is_some()
         || args.route.is_some()
         || args.clear_route.is_some()
         || args.route_agent.is_some()
@@ -292,6 +351,28 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
         )?;
         view.app_config.agents.default_reasoning = normalized;
     }
+    if let Some(default_assignee) = &args.default_assignee {
+        view.app_config.backlog.default_assignee = normalize_optional(default_assignee);
+    }
+    if let Some(default_state) = &args.default_state {
+        view.app_config.backlog.default_state = normalize_optional(default_state);
+    }
+    if let Some(default_priority) = &args.default_priority {
+        view.app_config.backlog.default_priority = parse_optional_priority(default_priority)?;
+    }
+    if !args.default_labels.is_empty() {
+        view.app_config.backlog.default_labels = parse_default_labels(&args.default_labels)?;
+    }
+    if let Some(project) = &args.velocity_project {
+        view.app_config.backlog.velocity_defaults.project = normalize_optional(project);
+    }
+    if let Some(state) = &args.velocity_state {
+        view.app_config.backlog.velocity_defaults.state = normalize_optional(state);
+    }
+    if let Some(auto_assign) = &args.velocity_auto_assign {
+        view.app_config.backlog.velocity_defaults.auto_assign =
+            parse_velocity_auto_assign(auto_assign)?;
+    }
     apply_route_updates(&mut view.app_config, args)?;
     view.app_config.validate()?;
 
@@ -325,6 +406,42 @@ fn normalize_optional(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_optional_priority(value: &str) -> Result<Option<u8>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let priority = value
+        .parse::<u8>()
+        .map_err(|_| anyhow!("backlog default priority must be an integer between 1 and 4"))?;
+    validate_backlog_default_priority(priority)?;
+    Ok(Some(priority))
+}
+
+fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
+    if values.len() == 1 && values[0].trim().eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+
+    let labels = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    validate_backlog_labels(&labels)?;
+    Ok(labels)
+}
+
+fn parse_velocity_auto_assign(value: &str) -> Result<Option<VelocityAutoAssign>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "viewer" => Ok(Some(VelocityAutoAssign::Viewer)),
+        _ => Err(anyhow!(
+            "velocity auto-assign must be `viewer` or empty to clear it"
+        )),
     }
 }
 

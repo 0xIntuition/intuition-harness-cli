@@ -22,11 +22,11 @@ use crate::cli::{ConfigEventArg, SetupArgs};
 use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
     DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, LinearConfig, LinearConfigOverrides,
-    ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, ensure_saved_issue_labels,
-    normalize_agent_name, supported_agent_models, supported_agent_names,
+    ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, VelocityAutoAssign,
+    ensure_saved_issue_labels, normalize_agent_name, supported_agent_models, supported_agent_names,
     supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-    validate_listen_poll_interval_seconds,
+    validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
+    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
@@ -482,6 +482,55 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         )
     ));
     lines.push(format!(
+        "Backlog default assignee: {}",
+        display_optional(view.planning_meta.backlog.default_assignee.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default state: {}",
+        display_optional(view.planning_meta.backlog.default_state.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default priority: {}",
+        view.planning_meta
+            .backlog
+            .default_priority
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Backlog default labels: {}",
+        render_label_summary(&view.planning_meta.backlog.default_labels)
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity project: {}",
+        display_optional(
+            view.planning_meta
+                .backlog
+                .velocity_defaults
+                .project
+                .as_deref()
+        )
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity state: {}",
+        display_optional(
+            view.planning_meta
+                .backlog
+                .velocity_defaults
+                .state
+                .as_deref()
+        )
+    ));
+    lines.push(format!(
+        "Zero-prompt auto-assign: {}",
+        view.planning_meta
+            .backlog
+            .velocity_defaults
+            .auto_assign
+            .map(render_velocity_auto_assign)
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
         "Listen prerequisites: {}",
         listen_prerequisites_summary()
     ));
@@ -509,6 +558,13 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.interactive_plan_follow_up_question_limit.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
+        || args.default_assignee.is_some()
+        || args.default_state.is_some()
+        || args.default_priority.is_some()
+        || !args.default_labels.is_empty()
+        || args.velocity_project.is_some()
+        || args.velocity_state.is_some()
+        || args.velocity_auto_assign.is_some()
 }
 
 async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Result<bool> {
@@ -619,6 +675,28 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     }
     if let Some(label) = &args.technical_label {
         view.planning_meta.issue_labels.technical = normalize_optional(label);
+    }
+    if let Some(assignee) = &args.default_assignee {
+        view.planning_meta.backlog.default_assignee = normalize_optional(assignee);
+    }
+    if let Some(state) = &args.default_state {
+        view.planning_meta.backlog.default_state = normalize_optional(state);
+    }
+    if let Some(priority) = &args.default_priority {
+        view.planning_meta.backlog.default_priority = parse_optional_priority(priority)?;
+    }
+    if !args.default_labels.is_empty() {
+        view.planning_meta.backlog.default_labels = parse_default_labels(&args.default_labels)?;
+    }
+    if let Some(project) = &args.velocity_project {
+        view.planning_meta.backlog.velocity_defaults.project = normalize_optional(project);
+    }
+    if let Some(state) = &args.velocity_state {
+        view.planning_meta.backlog.velocity_defaults.state = normalize_optional(state);
+    }
+    if let Some(auto_assign) = &args.velocity_auto_assign {
+        view.planning_meta.backlog.velocity_defaults.auto_assign =
+            parse_velocity_auto_assign(auto_assign)?;
     }
 
     let after_meta = serde_json::to_value(&view.planning_meta)?;
@@ -1565,6 +1643,20 @@ fn display_optional(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn render_label_summary(labels: &[String]) -> String {
+    if labels.is_empty() {
+        "unset".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn render_velocity_auto_assign(value: VelocityAutoAssign) -> String {
+    match value {
+        VelocityAutoAssign::Viewer => "viewer".to_string(),
+    }
+}
+
 fn display_repo_auth(api_key: Option<&str>, profile: Option<&str>) -> String {
     if api_key
         .map(str::trim)
@@ -1607,6 +1699,42 @@ fn normalize_optional(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_optional_priority(value: &str) -> Result<Option<u8>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let priority = value
+        .parse::<u8>()
+        .map_err(|_| anyhow!("backlog default priority must be an integer between 1 and 4"))?;
+    validate_backlog_default_priority(priority)?;
+    Ok(Some(priority))
+}
+
+fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
+    if values.len() == 1 && values[0].trim().eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+
+    let labels = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    validate_backlog_labels(&labels)?;
+    Ok(labels)
+}
+
+fn parse_velocity_auto_assign(value: &str) -> Result<Option<VelocityAutoAssign>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "viewer" => Ok(Some(VelocityAutoAssign::Viewer)),
+        _ => Err(anyhow!(
+            "velocity auto-assign must be `viewer` or empty to clear it"
+        )),
     }
 }
 

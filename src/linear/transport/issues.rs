@@ -3,19 +3,37 @@ use serde_json::{Value, json};
 
 use crate::linear::{
     IssueAssigneeFilter, IssueCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest,
+    UserRef,
 };
 
 use super::{
     ReqwestLinearClient,
     model::{
         Connection, IssueByIdPayload, IssueCommentsPayload, IssueCreatePayload, IssueUpdatePayload,
-        IssuesPayload,
+        IssuesPayload, UsersPayload,
     },
     pagination::CursorPager,
 };
 
 const ISSUES_PAGE_SIZE: usize = 100;
 const ISSUE_COMMENTS_PAGE_SIZE: usize = 50;
+const USERS_PAGE_SIZE: usize = 100;
+
+const USERS_QUERY: &str = r#"
+query Users($first: Int!, $after: String) {
+  users(first: $first, after: $after) {
+    nodes {
+      id
+      name
+      email
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"#;
 
 const ISSUES_QUERY: &str = r#"
 query Issues($first: Int!, $after: String, $filter: IssueFilter) {
@@ -195,6 +213,29 @@ children(first: 100) {
 "#;
 
 impl ReqwestLinearClient {
+    pub(super) async fn list_users_resource(&self, limit: usize) -> Result<Vec<UserRef>> {
+        let mut users = Vec::new();
+        let mut pager = CursorPager::new(Some(limit.max(1)), USERS_PAGE_SIZE);
+
+        while let Some(first) = pager.next_page_size() {
+            let data: UsersPayload = self
+                .graphql()
+                .query(
+                    USERS_QUERY,
+                    json!({
+                        "first": first,
+                        "after": pager.after(),
+                    }),
+                )
+                .await?;
+            let mut page = data.users;
+            users.append(&mut page.nodes);
+            pager.advance(&page);
+        }
+
+        Ok(users)
+    }
+
     pub(super) async fn list_issues_resource(&self, limit: usize) -> Result<Vec<IssueSummary>> {
         self.collect_issues(Some(limit.max(1)), None).await
     }
@@ -337,6 +378,7 @@ mutation CreateIssue($input: IssueCreateInput!) {{
                         "parentId": request.parent_id,
                         "stateId": request.state_id,
                         "priority": request.priority,
+                        "assigneeId": request.assignee_id,
                         "labelIds": request.label_ids,
                     }
                 }),

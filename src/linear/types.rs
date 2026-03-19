@@ -165,6 +165,7 @@ pub struct IssueCreateSpec {
     pub parent_id: Option<String>,
     pub state: Option<String>,
     pub priority: Option<u8>,
+    pub assignee_id: Option<String>,
     #[allow(dead_code)]
     pub labels: Vec<String>,
 }
@@ -194,6 +195,7 @@ pub struct IssueCreateRequest {
     pub parent_id: Option<String>,
     pub state_id: Option<String>,
     pub priority: Option<u8>,
+    pub assignee_id: Option<String>,
     #[allow(dead_code)]
     pub label_ids: Vec<String>,
 }

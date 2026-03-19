@@ -3127,6 +3127,10 @@ mod tests {
             unreachable!("list_projects is not used in this test")
         }
 
+        async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+            unreachable!("list_users is not used in this test")
+        }
+
         async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
             Ok(vec![self.issue.clone()])
         }
