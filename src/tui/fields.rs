@@ -173,27 +173,10 @@ impl InputFieldState {
                 AttachmentPasteOutcome::NoChange
             }),
             AttachmentMode::Rejected { message } => {
-                if resolve_attachment_from_pasted_text(text)?.is_some() {
-                    bail!("{message}");
-                }
-                Ok(if self.paste_normalized_text(text) {
-                    AttachmentPasteOutcome::TextPasted
-                } else {
-                    AttachmentPasteOutcome::NoChange
-                })
+                let message = message.clone();
+                self.paste_or_reject_prompt_attachment_text(text, &message)
             }
-            AttachmentMode::Enabled => {
-                if let Some(attachment) = resolve_attachment_from_pasted_text(text)? {
-                    self.insert_attachment(attachment)?;
-                    return Ok(AttachmentPasteOutcome::AttachmentPasted);
-                }
-
-                Ok(if self.paste_normalized_text(text) {
-                    AttachmentPasteOutcome::TextPasted
-                } else {
-                    AttachmentPasteOutcome::NoChange
-                })
-            }
+            AttachmentMode::Enabled => self.paste_prompt_attachment_text(text),
         }
     }
 
@@ -202,28 +185,54 @@ impl InputFieldState {
     ) -> Result<AttachmentPasteOutcome> {
         match &self.attachment_mode {
             AttachmentMode::Disabled => Ok(AttachmentPasteOutcome::NoChange),
-            AttachmentMode::Rejected { message } => match resolve_clipboard_prompt_paste()? {
-                ClipboardPromptPaste::Attachment(_) => bail!("{message}"),
-                ClipboardPromptPaste::Text(text) => Ok(if self.paste_normalized_text(&text) {
-                    AttachmentPasteOutcome::TextPasted
-                } else {
-                    AttachmentPasteOutcome::NoChange
-                }),
-                ClipboardPromptPaste::Empty => Ok(AttachmentPasteOutcome::NoChange),
-            },
+            AttachmentMode::Rejected { message } => {
+                let message = message.clone();
+                match resolve_clipboard_prompt_paste()? {
+                    ClipboardPromptPaste::Attachment(_) => bail!("{message}"),
+                    ClipboardPromptPaste::Text(text) => {
+                        self.paste_or_reject_prompt_attachment_text(&text, &message)
+                    }
+                    ClipboardPromptPaste::Empty => Ok(AttachmentPasteOutcome::NoChange),
+                }
+            }
             AttachmentMode::Enabled => match resolve_clipboard_prompt_paste()? {
                 ClipboardPromptPaste::Attachment(attachment) => {
                     self.insert_attachment(attachment)?;
                     Ok(AttachmentPasteOutcome::AttachmentPasted)
                 }
-                ClipboardPromptPaste::Text(text) => Ok(if self.paste_normalized_text(&text) {
-                    AttachmentPasteOutcome::TextPasted
-                } else {
-                    AttachmentPasteOutcome::NoChange
-                }),
+                ClipboardPromptPaste::Text(text) => self.paste_prompt_attachment_text(&text),
                 ClipboardPromptPaste::Empty => Ok(AttachmentPasteOutcome::NoChange),
             },
         }
+    }
+
+    fn paste_prompt_attachment_text(&mut self, text: &str) -> Result<AttachmentPasteOutcome> {
+        if let Some(attachment) = resolve_attachment_from_pasted_text(text)? {
+            self.insert_attachment(attachment)?;
+            return Ok(AttachmentPasteOutcome::AttachmentPasted);
+        }
+
+        Ok(if self.paste_normalized_text(text) {
+            AttachmentPasteOutcome::TextPasted
+        } else {
+            AttachmentPasteOutcome::NoChange
+        })
+    }
+
+    fn paste_or_reject_prompt_attachment_text(
+        &mut self,
+        text: &str,
+        message: &str,
+    ) -> Result<AttachmentPasteOutcome> {
+        if resolve_attachment_from_pasted_text(text)?.is_some() {
+            bail!("{message}");
+        }
+
+        Ok(if self.paste_normalized_text(text) {
+            AttachmentPasteOutcome::TextPasted
+        } else {
+            AttachmentPasteOutcome::NoChange
+        })
     }
 
     fn paste_normalized_text(&mut self, text: &str) -> bool {
@@ -851,6 +860,48 @@ mod tests {
             field.value(),
             format!("Plan: {}", note_path.to_str().expect("utf8"))
         );
+        assert!(field.prompt_attachments().is_empty());
+    }
+
+    #[test]
+    fn clipboard_text_image_path_is_normalized_into_an_attachment() {
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("clipboard-image.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .expect("save image");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments("Plan: ");
+        let outcome = field
+            .paste_prompt_attachment_text(image_path.to_str().expect("utf8"))
+            .expect("attachment from clipboard text");
+
+        assert_eq!(outcome, super::AttachmentPasteOutcome::AttachmentPasted);
+        assert_eq!(field.display_value(), "Plan: [Image #1]");
+        assert_eq!(field.prompt_attachments().len(), 1);
+    }
+
+    #[test]
+    fn rejecting_prompt_attachment_fields_reject_clipboard_image_paths() {
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("clipboard-image.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .expect("save image");
+
+        let mut field = InputFieldState::multiline_rejecting_prompt_attachments(
+            String::new(),
+            "attachments disabled",
+        );
+        let error = field
+            .paste_or_reject_prompt_attachment_text(
+                image_path.to_str().expect("utf8"),
+                "attachments disabled",
+            )
+            .expect_err("image path should be rejected");
+
+        assert!(error.to_string().contains("attachments disabled"));
+        assert_eq!(field.value(), "");
         assert!(field.prompt_attachments().is_empty());
     }
 
