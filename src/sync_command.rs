@@ -27,6 +27,7 @@ use crate::sync_dashboard::{
     SyncDashboardData, SyncDashboardExit, SyncDashboardIssue, SyncDashboardOptions,
     SyncSelectionAction, run_sync_dashboard,
 };
+use crate::text_diff::render_text_diff;
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const MANAGED_ATTACHMENT_MARKER: &str = "metastack-cli";
@@ -1458,57 +1459,12 @@ fn read_optional_text_file(path: &Path) -> Result<String> {
 }
 
 fn render_sync_diff(local_contents: &str, remote_contents: &str) -> String {
-    let mut rows = Vec::new();
-    rows.push("--- local/index.md".to_string());
-    rows.push("+++ linear/description".to_string());
-    rows.extend(diff_lines(local_contents, remote_contents));
-    rows.join("\n")
-}
-
-fn diff_lines(left: &str, right: &str) -> Vec<String> {
-    let left_lines = left.lines().map(str::to_string).collect::<Vec<_>>();
-    let right_lines = right.lines().map(str::to_string).collect::<Vec<_>>();
-    let mut table = vec![vec![0usize; right_lines.len() + 1]; left_lines.len() + 1];
-
-    for left_index in (0..left_lines.len()).rev() {
-        for right_index in (0..right_lines.len()).rev() {
-            table[left_index][right_index] = if left_lines[left_index] == right_lines[right_index] {
-                table[left_index + 1][right_index + 1] + 1
-            } else {
-                table[left_index + 1][right_index].max(table[left_index][right_index + 1])
-            };
-        }
-    }
-
-    let mut rendered = Vec::new();
-    let mut left_index = 0usize;
-    let mut right_index = 0usize;
-    while left_index < left_lines.len() && right_index < right_lines.len() {
-        if left_lines[left_index] == right_lines[right_index] {
-            rendered.push(format!(" {}", left_lines[left_index]));
-            left_index += 1;
-            right_index += 1;
-        } else if table[left_index + 1][right_index] >= table[left_index][right_index + 1] {
-            rendered.push(format!("-{}", left_lines[left_index]));
-            left_index += 1;
-        } else {
-            rendered.push(format!("+{}", right_lines[right_index]));
-            right_index += 1;
-        }
-    }
-    while left_index < left_lines.len() {
-        rendered.push(format!("-{}", left_lines[left_index]));
-        left_index += 1;
-    }
-    while right_index < right_lines.len() {
-        rendered.push(format!("+{}", right_lines[right_index]));
-        right_index += 1;
-    }
-
-    if rendered.is_empty() {
-        rendered.push(" (no description changes)".to_string());
-    }
-    rendered
+    render_text_diff(
+        "local/index.md",
+        "linear/description",
+        local_contents,
+        remote_contents,
+    )
 }
 
 fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
