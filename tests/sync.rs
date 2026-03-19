@@ -1245,9 +1245,9 @@ fn sync_render_once_uses_default_project_and_loads_paginated_issue_list()
             "meta backlog sync (MetaStack CLI)",
         ))
         .stdout(predicate::str::contains("Ready to push MET-13"))
+        .stdout(predicate::str::contains("Issue Search"))
         .stdout(predicate::str::contains("Third issue"))
-        .stdout(predicate::str::contains("local: unlinked"))
-        .stdout(predicate::str::contains("Local sync: unlinked"));
+        .stdout(predicate::str::contains("sync: unlinked"));
 
     first_page.assert();
     second_page.assert();

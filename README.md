@@ -618,6 +618,12 @@ Side effects:
 - `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 
+The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
+
+- type while the issue list is focused to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- the shared browser highlights matches in issue rows and previews and keeps sync-specific actions on the right-hand side
+
 The sync dashboard and render-once snapshot also show each issue's local sync state:
 
 - `synced`: current local and remote hashes still match the stored baselines
@@ -651,6 +657,8 @@ Legacy aliases: `meta issues`, `meta projects`, `meta dashboard`
 Notes:
 
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
+- `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
+- the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
 - In the interactive create/edit forms, multiline descriptions advance on `Enter` and insert a newline on `Shift+Enter`
 - `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
