@@ -499,7 +499,7 @@ Side effects:
 - runs the shell command first when configured, then the optional agent in the same working directory
 - creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
 
-In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`.
+In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`. Image attachments are intentionally rejected there in v1 so saved cron jobs never persist dangling temp-file references.
 
 Cron job files use this shape:
 
@@ -531,6 +531,17 @@ Legacy alias: `meta plan`
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
 
 Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow.
+
+The request editor and follow-up answer editors support up to 5 pasted images per editor in v1. `Ctrl+V` checks the clipboard for an image first and falls back to normal text paste when no image is present. Pasted local image paths and `file://` URLs are normalized into session-local temp PNG attachments outside the repository, and the editor renders them as non-editable `[Image #N]` placeholders.
+
+Current prompt-image support matrix:
+
+- `meta backlog plan` request editor: supported
+- `meta backlog plan` follow-up answer editors: supported
+- review-only planning screens: text only
+- macOS clipboard image paste: supported
+- Linux clipboard image paste: supported through `wl-paste -t image/png` on Wayland and `xclip -selection clipboard -t image/png -o` on X11
+- Windows / WSL clipboard image paste: not supported yet; the UI reports a clear error and path / `file://` paste still works
 
 For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values.
 
@@ -777,6 +788,8 @@ Agent-backed commands use stable route keys so different workflows can resolve d
 Workflow playbooks can still declare a built-in provider, but that value is now only used as the final fallback when the explicit, route, repo, and global config layers do not select one.
 
 The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
+
+Built-in providers are also the only prompt-image launch path in v1. When a supported prompt-bearing editor submits attachments, the CLI preserves attachment order, resizes oversized images to fit within `2048x768`, base64-encodes the resulting PNG payloads, and appends an explicit attachment block to the built-in provider prompt. Custom configured agents fail fast with a clear unsupported-provider error instead of dropping the images silently.
 
 Sandbox and permission handling depends on the command path:
 

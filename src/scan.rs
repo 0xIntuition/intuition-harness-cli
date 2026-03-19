@@ -176,6 +176,7 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
         model: None,
         reasoning: None,
         transport: None,
+        attachments: Vec::new(),
     };
     let options = AgentExecutionOptions {
         working_dir: Some(root.clone()),

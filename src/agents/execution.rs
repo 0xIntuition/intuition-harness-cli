@@ -12,6 +12,7 @@ use crate::config::{
     AgentConfigOverrides, AgentConfigSource, AppConfig, PlanningMeta, PromptTransport,
     normalize_agent_name, resolve_agent_config,
 };
+use crate::tui::prompt_images::{PromptImageAttachment, encode_prompt_images_for_provider};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentExecutionOptions {
@@ -39,6 +40,7 @@ pub(crate) struct ResolvedAgentInvocation {
     pub(crate) reasoning_source: Option<AgentConfigSource>,
     pub(crate) transport: PromptTransport,
     pub(crate) payload: String,
+    pub(crate) attachments: Vec<PromptImageAttachment>,
     pub(crate) builtin_provider: bool,
 }
 
@@ -131,6 +133,10 @@ pub(crate) fn apply_invocation_environment(
             .as_ref()
             .map(format_agent_config_source)
             .unwrap_or_default(),
+    );
+    command.env(
+        "METASTACK_AGENT_ATTACHMENT_COUNT",
+        invocation.attachments.len().to_string(),
     );
 }
 
@@ -246,12 +252,19 @@ pub(crate) fn resolve_agent_invocation_for_planning(
 
     let model = resolved.model;
     let reasoning = resolved.reasoning;
+    if !builtin_provider && !args.attachments.is_empty() {
+        bail!(
+            "agent `{agent_name}` does not support prompt image attachments; use built-in `codex` or `claude`, or remove the attachments"
+        );
+    }
     let payload = render_agent_payload(
+        &agent_name,
         &args.prompt,
         args.instructions.as_deref(),
         model.as_deref(),
         reasoning.as_deref(),
-    );
+        &args.attachments,
+    )?;
     let context = builtin_invocation_context(args.route_key.as_deref());
     let (command, rendered_args, transport) =
         if let Some(provider) = builtin_provider_adapter(&agent_name) {
@@ -310,6 +323,7 @@ pub(crate) fn resolve_agent_invocation_for_planning(
         reasoning_source: resolved.reasoning_source,
         transport,
         payload,
+        attachments: args.attachments.clone(),
         builtin_provider,
     })
 }
@@ -358,19 +372,21 @@ fn builtin_invocation_context(route_key: Option<&str>) -> BuiltinInvocationConte
 }
 
 fn render_agent_payload(
+    provider: &str,
     prompt: &str,
     instructions: Option<&str>,
     model: Option<&str>,
     reasoning: Option<&str>,
-) -> String {
+    attachments: &[PromptImageAttachment],
+) -> Result<String> {
     let instructions = instructions
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let model = model.map(str::trim).filter(|value| !value.is_empty());
     let reasoning = reasoning.map(str::trim).filter(|value| !value.is_empty());
 
-    if instructions.is_none() && model.is_none() && reasoning.is_none() {
-        return prompt.to_string();
+    if instructions.is_none() && model.is_none() && reasoning.is_none() && attachments.is_empty() {
+        return Ok(prompt.to_string());
     }
 
     let mut sections = vec![format!("Prompt:\n{prompt}")];
@@ -387,7 +403,39 @@ fn render_agent_payload(
         sections.push(format!("Preferred reasoning effort:\n{reasoning}"));
     }
 
-    sections.join("\n\n")
+    if !attachments.is_empty() {
+        sections.push(render_attachment_payload(provider, attachments)?);
+    }
+
+    Ok(sections.join("\n\n"))
+}
+
+fn render_attachment_payload(
+    provider: &str,
+    attachments: &[PromptImageAttachment],
+) -> Result<String> {
+    let encoded = encode_prompt_images_for_provider(attachments)?;
+    let mut lines = vec![format!(
+        "Prompt image attachments for built-in provider `{provider}`:"
+    )];
+    for (index, attachment) in encoded.iter().enumerate() {
+        lines.push(format!("[Image #{}]", index + 1));
+        lines.push(format!("name: {}", attachment.display_name));
+        lines.push("mime: image/png".to_string());
+        lines.push(format!(
+            "dimensions: {}x{}{}",
+            attachment.width,
+            attachment.height,
+            if attachment.resized {
+                " (resized to fit 2048x768)"
+            } else {
+                ""
+            }
+        ));
+        lines.push("base64:".to_string());
+        lines.push(attachment.base64_png.clone());
+    }
+    Ok(lines.join("\n"))
 }
 
 fn render_command_args(

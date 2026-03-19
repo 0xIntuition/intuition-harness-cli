@@ -1438,6 +1438,7 @@ fn resolve_merge_agent_resolution(
             model: args.model.clone(),
             reasoning: args.reasoning.clone(),
             transport: None,
+            attachments: Vec::new(),
         },
     )?;
 
@@ -1478,6 +1479,7 @@ fn run_agent_capture_in_dir(
             model: overrides.model,
             reasoning: overrides.reasoning,
             transport: None,
+            attachments: Vec::new(),
         },
     )?;
     let command_args = command_args_for_invocation(&invocation, Some(workspace_path))?;
