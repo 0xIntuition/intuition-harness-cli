@@ -366,6 +366,58 @@ fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn agents_listen_matches_legacy_once_output() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    let legacy = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .output()?;
+    assert!(legacy.status.success());
+
+    let preferred = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .output()?;
+    assert!(preferred.status.success());
+
+    assert_eq!(
+        String::from_utf8(legacy.stdout)?,
+        String::from_utf8(preferred.stdout)?
+    );
+    Ok(())
+}
+
+#[test]
 fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
