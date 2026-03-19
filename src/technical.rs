@@ -668,6 +668,7 @@ fn generate_backlog_files(
         model: None,
         reasoning: None,
         transport: None,
+        attachments: Vec::new(),
     })
     .with_context(|| {
         "meta backlog tech requires a configured local agent to generate backlog content from `.metastack/backlog/_TEMPLATE`"

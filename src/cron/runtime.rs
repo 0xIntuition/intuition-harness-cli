@@ -658,6 +658,7 @@ fn execute_agent_phase(
         model: None,
         reasoning: None,
         transport: None,
+        attachments: Vec::new(),
     };
     let config = AppConfig::load()?;
     let planning_meta = PlanningMeta::load(root)?;

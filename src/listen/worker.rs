@@ -451,6 +451,7 @@ fn build_listen_run_args(
         model: context.args.model.clone(),
         reasoning: context.args.reasoning.clone(),
         transport: None,
+        attachments: Vec::new(),
     })
 }
 

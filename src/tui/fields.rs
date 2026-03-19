@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -7,11 +8,20 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use unicode_width::UnicodeWidthChar;
 
+use crate::tui::prompt_images::{
+    ClipboardPromptPaste, MAX_PROMPT_IMAGES, PromptImageAttachment,
+    resolve_attachment_from_pasted_text, resolve_clipboard_prompt_paste,
+};
+
+const ATTACHMENT_MARKER: char = '\u{fffc}';
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InputFieldState {
     value: String,
     cursor: usize,
     mode: InputFieldMode,
+    attachment_mode: AttachmentMode,
+    attachments: Vec<PromptImageAttachment>,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +34,20 @@ pub(crate) struct InputFieldRender {
 enum InputFieldMode {
     SingleLine,
     MultiLine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttachmentMode {
+    Disabled,
+    Enabled,
+    Rejected { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttachmentPasteOutcome {
+    NoChange,
+    TextPasted,
+    AttachmentPasted,
 }
 
 impl Default for InputFieldState {
@@ -39,6 +63,8 @@ impl InputFieldState {
             cursor: value.len(),
             value,
             mode: InputFieldMode::SingleLine,
+            attachment_mode: AttachmentMode::Disabled,
+            attachments: Vec::new(),
         }
     }
 
@@ -48,11 +74,48 @@ impl InputFieldState {
             cursor: value.len(),
             value,
             mode: InputFieldMode::MultiLine,
+            attachment_mode: AttachmentMode::Disabled,
+            attachments: Vec::new(),
+        }
+    }
+
+    pub(crate) fn multiline_with_prompt_attachments(value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self {
+            cursor: value.len(),
+            value,
+            mode: InputFieldMode::MultiLine,
+            attachment_mode: AttachmentMode::Enabled,
+            attachments: Vec::new(),
+        }
+    }
+
+    pub(crate) fn multiline_rejecting_prompt_attachments(
+        value: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let value = value.into();
+        Self {
+            cursor: value.len(),
+            value,
+            mode: InputFieldMode::MultiLine,
+            attachment_mode: AttachmentMode::Rejected {
+                message: message.into(),
+            },
+            attachments: Vec::new(),
         }
     }
 
     pub(crate) fn value(&self) -> &str {
         &self.value
+    }
+
+    pub(crate) fn display_value(&self) -> String {
+        render_value_with_attachments(&self.value, &self.attachments)
+    }
+
+    pub(crate) fn prompt_attachments(&self) -> &[PromptImageAttachment] {
+        &self.attachments
     }
 
     #[cfg(test)]
@@ -61,7 +124,8 @@ impl InputFieldState {
     }
 
     pub(crate) fn render(&self, placeholder: &str, active: bool) -> InputFieldRender {
-        if self.value.is_empty() {
+        let display_value = self.display_value();
+        if display_value.is_empty() {
             let text = Text::from(Line::styled(
                 placeholder.to_string(),
                 Style::default().add_modifier(Modifier::DIM),
@@ -74,14 +138,14 @@ impl InputFieldState {
 
         if !active {
             return InputFieldRender {
-                text: Text::from(self.value.clone()),
+                text: Text::from(display_value),
                 cursor_prefix: None,
             };
         }
 
         InputFieldRender {
-            text: Text::from(self.value.clone()),
-            cursor_prefix: Some(self.value[..self.cursor].to_string()),
+            text: Text::from(display_value),
+            cursor_prefix: Some(render_prefix_with_attachments(&self.value[..self.cursor])),
         }
     }
 
@@ -95,6 +159,74 @@ impl InputFieldState {
     }
 
     pub(crate) fn paste(&mut self, text: &str) -> bool {
+        self.paste_normalized_text(text)
+    }
+
+    pub(crate) fn paste_with_prompt_attachments(
+        &mut self,
+        text: &str,
+    ) -> Result<AttachmentPasteOutcome> {
+        match &self.attachment_mode {
+            AttachmentMode::Disabled => Ok(if self.paste_normalized_text(text) {
+                AttachmentPasteOutcome::TextPasted
+            } else {
+                AttachmentPasteOutcome::NoChange
+            }),
+            AttachmentMode::Rejected { message } => {
+                if resolve_attachment_from_pasted_text(text)?.is_some() {
+                    bail!("{message}");
+                }
+                Ok(if self.paste_normalized_text(text) {
+                    AttachmentPasteOutcome::TextPasted
+                } else {
+                    AttachmentPasteOutcome::NoChange
+                })
+            }
+            AttachmentMode::Enabled => {
+                if let Some(attachment) = resolve_attachment_from_pasted_text(text)? {
+                    self.insert_attachment(attachment)?;
+                    return Ok(AttachmentPasteOutcome::AttachmentPasted);
+                }
+
+                Ok(if self.paste_normalized_text(text) {
+                    AttachmentPasteOutcome::TextPasted
+                } else {
+                    AttachmentPasteOutcome::NoChange
+                })
+            }
+        }
+    }
+
+    pub(crate) fn paste_clipboard_with_prompt_attachments(
+        &mut self,
+    ) -> Result<AttachmentPasteOutcome> {
+        match &self.attachment_mode {
+            AttachmentMode::Disabled => Ok(AttachmentPasteOutcome::NoChange),
+            AttachmentMode::Rejected { message } => match resolve_clipboard_prompt_paste()? {
+                ClipboardPromptPaste::Attachment(_) => bail!("{message}"),
+                ClipboardPromptPaste::Text(text) => Ok(if self.paste_normalized_text(&text) {
+                    AttachmentPasteOutcome::TextPasted
+                } else {
+                    AttachmentPasteOutcome::NoChange
+                }),
+                ClipboardPromptPaste::Empty => Ok(AttachmentPasteOutcome::NoChange),
+            },
+            AttachmentMode::Enabled => match resolve_clipboard_prompt_paste()? {
+                ClipboardPromptPaste::Attachment(attachment) => {
+                    self.insert_attachment(attachment)?;
+                    Ok(AttachmentPasteOutcome::AttachmentPasted)
+                }
+                ClipboardPromptPaste::Text(text) => Ok(if self.paste_normalized_text(&text) {
+                    AttachmentPasteOutcome::TextPasted
+                } else {
+                    AttachmentPasteOutcome::NoChange
+                }),
+                ClipboardPromptPaste::Empty => Ok(AttachmentPasteOutcome::NoChange),
+            },
+        }
+    }
+
+    fn paste_normalized_text(&mut self, text: &str) -> bool {
         let normalized = match self.mode {
             InputFieldMode::SingleLine => normalize_single_line_paste(text),
             InputFieldMode::MultiLine => normalize_multi_line_paste(text),
@@ -142,19 +274,49 @@ impl InputFieldState {
         self.cursor += ch.len_utf8();
     }
 
+    fn insert_attachment(&mut self, attachment: PromptImageAttachment) -> Result<()> {
+        if self.attachments.len() >= MAX_PROMPT_IMAGES {
+            bail!("prompt editors support at most {MAX_PROMPT_IMAGES} image attachments");
+        }
+
+        let attachment_index = attachment_index_for_cursor(&self.value, self.cursor);
+        self.value.insert(self.cursor, ATTACHMENT_MARKER);
+        self.cursor += ATTACHMENT_MARKER.len_utf8();
+        self.attachments.insert(attachment_index, attachment);
+        Ok(())
+    }
+
     fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
         }
 
         let start = previous_boundary(&self.value, self.cursor);
+        if self.value[start..self.cursor].starts_with(ATTACHMENT_MARKER) {
+            self.remove_attachment_at_raw_index(start);
+            return;
+        }
         self.value.drain(start..self.cursor);
         self.cursor = start;
+    }
+
+    fn delete_forward(&mut self) {
+        if self.cursor >= self.value.len() {
+            return;
+        }
+
+        let end = next_boundary(&self.value, self.cursor);
+        if self.value[self.cursor..end].starts_with(ATTACHMENT_MARKER) {
+            self.remove_attachment_at_raw_index(self.cursor);
+            return;
+        }
+        self.value.drain(self.cursor..end);
     }
 
     fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
+        self.attachments.clear();
     }
 
     fn move_left(&mut self) {
@@ -171,6 +333,16 @@ impl InputFieldState {
 
     fn move_end(&mut self) {
         self.cursor = self.value.len();
+    }
+
+    fn remove_attachment_at_raw_index(&mut self, raw_index: usize) {
+        let attachment_index = attachment_index_before_raw_index(&self.value, raw_index);
+        let end = next_boundary(&self.value, raw_index);
+        self.value.drain(raw_index..end);
+        self.cursor = raw_index;
+        if attachment_index < self.attachments.len() {
+            self.attachments.remove(attachment_index);
+        }
     }
 }
 
@@ -232,6 +404,41 @@ fn normalize_multi_line_paste(text: &str) -> String {
     normalized
 }
 
+fn render_value_with_attachments(value: &str, _attachments: &[PromptImageAttachment]) -> String {
+    let mut rendered = String::new();
+    let mut attachment_index = 0usize;
+
+    for ch in value.chars() {
+        if ch == ATTACHMENT_MARKER {
+            rendered.push_str(&format!("[Image #{}]", attachment_index + 1));
+            attachment_index += 1;
+        } else {
+            rendered.push(ch);
+        }
+    }
+
+    rendered
+}
+
+fn render_prefix_with_attachments(value: &str) -> String {
+    render_value_with_attachments(value, &[])
+}
+
+fn attachment_index_for_cursor(value: &str, cursor: usize) -> usize {
+    value[..cursor]
+        .chars()
+        .filter(|ch| *ch == ATTACHMENT_MARKER)
+        .count()
+}
+
+fn attachment_index_before_raw_index(value: &str, raw_index: usize) -> usize {
+    value
+        .char_indices()
+        .take_while(|(index, _)| *index < raw_index)
+        .filter(|(_, ch)| *ch == ATTACHMENT_MARKER)
+        .count()
+}
+
 fn wrapped_cursor_position(prefix: &str, width: u16) -> (u16, u16) {
     let width = usize::from(width.max(1));
     let mut row = 0usize;
@@ -276,6 +483,10 @@ impl InputFieldState {
             }
             KeyCode::Backspace => {
                 self.backspace();
+                true
+            }
+            KeyCode::Delete => {
+                self.delete_forward();
                 true
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -476,6 +687,8 @@ fn next_boundary(value: &str, cursor: usize) -> usize {
 mod tests {
     use super::{InputFieldState, MultiSelectFieldState, SelectFieldState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use image::{ImageBuffer, Rgba};
+    use tempfile::tempdir;
 
     #[test]
     fn input_field_tracks_text_and_clear() {
@@ -570,6 +783,56 @@ mod tests {
         assert!(!multi_line.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(multi_line.value(), "repo");
         assert_eq!(multi_line.cursor(), multi_line.value().len());
+    }
+
+    #[test]
+    fn prompt_attachment_paste_inserts_placeholder_and_tracks_order() {
+        let temp = tempdir().expect("temp dir");
+        let first_path = temp.path().join("first.png");
+        let second_path = temp.path().join("second.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&first_path)
+            .expect("save first");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([4, 5, 6, 255]))
+            .save(&second_path)
+            .expect("save second");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments("Plan ");
+        field
+            .paste_with_prompt_attachments(first_path.to_str().expect("utf8"))
+            .expect("first attachment");
+        field
+            .paste_with_prompt_attachments(second_path.to_str().expect("utf8"))
+            .expect("second attachment");
+
+        assert_eq!(field.display_value(), "Plan [Image #1][Image #2]");
+        assert_eq!(field.prompt_attachments().len(), 2);
+    }
+
+    #[test]
+    fn backspace_removes_attachment_and_renumbers_placeholders() {
+        let temp = tempdir().expect("temp dir");
+        let first_path = temp.path().join("first.png");
+        let second_path = temp.path().join("second.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&first_path)
+            .expect("save first");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([4, 5, 6, 255]))
+            .save(&second_path)
+            .expect("save second");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments(String::new());
+        field
+            .paste_with_prompt_attachments(first_path.to_str().expect("utf8"))
+            .expect("first attachment");
+        field
+            .paste_with_prompt_attachments(second_path.to_str().expect("utf8"))
+            .expect("second attachment");
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+
+        assert_eq!(field.display_value(), "[Image #1]");
+        assert_eq!(field.prompt_attachments().len(), 1);
     }
 
     #[test]
