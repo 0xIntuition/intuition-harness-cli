@@ -25,12 +25,20 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 9. Session state is persisted to the install-scoped MetaStack data root under
    `listen/projects/<PROJECT_KEY>/session.json`, and agent stdout/stderr are appended to
    `listen/projects/<PROJECT_KEY>/logs/<TICKET>.log`.
-10. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
-11. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
-12. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
-13. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker attempts to move both the parent issue and backlog child into a review-style state.
-14. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
-15. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
+10. Session cleanup is record-only: targeted session records are removed or rewritten inside
+    `session.json` without deleting `project.json`, `active-listener.lock.json`, or unrelated
+    per-issue logs, and live worker PIDs are never cleared automatically.
+11. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
+12. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
+13. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
+14. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker attempts to move both the parent issue and backlog child into a review-style state.
+15. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
+16. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
+    with stale/worker-died context preserved in its summary and log references instead of being
+    auto-resumed.
+17. Completed sessions older than the default 24-hour TTL are pruned automatically during store
+    loads and reconciliation, while blocked sessions are retained until explicit cleanup.
+18. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
@@ -51,6 +59,8 @@ Primary options:
 - `--demo`: skip Linear and render sample queue/session data.
 - `listen sessions list|inspect|clear|resume`: inspect or reuse stored project sessions from the
   install-scoped listener store.
+- `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
+  `--all`; it refuses to remove any targeted record whose stored PID is still alive.
 - Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, and `q` / `Ctrl-C` exits.
 
 Repo-scoped listen settings in `.metastack/meta.json`:
