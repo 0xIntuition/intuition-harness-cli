@@ -658,28 +658,30 @@ fn workspace_has_unpushed_commits(workspace_path: &Path) -> Result<bool> {
 }
 
 fn scan_workspace_usage(root: &Path) -> Result<(u64, SystemTime)> {
-    let mut bytes = 0u64;
-    let mut latest = fs::metadata(root)
+    let last_modified = fs::metadata(root)
         .with_context(|| format!("failed to inspect `{}`", root.display()))?
         .modified()
         .with_context(|| format!("failed to read modified time for `{}`", root.display()))?;
 
-    for entry in WalkDir::new(root) {
-        let entry = entry.with_context(|| format!("failed to walk `{}`", root.display()))?;
-        let metadata = entry
-            .metadata()
-            .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?;
-        if metadata.is_file() {
-            bytes = bytes.saturating_add(metadata.len());
+    // Use `du -sk` for fast disk usage instead of walking every file.
+    let bytes = match Command::new("du")
+        .args(["-sk"])
+        .arg(root)
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .split_whitespace()
+                .next()
+                .and_then(|kb| kb.parse::<u64>().ok())
+                .unwrap_or(0)
+                * 1024 // du -sk reports in kilobytes
         }
-        if let Ok(modified) = metadata.modified()
-            && modified > latest
-        {
-            latest = modified;
-        }
-    }
+        _ => 0,
+    };
 
-    Ok((bytes, latest))
+    Ok((bytes, last_modified))
 }
 
 fn looks_like_ticket_identifier(value: &str) -> bool {
