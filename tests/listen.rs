@@ -490,6 +490,64 @@ fn listen_sessions_list_prunes_expired_completed_sessions_on_load() -> Result<()
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result<(), Box<dyn Error>>
+{
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now - (24 * 60 * 60) - 1, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tracked sessions:"))
+        .stdout(predicate::str::contains("ENG-10164 [Blocked]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    Ok(())
+}
+
 #[test]
 fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
 -> Result<(), Box<dyn Error>> {
