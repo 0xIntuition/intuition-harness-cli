@@ -1101,14 +1101,16 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
         .split(layout[0]);
 
-    let rendered = app
-        .request
-        .render("Describe the feature or workflow you want to plan...", true);
     let request_block = Block::default()
         .borders(Borders::ALL)
         .title("Planning Request [editing]")
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let request_inner = request_block.inner(body[0]);
+    let rendered = app.request.render_with_width(
+        "Describe the feature or workflow you want to plan...",
+        true,
+        request_inner.width,
+    );
     let request = Paragraph::new(rendered.text.clone())
         .block(request_block)
         .wrap(Wrap { trim: false });
@@ -1174,9 +1176,6 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
     .wrap(Wrap { trim: false });
     frame.render_widget(question, main[0]);
 
-    let rendered = selected
-        .answer
-        .render("Type your answer for the active question...", true);
     let answer_block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
@@ -1186,6 +1185,11 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         ))
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let answer_inner = answer_block.inner(main[1]);
+    let rendered = selected.answer.render_with_width(
+        "Type your answer for the active question...",
+        true,
+        answer_inner.width,
+    );
     let answer = Paragraph::new(rendered.text.clone())
         .block(answer_block)
         .wrap(Wrap { trim: false });

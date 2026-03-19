@@ -63,7 +63,17 @@ impl InputFieldState {
         self.cursor
     }
 
+    #[cfg(test)]
     pub(crate) fn render(&self, placeholder: &str, active: bool) -> InputFieldRender {
+        self.render_with_width(placeholder, active, 1)
+    }
+
+    pub(crate) fn render_with_width(
+        &self,
+        placeholder: &str,
+        active: bool,
+        _width: u16,
+    ) -> InputFieldRender {
         if self.value.is_empty() {
             let text = Text::from(Line::styled(
                 placeholder.to_string(),
@@ -301,35 +311,57 @@ fn normalize_multi_line_paste(text: &str) -> String {
 }
 
 fn wrapped_cursor_position(prefix: &str, width: u16) -> (u16, u16) {
+    let boundaries = wrapped_cursor_boundaries(prefix, width);
+    boundaries
+        .last()
+        .map(|boundary| (boundary.column, boundary.row))
+        .unwrap_or((0, 0))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorBoundary {
+    byte: usize,
+    column: u16,
+    row: u16,
+}
+
+fn wrapped_cursor_boundaries(value: &str, width: u16) -> Vec<CursorBoundary> {
     let width = usize::from(width.max(1));
+    let mut boundaries = Vec::with_capacity(value.chars().count() + 1);
     let mut row = 0usize;
     let mut column = 0usize;
+    boundaries.push(CursorBoundary {
+        byte: 0,
+        column: 0,
+        row: 0,
+    });
 
-    for ch in prefix.chars() {
+    for (byte_index, ch) in value.char_indices() {
         if ch == '\n' {
             row += 1;
             column = 0;
-            continue;
+        } else {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if char_width > 0 && column + char_width > width {
+                row += 1;
+                column = 0;
+            }
+
+            column += char_width;
+            if column >= width {
+                row += column / width;
+                column %= width;
+            }
         }
 
-        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if char_width == 0 {
-            continue;
-        }
-
-        if column + char_width > width {
-            row += 1;
-            column = 0;
-        }
-
-        column += char_width;
-        if column >= width {
-            row += column / width;
-            column %= width;
-        }
+        boundaries.push(CursorBoundary {
+            byte: byte_index + ch.len_utf8(),
+            column: column as u16,
+            row: row as u16,
+        });
     }
 
-    (column as u16, row as u16)
+    boundaries
 }
 
 impl InputFieldState {
