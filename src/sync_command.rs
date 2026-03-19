@@ -17,6 +17,7 @@ use crate::cli::{LinearClientArgs, SyncPullArgs, SyncPushArgs};
 use crate::config::load_required_planning_meta;
 use crate::fs::{canonicalize_existing_dir, display_path, ensure_dir};
 use crate::linear::{AttachmentCreateRequest, IssueEditSpec, IssueListFilters, IssueSummary};
+use crate::linear::{localize_ticket_context, materialize_ticket_context};
 use crate::scaffold::ensure_planning_layout;
 use crate::sync_dashboard::{
     SyncDashboardData, SyncDashboardExit, SyncDashboardIssue, SyncDashboardOptions,
@@ -121,6 +122,7 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     ensure_planning_layout(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
     let issue = service.load_issue(&args.issue).await?;
+    let localized_issue = localize_ticket_context(&issue);
     let issue_dir = backlog_issue_dir(&root, &issue.identifier);
     ensure_dir(&issue_dir)?;
     let metadata = load_issue_metadata_if_present(&issue_dir)?;
@@ -136,7 +138,7 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
             read_optional_text_file(&backlog_issue_index_path(&root, &issue.identifier))?;
         let diff = render_sync_diff(
             &local_description,
-            issue.description.as_deref().unwrap_or_default(),
+            localized_issue.issue.description.as_deref().unwrap_or_default(),
         );
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
@@ -159,8 +161,9 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     write_issue_description(
         &root,
         &issue.identifier,
-        issue.description.as_deref().unwrap_or_default(),
+        localized_issue.issue.description.as_deref().unwrap_or_default(),
     )?;
+    materialize_ticket_context(&service, &localized_issue, &issue_dir).await?;
 
     let mut managed_files = Vec::new();
     for attachment in &issue.attachments {
@@ -447,8 +450,9 @@ fn load_issue_metadata_if_present(issue_dir: &Path) -> Result<Option<BacklogIssu
 }
 
 fn issue_remote_hash(issue: &IssueSummary) -> String {
+    let localized_issue = localize_ticket_context(issue);
     compute_remote_sync_hash(
-        issue.description.as_deref().unwrap_or_default(),
+        localized_issue.issue.description.as_deref().unwrap_or_default(),
         &managed_file_records_from_issue(issue),
     )
 }

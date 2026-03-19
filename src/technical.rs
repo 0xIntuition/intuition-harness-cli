@@ -37,6 +37,9 @@ use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{IssueCreateSpec, IssueListFilters, IssueSummary};
+use crate::linear::{
+    LocalizedTicketContext, localize_ticket_context, materialize_ticket_context,
+};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push;
@@ -221,6 +224,8 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             managed_files: Vec::<ManagedFileRecord>::new(),
         },
     )?;
+    let localized_parent = localize_ticket_context(&generated.parent);
+    materialize_ticket_context(&service, &localized_parent, &issue_dir).await?;
 
     run_sync_push(
         &args.client,
@@ -650,9 +655,10 @@ fn generate_backlog_files(
     selected_acceptance_criteria: &[String],
     template_files: &[RenderedTemplateFile],
 ) -> Result<Vec<RenderedTemplateFile>> {
+    let localized_parent = localize_ticket_context(parent);
     let prompt = render_technical_prompt(
         root,
-        parent,
+        &localized_parent,
         child_title,
         selected_acceptance_criteria,
         &slugify(child_title),
@@ -680,7 +686,7 @@ fn generate_backlog_files(
 
 fn render_technical_prompt(
     root: &Path,
-    parent: &IssueSummary,
+    parent: &LocalizedTicketContext,
     child_title: &str,
     selected_acceptance_criteria: &[String],
     backlog_slug: &str,
@@ -719,6 +725,8 @@ Parent Linear issue:\n\
 - State: {}\n\
 - URL: {}\n\
 - Description:\n{}\n\n\
+Parent issue parent-description context:\n{}\n\n\
+Ticket discussion context:\n{}\n\n\
 Derived backlog values:\n\
 - `BACKLOG_TITLE`: {}\n\
 - `BACKLOG_SLUG`: {}\n\
@@ -737,18 +745,31 @@ Instructions:\n\
 6. Default scope to the full repository root unless the user explicitly requested a narrower subproject, and create backlog content only for work inside this repository directory.\n\
 7. Return JSON only with this exact shape:\n\
 {{\"files\":[{{\"path\":\"index.md\",\"contents\":\"# ...\"}}]}}",
-        parent.identifier,
-        parent.title,
+        parent.issue.identifier,
+        parent.issue.title,
         parent
+            .issue
             .state
             .as_ref()
             .map(|state| state.name.as_str())
             .unwrap_or("Unknown"),
-        parent.url,
+        parent.issue.url,
         parent
+            .issue
             .description
             .as_deref()
             .unwrap_or("_No Linear description was provided._"),
+        parent
+            .issue
+            .parent
+            .as_ref()
+            .and_then(|issue| issue.description.as_deref())
+            .unwrap_or("_No parent description was provided._"),
+        if parent.scoped_discussion_markdown.is_empty() {
+            "_No Linear comments were provided._"
+        } else {
+            parent.scoped_discussion_markdown.as_str()
+        },
         child_title,
         backlog_slug,
         today,
@@ -1574,7 +1595,7 @@ mod tests {
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
-    use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState};
+    use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState, localize_ticket_context};
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1818,11 +1839,11 @@ Ignored.
 
         let prompt = render_technical_prompt(
             root,
-            &issue(
+            &localize_ticket_context(&issue(
                 "MET-35",
                 "Create the technical command",
                 "## Acceptance Criteria\n- Render docs\n- Keep sync safe",
-            ),
+            )),
             "Technical: Create the technical command",
             &["Render docs".to_string(), "Keep sync safe".to_string()],
             "technical-create-the-technical-command",
@@ -1838,6 +1859,7 @@ Ignored.
         assert!(prompt.contains("- Render docs"));
         assert!(prompt.contains("Injected workflow contract:"));
         assert!(prompt.contains("## Built-in Workflow Contract"));
+        assert!(prompt.contains("Ticket discussion context:"));
         assert!(
             prompt
                 .contains("create backlog content only for work inside this repository directory")

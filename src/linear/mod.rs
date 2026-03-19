@@ -5,6 +5,7 @@ pub mod edit;
 mod refine;
 mod render;
 mod service;
+mod ticket_context;
 mod transport;
 mod types;
 
@@ -16,6 +17,10 @@ pub(crate) use refine::run_issue_refine_command;
 pub(crate) use render::render_issues_list_output;
 pub use render::{render_issue_summary, render_projects_table};
 pub use service::LinearService;
+pub(crate) use ticket_context::{
+    LocalizedTicketContext, load_localized_ticket_context_ignored_paths,
+    localize_ticket_context, materialize_ticket_context,
+};
 pub use transport::{LinearClient, ReqwestLinearClient};
 pub use types::{
     AttachmentCreateRequest, AttachmentSummary, DashboardData, DashboardFilters, IssueComment,

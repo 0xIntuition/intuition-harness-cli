@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{
     Client,
+    Url,
     header::{AUTHORIZATION, CONTENT_TYPE},
 };
 use serde::de::DeserializeOwned;
@@ -95,9 +96,11 @@ impl<'a> GraphqlTransport<'a> {
     }
 
     pub(super) async fn download(&self, url: &str) -> Result<Vec<u8>> {
-        let response = self
-            .http
-            .get(url)
+        let mut request = self.http.get(url);
+        if should_send_linear_upload_auth(url) {
+            request = request.header(AUTHORIZATION, &self.config.api_key);
+        }
+        let response = request
             .send()
             .await
             .with_context(|| format!("failed to download `{url}`"))?;
@@ -115,5 +118,27 @@ impl<'a> GraphqlTransport<'a> {
             .await
             .map(|bytes| bytes.to_vec())
             .context("failed to read the downloaded file bytes")
+    }
+}
+
+pub(super) fn should_send_linear_upload_auth(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| host.eq_ignore_ascii_case("uploads.linear.app"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_send_linear_upload_auth;
+
+    #[test]
+    fn upload_download_auth_is_limited_to_linear_uploads_host() {
+        assert!(should_send_linear_upload_auth(
+            "https://uploads.linear.app/file/test.png"
+        ));
+        assert!(!should_send_linear_upload_auth(
+            "https://cdn.example.com/file/test.png"
+        ));
     }
 }

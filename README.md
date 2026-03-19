@@ -563,10 +563,12 @@ The command requires a configured local agent, or one of the built-in supported 
 Side effects:
 
 - ensures `.metastack/backlog/_TEMPLATE/` exists
-- asks the configured local agent to inspect the parent Linear issue and author the backlog files from `.metastack/backlog/_TEMPLATE/`
+- asks the configured local agent to inspect the parent Linear issue, rewritten local image references, the parent description, and a discussion-context digest before authoring the backlog files from `.metastack/backlog/_TEMPLATE/`
 - creates a new Linear child issue under the referenced parent
 - copies the full canonical template tree into `.metastack/backlog/<NEW_ISSUE_ID>/`
 - writes the generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
+- writes localized ticket-image artifacts under `.metastack/backlog/<NEW_ISSUE_ID>/artifacts/`, plus a traceability manifest at `.metastack/backlog/<NEW_ISSUE_ID>/artifacts/ticket-images.md`
+- writes comment discussion context to `.metastack/backlog/<NEW_ISSUE_ID>/context/ticket-discussion.md`
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
 
@@ -608,8 +610,11 @@ Legacy alias: `meta sync`
 Side effects:
 
 - bare `meta backlog sync` opens a ratatui issue browser scoped by `.metastack/meta.json` `linear.project_id`
-- `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
+- `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description after rewriting markdown image references to local `artifacts/<filename>` paths
 - `pull` restores CLI-managed attachment files into the same directory when present
+- `pull` rebuilds `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` and re-downloads every currently referenced ticket image into `.metastack/backlog/<ISSUE_ID>/artifacts/`
+- `pull` refreshes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` from Linear comments using author-attributed chronological sections
+- `pull` logs individual ticket-image download failures without failing the overall command
 - `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash` and `remote_hash` baselines alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files

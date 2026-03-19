@@ -221,6 +221,8 @@ pub(super) struct IssueLinkNode {
     pub(super) identifier: String,
     pub(super) title: String,
     pub(super) url: String,
+    #[serde(default)]
+    pub(super) description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +230,10 @@ pub(super) struct IssueLinkNode {
 pub(super) struct CommentNode {
     pub(super) id: String,
     pub(super) body: String,
+    #[serde(default)]
+    pub(super) created_at: Option<String>,
+    #[serde(default)]
+    pub(super) user: Option<UserRef>,
     #[serde(default)]
     pub(super) resolved_at: Option<String>,
 }
@@ -297,6 +303,8 @@ impl From<CommentNode> for IssueComment {
         Self {
             id: value.id,
             body: value.body,
+            created_at: value.created_at,
+            author_name: value.user.map(|user| user.name),
             resolved_at: value.resolved_at,
         }
     }
@@ -321,6 +329,7 @@ impl From<IssueLinkNode> for IssueLink {
             identifier: value.identifier,
             title: value.title,
             url: value.url,
+            description: value.description,
         }
     }
 }

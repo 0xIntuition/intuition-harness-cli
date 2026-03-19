@@ -121,14 +121,52 @@ JSON
             .body_includes("\"id\":\"parent-1\"");
         then.status(200).json_body(json!({
             "data": {
-                "issue": issue_detail_node(
-                    "parent-1",
-                    "MET-35",
-                    "Create the technical and sync commands",
-                    "Context\n\nTechnical workflow.\n\n## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket",
-                    Vec::new(),
-                    None,
-                )
+                "issue": {
+                    "id": "parent-1",
+                    "identifier": "MET-35",
+                    "title": "Create the technical and sync commands",
+                    "description": format!("Context\n\nTechnical workflow.\n\n![diagram]({})\n\n## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket", server.url("/design.png")),
+                    "url": "https://linear.app/issues/MET-35",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "labels": { "nodes": [] },
+                    "comments": {
+                        "nodes": [{
+                            "id": "comment-1",
+                            "body": format!("## Screenshot review\nPlease inspect ![comment]({})", server.url("/comment.png")),
+                            "createdAt": "2026-03-15T12:00:00Z",
+                            "user": {
+                                "id": "user-1",
+                                "name": "Taylor",
+                                "email": "taylor@example.com"
+                            },
+                            "resolvedAt": null
+                        }]
+                    },
+                    "state": {
+                        "id": "state-1",
+                        "name": "Todo",
+                        "type": "unstarted"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": {
+                        "id": "program-1",
+                        "identifier": "MET-01",
+                        "title": "Program",
+                        "url": "https://linear.app/issues/MET-01",
+                        "description": format!("Parent screenshot ![parent]({})", server.url("/parent.png"))
+                    },
+                    "children": { "nodes": [] }
+                }
             }
         }));
     });
@@ -150,11 +188,24 @@ JSON
                         "id": "parent-1",
                         "identifier": "MET-35",
                         "title": "Create the technical and sync commands",
-                        "url": "https://linear.app/issues/MET-35"
+                        "url": "https://linear.app/issues/MET-35",
+                        "description": null
                     })),
                 )
             }
         }));
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/design.png");
+        then.status(200).body("design");
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/parent.png");
+        then.status(200).body("parent");
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/comment.png");
+        then.status(200).body("comment");
     });
 
     server.mock(|when, then| {
@@ -357,6 +408,8 @@ JSON
     let validation = fs::read_to_string(issue_dir.join("validation.md"))?;
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     let payload = fs::read_to_string(output_dir.join("payload.txt"))?;
+    let manifest = fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?;
+    let discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
 
     assert!(index.contains("Agent-generated technical backlog"));
     assert!(!index.contains("{{BACKLOG_TITLE}}"));
@@ -369,8 +422,18 @@ JSON
     assert!(validation.contains("meta backlog tech MET-35"));
     assert!(metadata.contains("\"identifier\": \"MET-36\""));
     assert!(metadata.contains("\"parent_identifier\": \"MET-35\""));
+    assert!(manifest.contains("design.png"));
+    assert!(manifest.contains("comment-1-comment.png"));
+    assert!(discussion.contains("### **Taylor** (2026-03-15)"));
+    assert_eq!(fs::read(issue_dir.join("artifacts/design.png"))?, b"design");
+    assert_eq!(fs::read(issue_dir.join("artifacts/parent-parent.png"))?, b"parent");
+    assert_eq!(fs::read(issue_dir.join("artifacts/comment-1-comment.png"))?, b"comment");
     assert!(payload.contains("Parent Linear issue"));
     assert!(payload.contains("Create the technical and sync commands"));
+    assert!(payload.contains("artifacts/design.png"));
+    assert!(payload.contains("Parent issue parent-description context:"));
+    assert!(payload.contains("Ticket discussion context:"));
+    assert!(payload.contains("### **Taylor** (2026-03-15)"));
     assert!(payload.contains("Injected workflow contract:"));
     assert!(payload.contains("## Built-in Workflow Contract"));
     assert!(

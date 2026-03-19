@@ -211,6 +211,40 @@ async fn reqwest_client_creates_issue_labels() {
     create_mock.assert_calls(1);
 }
 
+#[tokio::test]
+async fn reqwest_client_fetches_parent_description_and_comment_attribution() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("createdAt")
+            .body_includes("user {")
+            .body_includes("parent {")
+            .body_includes("description");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node("MET-11")
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issue = client
+        .get_issue("issue-met-11")
+        .await
+        .expect("issue detail should load");
+
+    assert_eq!(
+        issue.parent.as_ref().and_then(|parent| parent.description.as_deref()),
+        Some("Parent description")
+    );
+    assert_eq!(issue.comments[0].created_at.as_deref(), Some("2026-03-17T12:00:00Z"));
+    assert_eq!(issue.comments[0].author_name.as_deref(), Some("Taylor"));
+    issue_mock.assert_calls(1);
+}
+
 fn client(api_url: String) -> ReqwestLinearClient {
     ReqwestLinearClient::new(LinearConfig {
         api_key: "token".to_string(),
@@ -249,4 +283,51 @@ fn issue_node(identifier: &str) -> serde_json::Value {
             "type": "unstarted"
         }
     })
+}
+
+fn issue_detail_node(identifier: &str) -> serde_json::Value {
+    let mut node = issue_node(identifier);
+    if let Some(object) = node.as_object_mut() {
+        object.insert(
+            "comments".to_string(),
+            json!({
+                "nodes": [
+                    {
+                        "id": "comment-1",
+                        "body": "Need screenshots",
+                        "createdAt": "2026-03-17T12:00:00Z",
+                        "user": {
+                            "id": "user-1",
+                            "name": "Taylor",
+                            "email": "taylor@example.com"
+                        },
+                        "resolvedAt": null
+                    }
+                ]
+            }),
+        );
+        object.insert(
+            "parent".to_string(),
+            json!({
+                "id": "parent-1",
+                "identifier": "MET-01",
+                "title": "Program",
+                "url": "https://linear.app/issues/MET-01",
+                "description": "Parent description"
+            }),
+        );
+        object.insert(
+            "attachments".to_string(),
+            json!({
+                "nodes": []
+            }),
+        );
+        object.insert(
+            "children".to_string(),
+            json!({
+                "nodes": []
+            }),
+        );
+    }
+    node
 }
