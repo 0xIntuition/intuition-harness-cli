@@ -37,9 +37,24 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn listen_render_once_demo_outputs_dashboard_snapshot() {
+fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let home_dir = temp.path().join("home");
+    fs::create_dir_all(&home_dir)?;
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
     meta()
+        .current_dir(temp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", &home_dir)
         .args(["listen", "--demo", "--render-once"])
         .assert()
         .success()
@@ -49,6 +64,7 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() {
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
         .stdout(predicate::str::contains("MET-13"));
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -257,12 +273,30 @@ exit 0
 #[test]
 fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let home_dir = temp.path().join("home");
+    fs::create_dir_all(&home_dir)?;
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
     let legacy = meta()
+        .current_dir(temp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", &home_dir)
         .args(["listen", "--demo", "--render-once"])
         .output()?;
     assert!(legacy.status.success());
 
     let preferred = meta()
+        .current_dir(temp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", &home_dir)
         .args(["agents", "listen", "--demo", "--render-once"])
         .output()?;
     assert!(preferred.status.success());
