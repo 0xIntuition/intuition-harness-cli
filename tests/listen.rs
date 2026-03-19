@@ -110,6 +110,9 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
         .stdout(predicate::str::contains("Runtime"))
         .stdout(predicate::str::contains("Agent Sessions"))
         .stdout(predicate::str::contains("terminal snapshot"))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
         .stdout(predicate::str::contains("MET-13"));
