@@ -104,9 +104,17 @@ const ACTIONS: [WorkspaceSelectionAction; 4] = [
     WorkspaceSelectionAction::Prune,
 ];
 
+/// Enrichment update sent from a background task to the dashboard event loop.
+#[derive(Debug, Clone)]
+pub struct WorkspaceEnrichmentUpdate {
+    pub entries: Vec<WorkspaceDashboardEntry>,
+    pub github_note: Option<String>,
+}
+
 pub fn run_workspace_dashboard(
     data: WorkspaceDashboardData,
     options: WorkspaceDashboardOptions,
+    enrichment_rx: Option<std::sync::mpsc::Receiver<WorkspaceEnrichmentUpdate>>,
 ) -> Result<WorkspaceDashboardExit> {
     if options.render_once {
         return render_once(data, options).map(WorkspaceDashboardExit::Snapshot);
@@ -130,16 +138,39 @@ pub fn run_workspace_dashboard(
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
+        // Check for enrichment updates from background task
+        if let Some(ref rx) = enrichment_rx {
+            if let Ok(update) = rx.try_recv() {
+                app.apply_enrichment(update);
+            }
+        }
+
+        if event::poll(Duration::from_millis(150))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            // Ctrl+C always exits regardless of focus
+            if key.code == KeyCode::Char('c')
+                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            {
+                return Ok(WorkspaceDashboardExit::Cancelled);
+            }
+
+            // Esc at top level exits, in action menu goes back
+            if key.code == KeyCode::Esc {
+                if app.focus == Focus::Workspaces {
+                    return Ok(WorkspaceDashboardExit::Cancelled);
+                } else {
+                    let _ = app.apply(WorkspaceDashboardAction::Back);
+                    continue;
+                }
+            }
+
+            // Navigation and actions
             let action = match key.code {
-                KeyCode::Char('q') => return Ok(WorkspaceDashboardExit::Cancelled),
                 KeyCode::Up => Some(WorkspaceDashboardAction::Up),
                 KeyCode::Down => Some(WorkspaceDashboardAction::Down),
                 KeyCode::Enter => Some(WorkspaceDashboardAction::Enter),
-                KeyCode::Esc => Some(WorkspaceDashboardAction::Back),
                 KeyCode::Char(' ') if app.focus == Focus::Workspaces => {
                     Some(WorkspaceDashboardAction::ToggleSelect)
                 }
@@ -151,6 +182,7 @@ pub fn run_workspace_dashboard(
             {
                 return Ok(WorkspaceDashboardExit::Selected(selection));
             } else if action.is_none() {
+                // Pass to search input (absorbs typed characters)
                 let _ = app.handle_query_key(key);
             }
         }
@@ -433,6 +465,25 @@ impl WorkspaceDashboardApp {
             selected: vec![false; entry_count],
             completed: None,
         }
+    }
+
+    fn apply_enrichment(&mut self, update: WorkspaceEnrichmentUpdate) {
+        // Match enriched entries to existing entries by ticket ID
+        for enriched in &update.entries {
+            if let Some(existing) = self
+                .data
+                .entries
+                .iter_mut()
+                .find(|e| e.ticket == enriched.ticket)
+            {
+                existing.linear_state = enriched.linear_state.clone();
+                existing.pr_label = enriched.pr_label.clone();
+                existing.is_removal_candidate = enriched.is_removal_candidate;
+            }
+        }
+        self.data.github_note = update.github_note;
+        // Resize selected vec if entries changed
+        self.selected.resize(self.data.entries.len(), false);
     }
 
     fn apply(&mut self, action: WorkspaceDashboardAction) -> Option<WorkspaceSelection> {

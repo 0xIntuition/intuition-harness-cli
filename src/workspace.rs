@@ -105,37 +105,58 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
     let is_interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
 
     if is_interactive {
-        eprint!(
-            "Discovered {} workspace clones. Loading Linear and GitHub data...",
-            entries.len()
-        );
-    }
-
-    let linear = load_linear_command_context(&args.client, None)?;
-    let github = discover_github_prs(&context.source_root);
-    let records = enrich_workspace_entries(entries, &linear.service, &github).await?;
-
-    let github_note = match &github {
-        GithubPrLookup::Unavailable(reason) => Some(format!("GitHub PR data unavailable: {reason}")),
-        _ => None,
-    };
-
-    if is_interactive {
-        // Clear the loading message before entering TUI
-        eprint!("\r\x1b[2K");
-    }
-
-    if is_interactive {
-        let dashboard_data = records_to_dashboard_data(
-            &context.workspace_root.display().to_string(),
-            &records,
-            github_note,
-        );
-
         use crate::workspace_dashboard::{
             WorkspaceDashboardOptions, WorkspaceDashboardExit, WorkspaceSelectionAction,
-            run_workspace_dashboard,
+            WorkspaceEnrichmentUpdate, run_workspace_dashboard,
         };
+
+        // Build initial dashboard data from local-only info
+        let initial_data = entries_to_initial_dashboard_data(
+            &context.workspace_root.display().to_string(),
+            &entries,
+        );
+
+        // Spawn async enrichment on a background thread
+        let (tx, rx) = std::sync::mpsc::channel::<WorkspaceEnrichmentUpdate>();
+        let client_for_enrichment = args.client.clone();
+        let source_root = context.source_root.clone();
+        let entries_for_enrichment = entries.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(async {
+                    let linear = load_linear_command_context(&client_for_enrichment, None).ok();
+                    let github = discover_github_prs(&source_root);
+                    if let Some(linear) = linear {
+                        if let Ok(records) = enrich_workspace_entries(
+                            entries_for_enrichment,
+                            &linear.service,
+                            &github,
+                        )
+                        .await
+                        {
+                            let github_note = match &github {
+                                GithubPrLookup::Unavailable(reason) => {
+                                    Some(format!("GitHub PR data unavailable: {reason}"))
+                                }
+                                _ => None,
+                            };
+                            let dashboard_data = records_to_dashboard_data(
+                                "",
+                                &records,
+                                github_note.clone(),
+                            );
+                            let _ = tx.send(WorkspaceEnrichmentUpdate {
+                                entries: dashboard_data.entries,
+                                github_note,
+                            });
+                        }
+                    }
+                });
+            }
+        });
 
         let options = WorkspaceDashboardOptions {
             render_once: false,
@@ -144,7 +165,7 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
             actions: Vec::new(),
         };
 
-        match run_workspace_dashboard(dashboard_data, options)? {
+        match run_workspace_dashboard(initial_data, options, Some(rx))? {
             WorkspaceDashboardExit::Cancelled => Ok("Workspace dashboard closed.".to_string()),
             WorkspaceDashboardExit::Snapshot(snapshot) => Ok(snapshot),
             WorkspaceDashboardExit::Selected(selection) => {
@@ -198,7 +219,15 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
             }
         }
     } else {
-        // Non-interactive text output
+        // Non-interactive: enrich synchronously then print text
+        let linear = load_linear_command_context(&args.client, None)?;
+        let github = discover_github_prs(&context.source_root);
+        let records = enrich_workspace_entries(entries, &linear.service, &github).await?;
+        let github_note = match &github {
+            GithubPrLookup::Unavailable(reason) => Some(format!("GitHub PR data unavailable: {reason}")),
+            _ => None,
+        };
+
         let mut lines = vec![
             format!("Workspace root: {}", context.workspace_root.display()),
             "TICKET  BRANCH  SIZE  MODIFIED  GIT  LINEAR  PR  SAFE".to_string(),
@@ -228,6 +257,35 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
         }
 
         Ok(lines.join("\n"))
+    }
+}
+
+fn entries_to_initial_dashboard_data(
+    workspace_root: &str,
+    entries: &[WorkspaceEntry],
+) -> crate::workspace_dashboard::WorkspaceDashboardData {
+    crate::workspace_dashboard::WorkspaceDashboardData {
+        workspace_root: workspace_root.to_string(),
+        entries: entries
+            .iter()
+            .map(|entry| crate::workspace_dashboard::WorkspaceDashboardEntry {
+                ticket: entry.ticket.clone(),
+                branch: entry.branch.clone(),
+                size: format_bytes(entry.disk_usage_bytes),
+                modified: format_system_time(entry.last_modified),
+                git_label: entry.git.display_label(),
+                git_clean: !entry.git.has_uncommitted_changes
+                    && !entry.git.has_unpushed_commits
+                    && !entry.git.is_detached,
+                linear_state: "Loading...".to_string(),
+                pr_label: "Loading...".to_string(),
+                is_removal_candidate: false,
+                has_unpushed: entry.git.has_unpushed_commits,
+                has_uncommitted: entry.git.has_uncommitted_changes,
+                is_detached: entry.git.is_detached,
+            })
+            .collect(),
+        github_note: None,
     }
 }
 
