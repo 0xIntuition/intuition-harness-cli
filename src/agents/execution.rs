@@ -134,6 +134,15 @@ pub(crate) fn apply_invocation_environment(
     );
 }
 
+pub(crate) fn apply_noninteractive_agent_environment(command: &mut Command) {
+    command.env("TERM", "dumb");
+    command.env("NO_COLOR", "1");
+    command.env("CLICOLOR", "0");
+    command.env("CLICOLOR_FORCE", "0");
+    command.env("FORCE_COLOR", "0");
+    command.env_remove("COLORTERM");
+}
+
 pub(crate) fn attempted_command(command: &str, command_args: &[String]) -> String {
     format!("{command} {}", command_args.join(" "))
 }
@@ -175,6 +184,7 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
         &invocation,

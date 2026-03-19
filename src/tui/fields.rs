@@ -12,6 +12,7 @@ pub(crate) struct InputFieldState {
     value: String,
     cursor: usize,
     mode: InputFieldMode,
+    preferred_column: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,7 @@ impl InputFieldState {
             cursor: value.len(),
             value,
             mode: InputFieldMode::SingleLine,
+            preferred_column: None,
         }
     }
 
@@ -48,6 +50,7 @@ impl InputFieldState {
             cursor: value.len(),
             value,
             mode: InputFieldMode::MultiLine,
+            preferred_column: None,
         }
     }
 
@@ -140,6 +143,7 @@ impl InputFieldState {
     fn insert(&mut self, ch: char) {
         self.value.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
+        self.preferred_column = None;
     }
 
     fn backspace(&mut self) {
@@ -150,28 +154,94 @@ impl InputFieldState {
         let start = previous_boundary(&self.value, self.cursor);
         self.value.drain(start..self.cursor);
         self.cursor = start;
+        self.preferred_column = None;
     }
 
     fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
+        self.preferred_column = None;
     }
 
     fn move_left(&mut self) {
         self.cursor = previous_boundary(&self.value, self.cursor);
+        self.preferred_column = None;
     }
 
     fn move_right(&mut self) {
         self.cursor = next_boundary(&self.value, self.cursor);
+        self.preferred_column = None;
     }
 
     fn move_home(&mut self) {
         self.cursor = 0;
+        self.preferred_column = None;
     }
 
     fn move_end(&mut self) {
         self.cursor = self.value.len();
+        self.preferred_column = None;
     }
+
+    fn move_up(&mut self, width: u16) {
+        self.move_vertical(width, -1);
+    }
+
+    fn move_down(&mut self, width: u16) {
+        self.move_vertical(width, 1);
+    }
+
+    fn move_vertical(&mut self, width: u16, delta: isize) {
+        if self.mode != InputFieldMode::MultiLine {
+            return;
+        }
+
+        let points = cursor_points(&self.value, width);
+        let Some(current_index) = points.iter().position(|point| point.byte == self.cursor) else {
+            return;
+        };
+        let current = &points[current_index];
+        let preferred_column = self.preferred_column.unwrap_or(current.column);
+        let target_row = current.row as isize + delta;
+        if target_row < 0 {
+            self.cursor = points
+                .iter()
+                .find(|point| point.row == 0)
+                .map(|point| point.byte)
+                .unwrap_or(0);
+            self.preferred_column = Some(preferred_column);
+            return;
+        }
+
+        let target_row = target_row as usize;
+        let mut best_match = None;
+        for point in points.iter().filter(|point| point.row == target_row) {
+            match best_match {
+                None => best_match = Some(point),
+                Some(best)
+                    if point.column <= preferred_column && point.column >= best.column =>
+                {
+                    best_match = Some(point);
+                }
+                Some(best) if best.column > preferred_column && point.column < best.column => {
+                    best_match = Some(point);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(target) = best_match {
+            self.cursor = target.byte;
+            self.preferred_column = Some(preferred_column);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorPoint {
+    byte: usize,
+    row: usize,
+    column: usize,
 }
 
 fn normalize_single_line_paste(text: &str) -> String {
@@ -266,6 +336,10 @@ fn wrapped_cursor_position(prefix: &str, width: u16) -> (u16, u16) {
 
 impl InputFieldState {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
+        self.handle_key_with_width(key, 1)
+    }
+
+    pub(crate) fn handle_key_with_width(&mut self, key: KeyEvent, width: u16) -> bool {
         match key.code {
             KeyCode::Enter
                 if self.mode == InputFieldMode::MultiLine
@@ -302,9 +376,65 @@ impl InputFieldState {
                 self.move_end();
                 true
             }
+            KeyCode::Up if self.mode == InputFieldMode::MultiLine => {
+                self.move_up(width);
+                true
+            }
+            KeyCode::Down if self.mode == InputFieldMode::MultiLine => {
+                self.move_down(width);
+                true
+            }
             _ => false,
         }
     }
+}
+
+fn cursor_points(value: &str, width: u16) -> Vec<CursorPoint> {
+    let width = usize::from(width.max(1));
+    let mut points = Vec::with_capacity(value.chars().count() + 1);
+    let mut row = 0usize;
+    let mut column = 0usize;
+
+    points.push(CursorPoint {
+        byte: 0,
+        row,
+        column,
+    });
+
+    for (index, ch) in value.char_indices() {
+        if ch == '\n' {
+            row += 1;
+            column = 0;
+            points.push(CursorPoint {
+                byte: index + ch.len_utf8(),
+                row,
+                column,
+            });
+            continue;
+        }
+
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if char_width > 0 {
+            if column + char_width > width {
+                row += 1;
+                column = 0;
+            }
+
+            column += char_width;
+            if column >= width {
+                row += column / width;
+                column %= width;
+            }
+        }
+
+        points.push(CursorPoint {
+            byte: index + ch.len_utf8(),
+            row,
+            column,
+        });
+    }
+
+    points
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -570,6 +700,37 @@ mod tests {
         assert!(!multi_line.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(multi_line.value(), "repo");
         assert_eq!(multi_line.cursor(), multi_line.value().len());
+    }
+
+    #[test]
+    fn input_field_up_down_moves_between_wrapped_lines() {
+        let mut field = InputFieldState::multiline("12345\n12");
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 4));
+        assert_eq!(field.cursor(), 5);
+
+        assert!(field.handle_key_with_width(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            4
+        ));
+        assert_eq!(field.cursor(), field.value().len());
+    }
+
+    #[test]
+    fn input_field_vertical_navigation_preserves_preferred_column() {
+        let mut field = InputFieldState::multiline("abcdef\nab\nabcdef");
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 8));
+        assert_eq!(field.cursor(), "abcdef\nab".len());
+
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 8));
+        assert_eq!(field.cursor(), 6);
+
+        assert!(field.handle_key_with_width(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            8
+        ));
+        assert_eq!(field.cursor(), "abcdef\nab".len());
     }
 
     #[test]
