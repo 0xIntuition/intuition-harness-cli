@@ -159,6 +159,9 @@ fn seed_ticket_store_state(
     repo_root: &std::path::Path,
     tickets: &[&str],
 ) -> Result<(), Box<dyn Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
     let state_path = listen_state_path(config_path, repo_root)?;
     let parent = state_path
         .parent()
@@ -183,7 +186,7 @@ fn seed_ticket_store_state(
                 "workspace_path": null,
                 "branch": null,
                 "workpad_comment_id": format!("comment-{ticket}"),
-                "updated_at_epoch_seconds": 1,
+                "updated_at_epoch_seconds": now,
                 "pid": null,
                 "session_id": null,
                 "turns": null,

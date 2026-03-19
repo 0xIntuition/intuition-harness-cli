@@ -151,7 +151,9 @@ pub fn run_workspace_dashboard(
         {
             // Ctrl+C always exits regardless of focus
             if key.code == KeyCode::Char('c')
-                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
             {
                 return Ok(WorkspaceDashboardExit::Cancelled);
             }
@@ -251,16 +253,17 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
         "Search by ticket, branch, state, or status...",
         app.focus == Focus::Workspaces,
     );
-    let query_block = Block::default()
-        .borders(Borders::ALL)
-        .title(if app.focus == Focus::Workspaces {
-            format!(
-                "Search [active] ({} selected, {})",
-                selected_count, total_size
-            )
-        } else {
-            format!("Search ({} selected, {})", selected_count, total_size)
-        });
+    let query_block =
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.focus == Focus::Workspaces {
+                format!(
+                    "Search [active] ({} selected, {})",
+                    selected_count, total_size
+                )
+            } else {
+                format!("Search ({} selected, {})", selected_count, total_size)
+            });
     let query_inner = query_block.inner(outer[1]);
     let query = Paragraph::new(rendered_query.text.clone())
         .block(query_block)
@@ -277,11 +280,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
 fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboardApp) {
     let results = app.visible_results();
     let title = panel_title(
-        format!(
-            "Workspaces ({}/{})",
-            results.len(),
-            app.data.entries.len()
-        ),
+        format!("Workspaces ({}/{})", results.len(), app.data.entries.len()),
         app.focus == Focus::Workspaces,
     );
 
@@ -312,7 +311,11 @@ fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashb
                         Tone::Info
                     };
 
-                    let git_tone = if entry.git_clean { Tone::Muted } else { Tone::Danger };
+                    let git_tone = if entry.git_clean {
+                        Tone::Muted
+                    } else {
+                        Tone::Danger
+                    };
 
                     ListItem::new(Text::from(vec![
                         Line::from(vec![
@@ -539,9 +542,7 @@ impl WorkspaceDashboardApp {
                         .iter()
                         .enumerate()
                         .filter(|(_, sel)| **sel)
-                        .filter_map(|(idx, _)| {
-                            self.data.entries.get(idx).map(|e| e.ticket.clone())
-                        })
+                        .filter_map(|(idx, _)| self.data.entries.get(idx).map(|e| e.ticket.clone()))
                         .collect();
 
                     if tickets.is_empty() {
@@ -645,9 +646,7 @@ impl WorkspaceDashboardApp {
                 "Step 1: Search, select workspaces with Space, then Enter to choose action."
                     .to_string()
             }
-            Focus::Actions => {
-                "Step 2: Choose an action for the selected workspace(s).".to_string()
-            }
+            Focus::Actions => "Step 2: Choose an action for the selected workspace(s).".to_string(),
         }
     }
 }

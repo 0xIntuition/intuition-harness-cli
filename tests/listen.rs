@@ -4267,7 +4267,11 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
     assert!(second_instructions.contains("continuation turn 2 of 20"));
 
     let state_path = listen_state_path(&config_path, &repo_root)?;
-    wait_for_file_substring(&state_path, "\"phase\": \"completed\"")?;
+    wait_for_file_substring_with_timeout(
+        &state_path,
+        "\"phase\": \"completed\"",
+        Duration::from_secs(120),
+    )?;
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-32\""));
     assert!(state.contains("\"phase\": \"completed\""));

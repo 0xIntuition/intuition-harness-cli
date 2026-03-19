@@ -585,18 +585,30 @@ fn team_payload() -> serde_json::Value {
 
 #[cfg(unix)]
 fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
-    for _ in 0..600 {
+    wait_for_file_substring_with_timeout(path, expected, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_file_substring_with_timeout(
+    path: &Path,
+    expected: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(100);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
         if let Ok(contents) = fs::read_to_string(path)
             && contents.contains(expected)
         {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(poll_interval);
     }
 
     Err(format!(
-        "timed out waiting for `{}` to contain substring `{expected}`",
-        path.display()
+        "timed out waiting for `{}` to contain substring `{expected}` after {}s",
+        path.display(),
+        timeout.as_secs()
     )
     .into())
 }
@@ -648,7 +660,7 @@ struct DynamicLinearServer {
 #[cfg(unix)]
 impl DynamicLinearServer {
     fn start() -> Result<Self, Box<dyn Error>> {
-        Self::start_with_completion_after_refreshes(6)
+        Self::start_with_completion_after_refreshes(8)
     }
 
     fn start_with_completion_after_refreshes(
@@ -667,6 +679,7 @@ impl DynamicLinearServer {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
                         let _ = handle_dynamic_linear_connection(&mut stream, &state);
                         let _ = stream.shutdown(Shutdown::Both);
                     }
@@ -707,6 +720,9 @@ fn handle_dynamic_linear_connection(
     state: &Arc<Mutex<DynamicLinearState>>,
 ) -> Result<(), Box<dyn Error>> {
     let request = read_http_request(stream)?;
+    if request.trim().is_empty() {
+        return Ok(());
+    }
     let body = request
         .split("\r\n\r\n")
         .nth(1)
@@ -747,7 +763,21 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
     let mut content_length = 0usize;
 
     loop {
-        let read = stream.read(&mut chunk)?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if buffer.is_empty() {
+                    return Ok(String::new());
+                }
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if read == 0 {
             break;
         }

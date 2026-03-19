@@ -106,8 +106,8 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
 
     if is_interactive {
         use crate::workspace_dashboard::{
-            WorkspaceDashboardOptions, WorkspaceDashboardExit, WorkspaceSelectionAction,
-            WorkspaceEnrichmentUpdate, run_workspace_dashboard,
+            WorkspaceDashboardExit, WorkspaceDashboardOptions, WorkspaceEnrichmentUpdate,
+            WorkspaceSelectionAction, run_workspace_dashboard,
         };
 
         // Build initial dashboard data from local-only info
@@ -143,11 +143,8 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
                                 }
                                 _ => None,
                             };
-                            let dashboard_data = records_to_dashboard_data(
-                                "",
-                                &records,
-                                github_note.clone(),
-                            );
+                            let dashboard_data =
+                                records_to_dashboard_data("", &records, github_note.clone());
                             let _ = tx.send(WorkspaceEnrichmentUpdate {
                                 entries: dashboard_data.entries,
                                 github_note,
@@ -204,7 +201,8 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
                             client: args.client.clone(),
                             dry_run: true,
                             force: true,
-                        }).await?;
+                        })
+                        .await?;
                         Ok(result)
                     }
                     WorkspaceSelectionAction::Prune => {
@@ -212,7 +210,8 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
                             client: args.client.clone(),
                             dry_run: false,
                             force: true,
-                        }).await?;
+                        })
+                        .await?;
                         Ok(result)
                     }
                 }
@@ -224,7 +223,9 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
         let github = discover_github_prs(&context.source_root);
         let records = enrich_workspace_entries(entries, &linear.service, &github).await?;
         let github_note = match &github {
-            GithubPrLookup::Unavailable(reason) => Some(format!("GitHub PR data unavailable: {reason}")),
+            GithubPrLookup::Unavailable(reason) => {
+                Some(format!("GitHub PR data unavailable: {reason}"))
+            }
             _ => None,
         };
 
@@ -268,22 +269,24 @@ fn entries_to_initial_dashboard_data(
         workspace_root: workspace_root.to_string(),
         entries: entries
             .iter()
-            .map(|entry| crate::workspace_dashboard::WorkspaceDashboardEntry {
-                ticket: entry.ticket.clone(),
-                branch: entry.branch.clone(),
-                size: format_bytes(entry.disk_usage_bytes),
-                modified: format_system_time(entry.last_modified),
-                git_label: entry.git.display_label(),
-                git_clean: !entry.git.has_uncommitted_changes
-                    && !entry.git.has_unpushed_commits
-                    && !entry.git.is_detached,
-                linear_state: "Loading...".to_string(),
-                pr_label: "Loading...".to_string(),
-                is_removal_candidate: false,
-                has_unpushed: entry.git.has_unpushed_commits,
-                has_uncommitted: entry.git.has_uncommitted_changes,
-                is_detached: entry.git.is_detached,
-            })
+            .map(
+                |entry| crate::workspace_dashboard::WorkspaceDashboardEntry {
+                    ticket: entry.ticket.clone(),
+                    branch: entry.branch.clone(),
+                    size: format_bytes(entry.disk_usage_bytes),
+                    modified: format_system_time(entry.last_modified),
+                    git_label: entry.git.display_label(),
+                    git_clean: !entry.git.has_uncommitted_changes
+                        && !entry.git.has_unpushed_commits
+                        && !entry.git.is_detached,
+                    linear_state: "Loading...".to_string(),
+                    pr_label: "Loading...".to_string(),
+                    is_removal_candidate: false,
+                    has_unpushed: entry.git.has_unpushed_commits,
+                    has_uncommitted: entry.git.has_uncommitted_changes,
+                    is_detached: entry.git.is_detached,
+                },
+            )
             .collect(),
         github_note: None,
     }
@@ -298,22 +301,24 @@ fn records_to_dashboard_data(
         workspace_root: workspace_root.to_string(),
         entries: records
             .iter()
-            .map(|record| crate::workspace_dashboard::WorkspaceDashboardEntry {
-                ticket: record.entry.ticket.clone(),
-                branch: record.entry.branch.clone(),
-                size: format_bytes(record.entry.disk_usage_bytes),
-                modified: format_system_time(record.entry.last_modified),
-                git_label: record.entry.git.display_label(),
-                git_clean: !record.entry.git.has_uncommitted_changes
-                    && !record.entry.git.has_unpushed_commits
-                    && !record.entry.git.is_detached,
-                linear_state: record.linear_state.clone(),
-                pr_label: record.pr_status.display_label().to_string(),
-                is_removal_candidate: record.linear_is_removal_candidate,
-                has_unpushed: record.entry.git.has_unpushed_commits,
-                has_uncommitted: record.entry.git.has_uncommitted_changes,
-                is_detached: record.entry.git.is_detached,
-            })
+            .map(
+                |record| crate::workspace_dashboard::WorkspaceDashboardEntry {
+                    ticket: record.entry.ticket.clone(),
+                    branch: record.entry.branch.clone(),
+                    size: format_bytes(record.entry.disk_usage_bytes),
+                    modified: format_system_time(record.entry.last_modified),
+                    git_label: record.entry.git.display_label(),
+                    git_clean: !record.entry.git.has_uncommitted_changes
+                        && !record.entry.git.has_unpushed_commits
+                        && !record.entry.git.is_detached,
+                    linear_state: record.linear_state.clone(),
+                    pr_label: record.pr_status.display_label().to_string(),
+                    is_removal_candidate: record.linear_is_removal_candidate,
+                    has_unpushed: record.entry.git.has_unpushed_commits,
+                    has_uncommitted: record.entry.git.has_uncommitted_changes,
+                    is_detached: record.entry.git.is_detached,
+                },
+            )
             .collect(),
         github_note,
     }
@@ -404,16 +409,25 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
             .filter(|d| d.action == PruneAction::Remove)
             .count();
         if removals > 0 && !args.force {
-            let prompt = format!("Remove {removals} workspace clone{}? [y/N]: ", if removals == 1 { "" } else { "s" });
+            let prompt = format!(
+                "Remove {removals} workspace clone{}? [y/N]: ",
+                if removals == 1 { "" } else { "s" }
+            );
             if io::stdin().is_terminal() {
                 print!("{prompt}");
-                io::stdout().flush().context("failed to flush confirmation prompt")?;
+                io::stdout()
+                    .flush()
+                    .context("failed to flush confirmation prompt")?;
             } else {
                 eprint!("{prompt}");
-                io::stderr().flush().context("failed to flush confirmation prompt")?;
+                io::stderr()
+                    .flush()
+                    .context("failed to flush confirmation prompt")?;
             }
             let mut input = String::new();
-            io::stdin().read_line(&mut input).context("failed to read confirmation input")?;
+            io::stdin()
+                .read_line(&mut input)
+                .context("failed to read confirmation input")?;
             if !matches!(input.trim(), "y" | "Y" | "yes" | "YES") {
                 bail!("workspace prune canceled");
             }
@@ -495,9 +509,7 @@ fn discover_workspace_entries(context: &WorkspaceContext) -> Result<Vec<Workspac
     let mut discovered: Vec<WorkspaceEntry> = std::thread::scope(|scope| {
         let handles: Vec<_> = candidates
             .iter()
-            .map(|(name, path)| {
-                scope.spawn(move || read_workspace_entry(context, name, path))
-            })
+            .map(|(name, path)| scope.spawn(move || read_workspace_entry(context, name, path)))
             .collect();
 
         handles
@@ -863,11 +875,7 @@ fn scan_workspace_usage(root: &Path) -> Result<(u64, SystemTime)> {
         .with_context(|| format!("failed to read modified time for `{}`", root.display()))?;
 
     // Use `du -sk` for fast disk usage instead of walking every file.
-    let bytes = match Command::new("du")
-        .args(["-sk"])
-        .arg(root)
-        .output()
-    {
+    let bytes = match Command::new("du").args(["-sk"]).arg(root).output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             stdout
