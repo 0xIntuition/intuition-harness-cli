@@ -132,3 +132,74 @@ pub(super) fn should_authorize_linear_upload_download(url: &str) -> Result<bool>
         Url::parse(url).with_context(|| format!("failed to parse download URL `{url}`"))?;
     Ok(matches!(parsed.host_str(), Some("uploads.linear.app")))
 }
+
+#[cfg(test)]
+mod tests {
+    use reqwest::Client;
+
+    use crate::config::LinearConfig;
+
+    use super::{GraphqlTransport, should_authorize_linear_upload_download};
+
+    #[test]
+    fn upload_download_auth_is_limited_to_linear_uploads_host() {
+        assert!(
+            should_authorize_linear_upload_download("https://uploads.linear.app/file/test.png")
+                .expect("uploads.linear.app URL should parse")
+        );
+        assert!(
+            !should_authorize_linear_upload_download("https://cdn.example.com/file/test.png")
+                .expect("cdn URL should parse")
+        );
+    }
+
+    #[test]
+    fn upload_downloads_send_the_raw_api_key_in_authorization() {
+        let config = LinearConfig {
+            api_key: "linear-token".to_string(),
+            api_url: "https://api.linear.app/graphql".to_string(),
+            default_team: None,
+        };
+        let http = Client::new();
+        let transport = GraphqlTransport::new(&config, &http);
+
+        let request = transport
+            .build_download_request("https://uploads.linear.app/file/test.png")
+            .expect("request builder should build")
+            .build()
+            .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("linear-token")
+        );
+    }
+
+    #[test]
+    fn non_linear_downloads_do_not_send_special_authorization() {
+        let config = LinearConfig {
+            api_key: "linear-token".to_string(),
+            api_url: "https://api.linear.app/graphql".to_string(),
+            default_team: None,
+        };
+        let http = Client::new();
+        let transport = GraphqlTransport::new(&config, &http);
+
+        let request = transport
+            .build_download_request("https://cdn.example.com/file/test.png")
+            .expect("request builder should build")
+            .build()
+            .expect("request should build");
+
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none(),
+            "non-Linear downloads should not include special auth",
+        );
+    }
+}
