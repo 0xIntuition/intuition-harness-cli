@@ -853,6 +853,103 @@ fn sync_push_updates_the_issue_description_only_with_opt_in_flag() -> Result<(),
 }
 
 #[test]
+fn sync_push_identifier_stays_linked_entry_driven_outside_dashboard() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_dir = temp.path().join(".metastack/backlog/generated-child");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Local child backlog\n")?;
+    write_linked_metadata(
+        &issue_dir,
+        "MET-77",
+        "Linked child backlog issue",
+        None,
+        None,
+        None,
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-77",
+                        "MET-77",
+                        "Linked child backlog issue",
+                        "Remote child issue",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-77\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "issue-77",
+                    "MET-77",
+                    "Linked child backlog issue",
+                    "Remote child issue",
+                    Vec::new(),
+                    None,
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "push",
+            "MET-77",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Pushed MET-77 from .metastack/backlog/generated-child",
+        ))
+        .stdout(predicate::str::contains(
+            "synced 0 managed attachment files",
+        ));
+
+    assert!(!temp.path().join(".metastack/backlog/MET-77").exists());
+    let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
+    assert!(metadata.contains("\"identifier\": \"MET-77\""));
+    assert!(metadata.contains("\"issue_id\": \"issue-77\""));
+    assert!(metadata.contains("\"local_hash\":"));
+    assert!(metadata.contains("\"remote_hash\":"));
+
+    Ok(())
+}
+
+#[test]
 fn sync_push_description_update_is_blocked_for_the_active_listen_issue()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
