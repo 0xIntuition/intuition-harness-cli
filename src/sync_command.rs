@@ -953,7 +953,7 @@ fn parse_checklist_progress_summary(contents: &str) -> ChecklistProgressSummary 
 
     for line in contents.lines() {
         let trimmed = line.trim_start();
-        if let Some(title) = trimmed.strip_prefix("## ") {
+        if let Some(title) = checklist_heading_title(trimmed) {
             if current_total > 0 {
                 milestones.push(ChecklistMilestoneProgress {
                     title: current_title,
@@ -992,6 +992,24 @@ fn parse_checklist_progress_summary(contents: &str) -> ChecklistProgressSummary 
         total: milestones.iter().map(|milestone| milestone.total).sum(),
         milestones,
     }
+}
+
+fn checklist_heading_title(line: &str) -> Option<&str> {
+    let heading_level = line
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b'#')
+        .count();
+    if heading_level < 2 {
+        return None;
+    }
+
+    let remainder = line[heading_level..].trim_start();
+    if remainder.is_empty() {
+        return None;
+    }
+
+    Some(remainder.trim())
 }
 
 fn render_harness_sync_comment(

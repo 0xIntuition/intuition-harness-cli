@@ -716,6 +716,170 @@ fn sync_push_updates_a_single_harness_sync_comment_and_skips_generated_discussio
     Ok(())
 }
 
+#[test]
+fn sync_push_groups_checklist_progress_by_nested_markdown_headings() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Updated description\n")?;
+    fs::write(
+        issue_dir.join("checklist.md"),
+        "# Checklist\n\n## Implementation\n\n### Comment sync\n- [x] pull comments\n- [ ] rewrite images\n\n### Progress sync\n- [x] parse checklist\n- [x] update comment\n",
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": sync_issue_detail_node_with_comments(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "Parent issue description",
+                    vec![sync_comment_node(
+                        "comment-sync",
+                        "Harness",
+                        "2026-03-18T17:00:00Z",
+                        "[harness-sync]\nold progress"
+                    )],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    let update_comment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateComment")
+            .body_includes("\"id\":\"comment-sync\"")
+            .body_includes("Comment sync -- 1/2 complete")
+            .body_includes("Progress sync -- 2/2 complete")
+            .body_includes("Overall: 75% (3/4)");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentUpdate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-sync",
+                        "body": "[harness-sync]\nupdated progress",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UploadFile")
+            .body_includes("\"filename\":\"checklist.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "fileUpload": {
+                    "success": true,
+                    "uploadFile": {
+                        "uploadUrl": server.url("/uploads/checklist.md"),
+                        "assetUrl": server.url("/assets/checklist.md"),
+                        "headers": [{
+                            "key": "x-goog-content-length-range",
+                            "value": "1,100000"
+                        }]
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(httpmock::Method::PUT)
+            .path("/uploads/checklist.md");
+        then.status(200);
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateAttachment")
+            .body_includes("\"relativePath\":\"checklist.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "attachmentCreate": {
+                    "success": true,
+                    "attachment": {
+                        "id": "attachment-checklist",
+                        "title": "checklist.md",
+                        "url": server.url("/assets/checklist.md"),
+                        "sourceType": "upload",
+                        "metadata": {
+                            "managedBy": "metastack-cli",
+                            "relativePath": "checklist.md"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "push",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    update_comment_mock.assert_calls(1);
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sync_issue_detail_node_with_comments(
     id: &str,
