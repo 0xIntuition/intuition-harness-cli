@@ -23,8 +23,8 @@ use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
     DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, LinearConfig, LinearConfigOverrides,
     ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, ensure_saved_issue_labels,
-    normalize_agent_name, supported_agent_models, supported_agent_names,
-    supported_reasoning_options, validate_agent_model, validate_agent_name,
+    normalize_agent_name, parse_listen_required_labels_csv, supported_agent_models,
+    supported_agent_names, supported_reasoning_options, validate_agent_model, validate_agent_name,
     validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
     validate_listen_poll_interval_seconds,
 };
@@ -90,7 +90,7 @@ struct SubmittedSetup {
     provider: Option<String>,
     model: Option<String>,
     reasoning: Option<String>,
-    listen_label: Option<String>,
+    listen_labels: Option<Vec<String>>,
     assignment_scope: ListenAssignmentScope,
     refresh_policy: ListenRefreshPolicy,
     instructions_path: Option<String>,
@@ -175,7 +175,7 @@ impl SetupStep {
             Self::Provider => "Repo agent",
             Self::Model => "Repo model",
             Self::Reasoning => "Repo reasoning",
-            Self::ListenLabel => "Listen label",
+            Self::ListenLabel => "Listen labels",
             Self::AssignmentScope => "Assignee filter",
             Self::RefreshPolicy => "Workspace refresh",
             Self::InstructionsPath => "Instructions file",
@@ -196,7 +196,7 @@ impl SetupStep {
             Self::Provider => "Agent",
             Self::Model => "Model",
             Self::Reasoning => "Reasoning",
-            Self::ListenLabel => "Listen label",
+            Self::ListenLabel => "Listen labels",
             Self::AssignmentScope => "Assignee",
             Self::RefreshPolicy => "Refresh",
             Self::InstructionsPath => "Instructions",
@@ -217,7 +217,7 @@ impl SetupStep {
             Self::Provider => "Repo default agent/provider",
             Self::Model => "Repo default model",
             Self::Reasoning => "Repo default reasoning effort",
-            Self::ListenLabel => "Listen required label",
+            Self::ListenLabel => "Listen required labels",
             Self::AssignmentScope => "Listen assignee filter",
             Self::RefreshPolicy => "Listen workspace refresh policy",
             Self::InstructionsPath => "Listen instructions file",
@@ -447,8 +447,8 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_optional(view.planning_meta.agent.reasoning.as_deref())
     ));
     lines.push(format!(
-        "Listen label: {}",
-        display_optional(view.planning_meta.listen.required_label.as_deref())
+        "Listen labels: {}",
+        display_listen_labels(view.planning_meta.listen.required_label_names())
     ));
     lines.push(format!(
         "Assignee filter: {}",
@@ -597,7 +597,7 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         view.planning_meta.agent.reasoning = normalized;
     }
     if let Some(label) = &args.listen_label {
-        view.planning_meta.listen.required_label = normalize_optional(label);
+        view.planning_meta.listen.required_labels = parse_optional_listen_labels_input(label);
     }
     if let Some(scope) = args.assignment_scope {
         view.planning_meta.listen.assignment_scope = scope.into();
@@ -721,11 +721,7 @@ impl SetupApp {
             model_field: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             reasoning: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             listen_label: InputFieldState::new(
-                view.planning_meta
-                    .listen
-                    .required_label
-                    .clone()
-                    .unwrap_or_default(),
+                view.planning_meta.listen.required_label_names().join(", "),
             ),
             assignment_field: SelectFieldState::new(
                 vec![
@@ -1072,7 +1068,7 @@ impl SetupApp {
             provider,
             model,
             reasoning,
-            listen_label: normalize_optional(self.listen_label.value()),
+            listen_labels: parse_optional_listen_labels_input(self.listen_label.value()),
             assignment_scope: match self.assignment_field.selected() {
                 1 => ListenAssignmentScope::Viewer,
                 _ => ListenAssignmentScope::Any,
@@ -1110,7 +1106,7 @@ impl SubmittedSetup {
         view.planning_meta.agent.provider = self.provider.clone();
         view.planning_meta.agent.model = self.model.clone();
         view.planning_meta.agent.reasoning = self.reasoning.clone();
-        view.planning_meta.listen.required_label = self.listen_label.clone();
+        view.planning_meta.listen.required_labels = self.listen_labels.clone();
         view.planning_meta.listen.assignment_scope = self.assignment_scope;
         view.planning_meta.listen.refresh_policy = self.refresh_policy;
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
@@ -1334,7 +1330,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.listen_label,
-            "Only tickets carrying this label will be picked up automatically. Leave blank to unset.",
+            "Only tickets carrying any of these comma-separated labels will be picked up automatically. Leave blank to unset.",
         ),
         SetupStep::AssignmentScope => {
             render_select_panel(frame, area, &title, &app.assignment_field)
@@ -1409,7 +1405,7 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
                 "Repo reasoning",
                 summarize_optional_select(&app.reasoning, "Leave unset"),
             ),
-            ("Listen label", summarize_optional(&app.listen_label)),
+            ("Listen labels", summarize_listen_labels(&app.listen_label)),
             (
                 "Assignee filter",
                 assignment_scope_label(match app.assignment_field.selected() {
@@ -1565,6 +1561,14 @@ fn display_optional(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn display_listen_labels(labels: &[String]) -> String {
+    if labels.is_empty() {
+        "unset".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
 fn display_repo_auth(api_key: Option<&str>, profile: Option<&str>) -> String {
     if api_key
         .map(str::trim)
@@ -1610,6 +1614,15 @@ fn normalize_optional(value: &str) -> Option<String> {
     }
 }
 
+fn parse_optional_listen_labels_input(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        parse_listen_required_labels_csv(trimmed)
+    }
+}
+
 fn parse_poll_interval(value: &str) -> Result<Option<u64>> {
     let Some(value) = normalize_optional(value) else {
         return Ok(None);
@@ -1634,6 +1647,12 @@ fn parse_plan_limit(value: &str) -> Result<Option<usize>> {
 
 fn summarize_optional(field: &InputFieldState) -> String {
     normalize_optional(field.value()).unwrap_or_else(|| "unset".to_string())
+}
+
+fn summarize_listen_labels(field: &InputFieldState) -> String {
+    parse_optional_listen_labels_input(field.value())
+        .map(|labels| labels.join(", "))
+        .unwrap_or_else(|| "unset".to_string())
 }
 
 fn summarize_optional_select(field: &SelectFieldState, unset_label: &str) -> String {
@@ -1694,9 +1713,12 @@ mod tests {
 
     use super::{
         BacklogTemplateConflictAction, SetupApp, SetupViewData,
-        parse_backlog_template_conflict_action, prompt_backlog_template_conflicts_with_io,
+        parse_backlog_template_conflict_action, parse_optional_listen_labels_input,
+        prompt_backlog_template_conflicts_with_io, render_summary,
     };
-    use crate::config::{AgentSettings, AppConfig, PlanningAgentSettings, PlanningMeta};
+    use crate::config::{
+        AgentSettings, AppConfig, PlanningAgentSettings, PlanningListenSettings, PlanningMeta,
+    };
     use anyhow::Result;
     use std::io::Cursor;
 
@@ -1759,6 +1781,37 @@ mod tests {
             ]
         );
         assert_eq!(app.reasoning.selected_label(), Some("max"));
+    }
+
+    #[test]
+    fn setup_parse_optional_listen_labels_supports_comma_separated_values() {
+        assert_eq!(
+            parse_optional_listen_labels_input(" plan, urgent ,Plan "),
+            Some(vec!["plan".to_string(), "urgent".to_string()])
+        );
+        assert_eq!(parse_optional_listen_labels_input("none"), None);
+    }
+
+    #[test]
+    fn setup_render_summary_lists_all_required_labels() {
+        let view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig::default(),
+            app_config_changed: false,
+            planning_meta: PlanningMeta {
+                listen: PlanningListenSettings {
+                    required_labels: Some(vec!["plan".to_string(), "urgent".to_string()]),
+                    ..PlanningListenSettings::default()
+                },
+                ..PlanningMeta::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let summary = render_summary(&view, false);
+        assert!(summary.contains("Listen labels: plan, urgent"));
     }
 
     #[test]

@@ -562,6 +562,39 @@ fn render_listen_backlog_file(
     )
 }
 
+fn format_required_label_filter(required_labels: &[String]) -> String {
+    required_labels
+        .iter()
+        .map(|label| format!("`{label}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn required_label_skip_reason(
+    listen_settings: &PlanningListenSettings,
+    issue: &IssueSummary,
+) -> Option<String> {
+    let required_labels = listen_settings.required_label_names();
+    if required_labels.is_empty()
+        || issue.labels.iter().any(|issue_label| {
+            required_labels
+                .iter()
+                .any(|required| issue_label.name.eq_ignore_ascii_case(required))
+        })
+    {
+        return None;
+    }
+
+    Some(if required_labels.len() == 1 {
+        format!("missing required label `{}`", required_labels[0])
+    } else {
+        format!(
+            "missing any required label ({})",
+            format_required_label_filter(required_labels)
+        )
+    })
+}
+
 impl<C> AgentDaemon<C>
 where
     C: LinearClient,
@@ -575,8 +608,12 @@ where
             pending.len()
         )];
         self.reconcile_sessions(&mut state, &mut notes).await?;
-        if let Some(label) = self.listen_settings.required_label.as_deref() {
-            notes.push(format!("Listen label filter is active: `{label}`."));
+        let required_labels = self.listen_settings.required_label_names();
+        if !required_labels.is_empty() {
+            notes.push(format!(
+                "Listen label filter is active: any of {}.",
+                format_required_label_filter(required_labels)
+            ));
         }
         if self.listen_settings.assignment_scope == ListenAssignmentScope::Viewer
             && let Some(viewer) = &self.viewer
@@ -1112,13 +1149,8 @@ where
     fn skip_reason(&self, issue: &IssueSummary) -> Option<String> {
         let mut reasons = Vec::new();
 
-        if let Some(required_label) = self.listen_settings.required_label.as_deref()
-            && !issue
-                .labels
-                .iter()
-                .any(|label| label.name.eq_ignore_ascii_case(required_label))
-        {
-            reasons.push(format!("missing required label `{required_label}`"));
+        if let Some(reason) = required_label_skip_reason(&self.listen_settings, issue) {
+            reasons.push(reason);
         }
 
         if self.listen_settings.assignment_scope == ListenAssignmentScope::Viewer
@@ -2582,8 +2614,10 @@ mod tests {
     use super::{
         AgentSession, ListenCycleData, ListenState, SessionPhase, TokenUsage,
         capture_workspace_snapshot, compact_identifier, format_duration, format_number,
-        listen_scope_label, mark_running_session_stale,
+        listen_scope_label, mark_running_session_stale, required_label_skip_reason,
     };
+    use crate::config::PlanningListenSettings;
+    use crate::linear::{IssueSummary, LabelRef, TeamRef};
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -2629,6 +2663,107 @@ mod tests {
         };
 
         assert_eq!(usage.display_compact(), "12,340");
+    }
+
+    fn listen_settings(required_labels: Option<Vec<&str>>) -> PlanningListenSettings {
+        PlanningListenSettings {
+            required_labels: required_labels
+                .map(|labels| labels.into_iter().map(str::to_string).collect::<Vec<_>>()),
+            ..PlanningListenSettings::default()
+        }
+    }
+
+    fn issue_with_labels(labels: &[&str]) -> IssueSummary {
+        IssueSummary {
+            id: "issue-1".to_string(),
+            identifier: "ENG-10211".to_string(),
+            title: "Listen labels".to_string(),
+            description: None,
+            url: "https://linear.app/issues/eng-10211".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-19T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| LabelRef {
+                    id: format!("label-{index}"),
+                    name: (*label).to_string(),
+                })
+                .collect(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn required_label_skip_reason_allows_single_label_match() {
+        let issue = issue_with_labels(&["plan"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["plan"])), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_allows_any_matching_label() {
+        let issue = issue_with_labels(&["bug", "urgent"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["plan", "urgent"])), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_is_case_insensitive() {
+        let issue = issue_with_labels(&["Urgent"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["urgent"])), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_ignores_empty_required_labels() {
+        let issue = issue_with_labels(&[]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(Vec::new())), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_ignores_unset_required_labels() {
+        let issue = issue_with_labels(&[]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(None), &issue),
+            None
+        );
+    }
+
+    #[test]
+    fn required_label_skip_reason_reports_missing_any_match() {
+        let issue = issue_with_labels(&["bug"]);
+
+        assert_eq!(
+            required_label_skip_reason(&listen_settings(Some(vec!["plan", "urgent"])), &issue),
+            Some("missing any required label (`plan`, `urgent`)".to_string())
+        );
     }
 
     #[test]
