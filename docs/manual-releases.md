@@ -135,6 +135,26 @@ curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/mai
 meta --version
 ```
 
+Smoke test the in-place self-update contract for release installs:
+
+```bash
+meta upgrade --check
+meta upgrade --dry-run
+meta upgrade
+```
+
+Smoke test the advanced version-management path:
+
+```bash
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
+```
+
+`meta upgrade` only mutates standalone GitHub Release installs. Cargo installs and source-checkout
+builds are intentionally refused with explicit remediation text because those origins are safer to
+upgrade through their original build/install flows.
+
 ## Rollback And Yanked Releases
 
 - If a release is still a draft, rerun the workflow or delete the draft release and rerun from the same tag.

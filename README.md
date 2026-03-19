@@ -44,6 +44,9 @@ cargo install --path . --force
 
 This will install the `meta` command to your Cargo bin directory, which is typically `~/.cargo/bin`.
 
+Cargo installs are intentionally not self-updatable with `meta upgrade`. Use the GitHub Release
+installer below when you want secure in-place updates.
+
 ## Install `meta` From Source
 
 Install the latest GitHub Release into `~/.local/bin`:
@@ -75,6 +78,32 @@ After installation:
 
 ```bash
 meta --help
+```
+
+Check whether a newer stable GitHub Release is available for the installed binary:
+
+```bash
+meta upgrade --check
+```
+
+Preview the verified replacement plan without mutating the install:
+
+```bash
+meta upgrade --dry-run
+```
+
+Apply the latest stable GitHub Release in place:
+
+```bash
+meta upgrade
+```
+
+Advanced version-management path:
+
+```bash
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
 ```
 
 ## Quick Start
@@ -159,6 +188,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
 | `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
 | `meta workspace` | List, clean, and prune sibling listener workspace clones under the fixed workspace root |
+| `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
 
 ## Build From Source
 
@@ -339,6 +369,31 @@ meta runtime setup --api-key lin_api_repo --team MET --project "MetaStack CLI"
 meta runtime setup --provider codex --model gpt-5.4 --reasoning medium
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
+
+### `upgrade`
+
+Inspect or apply GitHub Release self-updates for supported macOS/Linux release installs:
+
+```bash
+meta upgrade --check
+meta upgrade --dry-run
+meta upgrade
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
+```
+
+Default behavior resolves the latest stable GitHub Release for the running platform, verifies the
+selected archive against the published `SHA256SUMS`, stages extraction outside the live install
+path, and replaces the installed `meta` binary only after verification succeeds.
+
+`meta upgrade` refuses Cargo installs and source-checkout builds because those origins are not safe
+to mutate in place. Reinstall from GitHub Releases when you want an install that can self-update.
+
+Use `--check` to inspect the latest stable release without mutating the current install. Use
+`--dry-run` to resolve the same release and print the planned replacement path without swapping the
+binary. The advanced path keeps the default UX strict while still allowing pinned versions,
+prerelease opt-in, and deliberate downgrades with explicit flags.
 
 Legacy alias: `meta setup`
 

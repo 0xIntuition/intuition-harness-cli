@@ -17,6 +17,7 @@ fn top_level_help_lists_domain_families_aliases_and_examples() {
         .stdout(predicate::str::contains("\n  dashboard "))
         .stdout(predicate::str::contains("\n  merge "))
         .stdout(predicate::str::contains("\n  workspace "))
+        .stdout(predicate::str::contains("\n  upgrade "))
         .stdout(predicate::str::contains("\n  cron "))
         .stdout(predicate::str::contains("\n  plan "))
         .stdout(predicate::str::contains("\n  config "))
