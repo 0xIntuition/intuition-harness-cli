@@ -616,7 +616,7 @@ Side effects:
 
 ### `backlog sync`
 
-Browse issues from the repo default Linear project, then pull or push the selected backlog item without leaving the terminal:
+Browse backlog entries from local `.metastack/backlog/`, hydrate linked rows from Linear, and pull or push the selected linked entry without leaving the terminal:
 
 ```bash
 meta backlog sync --api-key "$LINEAR_API_KEY"
@@ -635,7 +635,9 @@ Legacy alias: `meta sync`
 
 Side effects:
 
-- bare `meta backlog sync` opens a ratatui issue browser scoped by `.metastack/meta.json` `linear.project_id`
+- bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.metastack/backlog/` state
+- linked dashboard rows hydrate the mapped Linear issue from `.linear.json`, while unlinked rows stay visible with explicit `unlinked` state
+- unlinked dashboard rows are local-only until you run `meta backlog sync link <ISSUE> --entry <SLUG>`
 - `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
 - `link` prompts for an unlinked backlog entry in a TTY when `--entry <SLUG>` is omitted
 - `link --pull` immediately hydrates the linked entry from Linear after writing metadata
