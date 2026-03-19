@@ -40,12 +40,24 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
 fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
     let home_dir = temp.path().join("home");
     let xdg_config_home = temp.path().join("xdg");
+    fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&home_dir)?;
     fs::create_dir_all(&xdg_config_home)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
 
     meta()
+        .current_dir(&repo_root)
         .env("HOME", &home_dir)
         .env("XDG_CONFIG_HOME", &xdg_config_home)
         .args(["listen", "--demo", "--render-once"])
@@ -268,12 +280,24 @@ exit 0
 fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
     let home_dir = temp.path().join("home");
     let xdg_config_home = temp.path().join("xdg");
+    fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&home_dir)?;
     fs::create_dir_all(&xdg_config_home)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
 
     let legacy = meta()
+        .current_dir(&repo_root)
         .env("HOME", &home_dir)
         .env("XDG_CONFIG_HOME", &xdg_config_home)
         .args(["listen", "--demo", "--render-once"])
@@ -281,6 +305,7 @@ fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     assert!(legacy.status.success());
 
     let preferred = meta()
+        .current_dir(&repo_root)
         .env("HOME", &home_dir)
         .env("XDG_CONFIG_HOME", &xdg_config_home)
         .args(["agents", "listen", "--demo", "--render-once"])
