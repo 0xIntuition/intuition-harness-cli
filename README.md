@@ -560,6 +560,12 @@ The command requires a configured local agent, or one of the built-in supported 
 
 `meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
+In a TTY, the parent-issue picker now uses the shared Linear issue browser:
+
+- type to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- shared semantic styling highlights identifiers, titles, state, priority, project, and preview metadata while you review the selected parent issue
+
 Side effects:
 
 - ensures `.metastack/backlog/_TEMPLATE/` exists
@@ -632,6 +638,12 @@ Side effects:
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 - pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
 
+The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
+
+- type while the issue list is focused to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- the shared browser highlights matches in issue rows and previews and keeps sync-specific actions on the right-hand side
+
 The sync dashboard and render-once snapshot also show each issue's local sync state:
 
 - `synced`: current local and remote hashes still match the stored baselines
@@ -665,6 +677,8 @@ Legacy aliases: `meta issues`, `meta projects`, `meta dashboard`
 Notes:
 
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
+- `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
+- the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
 - In the interactive create/edit forms, multiline descriptions advance on `Enter` and insert a newline on `Shift+Enter`
 - `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
@@ -684,7 +698,7 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
 
 Examples:
 
@@ -693,7 +707,6 @@ meta agents listen --demo --render-once
 meta agents listen --check --root .
 meta agents listen --team MET --project "MetaStack CLI" --once
 meta agents listen --team MET --project "MetaStack CLI"
-meta agents listen --team MET --project "MetaStack CLI" --dashboard-port 4050
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
 
@@ -719,7 +732,7 @@ Outputs:
 - install-scoped MetaListen state under the global MetaStack data root, keyed by the canonical
   source project `.metastack` root
 - install-scoped MetaListen logs under the same project store
-- a live browser dashboard on `http://127.0.0.1:<dashboard-port>/` in steady-state mode
+- a live terminal dashboard in steady-state mode, or a render-once terminal snapshot when requested
 
 When `$METASTACK_CONFIG` points to a custom config file, the listener store lives under that
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from

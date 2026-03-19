@@ -30,7 +30,7 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 12. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
 13. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker attempts to move both the parent issue and backlog child into a review-style state.
 14. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
-15. Live mode also serves an auto-refreshing local HTML dashboard from the same shared listen snapshot, including matching active/completed session tabs.
+15. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
@@ -46,7 +46,6 @@ Primary options:
 - `--project <NAME>`: optional project scope.
 - `--max-pickups <N>`: cap newly claimed issues per poll.
 - `--poll-interval <SECONDS>`: refresh cadence for the live loop. Overrides the repo-scoped default when set.
-- `--dashboard-port <PORT>`: local browser dashboard port in steady-state mode (`4000` by default, `0` for an ephemeral port in tests).
 - `--once`: run a single live cycle and print a textual summary.
 - `--render-once`: run a single cycle and print a deterministic ratatui snapshot.
 - `--demo`: skip Linear and render sample queue/session data.
@@ -78,7 +77,6 @@ diagnostics and `METASTACK_AGENT_*` environment variables before the provider pr
 
 - `src/listen/mod.rs`: command entrypoint, polling loop, shared snapshot model, state persistence, filtering, attachment-context download, workpad bootstrap, hidden listen worker flow, and prompt/instruction injection.
 - `src/listen/dashboard.rs`: ratatui rendering for the live full-screen view and deterministic snapshots.
-- `src/listen/web.rs`: lightweight local HTTP server and HTML dashboard rendering.
 - `src/listen/workspace.rs`: clone-backed ticket workspace path, refresh, and branch preparation helpers.
 - `src/listen/workpad.rs`: deterministic bootstrap workpad rendering.
 - `src/agents.rs`: reusable brief-generation and agent-launch helpers shared by `meta listen`, `meta scan`, and the planning flows.
@@ -89,10 +87,10 @@ diagnostics and `METASTACK_AGENT_*` environment variables before the provider pr
 
 ## Current Limitations
 
-- Live mode runs in an alternate terminal screen, exposes active/completed session toggles, and exits on `q` or `Ctrl-C`.
+- Live mode runs in an alternate terminal screen, exposes active/completed session toggles, and exits on `q` or `Ctrl-C` without binding a local TCP port.
 - Session persistence is install-scoped and local-file based; there is no remote coordination
   beyond the per-project active-listener lock yet.
 - The supervised worker can mark a ticket `blocked` if it exhausts the configured turn cap, or if repeated turns fail to produce meaningful implementation updates while the issue stays active.
 - Agent rows already expose stage, age, local session handle, and PID, but real token/rate-limit telemetry is still limited until richer executor telemetry lands.
 
-These are deliberate boundaries for the first slice. Future tickets can add agent executors, richer claim policies, remote status surfaces, and multi-agent coordination without replacing the command surface introduced here.
+These are deliberate boundaries for the first slice. Future tickets can add agent executors, richer claim policies, and multi-agent coordination without replacing the command surface introduced here.

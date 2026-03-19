@@ -36,6 +36,9 @@ use crate::cli::{RunAgentArgs, SyncPushArgs, TechnicalArgs};
 use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
+use crate::linear::browser::{
+    IssueSearchResult, render_issue_preview, render_issue_row, search_issues,
+};
 use crate::linear::{IssueCreateSpec, IssueListFilters, IssueSummary};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
@@ -397,7 +400,7 @@ fn handle_issue_picker_key(
 ) -> TechnicalAction {
     match key.code {
         KeyCode::Up => {
-            let filtered = filtered_issue_indices(app);
+            let filtered = search_results(app);
             if filtered.is_empty() {
                 app.selected = 0;
             } else if app.selected == 0 {
@@ -409,7 +412,7 @@ fn handle_issue_picker_key(
             TechnicalAction::None
         }
         KeyCode::Down => {
-            let filtered = filtered_issue_indices(app);
+            let filtered = search_results(app);
             if filtered.is_empty() {
                 app.selected = 0;
             } else {
@@ -419,8 +422,9 @@ fn handle_issue_picker_key(
             TechnicalAction::None
         }
         KeyCode::Enter => {
-            let filtered = filtered_issue_indices(app);
-            let Some(issue_index) = filtered.get(app.selected).copied() else {
+            let filtered = search_results(app);
+            let Some(issue_index) = filtered.get(app.selected).map(|result| result.issue_index)
+            else {
                 app.error = Some("No issues match the current search.".to_string());
                 return TechnicalAction::None;
             };
@@ -867,7 +871,7 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
     frame.render_widget(query, body[0]);
     rendered_query.set_cursor(frame, query_inner);
 
-    let filtered = filtered_issue_indices(app);
+    let filtered = search_results(app);
     let mut issue_state = ListState::default();
     issue_state.select(Some(app.selected.min(filtered.len().saturating_sub(1))));
     let issue_items = if filtered.is_empty() {
@@ -875,14 +879,10 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
     } else {
         filtered
             .iter()
-            .filter_map(|index| app.issues.get(*index))
-            .map(|issue| {
-                let state = issue
-                    .state
-                    .as_ref()
-                    .map(|state| state.name.as_str())
-                    .unwrap_or("Unknown");
-                ListItem::new(format!("{}  {}  ({state})", issue.identifier, issue.title))
+            .filter_map(|result| {
+                app.issues
+                    .get(result.issue_index)
+                    .map(|issue| render_issue_row(issue, Some(result), None))
             })
             .collect::<Vec<_>>()
     };
@@ -898,8 +898,16 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
 
     let preview = filtered
         .get(app.selected)
-        .and_then(|index| app.issues.get(*index))
-        .map(issue_picker_preview)
+        .and_then(|result| {
+            app.issues.get(result.issue_index).map(|issue| {
+                render_issue_preview(
+                    issue,
+                    Some(result),
+                    None,
+                    "_No Linear description was provided._",
+                )
+            })
+        })
         .unwrap_or_else(|| {
             Text::from(vec![
                 Line::from("Search results appear here."),
@@ -923,39 +931,8 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type to fuzzy-search issues. Up/Down moves the selection. Enter generates the technical backlog draft. Esc cancels.",
+        "Type to search issues by identifier, title, state, project, or description. Up/Down moves the selection. Enter generates the technical backlog draft. Esc cancels.",
     );
-}
-
-fn issue_picker_preview(issue: &IssueSummary) -> Text<'static> {
-    Text::from(vec![
-        Line::from(format!("Identifier: {}", issue.identifier)),
-        Line::from(format!("Title: {}", issue.title)),
-        Line::from(format!(
-            "State: {}",
-            issue
-                .state
-                .as_ref()
-                .map(|state| state.name.clone())
-                .unwrap_or_else(|| "Unknown".to_string())
-        )),
-        Line::from(format!(
-            "Project: {}",
-            issue
-                .project
-                .as_ref()
-                .map(|project| project.name.clone())
-                .unwrap_or_else(|| "No project".to_string())
-        )),
-        Line::from(format!("URL: {}", issue.url)),
-        Line::from(""),
-        Line::from(
-            issue
-                .description
-                .clone()
-                .unwrap_or_else(|| "_No Linear description was provided._".to_string()),
-        ),
-    ])
 }
 
 fn render_acceptance_criteria_frame(frame: &mut Frame<'_>, app: &AcceptanceCriteriaApp) {
@@ -1137,65 +1114,8 @@ fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
     );
 }
 
-fn filtered_issue_indices(app: &IssuePickerApp) -> Vec<usize> {
-    let query = app.query.value().trim();
-    let mut matches = app
-        .issues
-        .iter()
-        .enumerate()
-        .filter_map(|(index, issue)| {
-            fuzzy_issue_score(issue, query).map(|score| (index, score, issue.identifier.clone()))
-        })
-        .collect::<Vec<_>>();
-
-    matches.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
-
-    matches.into_iter().map(|(index, _, _)| index).collect()
-}
-
-fn fuzzy_issue_score(issue: &IssueSummary, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let combined = [
-        issue.identifier.as_str(),
-        issue.title.as_str(),
-        issue.description.as_deref().unwrap_or(""),
-        issue
-            .state
-            .as_ref()
-            .map(|state| state.name.as_str())
-            .unwrap_or(""),
-        issue
-            .project
-            .as_ref()
-            .map(|project| project.name.as_str())
-            .unwrap_or(""),
-    ]
-    .join(" ");
-
-    fuzzy_text_score(&combined, query)
-}
-
-fn fuzzy_text_score(value: &str, query: &str) -> Option<i64> {
-    let haystack = value.to_ascii_lowercase();
-    let needle = query.to_ascii_lowercase();
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if let Some(position) = haystack.find(&needle) {
-        return Some(1_000 - position as i64);
-    }
-
-    let mut score = 0i64;
-    let mut search_start = 0usize;
-    for ch in needle.chars() {
-        let relative = haystack[search_start..].find(ch)?;
-        score += 32 - relative as i64;
-        search_start += relative + ch.len_utf8();
-    }
-    Some(score)
+fn search_results(app: &IssuePickerApp) -> Vec<IssueSearchResult> {
+    search_issues(&app.issues, app.query.value().trim())
 }
 
 fn base_layout(frame: &mut Frame<'_>) -> Vec<Rect> {
@@ -1570,9 +1490,9 @@ fn snapshot(backend: &TestBackend) -> String {
 mod tests {
     use super::{
         AcceptanceCriteriaApp, IssuePickerApp, LoadingApp, TechnicalGeneratedBacklog,
-        TechnicalReviewApp, extract_acceptance_criteria, filtered_issue_indices, fuzzy_text_score,
-        handle_issue_picker_paste, render_acceptance_criteria_frame, render_issue_picker_frame,
-        render_loading_frame, render_review_frame, render_technical_prompt, snapshot,
+        TechnicalReviewApp, extract_acceptance_criteria, handle_issue_picker_paste,
+        render_acceptance_criteria_frame, render_issue_picker_frame, render_loading_frame,
+        render_review_frame, render_technical_prompt, search_results, snapshot,
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
@@ -1653,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_search_prefers_identifier_and_title_matches() {
+    fn picker_search_prefers_identifier_and_title_matches() {
         let picker = IssuePickerApp {
             query: InputFieldState::new("met-42 terminal"),
             issues: vec![
@@ -1664,8 +1584,14 @@ mod tests {
             error: None,
         };
 
-        let filtered = filtered_issue_indices(&picker);
-        assert_eq!(filtered, vec![1]);
+        let filtered = search_results(&picker);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|result| result.issue_index)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -1757,9 +1683,20 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_text_score_supports_subsequence_matching() {
-        assert!(fuzzy_text_score("Terminal backlog generator", "tbg").is_some());
-        assert!(fuzzy_text_score("Terminal backlog generator", "zzz").is_none());
+    fn issue_picker_snapshot_shows_zero_results_state() {
+        let snapshot = render_picker_snapshot(&IssuePickerApp {
+            query: InputFieldState::new("zzz"),
+            issues: vec![issue(
+                "MET-42",
+                "Terminal experience",
+                "Improve planning flow.",
+            )],
+            selected: 0,
+            error: None,
+        });
+
+        assert!(snapshot.contains("No issues match the current search."));
+        assert!(snapshot.contains("Search results appear here."));
     }
 
     #[test]
