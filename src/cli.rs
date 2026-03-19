@@ -22,7 +22,10 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog tech MET-35
   meta backlog split MET-35
-  meta backlog sync pull MET-35";
+  meta backlog sync status
+  meta backlog sync link MET-35 --entry manual-notes --pull
+  meta backlog sync pull --all
+  meta backlog sync push MET-35 --update-description";
 
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
