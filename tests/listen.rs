@@ -608,9 +608,13 @@ team = "PER"
         .stdout(predicate::str::contains(
             "Observed 1 Todo issue(s) from Linear.",
         ))
+        .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains(
             "Skipped MET-401: missing required label `agent`.",
         ))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("MET-402").not())
         .stdout(predicate::str::contains("PER-403").not());
 
@@ -1027,6 +1031,7 @@ exit 0
 
     for rendered in [&first_stdout, &second_stdout] {
         assert!(rendered.contains("Agent Sessions"));
+        assert!(rendered.contains("terminal snapshot"));
         assert!(rendered.contains("MET-40"));
         assert!(rendered.contains("MET-41"));
         assert!(rendered.contains("Running"));
@@ -1035,6 +1040,9 @@ exit 0
         assert!(rendered.contains("019c...2d66dd"));
         assert!(rendered.contains("Progress text stays clean"));
         assert!(rendered.contains("Second progress text stays clean"));
+        assert!(!rendered.contains("http://"));
+        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains("localhost"));
         assert!(!rendered.contains("PID TTY"));
         assert!(!rendered.contains("meta listen-worker --ticket MET-noise"));
     }
