@@ -19,7 +19,8 @@ pub use render::{render_issue_summary, render_projects_table};
 pub use service::LinearService;
 pub(crate) use ticket_context::{
     PreparedIssueContext, TicketDiscussionBudgets, TicketImageDownloadFailure,
-    materialize_issue_context, prepare_issue_context, render_ticket_image_summary,
+    load_localized_ticket_context_ignored_paths, materialize_issue_context,
+    prepare_issue_context, render_ticket_image_summary,
 };
 pub use transport::{LinearClient, ReqwestLinearClient};
 pub use types::{

@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 
 use crate::backlog::write_issue_attachment_file;
 
@@ -12,6 +13,7 @@ use super::{IssueComment, IssueSummary, LinearClient, LinearService};
 
 pub(crate) const DEFAULT_DISCUSSION_PROMPT_CHARS: usize = 6_000;
 pub(crate) const DEFAULT_DISCUSSION_PERSISTED_CHARS: usize = 20_000;
+const LOCALIZED_CONTEXT_METADATA_FILE: &str = ".ticket-context.json";
 const DISCUSSION_CONTEXT_PATH: &str = "context/ticket-discussion.md";
 const IMAGE_MANIFEST_PATH: &str = "artifacts/ticket-images.md";
 
@@ -117,6 +119,11 @@ struct DiscussionSection {
     rendered: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalizedTicketContextMetadata {
+    ignored_paths: Vec<String>,
+}
+
 /// Rewrite ticket description, parent description, and comment image references to local
 /// `artifacts/` paths and build prompt/persisted discussion-context strings.
 pub(crate) fn prepare_issue_context(
@@ -201,6 +208,10 @@ where
         .iter()
         .map(|image| format!("artifacts/{}", image.filename))
         .collect::<BTreeSet<_>>();
+    let ignored_paths = std::iter::once(DISCUSSION_CONTEXT_PATH.to_string())
+        .chain(std::iter::once(IMAGE_MANIFEST_PATH.to_string()))
+        .chain(current_images.iter().cloned())
+        .collect::<Vec<_>>();
 
     write_issue_attachment_file(
         issue_dir,
@@ -211,6 +222,13 @@ where
         issue_dir,
         DISCUSSION_CONTEXT_PATH,
         context.persisted_discussion.as_bytes(),
+    )?;
+    let metadata = serde_json::to_string_pretty(&LocalizedTicketContextMetadata { ignored_paths })
+        .context("failed to encode localized ticket context metadata")?;
+    write_issue_attachment_file(
+        issue_dir,
+        LOCALIZED_CONTEXT_METADATA_FILE,
+        metadata.as_bytes(),
     )?;
 
     let mut failures = Vec::new();
@@ -248,6 +266,25 @@ where
     }
 
     Ok(failures)
+}
+
+/// Load generated localized ticket-context paths that should not participate in backlog sync
+/// hashing or managed attachment uploads.
+///
+/// Returns an empty set when the localized ticket-context metadata file is absent.
+pub(crate) fn load_localized_ticket_context_ignored_paths(
+    issue_dir: &Path,
+) -> Result<BTreeSet<String>> {
+    let metadata_path = issue_dir.join(LOCALIZED_CONTEXT_METADATA_FILE);
+    if !metadata_path.is_file() {
+        return Ok(BTreeSet::new());
+    }
+
+    let contents = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("failed to read `{}`", metadata_path.display()))?;
+    let metadata: LocalizedTicketContextMetadata = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to decode `{}`", metadata_path.display()))?;
+    Ok(metadata.ignored_paths.into_iter().collect())
 }
 
 /// Render a concise image summary for agent-facing prompt context.

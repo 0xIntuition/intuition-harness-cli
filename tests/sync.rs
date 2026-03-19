@@ -46,32 +46,72 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
             .body_includes("\"id\":\"issue-1\"");
         then.status(200).json_body(json!({
             "data": {
-                "issue": issue_detail_node(
-                    "issue-1",
-                    "MET-35",
-                    "Create the technical and sync commands",
-                    "# Pulled description\n",
-                    vec![
-                        json!({
-                            "id": "attachment-1",
-                            "title": "implementation.md",
-                            "url": server.url("/downloads/implementation.md"),
-                            "sourceType": "upload",
-                            "metadata": {
-                                "managedBy": "metastack-cli",
-                                "relativePath": "implementation.md"
+                "issue": {
+                    "id": "issue-1",
+                    "identifier": "MET-35",
+                    "title": "Create the technical and sync commands",
+                    "description": format!("# Pulled description\n\n![diagram]({})\n", server.url("/design.png")),
+                    "url": "https://linear.app/issues/MET-35",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "labels": { "nodes": [] },
+                    "comments": {
+                        "nodes": [{
+                            "id": "comment-1",
+                            "body": format!("## Screenshot review\nPlease inspect ![comment]({})", server.url("/comment.png")),
+                            "createdAt": "2026-03-15T12:00:00Z",
+                            "user": {
+                                "id": "user-1",
+                                "name": "Taylor",
+                                "email": "taylor@example.com"
+                            },
+                            "resolvedAt": null
+                        }]
+                    },
+                    "state": {
+                        "id": "state-1",
+                        "name": "Todo",
+                        "type": "unstarted"
+                    },
+                    "attachments": {
+                        "nodes": [
+                            {
+                                "id": "attachment-1",
+                                "title": "implementation.md",
+                                "url": server.url("/downloads/implementation.md"),
+                                "sourceType": "upload",
+                                "metadata": {
+                                    "managedBy": "metastack-cli",
+                                    "relativePath": "implementation.md"
+                                }
+                            },
+                            {
+                                "id": "attachment-2",
+                                "title": "external-link",
+                                "url": "https://example.com/external",
+                                "sourceType": "link",
+                                "metadata": {}
                             }
-                        }),
-                        json!({
-                            "id": "attachment-2",
-                            "title": "external-link",
-                            "url": "https://example.com/external",
-                            "sourceType": "link",
-                            "metadata": {}
-                        })
-                    ],
-                    None,
-                )
+                        ]
+                    },
+                    "parent": {
+                        "id": "parent-1",
+                        "identifier": "MET-01",
+                        "title": "Program",
+                        "url": "https://linear.app/issues/MET-01",
+                        "description": format!("Parent screenshot ![parent]({})", server.url("/parent.png"))
+                    },
+                    "children": { "nodes": [] }
+                }
             }
         }));
     });
@@ -80,6 +120,18 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
         when.method(httpmock::Method::GET)
             .path("/downloads/implementation.md");
         then.status(200).body("# Downloaded implementation\n");
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/design.png");
+        then.status(200).body("design");
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/parent.png");
+        then.status(200).body("parent");
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/comment.png");
+        then.status(500).body("boom");
     });
 
     cli()
@@ -98,8 +150,23 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
         .stdout(predicate::str::contains("Pulled MET-35"));
 
     let issue_dir = temp.path().join(".metastack/backlog/MET-35");
-    assert!(fs::read_to_string(issue_dir.join("index.md"))?.contains("Pulled description"));
+    let index = fs::read_to_string(issue_dir.join("index.md"))?;
+    assert!(index.contains("Pulled description"));
+    assert!(index.contains("![diagram](artifacts/design.png)"));
     assert!(fs::read_to_string(issue_dir.join("implementation.md"))?.contains("Downloaded"));
+    let manifest = fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?;
+    assert!(manifest.contains("design.png"));
+    assert!(manifest.contains("parent-parent.png"));
+    assert!(manifest.contains("comment-1-comment.png"));
+    let discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
+    assert!(discussion.contains("### **Taylor** (2026-03-15)"));
+    assert!(discussion.contains("Screenshot review"));
+    assert_eq!(fs::read(issue_dir.join("artifacts/design.png"))?, b"design");
+    assert_eq!(
+        fs::read(issue_dir.join("artifacts/parent-parent.png"))?,
+        b"parent"
+    );
+    assert!(!issue_dir.join("artifacts/comment-1-comment.png").exists());
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     assert!(metadata.contains("attachment-1"));
     assert!(metadata.contains("\"local_hash\":"));
