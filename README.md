@@ -105,7 +105,7 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 ```
 
-- Remove `[mcp_servers.linear]` from the Codex config when possible. The harness also forces `-c mcp_servers.linear.enabled=false` for listen workers as defense in depth.
+- Remove `[mcp_servers.linear]` from the Codex config when possible. The preflight warns when Linear MCP is detected.
 - Built-in Claude workers require `claude` on `PATH`.
 - Built-in Claude listen runs should not inherit `ANTHROPIC_API_KEY`; headless listen is expected to use the local Claude subscription instead of an API-key override.
 - Run `meta agents listen --check` to validate the active listen provider prerequisites plus Linear reachability/auth without starting the daemon.
@@ -692,7 +692,7 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 ```
 
-- Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; `meta agents listen` also passes `-c mcp_servers.linear.enabled=false` as a defense-in-depth override.
+- Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; the preflight warns when Linear MCP is detected.
 - Claude: `claude` must be on `PATH`, and `ANTHROPIC_API_KEY` should be unset for unattended subscription-backed runs.
 - `meta agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
 
