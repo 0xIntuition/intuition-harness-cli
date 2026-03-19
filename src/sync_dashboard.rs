@@ -554,15 +554,49 @@ mod tests {
         SyncDashboardIssue, SyncDashboardOptions, run_sync_dashboard,
     };
     use crate::backlog::BacklogSyncStatus;
-    use crate::linear::DashboardData;
+    use crate::linear::{DashboardData, IssueSummary, TeamRef, WorkflowState};
     use crate::tui::fields::InputFieldState;
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();
+        let title = demo.title;
+        let fallback_team = demo
+            .issues
+            .first()
+            .map(|issue| issue.team.clone())
+            .unwrap_or_else(|| TeamRef {
+                id: "team-demo".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            });
+        let fallback_project = demo.issues.first().and_then(|issue| issue.project.clone());
+        let mut issues = demo.issues;
+        issues.push(IssueSummary {
+            id: "issue-13".to_string(),
+            identifier: "MET-13".to_string(),
+            title: "Draft backlog entry".to_string(),
+            description: Some("A local backlog row that has not been linked yet.".to_string()),
+            url: "https://linear.app/metastack/MET-13".to_string(),
+            priority: Some(3),
+            estimate: Some(1.0),
+            updated_at: "2026-03-14T16:10:00Z".to_string(),
+            team: fallback_team,
+            project: fallback_project,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: Some(WorkflowState {
+                id: "state-backlog".to_string(),
+                name: "Backlog".to_string(),
+                kind: Some("backlog".to_string()),
+            }),
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        });
         SyncDashboardData {
-            title: demo.title,
-            issues: demo
-                .issues
+            title,
+            issues: issues
                 .into_iter()
                 .enumerate()
                 .map(|(index, issue)| SyncDashboardIssue {
