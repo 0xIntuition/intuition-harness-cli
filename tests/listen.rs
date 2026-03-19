@@ -37,8 +37,8 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints() -> Result<(), Box<dyn Error>>
-{
+fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
+-> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

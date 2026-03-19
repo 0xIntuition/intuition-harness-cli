@@ -266,11 +266,7 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_issue_preview(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &SyncDashboardApp,
-) {
+fn render_issue_preview(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
     let preview = paragraph(app.preview_text(), panel_title("Issue Preview", false))
         .wrap(Wrap { trim: false });
     frame.render_widget(preview, area);

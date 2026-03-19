@@ -705,9 +705,10 @@ mod tests {
         .expect("snapshot should be returned");
 
         assert!(snapshot.contains("No issues match the current search and filters."));
-        assert!(snapshot.contains(
-            "Adjust the search query or sidebar filters to widen the result set."
-        ));
+        assert!(
+            snapshot
+                .contains("Adjust the search query or sidebar filters to widen the result set.")
+        );
     }
 
     fn visible_issue_ids(app: &DashboardApp) -> Vec<&str> {

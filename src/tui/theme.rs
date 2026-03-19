@@ -10,7 +10,6 @@ pub(crate) enum Tone {
     Accent,
     Info,
     Success,
-    Warning,
     Danger,
     Muted,
 }
@@ -142,7 +141,6 @@ pub(crate) fn tone_style(tone: Tone) -> Style {
         Tone::Accent => accent_color(),
         Tone::Info => Color::Cyan,
         Tone::Success => Color::Green,
-        Tone::Warning => Color::Yellow,
         Tone::Danger => Color::Red,
         Tone::Muted => Color::Gray,
     };

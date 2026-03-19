@@ -504,9 +504,9 @@ mod tests {
                 started_at_epoch_seconds: 1_773_568_249,
                 now_epoch_seconds: 1_773_575_600,
                 poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
-                dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
             },
         );
 
