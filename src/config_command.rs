@@ -181,6 +181,14 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         display_optional(view.app_config.agents.default_reasoning.as_deref())
     ));
     lines.push(format!(
+        "Notifications: {}",
+        if view.app_config.notifications.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+    lines.push(format!(
         "Advanced route overrides: {}",
         render_route_override_summary(&view.app_config)
     ));
@@ -236,6 +244,7 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.default_agent.is_some()
         || args.default_model.is_some()
         || args.default_reasoning.is_some()
+        || args.notifications.is_some()
         || args.route.is_some()
         || args.clear_route.is_some()
         || args.route_agent.is_some()
@@ -291,6 +300,9 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             normalized.as_deref(),
         )?;
         view.app_config.agents.default_reasoning = normalized;
+    }
+    if let Some(enabled) = args.notifications {
+        view.app_config.notifications.enabled = enabled;
     }
     apply_route_updates(&mut view.app_config, args)?;
     view.app_config.validate()?;
@@ -459,11 +471,12 @@ enum ConfigStep {
     Agent,
     Model,
     DefaultReasoning,
+    Notifications,
     Save,
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 7] {
+    fn all() -> [Self; 8] {
         [
             Self::ApiKey,
             Self::Team,
@@ -471,6 +484,7 @@ impl ConfigStep {
             Self::Agent,
             Self::Model,
             Self::DefaultReasoning,
+            Self::Notifications,
             Self::Save,
         ]
     }
@@ -500,6 +514,7 @@ impl ConfigStep {
             Self::Agent => "Default agent",
             Self::Model => "Default model",
             Self::DefaultReasoning => "Default reasoning",
+            Self::Notifications => "Notifications",
             Self::Save => "Save",
         }
     }
@@ -512,6 +527,7 @@ impl ConfigStep {
             Self::Agent => "Default agent",
             Self::Model => "Default model",
             Self::DefaultReasoning => "Default reasoning effort",
+            Self::Notifications => "Terminal notifications",
             Self::Save => "Save configuration",
         }
     }
@@ -536,6 +552,7 @@ struct ConfigApp {
     default_reasoning: SelectFieldState,
     agent_field: SelectFieldState,
     model_field: SelectFieldState,
+    notifications: SelectFieldState,
     detected_agents: Vec<String>,
     error: Option<String>,
 }
@@ -548,6 +565,7 @@ struct SubmittedConfig {
     default_agent: String,
     default_model: Option<String>,
     default_reasoning: Option<String>,
+    notifications_enabled: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -569,6 +587,12 @@ impl ConfigApp {
             .iter()
             .position(|candidate| candidate.eq_ignore_ascii_case(&selected_agent))
             .unwrap_or(0);
+        let notifications_options = vec!["Enabled".to_string(), "Disabled".to_string()];
+        let notifications_index = if view.app_config.notifications.enabled {
+            0
+        } else {
+            1
+        };
         let mut app = Self {
             step: ConfigStep::ApiKey,
             api_key: InputFieldState::new(
@@ -585,6 +609,7 @@ impl ConfigApp {
             default_reasoning: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
             agent_field: SelectFieldState::new(agent_options, agent_index),
             model_field: SelectFieldState::new(vec!["Leave unset".to_string()], 0),
+            notifications: SelectFieldState::new(notifications_options, notifications_index),
             detected_agents: view.detected_agents.clone(),
             error: None,
         };
@@ -685,6 +710,8 @@ impl ConfigApp {
                     self.sync_reasoning(None);
                 } else if self.step == ConfigStep::DefaultReasoning {
                     self.default_reasoning.move_by(-1);
+                } else if self.step == ConfigStep::Notifications {
+                    self.notifications.move_by(-1);
                 } else {
                     self.step = self.step.previous();
                 }
@@ -700,6 +727,8 @@ impl ConfigApp {
                     self.sync_reasoning(None);
                 } else if self.step == ConfigStep::DefaultReasoning {
                     self.default_reasoning.move_by(1);
+                } else if self.step == ConfigStep::Notifications {
+                    self.notifications.move_by(1);
                 } else {
                     self.step = self.step.next();
                 }
@@ -725,6 +754,7 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning
                     | ConfigStep::Agent
                     | ConfigStep::Model
+                    | ConfigStep::Notifications
                     | ConfigStep::Save => {}
                 }
                 None
@@ -751,7 +781,7 @@ impl ConfigApp {
             ConfigStep::DefaultProfile => {
                 let _ = self.default_profile.paste(text);
             }
-            ConfigStep::Agent | ConfigStep::Model | ConfigStep::Save => {}
+            ConfigStep::Agent | ConfigStep::Model | ConfigStep::Notifications | ConfigStep::Save => {}
             ConfigStep::DefaultReasoning => {}
         }
     }
@@ -784,6 +814,7 @@ impl ConfigApp {
             default_agent,
             default_model,
             default_reasoning,
+            notifications_enabled: self.notifications.selected() == 0,
         })
     }
 }
@@ -804,6 +835,7 @@ impl SubmittedConfig {
         view.app_config.agents.default_agent = Some(self.default_agent.clone());
         view.app_config.agents.default_model = self.default_model.clone();
         view.app_config.agents.default_reasoning = self.default_reasoning.clone();
+        view.app_config.notifications.enabled = self.notifications_enabled;
         Ok(())
     }
 }
@@ -1518,7 +1550,7 @@ fn render_config_dashboard(frame: &mut Frame<'_>, app: &ConfigApp) {
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(9), Constraint::Min(10)])
+            .constraints([Constraint::Length(10), Constraint::Min(10)])
             .split(body[0]);
         render_step_list(frame, app, sidebar[0], 1);
         render_summary_panel(frame, app, sidebar[1]);
@@ -1625,6 +1657,9 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         ConfigStep::DefaultReasoning => {
             render_select_panel(frame, area, &title, &app.default_reasoning)
         }
+        ConfigStep::Notifications => {
+            render_select_panel(frame, area, &title, &app.notifications)
+        }
         ConfigStep::Save => render_save_panel(frame, area),
     }
 }
@@ -1658,6 +1693,14 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
                 summarize_optional_select(&app.default_reasoning, "Leave unset"),
             ),
             (
+                "Notifications",
+                if app.notifications.selected() == 0 {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                },
+            ),
+            (
                 "Detected agents",
                 if app.detected_agents.is_empty() {
                     "none".to_string()
@@ -1678,7 +1721,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         ConfigStep::ApiKey | ConfigStep::Team | ConfigStep::DefaultProfile => {
             "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
-        ConfigStep::Agent | ConfigStep::Model | ConfigStep::DefaultReasoning => {
+        ConfigStep::Agent
+        | ConfigStep::Model
+        | ConfigStep::DefaultReasoning
+        | ConfigStep::Notifications => {
             "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
         ConfigStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",

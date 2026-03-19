@@ -533,6 +533,9 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Enable or disable terminal notification cues for long-running operations.
+    #[arg(long)]
+    pub notifications: Option<bool>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,

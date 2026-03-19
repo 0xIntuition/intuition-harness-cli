@@ -619,13 +619,14 @@ default_reasoning = "high"
             "--width",
             "92",
             "--height",
-            "34",
+            "36",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Steps"))
         .stdout(predicate::str::contains("Default reasoning"))
         .stdout(predicate::str::contains("high"))
+        .stdout(predicate::str::contains("Notifications"))
         .stdout(predicate::str::contains("MetaStack Team West"))
         .stdout(predicate::str::contains("Summary"));
 
