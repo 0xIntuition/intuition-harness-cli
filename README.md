@@ -560,6 +560,12 @@ The command requires a configured local agent, or one of the built-in supported 
 
 `meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
+In a TTY, the parent-issue picker now uses the shared Linear issue browser:
+
+- type to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- shared semantic styling highlights identifiers, titles, state, priority, project, and preview metadata while you review the selected parent issue
+
 Side effects:
 
 - ensures `.metastack/backlog/_TEMPLATE/` exists
