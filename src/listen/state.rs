@@ -146,6 +146,7 @@ impl SessionPhase {
         }
     }
 
+    #[cfg(test)]
     pub fn html_class(self) -> &'static str {
         match self {
             Self::Claimed => "warning",

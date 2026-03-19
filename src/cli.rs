@@ -731,9 +731,6 @@ pub struct ListenRunArgs {
     /// Poll interval in seconds for the live daemon loop.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub poll_interval: Option<u64>,
-    /// Local port for the browser dashboard served by the live listener.
-    #[arg(long, default_value_t = 4000)]
-    pub dashboard_port: u16,
     /// Run listen prerequisite checks and exit without polling Linear or starting the daemon.
     #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
     pub check: bool,

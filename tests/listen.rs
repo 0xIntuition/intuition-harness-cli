@@ -37,18 +37,66 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn listen_render_once_demo_outputs_dashboard_snapshot() {
+fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
     meta()
-        .args(["listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Listen Status"))
         .stdout(predicate::str::contains("Runtime"))
         .stdout(predicate::str::contains("Agent Sessions"))
+        .stdout(predicate::str::contains("terminal snapshot"))
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
         .stdout(predicate::str::contains("MET-13"));
+
+    Ok(())
+}
+
+#[test]
+fn agents_listen_help_omits_browser_dashboard_flags() {
+    let _guard = listen_test_lock();
+    meta()
+        .args(["agents", "listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--dashboard-port").not())
+        .stdout(predicate::str::contains("browser").not());
+}
+
+#[test]
+fn legacy_listen_help_omits_browser_dashboard_flags() {
+    let _guard = listen_test_lock();
+    meta()
+        .args(["listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--dashboard-port").not())
+        .stdout(predicate::str::contains("browser").not());
 }
 
 #[cfg(unix)]

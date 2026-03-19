@@ -670,7 +670,7 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried.
 
 Examples:
 
@@ -679,7 +679,6 @@ meta agents listen --demo --render-once
 meta agents listen --check --root .
 meta agents listen --team MET --project "MetaStack CLI" --once
 meta agents listen --team MET --project "MetaStack CLI"
-meta agents listen --team MET --project "MetaStack CLI" --dashboard-port 4050
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
 
@@ -705,7 +704,7 @@ Outputs:
 - install-scoped MetaListen state under the global MetaStack data root, keyed by the canonical
   source project `.metastack` root
 - install-scoped MetaListen logs under the same project store
-- a live browser dashboard on `http://127.0.0.1:<dashboard-port>/` in steady-state mode
+- a live terminal dashboard in steady-state mode, or a render-once terminal snapshot when requested
 
 When `$METASTACK_CONFIG` points to a custom config file, the listener store lives under that
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from

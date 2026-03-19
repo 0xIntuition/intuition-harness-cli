@@ -2,7 +2,6 @@ pub mod dashboard;
 mod preflight;
 mod state;
 mod store;
-mod web;
 mod worker;
 mod workpad;
 mod workspace;
@@ -13,7 +12,6 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -57,8 +55,7 @@ const IN_PROGRESS_STATE: &str = "In Progress";
 const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
-const DEFAULT_DASHBOARD_HOST: &str = "127.0.0.1";
-const DASHBOARD_REFRESH_INTERVAL_SECONDS: u64 = 1;
+const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
@@ -87,7 +84,7 @@ impl ListenDashboardData {
             format!("Rate Limits: {}", self.runtime.rate_limits),
             format!("Project: {}", self.runtime.project),
             format!("Dashboard: {}", self.runtime.dashboard),
-            format!("Dashboard refresh: {}", self.runtime.dashboard_refresh),
+            format!("Terminal refresh: {}", self.runtime.dashboard_refresh),
             format!("Linear refresh: {}", self.runtime.linear_refresh),
             format!("State file: {}", self.state_file),
         ];
@@ -138,9 +135,7 @@ pub struct ListenRuntimeSummary {
     pub rate_limits: String,
     pub project: String,
     pub dashboard: String,
-    pub dashboard_url: Option<String>,
     pub dashboard_refresh: String,
-    pub dashboard_refresh_seconds: u64,
     pub linear_refresh: String,
     pub current_epoch_seconds: u64,
 }
@@ -160,38 +155,11 @@ impl SessionListView {
         }
     }
 
-    pub(crate) fn query_value(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Completed => "completed",
-        }
-    }
-
     pub(crate) fn toggle(self) -> Self {
         match self {
             Self::Active => Self::Completed,
             Self::Completed => Self::Active,
         }
-    }
-
-    pub(crate) fn from_query(query: &str) -> Self {
-        query
-            .split('&')
-            .filter_map(|part| part.split_once('='))
-            .find_map(|(key, value)| {
-                if !key.eq_ignore_ascii_case("view") {
-                    return None;
-                }
-
-                if value.eq_ignore_ascii_case("completed") {
-                    Some(Self::Completed)
-                } else if value.eq_ignore_ascii_case("active") {
-                    Some(Self::Active)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
     }
 }
 
@@ -322,8 +290,7 @@ impl ListenCycleData {
             ],
             notes: vec![
                 "Demo mode: no Linear requests were made.".to_string(),
-                "The live dashboard now adapts to the full terminal viewport and mirrors the browser view."
-                    .to_string(),
+                "The live terminal dashboard adapts to the full viewport.".to_string(),
                 format!(
                     "State file: {}",
                     ListenProjectStore::resolve(root)
@@ -350,9 +317,9 @@ struct DashboardRuntimeContext {
     started_at_epoch_seconds: u64,
     now_epoch_seconds: u64,
     poll_interval_seconds: u64,
+    dashboard_label: &'static str,
     dashboard_refresh_seconds: u64,
     linear_refresh_seconds: u64,
-    dashboard_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1694,9 +1661,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     started_at_epoch_seconds: DEMO_START_EPOCH_SECONDS,
                     now_epoch_seconds: DEMO_NOW_EPOCH_SECONDS,
                     poll_interval_seconds,
-                    dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                    dashboard_label: "terminal snapshot",
+                    dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
-                    dashboard_url: None,
                 },
             );
             println!(
@@ -1713,9 +1680,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     started_at_epoch_seconds: DEMO_START_EPOCH_SECONDS,
                     now_epoch_seconds: DEMO_NOW_EPOCH_SECONDS,
                     poll_interval_seconds,
-                    dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                    dashboard_label: "terminal summary",
+                    dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
-                    dashboard_url: None,
                 },
             );
             println!("{}", data.render_summary());
@@ -1834,9 +1801,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 started_at_epoch_seconds: now,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                dashboard_label: "terminal snapshot",
+                dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
-                dashboard_url: None,
             },
         );
         println!(
@@ -1855,9 +1822,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 started_at_epoch_seconds: now,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                dashboard_label: "terminal summary",
+                dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
-                dashboard_url: None,
             },
         );
         println!("{}", data.render_summary());
@@ -1912,7 +1879,7 @@ fn store_summary(store: &ListenProjectStore) -> Result<StoredListenProjectSummar
 }
 
 async fn run_live_loop<F, Fut, S>(
-    args: &ListenRunArgs,
+    _args: &ListenRunArgs,
     poll_interval_seconds: u64,
     started_at_epoch_seconds: u64,
     initial_cycle: ListenCycleData,
@@ -1925,30 +1892,23 @@ where
     Fut: Future<Output = Result<ListenCycleData>>,
     S: FnMut(&mut ListenCycleData) -> Result<()>,
 {
-    let initial_data = build_dashboard_data(
+    let _initial_data = build_dashboard_data(
         &initial_cycle,
         &DashboardRuntimeContext {
             started_at_epoch_seconds,
             now_epoch_seconds: started_at_epoch_seconds,
             poll_interval_seconds,
-            dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+            dashboard_label: "terminal dashboard (TUI)",
+            dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
             linear_refresh_seconds: if refresh_immediately {
                 0
             } else {
                 poll_interval_seconds
             },
-            dashboard_url: None,
         },
     );
-    let shared_state = Arc::new(RwLock::new(initial_data));
-    let server = web::ListenDashboardServer::start(
-        DEFAULT_DASHBOARD_HOST,
-        args.dashboard_port,
-        shared_state.clone(),
-    )?;
-    let dashboard_url = server.url().to_string();
     let linear_refresh_interval = Duration::from_secs(poll_interval_seconds);
-    let dashboard_refresh_interval = Duration::from_secs(DASHBOARD_REFRESH_INTERVAL_SECONDS);
+    let terminal_refresh_interval = Duration::from_secs(TERMINAL_REFRESH_INTERVAL_SECONDS);
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -1964,7 +1924,7 @@ where
     } else {
         Instant::now() + linear_refresh_interval
     };
-    let mut next_dashboard_refresh_at = Instant::now() + dashboard_refresh_interval;
+    let mut next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
 
     loop {
         let now = now_epoch_seconds();
@@ -1977,18 +1937,17 @@ where
                 started_at_epoch_seconds,
                 now_epoch_seconds: now,
                 poll_interval_seconds,
-                dashboard_refresh_seconds: DASHBOARD_REFRESH_INTERVAL_SECONDS,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds,
-                dashboard_url: Some(dashboard_url.clone()),
             },
         );
-        update_shared_state(&shared_state, data.clone());
         terminal.draw(|frame| dashboard::render(frame, &data, session_view))?;
 
         let wait_for_input = next_linear_refresh_at
             .saturating_duration_since(Instant::now())
             .min(
-                next_dashboard_refresh_at
+                next_terminal_refresh_at
                     .saturating_duration_since(Instant::now())
                     .min(Duration::from_millis(250)),
             );
@@ -2015,10 +1974,10 @@ where
             cycle = next_cycle().await?;
             let refreshed_at = Instant::now();
             next_linear_refresh_at = refreshed_at + linear_refresh_interval;
-            next_dashboard_refresh_at = refreshed_at + dashboard_refresh_interval;
-        } else if now >= next_dashboard_refresh_at {
+            next_terminal_refresh_at = refreshed_at + terminal_refresh_interval;
+        } else if now >= next_terminal_refresh_at {
             refresh_dashboard_state(&mut cycle)?;
-            next_dashboard_refresh_at = Instant::now() + dashboard_refresh_interval;
+            next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
         }
     }
 
@@ -2046,11 +2005,6 @@ fn build_dashboard_data(
             )
         })
         .unwrap_or_else(|| "n/a".to_string());
-    let dashboard = runtime
-        .dashboard_url
-        .clone()
-        .unwrap_or_else(|| "not running in one-shot mode".to_string());
-
     ListenDashboardData {
         title: "meta listen".to_string(),
         scope: cycle.scope.clone(),
@@ -2082,10 +2036,8 @@ fn build_dashboard_data(
                 "n/a (agent rate-limit telemetry is not surfaced by this CLI yet)".to_string()
             }),
             project: cycle.scope.clone(),
-            dashboard: dashboard.clone(),
-            dashboard_url: runtime.dashboard_url.clone(),
+            dashboard: runtime.dashboard_label.to_string(),
             dashboard_refresh: format!("{}s", runtime.dashboard_refresh_seconds),
-            dashboard_refresh_seconds: runtime.dashboard_refresh_seconds,
             linear_refresh: format!("{}s", runtime.linear_refresh_seconds),
             current_epoch_seconds: runtime.now_epoch_seconds,
         },
@@ -2093,12 +2045,6 @@ fn build_dashboard_data(
         sessions: cycle.sessions.clone(),
         notes: cycle.notes.clone(),
         state_file: cycle.state_file.clone(),
-    }
-}
-
-fn update_shared_state(shared_state: &Arc<RwLock<ListenDashboardData>>, data: ListenDashboardData) {
-    if let Ok(mut shared) = shared_state.write() {
-        *shared = data;
     }
 }
 
