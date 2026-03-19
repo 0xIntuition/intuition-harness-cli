@@ -1973,6 +1973,30 @@ fn listen_sessions_target_multiple_project_scopes_from_one_repo() -> Result<(), 
         ))
         .stdout(predicate::str::contains("Project: project-beta"));
 
+    let beta_project_key = beta_state_path
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+        .expect("beta project key should be present")
+        .to_string();
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--project-key",
+            &beta_project_key,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-beta"));
+
     meta()
         .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
@@ -1994,16 +2018,14 @@ fn listen_sessions_target_multiple_project_scopes_from_one_repo() -> Result<(), 
         ));
 
     meta()
-        .current_dir(&repo_root)
+        .current_dir(temp.path())
         .env("METASTACK_CONFIG", &config_path)
         .args([
             "listen",
             "sessions",
             "clear",
-            "--root",
-            repo_root.to_str().expect("temp path should be utf-8"),
-            "--project",
-            "project-beta",
+            "--project-key",
+            &beta_project_key,
         ])
         .assert()
         .success()
