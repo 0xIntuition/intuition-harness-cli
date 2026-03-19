@@ -593,6 +593,7 @@ fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
 struct DynamicLinearState {
     claimed: bool,
     issue_refreshes_after_claim: usize,
+    review_transition_applied: bool,
 }
 
 #[cfg(unix)]
@@ -807,6 +808,14 @@ fn dynamic_linear_response(
     if body.contains("mutation UpdateIssue") {
         let mut state = state.lock().expect("state mutex should lock");
         state.claimed = true;
+        if body.contains(r#""stateId":"state-3""#) {
+            state.review_transition_applied = true;
+        }
+        let (state_id, state_name, state_type) = if state.review_transition_applied {
+            ("state-3", "Human Review", "started")
+        } else {
+            ("state-2", "In Progress", "started")
+        };
         return Ok(json!({
             "data": {
                 "issueUpdate": {
@@ -829,9 +838,9 @@ fn dynamic_linear_response(
                             "name": "MetaStack CLI"
                         },
                         "state": {
-                            "id": "state-2",
-                            "name": "In Progress",
-                            "type": "started"
+                            "id": state_id,
+                            "name": state_name,
+                            "type": state_type
                         }
                     }
                 }
@@ -906,7 +915,9 @@ fn dynamic_linear_response(
             }));
         }
         let state = state.lock().expect("state mutex should lock");
-        let (state_id, state_name) = if state.claimed {
+        let (state_id, state_name) = if state.review_transition_applied {
+            ("state-3", "Human Review")
+        } else if state.claimed {
             ("state-2", "In Progress")
         } else {
             ("state-1", "Todo")
@@ -930,9 +941,12 @@ fn dynamic_linear_response(
 
     if body.contains("query Issues") {
         let mut state = state.lock().expect("state mutex should lock");
-        let issue_state = if state.claimed {
+        let issue_state = if state.review_transition_applied {
+            ("state-3", "Human Review", "started")
+        } else if state.claimed {
             state.issue_refreshes_after_claim += 1;
             if state.issue_refreshes_after_claim >= 6 {
+                state.review_transition_applied = true;
                 ("state-3", "Human Review", "started")
             } else {
                 ("state-2", "In Progress", "started")
