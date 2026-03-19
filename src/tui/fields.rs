@@ -845,6 +845,32 @@ mod tests {
     }
 
     #[test]
+    fn delete_forward_removes_attachment_and_renumbers_placeholders() {
+        let temp = tempdir().expect("temp dir");
+        let first_path = temp.path().join("first.png");
+        let second_path = temp.path().join("second.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&first_path)
+            .expect("save first");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([4, 5, 6, 255]))
+            .save(&second_path)
+            .expect("save second");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments(String::new());
+        field
+            .paste_with_prompt_attachments(first_path.to_str().expect("utf8"))
+            .expect("first attachment");
+        field
+            .paste_with_prompt_attachments(second_path.to_str().expect("utf8"))
+            .expect("second attachment");
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)));
+
+        assert_eq!(field.display_value(), "[Image #1]");
+        assert_eq!(field.prompt_attachments().len(), 1);
+    }
+
+    #[test]
     fn prompt_attachment_paste_falls_back_to_text_for_non_image_paths() {
         let temp = tempdir().expect("temp dir");
         let note_path = temp.path().join("notes.txt");
