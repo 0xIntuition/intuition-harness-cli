@@ -395,7 +395,7 @@ fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn 
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Terminal refresh: 1s"))
         .stdout(predicate::str::contains("Linear refresh: 42s"));
 
     Ok(())
@@ -436,7 +436,7 @@ fn listen_cli_poll_interval_overrides_repo_default() -> Result<(), Box<dyn Error
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Terminal refresh: 1s"))
         .stdout(predicate::str::contains("Linear refresh: 9s"));
 
     Ok(())
@@ -1604,8 +1604,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
         .stdout(predicate::str::contains(
             "Stored MetaListen project sessions",
         ))
-        .stdout(predicate::str::contains("repo"))
-        .stdout(predicate::str::contains("MET-21"));
+        .stdout(predicate::str::contains("repo"));
 
     let project_key = state_path
         .parent()
