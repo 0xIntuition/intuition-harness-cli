@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{
-    Client,
+    Client, Url,
     header::{AUTHORIZATION, CONTENT_TYPE},
 };
 use serde::de::DeserializeOwned;
@@ -95,9 +95,8 @@ impl<'a> GraphqlTransport<'a> {
     }
 
     pub(super) async fn download(&self, url: &str) -> Result<Vec<u8>> {
-        let response = self
-            .http
-            .get(url)
+        let request = self.build_download_request(url)?;
+        let response = request
             .send()
             .await
             .with_context(|| format!("failed to download `{url}`"))?;
@@ -116,4 +115,20 @@ impl<'a> GraphqlTransport<'a> {
             .map(|bytes| bytes.to_vec())
             .context("failed to read the downloaded file bytes")
     }
+
+    pub(super) fn build_download_request(&self, url: &str) -> Result<reqwest::RequestBuilder> {
+        let parsed =
+            Url::parse(url).with_context(|| format!("failed to parse download URL `{url}`"))?;
+        let mut request = self.http.get(parsed);
+        if should_authorize_linear_upload_download(url)? {
+            request = request.header(AUTHORIZATION, &self.config.api_key);
+        }
+        Ok(request)
+    }
+}
+
+pub(super) fn should_authorize_linear_upload_download(url: &str) -> Result<bool> {
+    let parsed =
+        Url::parse(url).with_context(|| format!("failed to parse download URL `{url}`"))?;
+    Ok(matches!(parsed.host_str(), Some("uploads.linear.app")))
 }

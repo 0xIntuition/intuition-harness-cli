@@ -749,6 +749,7 @@ mod tests {
                 identifier: "MET-143".to_string(),
                 title: "Parent".to_string(),
                 url: "https://linear.example/MET-143".to_string(),
+                description: None,
             }),
             children: Vec::new(),
         };

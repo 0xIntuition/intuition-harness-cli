@@ -36,7 +36,10 @@ use crate::cli::{RunAgentArgs, SyncPushArgs, TechnicalArgs};
 use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
-use crate::linear::{IssueCreateSpec, IssueListFilters, IssueSummary};
+use crate::linear::{
+    IssueCreateSpec, IssueListFilters, IssueSummary, PreparedIssueContext, TicketDiscussionBudgets,
+    materialize_issue_context, prepare_issue_context, render_ticket_image_summary,
+};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push;
@@ -62,6 +65,7 @@ struct TechnicalGeneratedBacklog {
     parent: IssueSummary,
     child_title: String,
     selected_acceptance_criteria: Vec<String>,
+    prepared_context: PreparedIssueContext,
     files: Vec<RenderedTemplateFile>,
 }
 
@@ -95,6 +99,7 @@ struct LoadingApp {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum TechnicalStage {
     PickIssue(IssuePickerApp),
     SelectCriteria(AcceptanceCriteriaApp),
@@ -112,6 +117,7 @@ struct PendingTechnicalJob {
     previous_stage: Option<TechnicalRecoveryStage>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TechnicalAction {
     None,
     SelectIssue(IssueSummary),
@@ -123,6 +129,7 @@ enum TechnicalAction {
 struct TechnicalGenerationRequest {
     parent: IssueSummary,
     selected_acceptance_criteria: Vec<String>,
+    discussion_budgets: TicketDiscussionBudgets,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +148,7 @@ enum InteractiveTechnicalExit {
 pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
+    let discussion_budgets = resolve_ticket_discussion_budgets(&planning_meta);
     ensure_planning_layout(&root, false)?;
     ensure_backlog_templates(&root, false)?;
     let LinearCommandContext {
@@ -168,7 +176,12 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             Vec::new()
         };
 
-        match run_interactive_technical_session(&root, initial_parent, available_issues)? {
+        match run_interactive_technical_session(
+            &root,
+            initial_parent,
+            available_issues,
+            discussion_budgets,
+        )? {
             InteractiveTechnicalExit::Cancelled => {
                 println!("Technical generation cancelled.");
                 return Ok(());
@@ -182,7 +195,12 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         let parent = service.load_issue(issue).await?;
         let selected_acceptance_criteria =
             extract_acceptance_criteria(parent.description.as_deref());
-        build_generated_backlog(&root, &parent, &selected_acceptance_criteria)?
+        build_generated_backlog(
+            &root,
+            &parent,
+            &selected_acceptance_criteria,
+            discussion_budgets,
+        )?
     };
 
     let child = service
@@ -204,6 +222,9 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         .await?;
 
     let issue_dir = write_rendered_backlog_item(&root, &child.identifier, &generated.files)?;
+    let download_failures =
+        materialize_issue_context(&service, &issue_dir, &generated.prepared_context).await?;
+    log_ticket_image_download_failures(&child.identifier, &download_failures);
     save_issue_metadata(
         &issue_dir,
         &BacklogIssueMetadata {
@@ -247,6 +268,7 @@ fn run_interactive_technical_session(
     root: &Path,
     initial_parent: Option<IssueSummary>,
     issues: Vec<IssueSummary>,
+    discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<InteractiveTechnicalExit> {
     let mut app = if let Some(parent) = initial_parent {
         let criteria = extract_acceptance_criteria(parent.description.as_deref());
@@ -268,6 +290,7 @@ fn run_interactive_technical_session(
                 TechnicalGenerationRequest {
                     parent,
                     selected_acceptance_criteria: Vec::new(),
+                    discussion_budgets,
                 },
                 None,
             );
@@ -325,7 +348,7 @@ fn run_interactive_technical_session(
                     let action = match &mut app.stage {
                         TechnicalStage::PickIssue(picker) => handle_issue_picker_key(picker, key),
                         TechnicalStage::SelectCriteria(criteria) => {
-                            handle_acceptance_criteria_key(criteria, key)
+                            handle_acceptance_criteria_key(criteria, key, discussion_budgets)
                         }
                         TechnicalStage::Loading(_) => TechnicalAction::None,
                         TechnicalStage::Review(review) => handle_technical_review_key(review, key),
@@ -349,6 +372,7 @@ fn run_interactive_technical_session(
                                     TechnicalGenerationRequest {
                                         parent,
                                         selected_acceptance_criteria: Vec::new(),
+                                        discussion_budgets,
                                     },
                                     previous_stage,
                                 );
@@ -447,6 +471,7 @@ fn handle_issue_picker_paste(app: &mut IssuePickerApp, text: &str) {
 fn handle_acceptance_criteria_key(
     app: &mut AcceptanceCriteriaApp,
     key: crossterm::event::KeyEvent,
+    discussion_budgets: TicketDiscussionBudgets,
 ) -> TechnicalAction {
     match key.code {
         KeyCode::Enter => {
@@ -467,6 +492,7 @@ fn handle_acceptance_criteria_key(
             TechnicalAction::Generate(TechnicalGenerationRequest {
                 parent: app.parent.clone(),
                 selected_acceptance_criteria,
+                discussion_budgets,
             })
         }
         _ => {
@@ -534,6 +560,7 @@ fn spawn_generation_job(
             &root,
             &request.parent,
             &request.selected_acceptance_criteria,
+            request.discussion_budgets,
         );
         let _ = sender.send(result);
     });
@@ -609,7 +636,9 @@ fn build_generated_backlog(
     root: &Path,
     parent: &IssueSummary,
     selected_acceptance_criteria: &[String],
+    discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<TechnicalGeneratedBacklog> {
+    let prepared_context = prepare_issue_context(parent, discussion_budgets);
     let child_title = format!("Technical: {}", parent.title);
     let template_files = render_template_files(
         root,
@@ -618,13 +647,13 @@ fn build_generated_backlog(
             parent_identifier: Some(parent.identifier.clone()),
             parent_title: Some(parent.title.clone()),
             parent_url: Some(parent.url.clone()),
-            parent_description: parent.description.clone(),
+            parent_description: prepared_context.issue.description.clone(),
             ..TemplateContext::default()
         },
     )?;
     let files = generate_backlog_files(
         root,
-        parent,
+        &prepared_context,
         &child_title,
         selected_acceptance_criteria,
         &template_files,
@@ -633,6 +662,7 @@ fn build_generated_backlog(
         parent: parent.clone(),
         child_title,
         selected_acceptance_criteria: selected_acceptance_criteria.to_vec(),
+        prepared_context,
         files,
     })
 }
@@ -647,14 +677,14 @@ fn rendered_index_contents(rendered_files: &[RenderedTemplateFile]) -> Result<St
 
 fn generate_backlog_files(
     root: &Path,
-    parent: &IssueSummary,
+    prepared_context: &PreparedIssueContext,
     child_title: &str,
     selected_acceptance_criteria: &[String],
     template_files: &[RenderedTemplateFile],
 ) -> Result<Vec<RenderedTemplateFile>> {
     let prompt = render_technical_prompt(
         root,
-        parent,
+        prepared_context,
         child_title,
         selected_acceptance_criteria,
         &slugify(child_title),
@@ -682,7 +712,7 @@ fn generate_backlog_files(
 
 fn render_technical_prompt(
     root: &Path,
-    parent: &IssueSummary,
+    prepared_context: &PreparedIssueContext,
     child_title: &str,
     selected_acceptance_criteria: &[String],
     backlog_slug: &str,
@@ -711,6 +741,22 @@ fn render_technical_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
+    let parent = &prepared_context.issue;
+    let parent_description_block = parent
+        .description
+        .as_deref()
+        .unwrap_or("_No Linear description was provided._");
+    let parent_context_block = parent
+        .parent
+        .as_ref()
+        .and_then(|issue| issue.description.as_deref())
+        .unwrap_or("_No parent description was provided._");
+    let discussion_block = if prepared_context.prompt_discussion.trim().is_empty() {
+        "_No Linear comments were provided._".to_string()
+    } else {
+        prepared_context.prompt_discussion.clone()
+    };
+    let image_summary = render_ticket_image_summary(&prepared_context.images);
 
     Ok(format!(
         "You are generating a technical backlog item for the active repository.\n\n\
@@ -721,6 +767,9 @@ Parent Linear issue:\n\
 - State: {}\n\
 - URL: {}\n\
 - Description:\n{}\n\n\
+Parent issue context:\n{}\n\n\
+Ticket discussion context:\n{}\n\n\
+Localized ticket images:\n{}\n\n\
 Derived backlog values:\n\
 - `BACKLOG_TITLE`: {}\n\
 - `BACKLOG_SLUG`: {}\n\
@@ -747,10 +796,10 @@ Instructions:\n\
             .map(|state| state.name.as_str())
             .unwrap_or("Unknown"),
         parent.url,
-        parent
-            .description
-            .as_deref()
-            .unwrap_or("_No Linear description was provided._"),
+        parent_description_block,
+        parent_context_block,
+        discussion_block,
+        image_summary,
         child_title,
         backlog_slug,
         today,
@@ -759,6 +808,35 @@ Instructions:\n\
         repository_snapshot,
         template_block,
     ))
+}
+
+fn resolve_ticket_discussion_budgets(
+    planning_meta: &crate::config::PlanningMeta,
+) -> TicketDiscussionBudgets {
+    TicketDiscussionBudgets {
+        prompt_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_prompt_chars
+            .unwrap_or(TicketDiscussionBudgets::default().prompt_chars),
+        persisted_chars: planning_meta
+            .linear
+            .ticket_context
+            .discussion_persisted_chars
+            .unwrap_or(TicketDiscussionBudgets::default().persisted_chars),
+    }
+}
+
+fn log_ticket_image_download_failures(
+    identifier: &str,
+    failures: &[crate::linear::TicketImageDownloadFailure],
+) {
+    for failure in failures {
+        eprintln!(
+            "warning: failed to localize ticket image for {identifier}: {} from {} ({})",
+            failure.filename, failure.source_label, failure.error
+        );
+    }
 }
 
 fn validate_generated_files(
@@ -1576,7 +1654,10 @@ mod tests {
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
-    use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState};
+    use crate::linear::{
+        IssueSummary, ProjectRef, TeamRef, TicketDiscussionBudgets, WorkflowState,
+        prepare_issue_context,
+    };
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1723,6 +1804,14 @@ mod tests {
                     "The command generates backlog docs".to_string(),
                     "The docs stay in sync".to_string(),
                 ],
+                prepared_context: prepare_issue_context(
+                    &issue(
+                        "MET-35",
+                        "Create the technical command",
+                        "Parent description",
+                    ),
+                    TicketDiscussionBudgets::default(),
+                ),
                 files: vec![
                     RenderedTemplateFile {
                         relative_path: "index.md".to_string(),
@@ -1817,14 +1906,18 @@ Ignored.
         fs::create_dir_all(root.join("src")).expect("src dir should be created");
         fs::write(paths.scan_path(), "# Scan\nCLI layout").expect("scan context should be written");
         fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("repo file should be written");
-
-        let prompt = render_technical_prompt(
-            root,
+        let prepared_context = prepare_issue_context(
             &issue(
                 "MET-35",
                 "Create the technical command",
                 "## Acceptance Criteria\n- Render docs\n- Keep sync safe",
             ),
+            TicketDiscussionBudgets::default(),
+        );
+
+        let prompt = render_technical_prompt(
+            root,
+            &prepared_context,
             "Technical: Create the technical command",
             &["Render docs".to_string(), "Keep sync safe".to_string()],
             "technical-create-the-technical-command",
