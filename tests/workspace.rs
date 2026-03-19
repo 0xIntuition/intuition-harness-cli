@@ -357,6 +357,73 @@ fn workspace_list_reports_local_only_metadata_when_linear_issue_is_missing()
 
 #[cfg(unix)]
 #[test]
+fn workspace_terminal_state_kind_drives_candidates_and_prune_preview() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let server = MockServer::start();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, r#"{ "linear": { "team": "ENG" } }"#)?;
+    write_linear_config(&config_path, &server.url("/graphql"))?;
+
+    let workspace = create_workspace_ticket(&repo_root, "ENG-10175", "eng-10175-branch")?;
+    commit_workspace_file(
+        &workspace,
+        "archived.txt",
+        "archived\n",
+        "Archived workspace",
+    )?;
+    push_workspace_branch(&workspace, "eng-10175-branch")?;
+
+    mock_linear_issues(
+        &server,
+        serde_json::json!([linear_issue("ENG-10175", "Archived", "completed")]),
+    );
+    write_gh_stub(&bin_dir.join("gh"), "[]")?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "workspace",
+            "list",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archived"))
+        .stdout(predicate::str::contains("candidate"));
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "workspace",
+            "prune",
+            "--dry-run",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("REMOVE  ENG-10175"))
+        .stdout(predicate::str::contains(
+            "ticket completed and no PR was found",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn workspace_clean_force_removes_clone_and_ticket_scoped_store_artifacts()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;

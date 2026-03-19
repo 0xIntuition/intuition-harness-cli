@@ -44,6 +44,7 @@ struct WorkspaceGitSignals {
 struct WorkspaceListRecord {
     entry: WorkspaceEntry,
     linear_state: String,
+    linear_is_removal_candidate: bool,
     pr_status: PullRequestStatus,
 }
 
@@ -112,7 +113,7 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
         "TICKET  BRANCH  SIZE  MODIFIED  GIT  LINEAR  PR  SAFE".to_string(),
     ];
     for record in &records {
-        let safe = if linear_state_is_removal_candidate(&record.linear_state) {
+        let safe = if record.linear_is_removal_candidate {
             "candidate"
         } else {
             "-"
@@ -347,7 +348,7 @@ where
 {
     let mut records = Vec::with_capacity(entries.len());
     for entry in entries {
-        let linear_state = match linear
+        let (linear_state, linear_is_removal_candidate) = match linear
             .find_issue_by_identifier(
                 &entry.ticket,
                 IssueListFilters {
@@ -361,9 +362,14 @@ where
             Some(issue) => issue
                 .state
                 .as_ref()
-                .map(|state| state.name.clone())
-                .unwrap_or_else(|| "Unknown".to_string()),
-            None => "Missing".to_string(),
+                .map(|state| {
+                    (
+                        state.name.clone(),
+                        linear_state_is_removal_candidate(&state.name, state.kind.as_deref()),
+                    )
+                })
+                .unwrap_or_else(|| ("Unknown".to_string(), false)),
+            None => ("Missing".to_string(), false),
         };
         let pr_status = match github {
             GithubPrLookup::Available(prs) => prs
@@ -376,6 +382,7 @@ where
         records.push(WorkspaceListRecord {
             entry,
             linear_state,
+            linear_is_removal_candidate,
             pr_status,
         });
     }
@@ -549,7 +556,7 @@ fn remove_workspace_clone(context: &WorkspaceContext, entry: &WorkspaceEntry) ->
 }
 
 fn build_prune_decision(record: WorkspaceListRecord) -> PruneDecision {
-    if !linear_state_is_removal_candidate(&record.linear_state) {
+    if !record.linear_is_removal_candidate {
         return PruneDecision {
             record,
             action: PruneAction::Keep,
@@ -612,7 +619,11 @@ fn workspace_has_unpushed_commits(workspace_path: &Path) -> Result<bool> {
             &["rev-list", "--count", "origin/main..HEAD"],
         ),
     }?;
-    Ok(count.trim().parse::<u64>().unwrap_or_default() > 0)
+    let count = count
+        .trim()
+        .parse::<u64>()
+        .context("failed to parse git ahead count")?;
+    Ok(count > 0)
 }
 
 fn scan_workspace_usage(root: &Path) -> Result<(u64, SystemTime)> {
@@ -657,10 +668,17 @@ fn issue_team_key(identifier: &str) -> Option<String> {
         .filter(|team| !team.is_empty())
 }
 
-fn linear_state_is_removal_candidate(state: &str) -> bool {
+fn linear_state_is_removal_candidate(state_name: &str, state_kind: Option<&str>) -> bool {
+    if matches!(
+        state_kind.map(|kind| kind.trim().to_ascii_lowercase()),
+        Some(kind) if matches!(kind.as_str(), "completed" | "canceled")
+    ) {
+        return true;
+    }
+
     matches!(
-        state.trim().to_ascii_lowercase().as_str(),
-        "done" | "cancelled"
+        state_name.trim().to_ascii_lowercase().as_str(),
+        "done" | "cancelled" | "canceled"
     )
 }
 
