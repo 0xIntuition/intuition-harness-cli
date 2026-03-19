@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use image::ImageReader;
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, ImageFormat};
 use reqwest::Url;
@@ -16,6 +17,9 @@ use reqwest::Url;
 pub(crate) const MAX_PROMPT_IMAGES: usize = 5;
 const MAX_PROVIDER_IMAGE_WIDTH: u32 = 2048;
 const MAX_PROVIDER_IMAGE_HEIGHT: u32 = 768;
+const WINDOWS_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE: &str = "clipboard image paste is not supported on Windows yet; paste a readable local image path or file:// URL instead";
+const WSL_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE: &str = "clipboard image paste is not supported on WSL yet; paste a readable local image path or file:// URL instead";
+const GENERIC_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE: &str = "clipboard image paste is not supported on this platform yet; paste a readable local image path or file:// URL instead";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PromptImageAttachment {
@@ -40,33 +44,36 @@ pub(crate) enum ClipboardPromptPaste {
     Empty,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardPastePlatform {
+    MacOs,
+    Linux,
+    Windows,
+    Wsl,
+    Unsupported,
+}
+
 pub(crate) fn resolve_attachment_from_pasted_text(
     text: &str,
 ) -> Result<Option<PromptImageAttachment>> {
     let Some(path) = pasted_image_path(text)? else {
         return Ok(None);
     };
-    Ok(Some(store_prompt_image(&path)?))
+    store_prompt_image_from_pasted_path(&path)
 }
 
 pub(crate) fn resolve_clipboard_prompt_paste() -> Result<ClipboardPromptPaste> {
-    if cfg!(target_os = "macos") {
-        return resolve_macos_clipboard_prompt_paste();
+    match clipboard_paste_platform(running_in_wsl()?) {
+        ClipboardPastePlatform::MacOs => resolve_macos_clipboard_prompt_paste(),
+        ClipboardPastePlatform::Linux => resolve_linux_clipboard_prompt_paste(),
+        ClipboardPastePlatform::Windows => {
+            bail!("{WINDOWS_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE}")
+        }
+        ClipboardPastePlatform::Wsl => bail!("{WSL_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE}"),
+        ClipboardPastePlatform::Unsupported => {
+            bail!("{GENERIC_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE}")
+        }
     }
-
-    if cfg!(target_os = "linux") || running_in_wsl()? {
-        return resolve_linux_clipboard_prompt_paste();
-    }
-
-    if cfg!(windows) {
-        bail!(
-            "clipboard image paste is not supported on Windows yet; paste a readable local image path or file:// URL instead"
-        );
-    }
-
-    bail!(
-        "clipboard image paste is not supported on this platform yet; paste a readable local image path or file:// URL instead"
-    )
 }
 
 pub(crate) fn encode_prompt_images_for_provider(
@@ -278,6 +285,19 @@ fn store_prompt_image(path: &Path) -> Result<PromptImageAttachment> {
     })
 }
 
+fn store_prompt_image_from_pasted_path(path: &Path) -> Result<Option<PromptImageAttachment>> {
+    let reader = ImageReader::open(path)
+        .with_context(|| format!("failed to read image file `{}`", path.display()))?;
+    let reader = reader
+        .with_guessed_format()
+        .with_context(|| format!("failed to inspect pasted file `{}`", path.display()))?;
+    if reader.format().is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(store_prompt_image(path)?))
+}
+
 fn store_prompt_image_bytes(bytes: Vec<u8>, display_name: &str) -> Result<PromptImageAttachment> {
     let image =
         image::load_from_memory(&bytes).context("failed to decode pasted clipboard image")?;
@@ -354,16 +374,37 @@ fn running_in_wsl() -> Result<bool> {
     Ok(contents.to_ascii_lowercase().contains("microsoft"))
 }
 
+fn clipboard_paste_platform(in_wsl: bool) -> ClipboardPastePlatform {
+    if cfg!(target_os = "macos") {
+        return ClipboardPastePlatform::MacOs;
+    }
+
+    if cfg!(windows) {
+        return ClipboardPastePlatform::Windows;
+    }
+
+    if cfg!(target_os = "linux") {
+        if in_wsl {
+            return ClipboardPastePlatform::Wsl;
+        }
+        return ClipboardPastePlatform::Linux;
+    }
+
+    ClipboardPastePlatform::Unsupported
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        EncodedPromptImage, MAX_PROVIDER_IMAGE_HEIGHT, MAX_PROVIDER_IMAGE_WIDTH,
-        encode_prompt_images_for_provider,
+        ClipboardPastePlatform, EncodedPromptImage, MAX_PROVIDER_IMAGE_HEIGHT,
+        MAX_PROVIDER_IMAGE_WIDTH, clipboard_paste_platform, encode_prompt_images_for_provider,
+        resolve_attachment_from_pasted_text,
     };
     use crate::tui::prompt_images::PromptImageAttachment;
     use anyhow::Result;
     use image::{ImageBuffer, Rgba};
-    use tempfile::tempdir;
+    use reqwest::Url;
+    use tempfile::{NamedTempFile, tempdir};
 
     #[test]
     fn oversized_images_are_resized_before_base64_encoding() -> Result<()> {
@@ -389,5 +430,64 @@ mod tests {
         assert!(*height <= MAX_PROVIDER_IMAGE_HEIGHT);
 
         Ok(())
+    }
+
+    #[test]
+    fn file_url_paste_resolves_to_attachment() -> Result<()> {
+        let temp = tempdir()?;
+        let image_path = temp.path().join("proof.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)?;
+        let url = Url::from_file_path(&image_path).expect("file url");
+
+        let attachment = resolve_attachment_from_pasted_text(url.as_str())?.expect("attachment");
+
+        assert_eq!(attachment.original_path, image_path);
+        assert_eq!(attachment.display_name, "proof.png");
+        assert!(attachment.stored_path.exists());
+        assert_ne!(attachment.stored_path, attachment.original_path);
+        Ok(())
+    }
+
+    #[test]
+    fn non_image_paths_fall_back_to_text_paste() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        std::fs::write(file.path(), "not an image")?;
+
+        let attachment = resolve_attachment_from_pasted_text(&file.path().display().to_string())?;
+
+        assert_eq!(attachment, None);
+        Ok(())
+    }
+
+    #[test]
+    fn clipboard_platform_prefers_wsl_over_linux() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(clipboard_paste_platform(true), ClipboardPastePlatform::Wsl);
+
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            clipboard_paste_platform(true),
+            clipboard_paste_platform(false)
+        );
+    }
+
+    #[test]
+    fn clipboard_platform_matches_current_host_when_not_in_wsl() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            clipboard_paste_platform(false),
+            ClipboardPastePlatform::MacOs
+        );
+        #[cfg(all(target_os = "linux", not(windows)))]
+        assert_eq!(
+            clipboard_paste_platform(false),
+            ClipboardPastePlatform::Linux
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            clipboard_paste_platform(false),
+            ClipboardPastePlatform::Windows
+        );
     }
 }

@@ -836,6 +836,55 @@ mod tests {
     }
 
     #[test]
+    fn prompt_attachment_paste_falls_back_to_text_for_non_image_paths() {
+        let temp = tempdir().expect("temp dir");
+        let note_path = temp.path().join("notes.txt");
+        std::fs::write(&note_path, "plain text").expect("save note");
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments("Plan: ");
+        let outcome = field
+            .paste_with_prompt_attachments(note_path.to_str().expect("utf8"))
+            .expect("text fallback");
+
+        assert_eq!(outcome, super::AttachmentPasteOutcome::TextPasted);
+        assert_eq!(
+            field.value(),
+            format!("Plan: {}", note_path.to_str().expect("utf8"))
+        );
+        assert!(field.prompt_attachments().is_empty());
+    }
+
+    #[test]
+    fn prompt_attachment_paste_enforces_the_documented_cap() {
+        let temp = tempdir().expect("temp dir");
+        let mut paths = Vec::new();
+        for index in 0..=5 {
+            let path = temp.path().join(format!("{index}.png"));
+            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+                .save(&path)
+                .expect("save image");
+            paths.push(path);
+        }
+
+        let mut field = InputFieldState::multiline_with_prompt_attachments(String::new());
+        for path in paths.iter().take(5) {
+            field
+                .paste_with_prompt_attachments(path.to_str().expect("utf8"))
+                .expect("attachment within cap");
+        }
+
+        let error = field
+            .paste_with_prompt_attachments(paths[5].to_str().expect("utf8"))
+            .expect_err("sixth attachment should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("prompt editors support at most 5 image attachments")
+        );
+        assert_eq!(field.prompt_attachments().len(), 5);
+    }
+
+    #[test]
     fn select_field_wraps_navigation() {
         let mut field = SelectFieldState::new(
             vec![
