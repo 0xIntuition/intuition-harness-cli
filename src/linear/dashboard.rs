@@ -8,10 +8,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::browser::{
@@ -20,6 +19,7 @@ use super::browser::{
 };
 use super::{DashboardData, IssueSummary};
 use crate::tui::fields::InputFieldState;
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
 pub struct DashboardOptions {
@@ -129,34 +129,58 @@ fn render_once(data: DashboardData, options: DashboardOptions) -> Result<String>
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
+    let narrow = frame.area().width < 115;
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(if narrow { 5 } else { 4 }),
             Constraint::Length(3),
             Constraint::Min(0),
         ])
         .split(frame.area());
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(26),
-            Constraint::Percentage(34),
-            Constraint::Percentage(40),
-        ])
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![
+                Constraint::Length(12),
+                Constraint::Percentage(44),
+                Constraint::Min(10),
+            ]
+        } else {
+            vec![
+                Constraint::Percentage(26),
+                Constraint::Percentage(34),
+                Constraint::Percentage(40),
+            ]
+        })
         .split(outer[2]);
     let sidebar = Layout::default()
-        .direction(Direction::Vertical)
+        .direction(if narrow {
+            Direction::Horizontal
+        } else {
+            Direction::Vertical
+        })
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(body[0]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from(app.data.title.clone()),
-        Line::from(app.summary_line()),
-        Line::from("Keys: Type to search while the issue list is focused. Tab changes focus, Up/Down moves selection, Enter applies sidebar filters, q exits."),
-    ]))
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("Linear Issues"));
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(app.data.title.clone()),
+            Line::from(app.summary_line()),
+            key_hints(&[
+                ("Type", "search"),
+                ("Tab", "focus"),
+                ("Up/Down", "move"),
+                ("Enter", "apply"),
+                ("q", "exit"),
+            ]),
+        ]),
+        panel_title("Linear Issues", false),
+    );
     frame.render_widget(header, outer[0]);
 
     let rendered_query = app.query.render(
@@ -197,23 +221,19 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
     );
 
     let filtered_issue_results = app.visible_issue_results();
-    let issue_title = if app.focus == Focus::Issues {
-        format!(
-            "Issues [focus] ({}/{})",
-            filtered_issue_results.len(),
-            app.data.issues.len()
-        )
-    } else {
+    let issue_title = panel_title(
         format!(
             "Issues ({}/{})",
             filtered_issue_results.len(),
             app.data.issues.len()
-        )
-    };
+        ),
+        app.focus == Focus::Issues,
+    );
     let issue_items = if filtered_issue_results.is_empty() {
-        vec![ListItem::new(
+        vec![ListItem::new(empty_state(
             "No issues match the current search and filters.",
-        )]
+            "Adjust the search query or sidebar filters to widen the result set.",
+        ))]
     } else {
         filtered_issue_results
             .iter()
@@ -231,25 +251,20 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
     } else {
         issue_state.select(Some(app.issue_index.min(filtered_issue_results.len() - 1)));
     }
-    let issue_list = List::new(issue_items)
-        .block(Block::default().borders(Borders::ALL).title(issue_title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let issue_list = list(issue_items, issue_title);
     frame.render_stateful_widget(issue_list, body[1], &mut issue_state);
 
-    let preview = Paragraph::new(app.preview_text())
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Description Preview"),
-        );
+    let preview = paragraph(
+        app.preview_text(),
+        panel_title("Description Preview", false),
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(preview, body[2]);
 }
 
 fn render_filter_list<T, F>(
     frame: &mut Frame<'_>,
-    area: ratatui::layout::Rect,
+    area: Rect,
     title: &str,
     is_focused: bool,
     options: &[FilterOption<T>],
@@ -263,23 +278,23 @@ fn render_filter_list<T, F>(
     let items = options
         .iter()
         .map(|option| {
-            let prefix = if is_active(&option.value) {
-                "[x]"
+            let badge_label = if is_active(&option.value) {
+                "on"
             } else {
-                "[ ]"
+                "off"
             };
-            ListItem::new(format!("{prefix} {} ({})", option.label, option.count))
+            let badge_tone = if is_active(&option.value) {
+                Tone::Success
+            } else {
+                Tone::Muted
+            };
+            ListItem::new(Line::from(vec![
+                badge(badge_label, badge_tone),
+                Span::raw(format!(" {} ({})", option.label, option.count)),
+            ]))
         })
         .collect::<Vec<_>>();
-    let title = if is_focused {
-        format!("{title} [focus]")
-    } else {
-        title.to_string()
-    };
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let list = list(items, panel_title(title, is_focused));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -614,7 +629,9 @@ impl Drop for TerminalCleanup {
 
 #[cfg(test)]
 mod tests {
-    use super::{DashboardAction, DashboardApp, EstimateFilter, Focus};
+    use super::{
+        DashboardAction, DashboardApp, DashboardOptions, EstimateFilter, Focus, run_dashboard,
+    };
     use crate::linear::DashboardData;
     use crate::tui::fields::InputFieldState;
 
@@ -667,6 +684,30 @@ mod tests {
             format!("{:?}", app.preview_text())
                 .contains("No issues match the current search and filters.")
         );
+    }
+
+    #[test]
+    fn dashboard_render_once_surfaces_empty_state_in_narrow_layout() {
+        let snapshot = run_dashboard(
+            DashboardData {
+                title: "Linear dashboard".to_string(),
+                issues: Vec::new(),
+            },
+            DashboardOptions {
+                render_once: true,
+                width: 96,
+                height: 30,
+                actions: Vec::new(),
+                initial_state_filter: None,
+            },
+        )
+        .expect("render once should succeed")
+        .expect("snapshot should be returned");
+
+        assert!(snapshot.contains("No issues match the current search and filters."));
+        assert!(snapshot.contains(
+            "Adjust the search query or sidebar filters to widen the result set."
+        ));
     }
 
     fn visible_issue_ids(app: &DashboardApp) -> Vec<&str> {

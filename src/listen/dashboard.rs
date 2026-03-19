@@ -3,10 +3,11 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::{ListenDashboardData, SessionListView, SessionPhase};
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, panel, panel_title};
 
 pub fn render_dashboard(data: &ListenDashboardData, width: u16, height: u16) -> Result<String> {
     render_dashboard_with_view(data, width, height, SessionListView::Active)
@@ -57,12 +58,11 @@ pub(crate) fn render(frame: &mut Frame<'_>, data: &ListenDashboardData, view: Se
 fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) {
     if area.width < 110 {
         let compact = Paragraph::new(Text::from(vec![
-            Line::from(Span::styled(
-                data.title.clone(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Line::from(vec![
+                badge("listen", Tone::Accent),
+                Span::raw(" "),
+                Span::raw(data.title.clone()),
+            ]),
             Line::from(Span::styled(
                 data.scope.clone(),
                 Style::default()
@@ -89,14 +89,14 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                 &data.runtime.linear_refresh,
                 Color::LightYellow,
             ),
+            key_hints(&[
+                ("Tab", "toggle view"),
+                ("←/→", "switch tabs"),
+                ("q", "exit"),
+            ]),
         ]))
         .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title("Listen Status"),
-        );
+        .block(panel(panel_title("Listen Status", false)));
         frame.render_widget(compact, area);
         return;
     }
@@ -115,12 +115,11 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         .split(area);
 
     let hero = Paragraph::new(Text::from(vec![
-        Line::from(Span::styled(
-            data.title.clone(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
+        Line::from(vec![
+            badge("listen", Tone::Accent),
+            Span::raw(" "),
+            Span::raw(data.title.clone()),
+        ]),
         Line::from(Span::styled(
             data.scope.clone(),
             Style::default()
@@ -135,14 +134,14 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             Span::styled("State file: ", label_style()),
             Span::styled(data.state_file.clone(), value_style(Color::Green)),
         ]),
+        key_hints(&[
+            ("Tab", "toggle view"),
+            ("←/→", "switch tabs"),
+            ("q", "exit"),
+        ]),
     ]))
     .wrap(Wrap { trim: true })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("Listen Status"),
-    );
+    .block(panel(panel_title("Listen Status", false)));
     frame.render_widget(hero, chunks[0]);
 
     let runtime_lines = vec![
@@ -166,12 +165,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
     ];
     let runtime = Paragraph::new(Text::from(runtime_lines))
         .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title("Runtime"),
-        );
+        .block(panel(panel_title("Runtime", false)));
     frame.render_widget(runtime, chunks[1]);
 }
 
@@ -183,10 +177,7 @@ fn render_sessions(
 ) {
     let counts = data.session_counts();
     let sessions = data.sessions_for_view(view);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title("Agent Sessions");
+    let block = panel(panel_title("Agent Sessions", false));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -211,8 +202,14 @@ fn render_sessions(
 
     if sessions.is_empty() {
         let empty = Paragraph::new(match view {
-            SessionListView::Active => "No active agent sessions are currently tracked.",
-            SessionListView::Completed => "No completed agent sessions are currently tracked.",
+            SessionListView::Active => empty_state(
+                "No active agent sessions are currently tracked.",
+                "New claimed tickets will appear here once workers start.",
+            ),
+            SessionListView::Completed => empty_state(
+                "No completed agent sessions are currently tracked.",
+                "Completed workers will move into this view after they exit.",
+            ),
         })
         .wrap(Wrap { trim: true });
         frame.render_widget(empty, sections[1]);
@@ -319,12 +316,7 @@ fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             })
             .collect::<Vec<_>>()
     };
-    let pending = List::new(pending_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("Todo Queue"),
-    );
+    let pending = List::new(pending_items).block(panel(panel_title("Todo Queue", false)));
     frame.render_widget(pending, chunks[0]);
 
     let notes = if data.notes.is_empty() {
@@ -332,12 +324,9 @@ fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
     } else {
         data.notes.join("\n")
     };
-    let notes = Paragraph::new(notes).wrap(Wrap { trim: true }).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("Notes"),
-    );
+    let notes = Paragraph::new(notes)
+        .wrap(Wrap { trim: true })
+        .block(panel(panel_title("Notes", false)));
     frame.render_widget(notes, chunks[1]);
 }
 
@@ -504,5 +493,26 @@ mod tests {
         assert!(snapshot.contains("n/a"));
         assert!(snapshot.contains("019c...e1bf2a"));
         assert!(snapshot.contains("Progress text stays clean"));
+    }
+
+    #[test]
+    fn snapshot_surfaces_empty_completed_state_in_compact_layout() {
+        let cycle = ListenCycleData::demo(Path::new("."));
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                dashboard_url: Some("http://127.0.0.1:4000/".to_string()),
+            },
+        );
+
+        let snapshot = render_dashboard_with_view(&data, 96, 28, SessionListView::Completed)
+            .expect("completed snapshot should render");
+
+        assert!(snapshot.contains("No completed agent sessions are currently tracked."));
     }
 }

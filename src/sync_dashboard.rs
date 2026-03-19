@@ -8,10 +8,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::backlog::BacklogSyncStatus;
@@ -21,6 +20,7 @@ use crate::linear::browser::{
     render_issue_row, search_issues,
 };
 use crate::tui::fields::InputFieldState;
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
 pub struct SyncDashboardData {
@@ -150,34 +150,50 @@ fn render_once(data: SyncDashboardData, options: SyncDashboardOptions) -> Result
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
+    let narrow = frame.area().width < 104;
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(if narrow { 5 } else { 4 }),
             Constraint::Length(3),
             Constraint::Min(0),
         ])
         .split(frame.area());
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![Constraint::Percentage(42), Constraint::Percentage(58)]
+        } else {
+            vec![Constraint::Percentage(46), Constraint::Percentage(54)]
+        })
         .split(outer[2]);
     let details = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(58),
+            Constraint::Percentage(if narrow { 50 } else { 58 }),
             Constraint::Length(8),
             Constraint::Min(6),
         ])
         .split(body[1]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from(app.data.title.clone()),
-        Line::from(app.summary_line()),
-        Line::from("Keys: Type to search while choosing an issue. Up/Down moves selection, Enter advances, Esc goes back, q exits."),
-    ]))
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("meta sync"));
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(app.data.title.clone()),
+            Line::from(app.summary_line()),
+            key_hints(&[
+                ("Type", "search"),
+                ("Up/Down", "move"),
+                ("Enter", "advance"),
+                ("Esc", "back"),
+                ("q", "exit"),
+            ]),
+        ]),
+        panel_title("meta sync", false),
+    );
     frame.render_widget(header, outer[0]);
 
     let rendered_query = app.query.render(
@@ -204,23 +220,26 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     render_status(frame, details[2], app);
 }
 
-fn render_issue_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &SyncDashboardApp) {
-    let title = if app.focus == Focus::Issues {
-        format!(
-            "Project Issues [focus] ({}/{})",
-            app.visible_issue_results().len(),
-            app.data.issues.len()
-        )
-    } else {
+fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
+    let results = app.visible_issue_results();
+    let title = panel_title(
         format!(
             "Project Issues ({}/{})",
-            app.visible_issue_results().len(),
+            results.len(),
             app.data.issues.len()
-        )
-    };
-    let results = app.visible_issue_results();
-    let items = if results.is_empty() {
-        vec![ListItem::new("No issues match the current search.")]
+        ),
+        app.focus == Focus::Issues,
+    );
+    let items = if app.data.issues.is_empty() {
+        vec![ListItem::new(empty_state(
+            "No issues found for the configured default project.",
+            "Choose a default project with active Linear work, then rerun `meta sync`.",
+        ))]
+    } else if results.is_empty() {
+        vec![ListItem::new(empty_state(
+            "No issues match the current search.",
+            "Clear or broaden the query to choose a sync target.",
+        ))]
     } else {
         results
             .iter()
@@ -243,40 +262,28 @@ fn render_issue_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &S
         state.select(Some(app.issue_index.min(results.len() - 1)));
     }
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let list = list(items, title);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_issue_preview(
     frame: &mut Frame<'_>,
-    area: ratatui::layout::Rect,
+    area: Rect,
     app: &SyncDashboardApp,
 ) {
-    let preview = Paragraph::new(app.preview_text())
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Issue Preview"),
-        );
+    let preview = paragraph(app.preview_text(), panel_title("Issue Preview", false))
+        .wrap(Wrap { trim: false });
     frame.render_widget(preview, area);
 }
 
-fn render_action_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &SyncDashboardApp) {
-    let title = if app.focus == Focus::Actions {
-        "Sync Action [focus]"
-    } else {
-        "Sync Action"
-    };
+fn render_action_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
+    let title = panel_title("Sync Action", app.focus == Focus::Actions);
 
     let items = ACTIONS
         .iter()
         .map(|action| {
             ListItem::new(Text::from(vec![
-                Line::from(action.label()),
+                Line::from(vec![badge(action.label(), Tone::Accent)]),
                 Line::from(action.description()),
             ]))
         })
@@ -284,17 +291,12 @@ fn render_action_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &
     let mut state = ListState::default();
     state.select(Some(app.action_index.min(ACTIONS.len() - 1)));
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let list = list(items, title);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_status(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &SyncDashboardApp) {
-    let status = Paragraph::new(app.status_text())
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title("Selection"));
+fn render_status(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
+    let status = paragraph(app.status_text(), panel_title("Selection", false));
     frame.render_widget(status, area);
 }
 

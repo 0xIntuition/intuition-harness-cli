@@ -10,13 +10,13 @@ use ratatui::backend::CrosstermBackend;
 #[cfg(test)]
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::ListItem;
 use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::write_text_file;
+use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 pub(crate) const SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
 
@@ -30,39 +30,44 @@ pub(crate) struct LoadingPanelData {
 }
 
 pub(crate) fn render_loading_panel(frame: &mut Frame<'_>, area: Rect, data: &LoadingPanelData) {
+    let panel_height = if area.height < 14 { 10 } else { 11 };
     let [outer] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9)])
+        .constraints([Constraint::Length(panel_height)])
         .flex(Flex::Center)
         .areas(area);
     let [panel] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70)])
+        .constraints([Constraint::Percentage(if area.width < 88 {
+            92
+        } else {
+            70
+        })])
         .flex(Flex::Center)
         .areas(outer);
-    let loading = Paragraph::new(Text::from(vec![
-        Line::styled(
-            format!(
-                "{} {}",
-                SPINNER_FRAMES[data.spinner_index % SPINNER_FRAMES.len()],
-                data.message
-            ),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Line::from(""),
-        Line::from(data.detail.clone()),
-        Line::from(""),
-        Line::styled(
-            data.status_line.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(data.title.clone()),
+
+    let loading = paragraph(
+        Text::from(vec![
+            Line::from(vec![
+                badge("loading", Tone::Info),
+                Span::raw(" "),
+                Span::raw(format!(
+                    "{} {}",
+                    SPINNER_FRAMES[data.spinner_index % SPINNER_FRAMES.len()],
+                    data.message
+                )),
+            ]),
+            Line::from(""),
+            Line::from(data.detail.clone()),
+            Line::from(""),
+            Line::from(Span::styled(
+                data.status_line.clone(),
+                crate::tui::theme::muted_style(),
+            )),
+        ]),
+        panel_title(data.title.clone(), false),
     )
-    .wrap(Wrap { trim: false });
+    .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(loading, panel);
 }
 
@@ -368,30 +373,39 @@ impl ProgressTracker {
 }
 
 pub(crate) fn render_progress_dashboard(frame: &mut Frame<'_>, data: &ProgressViewData) {
+    let area = frame.area();
+    let narrow = area.width < 100;
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(if narrow { 6 } else { 7 }),
             Constraint::Min(10),
-            Constraint::Length(4),
+            Constraint::Length(if narrow { 5 } else { 4 }),
         ])
-        .split(frame.area());
+        .split(area);
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![Constraint::Percentage(52), Constraint::Percentage(48)]
+        } else {
+            vec![Constraint::Percentage(48), Constraint::Percentage(52)]
+        })
         .split(outer[1]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from(data.title.clone()),
-        Line::from(data.status_line.clone()),
-        Line::from("The merge runner keeps this progress view visible until success or failure."),
-        Line::from("Structured progress is saved on every update for later reconstruction."),
-    ]))
-    .wrap(Wrap { trim: true })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Long-Running Progress"),
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(data.title.clone()),
+            Line::from(data.status_line.clone()),
+            Line::from(
+                "The merge runner keeps this progress view visible until success or failure.",
+            ),
+            key_hints(&[("Ctrl-C", "exit"), ("JSON", "saved every update")]),
+        ]),
+        panel_title("Long-Running Progress", false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -399,34 +413,48 @@ pub(crate) fn render_progress_dashboard(frame: &mut Frame<'_>, data: &ProgressVi
         .steps
         .iter()
         .map(|step| {
+            let tone = match step.state {
+                ProgressStepState::Pending => Tone::Muted,
+                ProgressStepState::Running => Tone::Info,
+                ProgressStepState::Complete => Tone::Success,
+                ProgressStepState::Failed => Tone::Danger,
+            };
             ListItem::new(Text::from(vec![
-                Line::from(format!("[{}] {}", step.state.label(), step.label)),
-                Line::from(step.detail.clone().unwrap_or_default()),
+                Line::from(vec![
+                    badge(step.state.label(), tone),
+                    Span::raw(" "),
+                    Span::raw(step.label.clone()),
+                ]),
+                Line::from(
+                    step.detail
+                        .clone()
+                        .unwrap_or_else(|| "Waiting for work.".to_string()),
+                ),
             ]))
         })
         .collect::<Vec<_>>();
-    let steps = List::new(step_items).block(Block::default().borders(Borders::ALL).title("Phases"));
+    let steps = list(step_items, panel_title("Phases", false));
     frame.render_widget(steps, body[0]);
 
-    let active = Paragraph::new(Text::from(vec![
-        Line::styled(
-            "Active substep",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Line::from(""),
-        Line::from(
-            data.active_detail
-                .clone()
-                .unwrap_or_else(|| "Waiting for the next update.".to_string()),
-        ),
-    ]))
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title("Details"));
+    let active_text = if let Some(detail) = &data.active_detail {
+        Text::from(vec![
+            Line::from(vec![
+                badge("active", Tone::Accent),
+                Span::raw(" Active substep"),
+            ]),
+            Line::from(""),
+            Line::from(detail.clone()),
+        ])
+    } else {
+        empty_state(
+            "No substep is active yet.",
+            "Waiting for the next structured progress update.",
+        )
+    };
+    let active = paragraph(active_text, panel_title("Details", false));
     frame.render_widget(active, body[1]);
 
-    let footer = Paragraph::new(data.notes.join("\n"))
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title("Notes"));
+    let footer = paragraph(data.notes.join("\n"), panel_title("Notes", false));
     frame.render_widget(footer, outer[2]);
 }
 
