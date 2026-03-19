@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{
-    Client,
-    Url,
+    Client, Url,
     header::{AUTHORIZATION, CONTENT_TYPE},
 };
 use serde::de::DeserializeOwned;

@@ -426,8 +426,14 @@ JSON
     assert!(manifest.contains("comment-1-comment.png"));
     assert!(discussion.contains("### **Taylor** (2026-03-15)"));
     assert_eq!(fs::read(issue_dir.join("artifacts/design.png"))?, b"design");
-    assert_eq!(fs::read(issue_dir.join("artifacts/parent-parent.png"))?, b"parent");
-    assert_eq!(fs::read(issue_dir.join("artifacts/comment-1-comment.png"))?, b"comment");
+    assert_eq!(
+        fs::read(issue_dir.join("artifacts/parent-parent.png"))?,
+        b"parent"
+    );
+    assert_eq!(
+        fs::read(issue_dir.join("artifacts/comment-1-comment.png"))?,
+        b"comment"
+    );
     assert!(payload.contains("Parent Linear issue"));
     assert!(payload.contains("Create the technical and sync commands"));
     assert!(payload.contains("artifacts/design.png"));

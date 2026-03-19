@@ -626,8 +626,16 @@ mod tests {
                 .body
                 .contains("![shot](artifacts/comment-1-comment.png)")
         );
-        assert!(localized.scoped_discussion_markdown.contains("### **Casey** (2026-03-17)"));
-        assert!(localized.scoped_discussion_markdown.contains("### **Jordan** (2026-03-18)"));
+        assert!(
+            localized
+                .scoped_discussion_markdown
+                .contains("### **Casey** (2026-03-17)")
+        );
+        assert!(
+            localized
+                .scoped_discussion_markdown
+                .contains("### **Jordan** (2026-03-18)")
+        );
     }
 
     #[test]
@@ -677,7 +685,8 @@ mod tests {
 
     #[test]
     fn manifest_renders_traceability_table() {
-        let manifest = render_ticket_image_manifest(&localize_ticket_context(&issue()).image_assets);
+        let manifest =
+            render_ticket_image_manifest(&localize_ticket_context(&issue()).image_assets);
 
         assert!(manifest.contains("| `design.png` | diagram | description |"));
         assert!(manifest.contains("| `comment-1-comment.png` | shot | Triage summary |"));

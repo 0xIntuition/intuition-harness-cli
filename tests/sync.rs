@@ -162,7 +162,10 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
     assert!(discussion.contains("### **Taylor** (2026-03-15)"));
     assert!(discussion.contains("Screenshot review"));
     assert_eq!(fs::read(issue_dir.join("artifacts/design.png"))?, b"design");
-    assert_eq!(fs::read(issue_dir.join("artifacts/parent-parent.png"))?, b"parent");
+    assert_eq!(
+        fs::read(issue_dir.join("artifacts/parent-parent.png"))?,
+        b"parent"
+    );
     assert!(!issue_dir.join("artifacts/comment-1-comment.png").exists());
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     assert!(metadata.contains("attachment-1"));

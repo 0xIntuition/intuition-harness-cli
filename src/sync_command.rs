@@ -138,7 +138,11 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
             read_optional_text_file(&backlog_issue_index_path(&root, &issue.identifier))?;
         let diff = render_sync_diff(
             &local_description,
-            localized_issue.issue.description.as_deref().unwrap_or_default(),
+            localized_issue
+                .issue
+                .description
+                .as_deref()
+                .unwrap_or_default(),
         );
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
@@ -161,7 +165,11 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     write_issue_description(
         &root,
         &issue.identifier,
-        localized_issue.issue.description.as_deref().unwrap_or_default(),
+        localized_issue
+            .issue
+            .description
+            .as_deref()
+            .unwrap_or_default(),
     )?;
     materialize_ticket_context(&service, &localized_issue, &issue_dir).await?;
 
@@ -452,7 +460,11 @@ fn load_issue_metadata_if_present(issue_dir: &Path) -> Result<Option<BacklogIssu
 fn issue_remote_hash(issue: &IssueSummary) -> String {
     let localized_issue = localize_ticket_context(issue);
     compute_remote_sync_hash(
-        localized_issue.issue.description.as_deref().unwrap_or_default(),
+        localized_issue
+            .issue
+            .description
+            .as_deref()
+            .unwrap_or_default(),
         &managed_file_records_from_issue(issue),
     )
 }

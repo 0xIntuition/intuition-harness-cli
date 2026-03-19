@@ -37,9 +37,7 @@ use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{IssueCreateSpec, IssueListFilters, IssueSummary};
-use crate::linear::{
-    LocalizedTicketContext, localize_ticket_context, materialize_ticket_context,
-};
+use crate::linear::{LocalizedTicketContext, localize_ticket_context, materialize_ticket_context};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push;
@@ -1595,7 +1593,9 @@ mod tests {
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
-    use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState, localize_ticket_context};
+    use crate::linear::{
+        IssueSummary, ProjectRef, TeamRef, WorkflowState, localize_ticket_context,
+    };
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

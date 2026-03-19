@@ -18,8 +18,8 @@ pub(crate) use render::render_issues_list_output;
 pub use render::{render_issue_summary, render_projects_table};
 pub use service::LinearService;
 pub(crate) use ticket_context::{
-    LocalizedTicketContext, load_localized_ticket_context_ignored_paths,
-    localize_ticket_context, materialize_ticket_context,
+    LocalizedTicketContext, load_localized_ticket_context_ignored_paths, localize_ticket_context,
+    materialize_ticket_context,
 };
 pub use transport::{LinearClient, ReqwestLinearClient};
 pub use types::{

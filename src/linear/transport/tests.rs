@@ -237,10 +237,16 @@ async fn reqwest_client_fetches_parent_description_and_comment_attribution() {
         .expect("issue detail should load");
 
     assert_eq!(
-        issue.parent.as_ref().and_then(|parent| parent.description.as_deref()),
+        issue
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.description.as_deref()),
         Some("Parent description")
     );
-    assert_eq!(issue.comments[0].created_at.as_deref(), Some("2026-03-17T12:00:00Z"));
+    assert_eq!(
+        issue.comments[0].created_at.as_deref(),
+        Some("2026-03-17T12:00:00Z")
+    );
     assert_eq!(issue.comments[0].author_name.as_deref(), Some("Taylor"));
     issue_mock.assert_calls(1);
 }
