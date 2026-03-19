@@ -295,6 +295,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
                 local_hash: None,
                 remote_hash: None,
                 last_sync_at: None,
+                last_pulled_comment_ids: Vec::new(),
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
         )?;

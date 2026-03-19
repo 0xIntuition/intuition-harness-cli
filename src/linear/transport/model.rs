@@ -65,6 +65,11 @@ pub(super) struct IssueByIdPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsPayload {
+    pub(super) issue: Option<IssueCommentsNode>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssueCreatePayload {
     #[serde(rename = "issueCreate")]
     pub(super) issue_create: IssueMutationNode,
@@ -110,6 +115,12 @@ pub(super) struct UploadPayload {
 pub(super) struct IssueMutationNode {
     pub(super) success: bool,
     pub(super) issue: Option<IssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsNode {
+    #[serde(default)]
+    pub(super) comments: Option<Connection<CommentNode>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +240,10 @@ pub(super) struct CommentNode {
     pub(super) id: String,
     pub(super) body: String,
     #[serde(default)]
+    pub(super) created_at: Option<String>,
+    #[serde(default)]
+    pub(super) user: Option<UserRef>,
+    #[serde(default)]
     pub(super) resolved_at: Option<String>,
 }
 
@@ -297,6 +312,8 @@ impl From<CommentNode> for IssueComment {
         Self {
             id: value.id,
             body: value.body,
+            created_at: value.created_at,
+            author_name: value.user.map(|user| user.name),
             resolved_at: value.resolved_at,
         }
     }

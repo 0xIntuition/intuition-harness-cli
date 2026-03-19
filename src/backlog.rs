@@ -12,6 +12,9 @@ use crate::fs::{PlanningPaths, write_text_file};
 
 pub const INDEX_FILE_NAME: &str = "index.md";
 pub const METADATA_FILE_NAME: &str = ".linear.json";
+pub const TICKET_DISCUSSION_FILE_NAME: &str = "context/ticket-discussion.md";
+pub const TICKET_IMAGE_MANIFEST_FILE_NAME: &str = "artifacts/ticket-images.md";
+pub const TICKET_IMAGE_DIR_NAME: &str = "artifacts/ticket-images";
 const CANONICAL_PLACEHOLDERS: &[&str] = &[
     "{{BACKLOG_TITLE}}",
     "{{BACKLOG_SLUG}}",
@@ -160,6 +163,8 @@ pub struct BacklogIssueMetadata {
     pub remote_hash: Option<String>,
     #[serde(default)]
     pub last_sync_at: Option<String>,
+    #[serde(default)]
+    pub last_pulled_comment_ids: Vec<String>,
     #[serde(default)]
     pub managed_files: Vec<ManagedFileRecord>,
 }
@@ -394,6 +399,20 @@ pub fn collect_local_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile
     Ok(files)
 }
 
+pub fn collect_remote_managed_sync_files(issue_dir: &Path) -> Result<Vec<LocalBacklogFile>> {
+    Ok(collect_local_sync_files(issue_dir)?
+        .into_iter()
+        .filter(|file| is_remote_managed_sync_relative_path(&file.relative_path))
+        .collect())
+}
+
+pub fn is_remote_managed_sync_relative_path(relative_path: &str) -> bool {
+    !matches!(
+        relative_path,
+        TICKET_DISCUSSION_FILE_NAME | TICKET_IMAGE_MANIFEST_FILE_NAME
+    ) && !relative_path.starts_with(&format!("{TICKET_IMAGE_DIR_NAME}/"))
+}
+
 /// Compute the deterministic local sync hash for tracked backlog files in an issue directory.
 ///
 /// Dotfiles, including `.linear.json`, are excluded from the tracked file set. Returns `Ok(None)`
@@ -403,7 +422,7 @@ pub fn compute_local_sync_hash(issue_dir: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let files = collect_local_sync_files(issue_dir)?;
+    let files = collect_remote_managed_sync_files(issue_dir)?;
     Ok(Some(hash_local_backlog_files(&files)))
 }
 
@@ -734,6 +753,7 @@ mod tests {
                 local_hash: None,
                 remote_hash: None,
                 last_sync_at: None,
+                last_pulled_comment_ids: Vec::new(),
                 managed_files: Vec::<ManagedFileRecord>::new(),
             }),
             Some("local".to_string()),

@@ -33,6 +33,10 @@ pub struct IssueComment {
     pub id: String,
     pub body: String,
     #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub author_name: Option<String>,
+    #[serde(default)]
     pub resolved_at: Option<String>,
 }
 

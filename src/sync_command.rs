@@ -1,17 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::backlog::{
-    BacklogIssueMetadata, BacklogSyncStatus, INDEX_FILE_NAME, ManagedFileRecord, backlog_issue_dir,
-    backlog_issue_metadata_path, collect_local_sync_files, compute_local_sync_hash,
-    compute_remote_sync_hash, load_issue_metadata, resolve_backlog_sync_status,
-    save_issue_metadata, write_issue_attachment_file,
+    BacklogIssueMetadata, BacklogSyncStatus, INDEX_FILE_NAME, ManagedFileRecord,
+    TICKET_DISCUSSION_FILE_NAME, TICKET_IMAGE_DIR_NAME, TICKET_IMAGE_MANIFEST_FILE_NAME,
+    backlog_issue_dir, backlog_issue_metadata_path, collect_remote_managed_sync_files,
+    compute_local_sync_hash, compute_remote_sync_hash, load_issue_metadata,
+    resolve_backlog_sync_status, save_issue_metadata, write_issue_attachment_file,
 };
 use crate::cli::{LinearClientArgs, SyncLinkArgs, SyncPullArgs, SyncPushArgs, SyncStatusArgs};
 use crate::config::load_required_planning_meta;
@@ -19,8 +20,8 @@ use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
 use crate::linear::{
-    AttachmentCreateRequest, IssueEditSpec, IssueListFilters, IssueSummary, LinearService,
-    ReqwestLinearClient,
+    AttachmentCreateRequest, IssueComment, IssueEditSpec, IssueListFilters, IssueSummary,
+    LinearService, ReqwestLinearClient,
 };
 use crate::scaffold::ensure_planning_layout;
 use crate::sync_dashboard::{
@@ -30,6 +31,7 @@ use crate::sync_dashboard::{
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const MANAGED_ATTACHMENT_MARKER: &str = "metastack-cli";
+const HARNESS_SYNC_MARKER: &str = "[harness-sync]";
 
 #[derive(Debug, Clone)]
 struct BacklogSyncEntry {
@@ -51,6 +53,43 @@ struct BatchSyncSummary {
     synced: usize,
     skipped: usize,
     errors: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyncPullOptions {
+    discussion_file_char_limit: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ChecklistProgressSummary {
+    milestones: Vec<ChecklistMilestoneProgress>,
+    completed: usize,
+    total: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ChecklistMilestoneProgress {
+    title: String,
+    completed: usize,
+    total: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DiscussionComment {
+    id: String,
+    body: String,
+    created_at: Option<String>,
+    author_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DiscussionImageAsset {
+    comment_id: String,
+    alt: String,
+    source_url: String,
+    local_relative_path: String,
+    discussion_relative_path: String,
+    reused_existing_file: bool,
 }
 
 pub async fn run_sync_dashboard_command(
@@ -128,10 +167,13 @@ pub async fn run_sync_link(
     args: &SyncLinkArgs,
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
-    let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let planning_meta = load_required_planning_meta(&root, "sync")?;
     ensure_planning_layout(&root, false)?;
     let entries = discover_backlog_entries(&root)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
+    let pull_options = SyncPullOptions {
+        discussion_file_char_limit: planning_meta.sync.discussion_file_char_limit(),
+    };
 
     let issue = match &args.issue {
         Some(identifier) => service.load_issue(identifier).await?,
@@ -169,7 +211,8 @@ pub async fn run_sync_link(
         && metadata.identifier.eq_ignore_ascii_case(&issue.identifier)
     {
         if args.pull {
-            let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false).await?;
+            let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false, pull_options)
+                .await?;
         } else {
             println!(
                 "{} is already linked to {} at {}.",
@@ -183,11 +226,12 @@ pub async fn run_sync_link(
 
     save_issue_metadata(
         &issue_dir,
-        &build_issue_metadata(&issue, Vec::new(), None, None, None),
+        &build_issue_metadata(&issue, Vec::new(), None, None, None, Vec::new()),
     )?;
 
     if args.pull {
-        let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false).await?;
+        let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false, pull_options)
+            .await?;
     } else {
         println!(
             "Linked {} to {}.",
@@ -287,12 +331,15 @@ pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusAr
 /// local backlog paths cannot be prepared, or overwrite safeguards block the pull.
 pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
-    let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let planning_meta = load_required_planning_meta(&root, "sync")?;
     ensure_planning_layout(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(client_args, None)?;
+    let options = SyncPullOptions {
+        discussion_file_char_limit: planning_meta.sync.discussion_file_char_limit(),
+    };
 
     if args.all {
-        return run_sync_pull_all(&root, &service).await;
+        return run_sync_pull_all(&root, &service, options).await;
     }
 
     let issue_identifier = args
@@ -303,7 +350,7 @@ pub async fn run_sync_pull(client_args: &LinearClientArgs, args: &SyncPullArgs) 
     let entries = discover_backlog_entries(&root)?;
     let issue_dir = resolve_issue_dir_for_identifier(&root, &entries, &issue.identifier)?;
     ensure_dir(&issue_dir)?;
-    let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false).await?;
+    let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false, options).await?;
     Ok(())
 }
 
@@ -365,6 +412,7 @@ fn guard_listen_issue_description_sync(identifier: &str) -> Result<()> {
 async fn run_sync_pull_all(
     root: &Path,
     service: &LinearService<ReqwestLinearClient>,
+    options: SyncPullOptions,
 ) -> Result<()> {
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
@@ -383,8 +431,15 @@ async fn run_sync_pull_all(
             .as_ref()
             .ok_or_else(|| anyhow!("linked backlog entry metadata unexpectedly missing"))?;
         match service.load_issue(&metadata.identifier).await {
-            Ok(issue) => match sync_pull_issue(root, service, &issue, &entry.issue_dir, true).await
-            {
+            Ok(issue) => match sync_pull_issue(
+                root,
+                service,
+                &issue,
+                &entry.issue_dir,
+                true,
+                options,
+            )
+            .await {
                 Ok(SyncExecutionOutcome::Synced) => summary.synced += 1,
                 Ok(SyncExecutionOutcome::Skipped) => summary.skipped += 1,
                 Err(error) => {
@@ -513,6 +568,7 @@ async fn sync_pull_issue(
     issue: &IssueSummary,
     issue_dir: &Path,
     skip_if_synced: bool,
+    options: SyncPullOptions,
 ) -> Result<SyncExecutionOutcome> {
     ensure_dir(issue_dir)?;
     let metadata = load_issue_metadata_if_present(issue_dir)?;
@@ -531,7 +587,7 @@ async fn sync_pull_issue(
         let local_description = read_optional_text_file(&issue_dir.join(INDEX_FILE_NAME))?;
         let diff = render_sync_diff(
             &local_description,
-            issue.description.as_deref().unwrap_or_default(),
+            normalized_issue_description(issue),
         );
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
@@ -551,7 +607,7 @@ async fn sync_pull_issue(
         }
     }
 
-    write_issue_index_file(issue_dir, issue.description.as_deref().unwrap_or_default())?;
+    write_issue_index_file(issue_dir, normalized_issue_description(issue))?;
 
     let mut managed_files = Vec::new();
     for attachment in &issue.attachments {
@@ -575,6 +631,35 @@ async fn sync_pull_issue(
         });
     }
 
+    let discussion_comments = discussion_comments(issue);
+    let pulled_comment_ids = discussion_comments
+        .iter()
+        .map(|comment| comment.id.clone())
+        .collect::<Vec<_>>();
+    let previously_pulled_comment_ids = metadata
+        .as_ref()
+        .map(|metadata| metadata.last_pulled_comment_ids.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let discussion_images = sync_discussion_images(
+        service,
+        issue_dir,
+        &discussion_comments,
+        &previously_pulled_comment_ids,
+    )
+    .await?;
+    write_text_file(
+        &issue_dir.join(TICKET_DISCUSSION_FILE_NAME),
+        &render_ticket_discussion(issue, &discussion_comments, &discussion_images, options),
+        true,
+    )?;
+    write_text_file(
+        &issue_dir.join(TICKET_IMAGE_MANIFEST_FILE_NAME),
+        &render_ticket_image_manifest(issue, &discussion_images),
+        true,
+    )?;
+
     let local_hash = compute_local_sync_hash(issue_dir)?.ok_or_else(|| {
         anyhow!(
             "backlog issue directory `{}` disappeared during sync",
@@ -589,11 +674,12 @@ async fn sync_pull_issue(
             Some(local_hash),
             Some(remote_hash),
             Some(sync_timestamp()),
+            pulled_comment_ids,
         ),
     )?;
 
     println!(
-        "Pulled {} into {} (restored {} managed attachment file{}).",
+        "Pulled {} into {} (restored {} managed attachment file{}; rebuilt discussion context with {} comment{} and {} image{}).",
         issue.identifier,
         display_path(issue_dir, root),
         issue
@@ -608,6 +694,10 @@ async fn sync_pull_issue(
                 .filter(|attachment| managed_attachment_path(&attachment.metadata).is_some())
                 .count()
         ),
+        discussion_comments.len(),
+        plural_suffix(discussion_comments.len()),
+        discussion_images.len(),
+        plural_suffix(discussion_images.len()),
     );
 
     Ok(SyncExecutionOutcome::Synced)
@@ -680,7 +770,7 @@ async fn sync_push_issue(
             .await?;
     }
 
-    let local_files = collect_local_sync_files(issue_dir)?
+    let local_files = collect_remote_managed_sync_files(issue_dir)?
         .into_iter()
         .filter(|file| file.relative_path != INDEX_FILE_NAME)
         .collect::<Vec<_>>();
@@ -734,6 +824,23 @@ async fn sync_push_issue(
         });
     }
 
+    let checklist_path = issue_dir.join("checklist.md");
+    let progress_comment_status = if checklist_path.is_file() {
+        let checklist_contents = fs::read_to_string(&checklist_path)
+            .with_context(|| format!("failed to read `{}`", checklist_path.display()))?;
+        let progress = parse_checklist_progress_summary(&checklist_contents);
+        service
+            .upsert_comment_with_marker(
+                issue,
+                HARNESS_SYNC_MARKER,
+                render_harness_sync_comment(issue, &progress),
+            )
+            .await?;
+        Some("updated [harness-sync] progress comment")
+    } else {
+        None
+    };
+
     let remote_description = if update_description {
         description
     } else {
@@ -748,11 +855,15 @@ async fn sync_push_issue(
             Some(local_hash),
             Some(remote_hash),
             Some(sync_timestamp()),
+            metadata
+                .as_ref()
+                .map(|metadata| metadata.last_pulled_comment_ids.clone())
+                .unwrap_or_default(),
         ),
     )?;
 
     println!(
-        "Pushed {} from {} (synced {} managed attachment file{}; {}).",
+        "Pushed {} from {} (synced {} managed attachment file{}; {}; {}).",
         issue.identifier,
         display_path(issue_dir, root),
         local_path_count,
@@ -762,6 +873,7 @@ async fn sync_push_issue(
         } else {
             "left the Linear issue description unchanged; pass --update-description to send index.md"
         },
+        progress_comment_status.unwrap_or("skipped [harness-sync] progress comment because checklist.md is missing"),
     );
 
     Ok(SyncExecutionOutcome::Synced)
@@ -773,6 +885,7 @@ fn build_issue_metadata(
     local_hash: Option<String>,
     remote_hash: Option<String>,
     last_sync_at: Option<String>,
+    last_pulled_comment_ids: Vec<String>,
 ) -> BacklogIssueMetadata {
     BacklogIssueMetadata {
         issue_id: issue.id.clone(),
@@ -790,8 +903,427 @@ fn build_issue_metadata(
         local_hash,
         remote_hash,
         last_sync_at,
+        last_pulled_comment_ids,
         managed_files,
     }
+}
+
+fn normalized_issue_description(issue: &IssueSummary) -> &str {
+    issue.description.as_deref().unwrap_or_default()
+}
+
+fn discussion_comments(issue: &IssueSummary) -> Vec<DiscussionComment> {
+    let mut comments = issue
+        .comments
+        .iter()
+        .filter(|comment| !is_generated_sync_comment(comment))
+        .map(|comment| DiscussionComment {
+            id: comment.id.clone(),
+            body: comment.body.clone(),
+            created_at: comment.created_at.clone(),
+            author_name: comment.author_name.clone(),
+        })
+        .collect::<Vec<_>>();
+    comments.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    comments
+}
+
+fn is_generated_sync_comment(comment: &IssueComment) -> bool {
+    comment.body.contains("## Codex Workpad") || comment.body.contains(HARNESS_SYNC_MARKER)
+}
+
+async fn sync_discussion_images(
+    service: &LinearService<ReqwestLinearClient>,
+    issue_dir: &Path,
+    comments: &[DiscussionComment],
+    previously_pulled_comment_ids: &HashSet<String>,
+) -> Result<Vec<DiscussionImageAsset>> {
+    let image_dir = issue_dir.join(TICKET_IMAGE_DIR_NAME);
+    if comments.is_empty() && image_dir.is_dir() {
+        fs::remove_dir_all(&image_dir)
+            .with_context(|| format!("failed to reset `{}`", image_dir.display()))?;
+    }
+
+    let mut assets = Vec::new();
+    let mut expected_relative_paths = BTreeSet::new();
+    for comment in comments {
+        for (index, (alt, source_url)) in extract_markdown_image_references(&comment.body)
+            .into_iter()
+            .enumerate()
+        {
+            let file_name = discussion_image_file_name(&comment.id, index, &source_url);
+            let local_relative_path = format!("{TICKET_IMAGE_DIR_NAME}/{file_name}");
+            let discussion_relative_path = format!("../{local_relative_path}");
+            let destination = issue_dir.join(&local_relative_path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create `{}`", parent.display()))?;
+            }
+
+            let reused_existing_file =
+                previously_pulled_comment_ids.contains(&comment.id) && destination.is_file();
+            if !reused_existing_file {
+                let contents = service.download_file(&source_url).await.with_context(|| {
+                    format!(
+                        "failed to download discussion image `{source_url}` from comment `{}`",
+                        comment.id
+                    )
+                })?;
+                fs::write(&destination, contents)
+                    .with_context(|| format!("failed to write `{}`", destination.display()))?;
+            }
+
+            expected_relative_paths.insert(local_relative_path.clone());
+            assets.push(DiscussionImageAsset {
+                comment_id: comment.id.clone(),
+                alt,
+                source_url,
+                local_relative_path,
+                discussion_relative_path,
+                reused_existing_file,
+            });
+        }
+    }
+
+    if image_dir.is_dir() {
+        for entry in fs::read_dir(&image_dir)
+            .with_context(|| format!("failed to read `{}`", image_dir.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to traverse `{}`", image_dir.display()))?;
+            if !entry
+                .file_type()
+                .with_context(|| format!("failed to read `{}`", entry.path().display()))?
+                .is_file()
+            {
+                continue;
+            }
+            let relative_path = format!(
+                "{TICKET_IMAGE_DIR_NAME}/{}",
+                entry.file_name().to_string_lossy()
+            );
+            if !expected_relative_paths.contains(&relative_path) {
+                fs::remove_file(entry.path())
+                    .with_context(|| format!("failed to remove `{}`", entry.path().display()))?;
+            }
+        }
+    }
+
+    if assets.is_empty() && image_dir.is_dir() {
+        fs::remove_dir_all(&image_dir)
+            .with_context(|| format!("failed to reset `{}`", image_dir.display()))?;
+    }
+
+    Ok(assets)
+}
+
+fn extract_markdown_image_references(body: &str) -> Vec<(String, String)> {
+    let mut references = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(start) = body[cursor..].find("![") {
+        let start = cursor + start;
+        let alt_start = start + 2;
+        let Some(alt_end_offset) = body[alt_start..].find("](") else {
+            break;
+        };
+        let alt_end = alt_start + alt_end_offset;
+        let url_start = alt_end + 2;
+        let Some(url_end_offset) = body[url_start..].find(')') else {
+            break;
+        };
+        let url_end = url_start + url_end_offset;
+        references.push((
+            body[alt_start..alt_end].to_string(),
+            body[url_start..url_end].to_string(),
+        ));
+        cursor = url_end + 1;
+    }
+    references
+}
+
+fn discussion_image_file_name(comment_id: &str, index: usize, source_url: &str) -> String {
+    let suffix = Path::new(
+        source_url
+            .split('?')
+            .next()
+            .unwrap_or(source_url)
+            .rsplit('/')
+            .next()
+            .unwrap_or("image"),
+    )
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .map(|extension| format!(".{}", sanitize_file_name_component(extension)))
+    .unwrap_or_default();
+    format!(
+        "{}-{:02}{}",
+        sanitize_file_name_component(comment_id),
+        index + 1,
+        suffix
+    )
+}
+
+fn sanitize_file_name_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    sanitized.trim_matches('-').to_string()
+}
+
+fn render_ticket_discussion(
+    issue: &IssueSummary,
+    comments: &[DiscussionComment],
+    images: &[DiscussionImageAsset],
+    options: SyncPullOptions,
+) -> String {
+    let header = format!(
+        "# Ticket Discussion\n\nGenerated by `meta backlog sync pull` for `{}`.\n\n",
+        issue.identifier
+    );
+    if comments.is_empty() {
+        return format!("{header}No discussion comments were found.\n");
+    }
+
+    let rendered_comments = comments
+        .iter()
+        .map(|comment| render_discussion_comment(comment, images))
+        .collect::<Vec<_>>();
+    let mut kept = Vec::new();
+    let mut used = header.len();
+    for rendered in rendered_comments.iter().rev() {
+        let separator_len = if kept.is_empty() { 0 } else { "\n\n---\n\n".len() };
+        if !kept.is_empty() && used + separator_len + rendered.len() > options.discussion_file_char_limit
+        {
+            break;
+        }
+        if kept.is_empty() && used + rendered.len() > options.discussion_file_char_limit {
+            kept.push(truncate_tail(rendered, options.discussion_file_char_limit.saturating_sub(used)));
+            break;
+        }
+        used += separator_len + rendered.len();
+        kept.push(rendered.clone());
+    }
+    kept.reverse();
+    let omitted = comments.len().saturating_sub(kept.len());
+
+    let mut body = header;
+    if omitted > 0 {
+        body.push_str(&format!(
+            "Showing the most recent {} of {} comment{} within the {} character budget.\n\n",
+            kept.len(),
+            comments.len(),
+            plural_suffix(comments.len()),
+            options.discussion_file_char_limit
+        ));
+    }
+    body.push_str(&kept.join("\n\n---\n\n"));
+    body.push('\n');
+    body
+}
+
+fn render_discussion_comment(comment: &DiscussionComment, images: &[DiscussionImageAsset]) -> String {
+    let author = comment
+        .author_name
+        .as_deref()
+        .filter(|author| !author.trim().is_empty())
+        .unwrap_or("Unknown author");
+    let timestamp = format_comment_timestamp(comment.created_at.as_deref());
+    let comment_images = images
+        .iter()
+        .filter(|asset| asset.comment_id == comment.id)
+        .collect::<Vec<_>>();
+    format!(
+        "## {} — {}\n\n{}",
+        timestamp,
+        author,
+        rewrite_comment_images(&comment.body, &comment_images)
+    )
+}
+
+fn rewrite_comment_images(body: &str, images: &[&DiscussionImageAsset]) -> String {
+    if images.is_empty() {
+        return body.to_string();
+    }
+
+    let mut rendered = String::new();
+    let mut cursor = 0usize;
+    let mut image_index = 0usize;
+    while let Some(start_offset) = body[cursor..].find("![") {
+        let start = cursor + start_offset;
+        let alt_start = start + 2;
+        let Some(alt_end_offset) = body[alt_start..].find("](") else {
+            break;
+        };
+        let alt_end = alt_start + alt_end_offset;
+        let url_start = alt_end + 2;
+        let Some(url_end_offset) = body[url_start..].find(')') else {
+            break;
+        };
+        let url_end = url_start + url_end_offset;
+
+        rendered.push_str(&body[cursor..start]);
+        if let Some(image) = images.get(image_index) {
+            rendered.push_str(&format!("![{}]({})", image.alt, image.discussion_relative_path));
+        } else {
+            rendered.push_str(&body[start..=url_end]);
+        }
+        cursor = url_end + 1;
+        image_index += 1;
+    }
+    rendered.push_str(&body[cursor..]);
+    rendered
+}
+
+fn render_ticket_image_manifest(issue: &IssueSummary, images: &[DiscussionImageAsset]) -> String {
+    let mut lines = vec![
+        "# Ticket Images".to_string(),
+        String::new(),
+        format!(
+            "Generated by `meta backlog sync pull` for `{}` at {}.",
+            issue.identifier,
+            sync_timestamp()
+        ),
+        String::new(),
+    ];
+    if images.is_empty() {
+        lines.push("No discussion images were found.".to_string());
+        return lines.join("\n");
+    }
+
+    for image in images {
+        lines.push(format!(
+            "- `{}` -> `{}` ({})",
+            image.source_url,
+            image.local_relative_path,
+            if image.reused_existing_file {
+                "reused existing download"
+            } else {
+                "downloaded"
+            }
+        ));
+    }
+    lines.join("\n")
+}
+
+fn parse_checklist_progress_summary(contents: &str) -> ChecklistProgressSummary {
+    let mut milestones = Vec::new();
+    let mut current_title = "Checklist".to_string();
+    let mut current_completed = 0usize;
+    let mut current_total = 0usize;
+
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if let Some(title) = trimmed.strip_prefix("## ") {
+            if current_total > 0 {
+                milestones.push(ChecklistMilestoneProgress {
+                    title: current_title,
+                    completed: current_completed,
+                    total: current_total,
+                });
+            }
+            current_title = title.trim().to_string();
+            current_completed = 0;
+            current_total = 0;
+            continue;
+        }
+
+        if trimmed.starts_with("- [x] ")
+            || trimmed.starts_with("- [X] ")
+            || trimmed.starts_with("* [x] ")
+            || trimmed.starts_with("* [X] ")
+        {
+            current_completed += 1;
+            current_total += 1;
+        } else if trimmed.starts_with("- [ ] ") || trimmed.starts_with("* [ ] ") {
+            current_total += 1;
+        }
+    }
+
+    if current_total > 0 {
+        milestones.push(ChecklistMilestoneProgress {
+            title: current_title,
+            completed: current_completed,
+            total: current_total,
+        });
+    }
+
+    ChecklistProgressSummary {
+        completed: milestones.iter().map(|milestone| milestone.completed).sum(),
+        total: milestones.iter().map(|milestone| milestone.total).sum(),
+        milestones,
+    }
+}
+
+fn render_harness_sync_comment(issue: &IssueSummary, progress: &ChecklistProgressSummary) -> String {
+    let mut lines = vec![
+        HARNESS_SYNC_MARKER.to_string(),
+        format!("Issue: `{}`", issue.identifier),
+        format!("Updated: {}", sync_timestamp()),
+        String::new(),
+    ];
+    if progress.milestones.is_empty() {
+        lines.push("No checklist milestones were found in `checklist.md`.".to_string());
+    } else {
+        for milestone in &progress.milestones {
+            lines.push(format!(
+                "- {} -- {}/{} complete",
+                milestone.title, milestone.completed, milestone.total
+            ));
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "Overall: {} ({}/{})",
+            completion_percentage(progress.completed, progress.total),
+            progress.completed,
+            progress.total
+        ));
+    }
+    lines.join("\n")
+}
+
+fn completion_percentage(completed: usize, total: usize) -> String {
+    if total == 0 {
+        return "0%".to_string();
+    }
+    format!("{}%", (completed * 100) / total)
+}
+
+fn format_comment_timestamp(created_at: Option<&str>) -> String {
+    created_at
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc).format("%Y-%m-%d %H:%M UTC").to_string())
+        .or_else(|| created_at.map(str::to_string))
+        .unwrap_or_else(|| "Unknown time".to_string())
+}
+
+fn truncate_tail(contents: &str, limit: usize) -> String {
+    if contents.len() <= limit {
+        return contents.to_string();
+    }
+    if limit <= 32 {
+        return contents.chars().take(limit).collect();
+    }
+    let mut tail = contents
+        .chars()
+        .rev()
+        .take(limit.saturating_sub(27))
+        .collect::<Vec<_>>();
+    tail.reverse();
+    format!(
+        "[truncated to fit budget]\n\n{}",
+        tail.into_iter().collect::<String>()
+    )
 }
 
 async fn load_sync_project_issues(
@@ -1087,7 +1619,7 @@ fn load_issue_metadata_if_present(issue_dir: &Path) -> Result<Option<BacklogIssu
 
 fn issue_remote_hash(issue: &IssueSummary) -> String {
     compute_remote_sync_hash(
-        issue.description.as_deref().unwrap_or_default(),
+        normalized_issue_description(issue),
         &managed_file_records_from_issue(issue),
     )
 }

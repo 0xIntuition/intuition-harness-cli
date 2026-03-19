@@ -98,6 +98,7 @@ impl<'a> GraphqlTransport<'a> {
         let response = self
             .http
             .get(url)
+            .header(AUTHORIZATION, &self.config.api_key)
             .send()
             .await
             .with_context(|| format!("failed to download `{url}`"))?;

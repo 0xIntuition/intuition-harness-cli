@@ -26,7 +26,8 @@ use walkdir::WalkDir;
 
 use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 use crate::backlog::{
-    BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, TemplateContext,
+    BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, TICKET_DISCUSSION_FILE_NAME,
+    TemplateContext,
     render_template_files, save_issue_metadata, write_issue_description,
 };
 use crate::cli::{
@@ -35,7 +36,7 @@ use crate::cli::{
 };
 use crate::config::{
     AppConfig, LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
-    PlanningMeta, load_required_planning_meta,
+    PlanningMeta, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, load_required_planning_meta,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{
@@ -828,6 +829,7 @@ where
                 local_hash: None,
                 remote_hash: None,
                 last_sync_at: None,
+                last_pulled_comment_ids: Vec::new(),
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
         )?;
@@ -2129,9 +2131,29 @@ fn render_agent_prompt(
             String::new()
         }
     };
+    let discussion_context = backlog_issue
+        .and_then(|backlog_issue| {
+            let discussion_path = PlanningPaths::new(workspace_path)
+                .backlog_issue_dir(&backlog_issue.identifier)
+                .join(TICKET_DISCUSSION_FILE_NAME);
+            discussion_path.is_file().then_some(discussion_path)
+        })
+        .and_then(|discussion_path| {
+            let contents = fs::read_to_string(&discussion_path).ok()?;
+            let char_limit = PlanningMeta::load(workspace_path)
+                .ok()
+                .map(|planning_meta| planning_meta.sync.discussion_prompt_char_limit())
+                .unwrap_or(DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT);
+            Some(format!(
+                "\nDiscussion context: {}\nDiscussion excerpt:\n\n{}",
+                discussion_path.display(),
+                truncate_discussion_excerpt(&contents, char_limit),
+            ))
+        })
+        .unwrap_or_default();
 
     format!(
-        "You are working on Linear ticket `{identifier}`\n\n{continuation}Issue context:\nIdentifier: {identifier}\nTitle: {title}\nCurrent status: {state}\nAssignee: {assignee}\nLabels: {labels}\nURL: {url}\nWorkspace: {workspace}\nTracking workpad comment ID: {comment_id}{backlog_context}{attachment_context}\n\nDescription:\n\n{description}",
+        "You are working on Linear ticket `{identifier}`\n\n{continuation}Issue context:\nIdentifier: {identifier}\nTitle: {title}\nCurrent status: {state}\nAssignee: {assignee}\nLabels: {labels}\nURL: {url}\nWorkspace: {workspace}\nTracking workpad comment ID: {comment_id}{backlog_context}{attachment_context}{discussion_context}\n\nDescription:\n\n{description}",
         identifier = issue.identifier,
         title = issue.title,
         state = state,
@@ -2142,8 +2164,28 @@ fn render_agent_prompt(
         comment_id = workpad_comment_id,
         backlog_context = backlog_context,
         attachment_context = attachment_context,
+        discussion_context = discussion_context,
         description = description,
         continuation = continuation,
+    )
+}
+
+fn truncate_discussion_excerpt(contents: &str, char_limit: usize) -> String {
+    if contents.len() <= char_limit {
+        return contents.to_string();
+    }
+    if char_limit <= 32 {
+        return contents.chars().take(char_limit).collect();
+    }
+    let mut tail = contents
+        .chars()
+        .rev()
+        .take(char_limit.saturating_sub(27))
+        .collect::<Vec<_>>();
+    tail.reverse();
+    format!(
+        "[truncated to most recent excerpt]\n\n{}",
+        tail.into_iter().collect::<String>()
     )
 }
 
@@ -2450,12 +2492,14 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         ListenCycleData, ListenState, SessionPhase, TokenUsage, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number,
+        compact_identifier, format_duration, format_number, render_agent_prompt,
     };
     use std::fs;
     use std::path::Path;
     use std::process::Command;
     use tempfile::tempdir;
+
+    use crate::linear::{IssueSummary, TeamRef};
 
     #[test]
     fn session_phase_has_human_labels() {
@@ -2611,6 +2655,65 @@ mod tests {
             "expected src.rs in status entries: {:?}",
             updated.status_entries
         );
+    }
+
+    #[test]
+    fn render_agent_prompt_includes_truncated_ticket_discussion_excerpt() {
+        let temp = tempdir().expect("temp dir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack/backlog/MET-24/context"))
+            .expect("discussion dir should build");
+        fs::create_dir_all(workspace.join(".metastack"))
+            .expect("metastack dir should build");
+        fs::write(
+            workspace.join(".metastack/meta.json"),
+            r#"{
+  "sync": {
+    "discussion_prompt_char_limit": 80
+  }
+}
+"#,
+        )
+        .expect("meta should write");
+        fs::write(
+            workspace.join(".metastack/backlog/MET-24/context/ticket-discussion.md"),
+            "# Ticket Discussion\n\nOld details that should be truncated away.\n\nNewest discussion tail.",
+        )
+        .expect("discussion should write");
+
+        let issue = test_issue("MET-24");
+        let prompt = render_agent_prompt(&issue, workspace, "comment-24", Some(&issue), 1, 20);
+
+        assert!(prompt.contains("Discussion context:"));
+        assert!(prompt.contains("[truncated to most recent excerpt]"));
+        assert!(prompt.contains("Newest discussion tail."));
+        assert!(!prompt.contains("Old details that should be truncated away."));
+    }
+
+    fn test_issue(identifier: &str) -> IssueSummary {
+        IssueSummary {
+            id: format!("issue-{identifier}"),
+            identifier: identifier.to_string(),
+            title: "Attachment bootstrap".to_string(),
+            description: Some("Use uploaded docs as implementation context".to_string()),
+            url: format!("https://linear.app/issues/{identifier}"),
+            priority: Some(2),
+            estimate: None,
+            updated_at: "2026-03-14T16:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
     }
 
     fn run_git(repo: &std::path::Path, args: &[&str]) -> anyhow::Result<()> {
