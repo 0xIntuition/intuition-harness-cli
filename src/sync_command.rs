@@ -86,6 +86,11 @@ fn resolve_ticket_discussion_budgets(
     }
 }
 
+/// Launch the interactive sync dashboard using local backlog entries as the selection source.
+///
+/// Returns an error when planning metadata is missing, the repo has no configured default
+/// project and no `--project` override, backlog discovery fails, or Linear-backed dashboard
+/// actions cannot be completed.
 pub async fn run_sync_dashboard_command(
     client_args: &LinearClientArgs,
     project_override: Option<&str>,

@@ -148,6 +148,11 @@ enum InteractiveTechnicalExit {
     Confirmed(TechnicalGeneratedBacklog),
 }
 
+/// Create a technical child issue, materialize its local backlog packet, and sync attachments.
+///
+/// Returns an error when planning metadata is missing, the parent issue cannot be loaded,
+/// backlog generation fails, the Linear child issue cannot be created, or the initial child sync
+/// push cannot publish the generated managed files.
 pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
