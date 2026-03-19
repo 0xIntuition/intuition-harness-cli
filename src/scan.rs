@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use toml::Value;
@@ -23,6 +23,7 @@ use crate::context::load_workflow_contract;
 use crate::fs::{
     FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, write_text_file,
 };
+use crate::notifications::TerminalNotifier;
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 use crate::scan_dashboard::{ScanDashboard, ScanDashboardData, ScanDashboardRow, ScanItemState};
@@ -524,6 +525,7 @@ fn run_scan_agent_with_dashboard(
             invocation.agent
         )
     })?;
+    let wait_started_at = Instant::now();
 
     if invocation.transport == crate::config::PromptTransport::Stdin {
         let mut stdin = child
@@ -569,6 +571,15 @@ fn run_scan_agent_with_dashboard(
 
         thread::sleep(SCAN_PROGRESS_POLL_INTERVAL);
     }
+
+    let mut notifier = TerminalNotifier::new(&AppConfig::load()?.notifications);
+    let _ = notifier.notify_long_wait_finished(
+        format!(
+            "Scan agent `{}` completed the codebase refresh",
+            invocation.agent
+        ),
+        wait_started_at.elapsed(),
+    )?;
 
     Ok(())
 }

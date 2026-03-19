@@ -251,8 +251,15 @@ The persisted config can store:
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
+- terminal notification cues under `[notifications]`
 - advanced family-level agent routing under `[agents.routing.families.<family>]`
 - advanced command-level agent routing under `[agents.routing.commands."<route>"]`
+
+Terminal notification cues are enabled by default. Set `[notifications].enabled = false` to
+disable the terminal bell and related long-wait milestone cues across `meta merge`,
+`meta context scan`, and long-running `meta agents listen` worker turns. The first implementation
+is terminal-safe only: it rings the standard terminal bell when a TTY is available and otherwise
+falls back to normal in-app progress updates without attempting desktop OS notifications.
 
 Agent-backed routes resolve install-scoped settings in this order:
 
@@ -313,6 +320,9 @@ team = "MET"
 default_agent = "codex"
 default_model = "gpt-5.4"
 default_reasoning = "medium"
+
+[notifications]
+enabled = true
 
 [agents.routing.families.backlog]
 provider = "claude"
@@ -407,6 +417,7 @@ Behavior summary:
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
 - Publication is gated on those validation commands succeeding. When validation fails, `meta merge` invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
+- When terminal notifications are enabled, major merge phase completions emit a terminal cue. The cue uses the terminal bell when a TTY is attached and otherwise degrades to the existing progress output without failing the run.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
 
@@ -442,7 +453,7 @@ Outputs:
 - `.metastack/codebase/STRUCTURE.md`
 - `.metastack/codebase/TESTING.md`
 
-When stdout is attached to a TTY, `meta context scan` renders a compact progress dashboard. The underlying agent output is captured in `.metastack/agents/sessions/scan.log`.
+When stdout is attached to a TTY, `meta context scan` renders a compact progress dashboard. The underlying agent output is captured in `.metastack/agents/sessions/scan.log`. When terminal notifications are enabled, the scan emits a cue only after a long-running scan-agent wait completes; short scans stay silent.
 
 `meta context scan` treats the resolved repository root as the default target scope for the run. In monorepos, that means the top-level directory you invoked as `--root` (or the current working directory when `--root` is omitted). The scan prompt stays focused on that repository only and should narrow to a subproject only when the user explicitly asks for it.
 
@@ -699,7 +710,7 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output. When terminal notifications are enabled, long-running listen worker turns emit a cue only after the wait finishes, so routine short turns do not ring.
 
 Examples:
 

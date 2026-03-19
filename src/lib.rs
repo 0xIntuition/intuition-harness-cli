@@ -12,6 +12,7 @@ mod linear;
 mod listen;
 mod merge;
 mod merge_dashboard;
+mod notifications;
 mod plan;
 mod progress;
 mod repo_target;

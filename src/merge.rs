@@ -376,6 +376,7 @@ fn execute_merge_run(
 ) -> Result<MergeExecution> {
     let paths = PlanningPaths::new(root);
     ensure_dir(&paths.merge_runs_dir)?;
+    let app_config = AppConfig::load()?;
 
     let (run_id, run_dir) = reserve_run_dir(&paths)?;
     let progress_mode = if args.no_interactive {
@@ -388,6 +389,7 @@ fn execute_merge_run(
         run_dir.join("progress.json"),
         &merge_progress_steps(),
         progress_mode,
+        &app_config.notifications,
     )?;
 
     let aggregate_branch = format!("meta-merge/{run_id}");

@@ -15,7 +15,9 @@ use ratatui::widgets::ListItem;
 use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
 
+use crate::config::NotificationSettings;
 use crate::fs::write_text_file;
+use crate::notifications::{TerminalNotification, TerminalNotifier};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 pub(crate) const SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
@@ -152,12 +154,14 @@ pub(crate) struct ProgressViewData {
     pub(crate) active_detail: Option<String>,
     pub(crate) steps: Vec<ProgressStepRecord>,
     pub(crate) notes: Vec<String>,
+    pub(crate) recent_notification: Option<String>,
 }
 
 enum ProgressDisplay {
     Tui(Terminal<CrosstermBackend<io::Stdout>>),
     Text {
         last_line: Option<String>,
+        last_notification: Option<String>,
     },
     #[cfg(test)]
     Hidden,
@@ -172,9 +176,10 @@ impl ProgressDisplay {
                 let backend = CrosstermBackend::new(stdout);
                 Self::Tui(Terminal::new(backend)?)
             }
-            ProgressOutputMode::Interactive | ProgressOutputMode::Text => {
-                Self::Text { last_line: None }
-            }
+            ProgressOutputMode::Interactive | ProgressOutputMode::Text => Self::Text {
+                last_line: None,
+                last_notification: None,
+            },
             #[cfg(test)]
             ProgressOutputMode::Hidden => Self::Hidden,
         })
@@ -185,7 +190,10 @@ impl ProgressDisplay {
             Self::Tui(terminal) => {
                 terminal.draw(|frame| render_progress_dashboard(frame, data))?;
             }
-            Self::Text { last_line } => {
+            Self::Text {
+                last_line,
+                last_notification,
+            } => {
                 let mut line = data.status_line.clone();
                 if let Some(detail) = &data.active_detail
                     && !detail.is_empty()
@@ -196,6 +204,12 @@ impl ProgressDisplay {
                 if last_line.as_ref() != Some(&line) {
                     println!("{line}");
                     *last_line = Some(line);
+                }
+                if let Some(notification) = &data.recent_notification
+                    && last_notification.as_ref() != Some(notification)
+                {
+                    println!("Notification: {notification}");
+                    *last_notification = Some(notification.clone());
                 }
             }
             #[cfg(test)]
@@ -219,6 +233,8 @@ pub(crate) struct ProgressTracker {
     artifact_path: PathBuf,
     artifact: ProgressArtifact,
     display: ProgressDisplay,
+    notifier: TerminalNotifier,
+    latest_notification: Option<String>,
 }
 
 impl ProgressTracker {
@@ -227,6 +243,7 @@ impl ProgressTracker {
         artifact_path: impl Into<PathBuf>,
         steps: &[ProgressStepDefinition],
         mode: ProgressOutputMode,
+        notifications: &NotificationSettings,
     ) -> Result<Self> {
         let timestamp = now_timestamp();
         let artifact = ProgressArtifact {
@@ -253,6 +270,8 @@ impl ProgressTracker {
             artifact_path: artifact_path.into(),
             artifact,
             display: ProgressDisplay::start(mode)?,
+            notifier: TerminalNotifier::new(notifications),
+            latest_notification: None,
         };
         tracker.persist()?;
         Ok(tracker)
@@ -275,7 +294,8 @@ impl ProgressTracker {
 
     pub(crate) fn complete_step(&mut self, key: &str, detail: impl Into<String>) -> Result<()> {
         let detail = detail.into();
-        self.transition_step(key, ProgressStepState::Complete, Some(detail), None)
+        self.transition_step(key, ProgressStepState::Complete, Some(detail.clone()), None)?;
+        self.record_notification(TerminalNotification::Milestone(detail))
     }
 
     pub(crate) fn fail_step(
@@ -287,13 +307,21 @@ impl ProgressTracker {
         let detail = detail.into();
         self.artifact.status = ProgressRunState::Failed;
         self.artifact.finished_at = Some(now_timestamp());
-        self.transition_step(key, ProgressStepState::Failed, Some(detail), pull_request)
+        self.transition_step(
+            key,
+            ProgressStepState::Failed,
+            Some(detail.clone()),
+            pull_request,
+        )?;
+        self.record_notification(TerminalNotification::Failure(detail))
     }
 
     pub(crate) fn finish_success(&mut self, detail: impl Into<String>) -> Result<()> {
         self.artifact.status = ProgressRunState::Succeeded;
         self.artifact.finished_at = Some(now_timestamp());
-        self.artifact.active_detail = Some(detail.into());
+        let detail = detail.into();
+        self.artifact.active_detail = Some(detail.clone());
+        self.record_notification(TerminalNotification::Milestone(detail))?;
         self.persist()
     }
 
@@ -347,6 +375,11 @@ impl ProgressTracker {
         self.display.render(&self.view_data())
     }
 
+    fn record_notification(&mut self, notification: TerminalNotification) -> Result<()> {
+        self.latest_notification = self.notifier.notify(notification)?;
+        Ok(())
+    }
+
     fn view_data(&self) -> ProgressViewData {
         let active_index = self
             .artifact
@@ -359,15 +392,21 @@ impl ProgressTracker {
             (Some(label), Some(index)) => format!("Phase {index}/{total}: {label}"),
             _ => self.artifact.title.clone(),
         };
+        let mut notes = vec![format!(
+            "Progress artifact: {}",
+            self.artifact_path.display()
+        )];
+        if let Some(notification) = &self.latest_notification {
+            notes.push(format!("Recent cue: {notification}"));
+        }
+
         ProgressViewData {
             title: self.artifact.title.clone(),
             status_line,
             active_detail: self.artifact.active_detail.clone(),
             steps: self.artifact.steps.clone(),
-            notes: vec![format!(
-                "Progress artifact: {}",
-                self.artifact_path.display()
-            )],
+            notes,
+            recent_notification: self.latest_notification.clone(),
         }
     }
 }
@@ -507,6 +546,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::config::NotificationSettings;
 
     #[test]
     fn loading_panel_snapshot_surfaces_shared_copy() {
@@ -550,6 +590,7 @@ mod tests {
             &artifact_path,
             &steps,
             ProgressOutputMode::Hidden,
+            &NotificationSettings { enabled: true },
         )
         .expect("tracker should start");
         tracker
@@ -603,6 +644,7 @@ mod tests {
                 notes: vec![
                     "Progress artifact: .metastack/merge-runs/run/progress.json".to_string(),
                 ],
+                recent_notification: Some("Major milestone reached: Validation passed".to_string()),
             },
             120,
             28,
@@ -613,5 +655,32 @@ mod tests {
         assert!(snapshot.contains("Phase 3/6: Merge application"));
         assert!(snapshot.contains("Applying pull request #101"));
         assert!(snapshot.contains("Progress artifact: .metastack/merge-runs/run/progress.json"));
+    }
+
+    #[test]
+    fn progress_tracker_prints_text_notifications_when_enabled() {
+        let temp = tempdir().expect("tempdir should exist");
+        let artifact_path = temp.path().join("progress.json");
+        let steps = [ProgressStepDefinition {
+            key: "validate",
+            label: "Validation",
+        }];
+
+        let mut tracker = ProgressTracker::start(
+            "meta merge progress",
+            &artifact_path,
+            &steps,
+            ProgressOutputMode::Hidden,
+            &NotificationSettings { enabled: true },
+        )
+        .expect("tracker should start");
+        tracker
+            .complete_step("validate", "Validation passed")
+            .expect("step should complete");
+
+        assert_eq!(
+            tracker.latest_notification.as_deref(),
+            Some("Major milestone reached: Validation passed")
+        );
     }
 }

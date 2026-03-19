@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub linear: LinearSettings,
     #[serde(default)]
     pub agents: AgentSettings,
+    #[serde(default)]
+    pub notifications: NotificationSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -128,6 +130,20 @@ pub struct AgentSettings {
     pub commands: BTreeMap<String, AgentCommandConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationSettings {
+    #[serde(default = "default_notifications_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_notifications_enabled(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentRoutingSettings {
     #[serde(default)]
@@ -158,6 +174,10 @@ pub enum PromptTransport {
     #[default]
     Arg,
     Stdin,
+}
+
+const fn default_notifications_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1485,10 +1505,10 @@ mod tests {
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
         AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
-        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, NoAgentSelectedError, PlanningAgentSettings,
-        PlanningListenSettings, PlanningMeta, PlanningPlanSettings, is_no_agent_selected_error,
-        no_agent_selected_route_key, normalize_agent_route_key, resolve_agent_config,
-        resolve_agent_route, validate_agent_reasoning,
+        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, NoAgentSelectedError, NotificationSettings,
+        PlanningAgentSettings, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
+        resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
 
@@ -1571,6 +1591,25 @@ mod tests {
     fn listen_poll_interval_validation_accepts_positive_values() {
         assert!(validate_listen_poll_interval_seconds(1).is_ok());
         assert!(validate_listen_poll_interval_seconds(60).is_ok());
+    }
+
+    #[test]
+    fn notifications_default_to_enabled() {
+        assert!(NotificationSettings::default().enabled);
+        assert!(AppConfig::default().notifications.enabled);
+    }
+
+    #[test]
+    fn app_config_toml_defaults_notifications_when_omitted() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[agents]
+default_agent = "codex"
+"#,
+        )
+        .expect("config should decode");
+
+        assert!(config.notifications.enabled);
     }
 
     #[test]
@@ -1727,6 +1766,20 @@ mod tests {
                 .and_then(|route| route.provider.as_deref()),
             Some("claude")
         );
+        assert!(decoded.notifications.enabled);
+    }
+
+    #[test]
+    fn app_config_toml_round_trips_disabled_notifications() {
+        let config = AppConfig {
+            notifications: NotificationSettings { enabled: false },
+            ..AppConfig::default()
+        };
+
+        let encoded = toml::to_string_pretty(&config).expect("config should encode");
+        let decoded: AppConfig = toml::from_str(&encoded).expect("config should decode");
+
+        assert!(!decoded.notifications.enabled);
     }
 
     #[test]

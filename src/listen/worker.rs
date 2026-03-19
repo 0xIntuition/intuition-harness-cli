@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -18,6 +19,7 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{
     IssueListFilters, IssueSummary, LinearClient, LinearService, ReqwestLinearClient, WorkflowState,
 };
+use crate::notifications::TerminalNotifier;
 use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
 
@@ -596,6 +598,7 @@ fn execute_agent_turn(
             invocation.agent
         )
     })?;
+    let wait_started_at = Instant::now();
 
     if invocation.transport == PromptTransport::Stdin {
         let mut stdin = child
@@ -611,7 +614,15 @@ fn execute_agent_turn(
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
+    let mut notifier = TerminalNotifier::new(&context.app_config.notifications);
     if !status.success() {
+        let _ = notifier.notify_long_wait_finished(
+            format!(
+                "listen agent `{}` finished turn {turn_number} with a failure",
+                invocation.agent
+            ),
+            wait_started_at.elapsed(),
+        )?;
         let code = status
             .code()
             .map(|value| value.to_string())
@@ -621,6 +632,14 @@ fn execute_agent_turn(
             invocation.agent
         );
     }
+
+    let _ = notifier.notify_long_wait_finished(
+        format!(
+            "listen agent `{}` finished turn {turn_number}",
+            invocation.agent
+        ),
+        wait_started_at.elapsed(),
+    )?;
 
     Ok(())
 }
