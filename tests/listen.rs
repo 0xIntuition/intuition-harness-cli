@@ -37,6 +37,46 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("meta listen"))
+        .stdout(predicate::str::contains("Dashboard: terminal summary"))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not());
+
+    Ok(())
+}
+
+#[test]
 fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
