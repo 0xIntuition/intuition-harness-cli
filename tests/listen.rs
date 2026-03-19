@@ -4002,9 +4002,15 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path(&stub_dir.join("payload-2.txt"))?;
     let state_path = listen_state_path(&config_path, &repo_root)?;
     wait_for_file_substring(&state_path, "\"phase\": \"blocked\"")?;
+    let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
+        .trim()
+        .parse::<u32>()?;
+    assert!(
+        turn_count >= 2,
+        "expected at least two agent turns before the worker stalled, observed {turn_count}"
+    );
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"issue_identifier\": \"MET-32\""));
     assert!(state.contains("\"phase\": \"blocked\""));
