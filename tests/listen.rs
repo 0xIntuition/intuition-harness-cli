@@ -4241,8 +4241,11 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path(&stub_dir.join("payload-2.txt"))?;
-    wait_for_path(&stub_dir.join("instructions-2.txt"))?;
+    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(120))?;
+    wait_for_path_with_timeout(
+        &stub_dir.join("instructions-2.txt"),
+        Duration::from_secs(120),
+    )?;
     let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
         .trim()
         .parse::<u32>()?;

@@ -2582,8 +2582,7 @@ mod tests {
     use super::{
         AgentSession, ListenCycleData, ListenState, SessionPhase, TokenUsage,
         capture_workspace_snapshot, compact_identifier, format_duration, format_number,
-        mark_running_session_stale,
-        listen_scope_label,
+        listen_scope_label, mark_running_session_stale,
     };
     use std::fs;
     use std::path::Path;

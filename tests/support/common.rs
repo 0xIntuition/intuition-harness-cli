@@ -390,14 +390,26 @@ fn commit_and_push_pull_ref(
 
 #[cfg(unix)]
 fn wait_for_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    for _ in 0..1_200 {
+    wait_for_path_with_timeout(path, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_path_with_timeout(path: &Path, timeout: Duration) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(50);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
         if path.exists() {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(poll_interval);
     }
 
-    Err(format!("timed out waiting for `{}`", path.display()).into())
+    Err(format!(
+        "timed out waiting for `{}` after {}s",
+        path.display(),
+        timeout.as_secs()
+    )
+    .into())
 }
 
 #[cfg(unix)]
