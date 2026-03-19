@@ -523,6 +523,7 @@ mod tests {
             reasoning_source: Some(AgentConfigSource::RepoDefault),
             transport: PromptTransport::Arg,
             payload: "Prompt:\nhello".to_string(),
+            attachments: Vec::new(),
             builtin_provider: true,
         }
     }
