@@ -106,35 +106,146 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
     let github = discover_github_prs(&context.source_root);
     let records = enrich_workspace_entries(entries, &linear.service, &github).await?;
 
-    let mut lines = vec![
-        format!("Workspace root: {}", context.workspace_root.display()),
-        "TICKET  BRANCH  SIZE  MODIFIED  GIT  LINEAR  PR  SAFE".to_string(),
-    ];
-    for record in &records {
-        let safe = if record.linear_is_removal_candidate {
-            "candidate"
-        } else {
-            "-"
+    let github_note = match &github {
+        GithubPrLookup::Unavailable(reason) => Some(format!("GitHub PR data unavailable: {reason}")),
+        _ => None,
+    };
+
+    // Launch TUI dashboard when interactive, fall back to text output
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        let dashboard_data = records_to_dashboard_data(
+            &context.workspace_root.display().to_string(),
+            &records,
+            github_note,
+        );
+
+        use crate::workspace_dashboard::{
+            WorkspaceDashboardOptions, WorkspaceDashboardExit, WorkspaceSelectionAction,
+            run_workspace_dashboard,
         };
-        lines.push(format!(
-            "{}  {}  {}  {}  {}  {}  {}  {}",
-            record.entry.ticket,
-            record.entry.branch,
-            format_bytes(record.entry.disk_usage_bytes),
-            format_system_time(record.entry.last_modified),
-            record.entry.git.display_label(),
-            record.linear_state,
-            record.pr_status.display_label(),
-            safe,
-        ));
-    }
 
-    if let GithubPrLookup::Unavailable(reason) = github {
-        lines.push(String::new());
-        lines.push(format!("GitHub PR data unavailable: {reason}"));
-    }
+        let options = WorkspaceDashboardOptions {
+            render_once: false,
+            width: 120,
+            height: 40,
+            actions: Vec::new(),
+        };
 
-    Ok(lines.join("\n"))
+        match run_workspace_dashboard(dashboard_data, options)? {
+            WorkspaceDashboardExit::Cancelled => Ok("Workspace dashboard closed.".to_string()),
+            WorkspaceDashboardExit::Snapshot(snapshot) => Ok(snapshot),
+            WorkspaceDashboardExit::Selected(selection) => {
+                let repo_root = crate::cli::RepositoryRootArgs {
+                    root: args.client.root.clone(),
+                };
+                match selection.action {
+                    WorkspaceSelectionAction::CleanTargets => {
+                        let mut results = Vec::new();
+                        for ticket in &selection.tickets {
+                            let result = run_workspace_clean(&crate::cli::WorkspaceCleanArgs {
+                                root: repo_root.clone(),
+                                ticket: Some(ticket.clone()),
+                                target_only: true,
+                                force: true,
+                            })?;
+                            results.push(result);
+                        }
+                        Ok(results.join("\n"))
+                    }
+                    WorkspaceSelectionAction::Clean => {
+                        let mut results = Vec::new();
+                        for ticket in &selection.tickets {
+                            let result = run_workspace_clean(&crate::cli::WorkspaceCleanArgs {
+                                root: repo_root.clone(),
+                                ticket: Some(ticket.clone()),
+                                target_only: false,
+                                force: true,
+                            })?;
+                            results.push(result);
+                        }
+                        Ok(results.join("\n"))
+                    }
+                    WorkspaceSelectionAction::PruneDryRun => {
+                        let result = run_workspace_prune(&crate::cli::WorkspacePruneArgs {
+                            client: args.client.clone(),
+                            dry_run: true,
+                            force: true,
+                        }).await?;
+                        Ok(result)
+                    }
+                    WorkspaceSelectionAction::Prune => {
+                        let result = run_workspace_prune(&crate::cli::WorkspacePruneArgs {
+                            client: args.client.clone(),
+                            dry_run: false,
+                            force: true,
+                        }).await?;
+                        Ok(result)
+                    }
+                }
+            }
+        }
+    } else {
+        // Non-interactive text output
+        let mut lines = vec![
+            format!("Workspace root: {}", context.workspace_root.display()),
+            "TICKET  BRANCH  SIZE  MODIFIED  GIT  LINEAR  PR  SAFE".to_string(),
+        ];
+        for record in &records {
+            let safe = if record.linear_is_removal_candidate {
+                "candidate"
+            } else {
+                "-"
+            };
+            lines.push(format!(
+                "{}  {}  {}  {}  {}  {}  {}  {}",
+                record.entry.ticket,
+                record.entry.branch,
+                format_bytes(record.entry.disk_usage_bytes),
+                format_system_time(record.entry.last_modified),
+                record.entry.git.display_label(),
+                record.linear_state,
+                record.pr_status.display_label(),
+                safe,
+            ));
+        }
+
+        if let Some(note) = github_note {
+            lines.push(String::new());
+            lines.push(note);
+        }
+
+        Ok(lines.join("\n"))
+    }
+}
+
+fn records_to_dashboard_data(
+    workspace_root: &str,
+    records: &[WorkspaceListRecord],
+    github_note: Option<String>,
+) -> crate::workspace_dashboard::WorkspaceDashboardData {
+    crate::workspace_dashboard::WorkspaceDashboardData {
+        workspace_root: workspace_root.to_string(),
+        entries: records
+            .iter()
+            .map(|record| crate::workspace_dashboard::WorkspaceDashboardEntry {
+                ticket: record.entry.ticket.clone(),
+                branch: record.entry.branch.clone(),
+                size: format_bytes(record.entry.disk_usage_bytes),
+                modified: format_system_time(record.entry.last_modified),
+                git_label: record.entry.git.display_label(),
+                git_clean: !record.entry.git.has_uncommitted_changes
+                    && !record.entry.git.has_unpushed_commits
+                    && !record.entry.git.is_detached,
+                linear_state: record.linear_state.clone(),
+                pr_label: record.pr_status.display_label().to_string(),
+                is_removal_candidate: record.linear_is_removal_candidate,
+                has_unpushed: record.entry.git.has_unpushed_commits,
+                has_uncommitted: record.entry.git.has_uncommitted_changes,
+                is_detached: record.entry.git.is_detached,
+            })
+            .collect(),
+        github_note,
+    }
 }
 
 /// Removes one workspace clone or the `target/` directories within matching clones. Returns an

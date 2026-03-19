@@ -27,6 +27,7 @@ mod tui;
 mod workflow_contract;
 mod workflows;
 mod workspace;
+mod workspace_dashboard;
 
 use std::ffi::OsString;
 
