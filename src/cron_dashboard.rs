@@ -11,12 +11,12 @@ use crossterm::terminal::{
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::theme::{Tone, badge, key_hints, list, panel_title, paragraph};
 
 const NONE_AGENT_LABEL: &str = "None";
 const ENABLED_OPTIONS: [&str; 2] = ["Enabled", "Disabled"];
@@ -177,26 +177,46 @@ fn render_once(mut app: CronInitApp, options: CronInitFormOptions) -> Result<Cro
 }
 
 fn render_cron_init_form(frame: &mut Frame<'_>, app: &CronInitApp) {
+    let narrow = frame.area().width < 110;
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(if narrow { 5 } else { 4 }),
             Constraint::Min(0),
             Constraint::Length(4),
         ])
         .split(frame.area());
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .direction(if narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if narrow {
+            vec![Constraint::Percentage(42), Constraint::Percentage(58)]
+        } else {
+            vec![Constraint::Percentage(52), Constraint::Percentage(48)]
+        })
         .split(layout[1]);
 
-    let header = Paragraph::new(Text::from(vec![
-        Line::from("Cron Init Dashboard"),
-        Line::from(
-            "Configure a schedule preset, an optional shell command, and an optional recurring agent prompt.",
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("meta cron init"));
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(vec![
+                badge("cron", Tone::Accent),
+                Span::raw(" Cron Init Dashboard"),
+            ]),
+            Line::from(
+                "Configure a schedule preset, an optional shell command, and an optional recurring agent prompt.",
+            ),
+            key_hints(&[
+                ("Tab", "next field"),
+                ("Shift+Tab", "previous"),
+                ("Ctrl-S", "save"),
+                ("Esc", "cancel"),
+            ]),
+        ]),
+        panel_title("meta cron init", false),
+    );
     frame.render_widget(header, layout[0]);
 
     render_form_fields(frame, app, body[0]);
@@ -211,17 +231,24 @@ fn render_form_fields(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     let items = CronField::all()
         .iter()
         .map(|field| {
-            ListItem::new(Line::from(format!(
-                "{}: {}",
-                field.label(),
-                app.field_value(*field)
-            )))
+            ListItem::new(Line::from(vec![
+                badge(
+                    if *field == app.focus {
+                        "active"
+                    } else {
+                        "field"
+                    },
+                    if *field == app.focus {
+                        Tone::Accent
+                    } else {
+                        Tone::Muted
+                    },
+                ),
+                Span::raw(format!(" {}: {}", field.label(), app.field_value(*field))),
+            ]))
         })
         .collect::<Vec<_>>();
-    let fields = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Fields"))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let fields = list(items, panel_title("Fields", true));
     frame.render_stateful_widget(fields, area, &mut state);
 }
 
@@ -242,41 +269,43 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
         (_, Some(_)) => "Prompt set, but no agent selected".to_string(),
         _ => "Disabled until a prompt is provided".to_string(),
     };
-    let preview = Paragraph::new(Text::from(vec![
-        Line::from(format!(
-            "Job file: .metastack/cron/{}.md",
-            if app.name.value().trim().is_empty() {
-                "<name>"
-            } else {
-                app.name.value().trim()
-            }
-        )),
-        Line::from(format!("Generated schedule: {schedule_summary}")),
-        Line::from(format!(
-            "Command: {}",
-            empty_placeholder(app.command.value(), "<optional>")
-        )),
-        Line::from(format!("Agent phase: {agent_summary}")),
-        Line::from(format!(
-            "Working directory: {}",
-            empty_placeholder(app.working_directory.value(), ".")
-        )),
-        Line::from(format!(
-            "Timeout / shell: {}s via {}",
-            empty_placeholder(app.timeout_seconds.value(), "900"),
-            empty_placeholder(app.shell.value(), "/bin/sh")
-        )),
-        Line::from(format!(
-            "Enabled: {}",
-            app.enabled.selected_label().unwrap_or("Enabled")
-        )),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Preview"))
-    .wrap(Wrap { trim: false });
+    let preview = paragraph(
+        Text::from(vec![
+            Line::from(format!(
+                "Job file: .metastack/cron/{}.md",
+                if app.name.value().trim().is_empty() {
+                    "<name>"
+                } else {
+                    app.name.value().trim()
+                }
+            )),
+            Line::from(format!("Generated schedule: {schedule_summary}")),
+            Line::from(format!(
+                "Command: {}",
+                empty_placeholder(app.command.value(), "<optional>")
+            )),
+            Line::from(format!("Agent phase: {agent_summary}")),
+            Line::from(format!(
+                "Working directory: {}",
+                empty_placeholder(app.working_directory.value(), ".")
+            )),
+            Line::from(format!(
+                "Timeout / shell: {}s via {}",
+                empty_placeholder(app.timeout_seconds.value(), "900"),
+                empty_placeholder(app.shell.value(), "/bin/sh")
+            )),
+            Line::from(format!(
+                "Enabled: {}",
+                app.enabled.selected_label().unwrap_or("Enabled")
+            )),
+        ]),
+        panel_title("Preview", false),
+    )
+    .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(preview, sections[0]);
 
-    let active_help = Paragraph::new(Text::from(vec![
-        Line::from(app.focus.help_text()),
+    let active_help = paragraph(Text::from(vec![
+        Line::from(app.focus.help_text().to_string()),
         Line::from(""),
         Line::from("Execution contract:"),
         Line::from(
@@ -288,27 +317,25 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
         ),
         Line::from(""),
         Line::from("Prompt preview:"),
-        Line::from(empty_placeholder(app.prompt.value(), "<blank>")),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Details"))
-    .wrap(Wrap { trim: false });
+        Line::from(empty_placeholder(app.prompt.value(), "<blank>").to_string()),
+    ]), panel_title("Details", false))
+    .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(active_help, sections[1]);
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
-    let footer = Paragraph::new(Text::from(vec![
+    let footer_message = app
+        .error
+        .clone()
+        .unwrap_or_else(|| "Ready to create the cron job.".to_string());
+    let footer = paragraph(Text::from(vec![
         Line::from("Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections."),
         Line::from(
             "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline. Ctrl+S also creates the job. Esc cancels.",
         ),
-        Line::from(
-            app.error
-                .as_deref()
-                .unwrap_or("Ready to create the cron job."),
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("Controls"))
-    .wrap(Wrap { trim: false });
+        Line::from(footer_message),
+    ]), panel_title("Controls", false))
+    .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(footer, area);
 }
 
