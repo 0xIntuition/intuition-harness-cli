@@ -241,6 +241,207 @@ fn listen_sessions_clear_refuses_live_pid_records() -> Result<(), Box<dyn Error>
 
 #[cfg(unix)]
 #[test]
+fn agents_listen_sessions_clear_blocked_preserves_other_selector_states()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", now, None),
+            listen_session_json("ENG-10164", "completed", now, None),
+            listen_session_json("ENG-10165", "running", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "sessions",
+            "clear",
+            "--blocked",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--blocked`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+    assert_eq!(sessions[1]["issue_identifier"], "ENG-10165");
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10164 [Completed]"))
+        .stdout(predicate::str::contains("ENG-10165 [Running]"))
+        .stdout(predicate::str::contains("ENG-10163").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_completed_preserves_blocked_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "completed", now, None),
+            listen_session_json("ENG-10164", "blocked", now, None),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--completed",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--completed`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Completed]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_clear_stale_removes_only_dead_pid_records() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut child = ProcessCommand::new("sleep").arg("30").spawn()?;
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", 100, Some(99_999)),
+            listen_session_json("ENG-10164", "running", 200, Some(child.id())),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--stale",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Cleared 1 stored MetaListen session(s) matched by `--stale`",
+        ))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked]"));
+
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    let sessions = state["sessions"]
+        .as_array()
+        .expect("sessions should remain an array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["issue_identifier"], "ENG-10164");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_sessions_list_prunes_expired_completed_sessions_on_load() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
