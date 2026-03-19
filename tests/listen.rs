@@ -548,6 +548,90 @@ fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_sessions_list_and_inspect_surface_latest_resume_metadata() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![
+            listen_session_json("ENG-10163", "blocked", 100, None),
+            json!({
+                "issue_id": "ENG-10164-id",
+                "issue_identifier": "ENG-10164",
+                "issue_title": "ENG-10164 title",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/ENG-10164",
+                "phase": "running",
+                "summary": "ENG-10164 summary",
+                "brief_path": ".metastack/agents/briefs/ENG-10164.md",
+                "workspace_path": "/tmp/ENG-10164",
+                "workpad_comment_id": "comment-ENG-10164",
+                "updated_at_epoch_seconds": 200,
+                "pid": 4242,
+                "session_id": "ENG-10164-id",
+                "latest_resume_handle": {
+                    "provider": "codex",
+                    "id": "019d0763-afc9-70d1-8022-51624918cf76"
+                },
+                "turns": 1,
+                "tokens": {},
+                "log_path": "logs/ENG-10164.log"
+            }),
+        ],
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PROVIDER"))
+        .stdout(predicate::str::contains("RESUME ID"))
+        .stdout(predicate::str::contains("codex"))
+        .stdout(predicate::str::contains(
+            "019d0763-afc9-70d1-8022-51624918cf76",
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resume provider: codex"))
+        .stdout(predicate::str::contains(
+            "Resume ID: 019d0763-afc9-70d1-8022-51624918cf76",
+        ));
+
+    Ok(())
+}
+
 #[test]
 fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
 -> Result<(), Box<dyn Error>> {
@@ -731,6 +815,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -832,6 +917,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -1690,7 +1776,11 @@ exit 0
                     "workpad_comment_id": "comment-40",
                     "updated_at_epoch_seconds": 1_773_575_000u64,
                     "pid": 4242,
-                    "session_id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a",
+                    "session_id": "issue-40",
+                    "latest_resume_handle": {
+                        "provider": "codex",
+                        "id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                    },
                     "turns": 3,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-40.log"
@@ -1713,7 +1803,11 @@ exit 0
                     "workpad_comment_id": "comment-41",
                     "updated_at_epoch_seconds": 1_773_574_900u64,
                     "pid": 4343,
-                    "session_id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd",
+                    "session_id": "issue-41",
+                    "latest_resume_handle": {
+                        "provider": "claude",
+                        "id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                    },
                     "turns": 4,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-41.log"
@@ -3603,6 +3697,8 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--verbose
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -3638,6 +3734,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -3878,6 +3975,8 @@ exit 99
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
     assert!(args.contains("--permission-mode=bypassPermissions"));
+    assert!(args.contains("--verbose"));
+    assert!(args.contains("--output-format=stream-json"));
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
@@ -4241,10 +4340,10 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(120))?;
+    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(180))?;
     wait_for_path_with_timeout(
         &stub_dir.join("instructions-2.txt"),
-        Duration::from_secs(120),
+        Duration::from_secs(180),
     )?;
     let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
         .trim()

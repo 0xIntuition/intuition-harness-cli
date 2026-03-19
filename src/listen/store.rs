@@ -735,6 +735,7 @@ mod tests {
             updated_at_epoch_seconds: updated_at,
             pid: None,
             session_id: Some(format!("session-{issue_identifier}")),
+            latest_resume_handle: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             log_path: Some(format!("logs/{issue_identifier}.log")),

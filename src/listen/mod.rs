@@ -45,7 +45,9 @@ use crate::linear::{
 use crate::listen::workpad::{extract_requirements, render_bootstrap_workpad};
 use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
 use crate::scaffold::ensure_planning_layout;
-pub use state::{AgentSession, PendingIssue, SessionPhase, TokenUsage};
+pub use state::{
+    AgentSession, LatestResumeHandle, PendingIssue, ResumeProvider, SessionPhase, TokenUsage,
+};
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
 use store::{
     ListenProjectStore, SessionSelector, StoredListenProjectSummary, pid_is_running,
@@ -249,10 +251,14 @@ impl ListenCycleData {
                     workpad_comment_id: Some("comment-met-13".to_string()),
                     updated_at_epoch_seconds: reference_now - 1_180,
                     pid: Some(95_388),
-                    session_id: Some(
-                        "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                    session_id: Some("019cedb422937651b0b4dfac4af6a640".to_string()),
+                    latest_resume_handle: Some(LatestResumeHandle {
+                        provider: ResumeProvider::Codex,
+                        id: (
+                            "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                        )
                             .to_string(),
-                    ),
+                    }),
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(9_614_112),
@@ -279,10 +285,14 @@ impl ListenCycleData {
                     workpad_comment_id: None,
                     updated_at_epoch_seconds: reference_now - 2_940,
                     pid: Some(96_104),
-                    session_id: Some(
-                        "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                    session_id: Some("019ceda50a417ef1bf964f26683c1570".to_string()),
+                    latest_resume_handle: Some(LatestResumeHandle {
+                        provider: ResumeProvider::Claude,
+                        id: (
+                            "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                        )
                             .to_string(),
-                    ),
+                    }),
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(8_380_959),
@@ -1170,6 +1180,7 @@ where
             updated_at_epoch_seconds,
             pid: artifacts.pid.filter(|pid| *pid > 0),
             session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
             log_path: artifacts.log_path,
@@ -1601,7 +1612,7 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     let now = now_epoch_seconds();
     let mut lines = vec![
         "Stored MetaListen project sessions:".to_string(),
-        "KEY  PHASE  UPDATED  ISSUE  PROJECT  ROOT".to_string(),
+        "KEY  PHASE  UPDATED  ISSUE  PROVIDER  RESUME ID  PROJECT  ROOT".to_string(),
     ];
     for project in projects {
         let latest = project.latest_session.as_ref();
@@ -1614,12 +1625,20 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
         let issue = latest
             .map(|session| session.issue_identifier.clone())
             .unwrap_or_else(|| "-".to_string());
+        let provider = latest
+            .map(AgentSession::latest_resume_provider_label)
+            .unwrap_or_else(|| "-".to_string());
+        let resume_id = latest
+            .map(AgentSession::latest_resume_id_label)
+            .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
-            "{}  {}  {}  {}  {}  {}",
+            "{}  {}  {}  {}  {}  {}  {}  {}",
             compact_identifier(&project.metadata.project_key),
             phase,
             updated,
             issue,
+            provider,
+            resume_id,
             project.metadata.project_label,
             project.metadata.source_root
         ));
@@ -1665,6 +1684,14 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!(
             "  - Updated: {}",
             now_timestamp_for_epoch(session.updated_at_epoch_seconds)
+        ));
+        lines.push(format!(
+            "  - Resume provider: {}",
+            session.latest_resume_provider_label()
+        ));
+        lines.push(format!(
+            "  - Resume ID: {}",
+            session.latest_resume_id_label()
         ));
         if let Some(workspace_path) = session.workspace_path {
             lines.push(format!("  - Workspace: {workspace_path}"));
@@ -2652,6 +2679,7 @@ mod tests {
             updated_at_epoch_seconds: 1,
             pid: Some(42_424),
             session_id: Some("session-1".to_string()),
+            latest_resume_handle: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
             log_path: Some("logs/ENG-10163.log".to_string()),

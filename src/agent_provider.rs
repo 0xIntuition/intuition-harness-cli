@@ -192,7 +192,13 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
             }
         }
 
-        args.extend(launch_args.to_vec());
+        let mut exec_args = launch_args.to_vec();
+        if context == BuiltinInvocationContext::Listen
+            && let Some(exec_index) = exec_args.iter().position(|arg| arg == "exec")
+        {
+            exec_args.insert(exec_index + 1, "--json".to_string());
+        }
+        args.extend(exec_args);
         Ok(args)
     }
 
@@ -270,6 +276,11 @@ impl BuiltinProviderAdapter for CodexProviderAdapter {
                         &["-c, --config <key=value>", "--config <key=value>"],
                     )][..],
                 ),
+                (
+                    exec_args.iter().any(|arg| arg == "--json"),
+                    "exec json flags",
+                    &[FlagSupport::new("--json", &["--json"])][..],
+                ),
             ],
         )?;
 
@@ -310,6 +321,8 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         let mut args = Vec::new();
         if context == BuiltinInvocationContext::Listen {
             args.push("--permission-mode=bypassPermissions".to_string());
+            args.push("--verbose".to_string());
+            args.push("--output-format=stream-json".to_string());
         }
         args.extend(launch_args.to_vec());
         Ok(args)
@@ -334,6 +347,21 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
                     command_args.iter().any(|arg| arg.starts_with("--effort=")),
                     "effort flags",
                     &[FlagSupport::new("--effort", &["--effort <level>"])][..],
+                ),
+                (
+                    command_args.iter().any(|arg| arg == "--verbose"),
+                    "verbose flags",
+                    &[FlagSupport::new("--verbose", &["--verbose"])][..],
+                ),
+                (
+                    command_args
+                        .iter()
+                        .any(|arg| arg.starts_with("--output-format=")),
+                    "output-format flags",
+                    &[FlagSupport::new(
+                        "--output-format",
+                        &["--output-format <format>"],
+                    )][..],
                 ),
                 (
                     command_args.iter().any(|arg| {
