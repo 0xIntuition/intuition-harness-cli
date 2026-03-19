@@ -35,22 +35,26 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
 workspace root, while listener session state lives in a shared install-scoped store. The store key
-is derived from the canonical source project `.metastack` root, so the source repo checkout and any
-related worktrees resolve to the same stored project session and active-listener lock.
+is derived from the canonical source project root plus the effective project selector used for the
+run, so the source repo checkout and any related worktrees still share one stored session per
+project target while different project targets in the same checkout keep separate locks and logs.
 
 ## Command Surface
 
 Primary options:
 
 - `--team <KEY>`: Linear team scope.
-- `--project <NAME>`: optional project scope.
+- `--project <NAME|ID>`: optional project scope. Omitting it falls back to the repo default
+  `linear.project_id` when configured.
 - `--max-pickups <N>`: cap newly claimed issues per poll.
 - `--poll-interval <SECONDS>`: refresh cadence for the live loop. Overrides the repo-scoped default when set.
 - `--once`: run a single live cycle and print a textual summary.
 - `--render-once`: run a single cycle and print a deterministic ratatui snapshot.
 - `--demo`: skip Linear and render sample queue/session data.
 - `listen sessions list|inspect|clear|resume`: inspect or reuse stored project sessions from the
-  install-scoped listener store.
+  install-scoped listener store. Use `--project` with `inspect`, `clear`, or `resume` to target a
+  non-default project from the same checkout, or `--project-key` when you already know the stored
+  install-scoped key.
 - Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, and `q` / `Ctrl-C` exits.
 
 Repo-scoped listen settings in `.metastack/meta.json`:

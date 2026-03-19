@@ -676,6 +676,9 @@ pub struct ListenSessionTargetArgs {
     /// Resolve the stored project session from this repository root.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Resolve the stored project session for this effective Linear project selector.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Resolve the stored project session from an install-scoped project key.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
@@ -867,6 +870,9 @@ pub struct ListenWorkerArgs {
     /// Repository root whose listen state should be updated.
     #[arg(long, value_name = "PATH")]
     pub source_root: PathBuf,
+    /// Effective Linear project selector for the listener session store.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Workspace checkout where the agent should run.
     #[arg(long, value_name = "PATH")]
     pub workspace: PathBuf,

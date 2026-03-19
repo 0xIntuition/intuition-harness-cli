@@ -28,6 +28,8 @@ pub(super) struct ListenProjectIdentity {
     pub(super) project_key: String,
     pub(super) source_root: PathBuf,
     pub(super) metastack_root: PathBuf,
+    pub(super) source_label: String,
+    pub(super) project_selector: Option<String>,
     pub(super) project_label: String,
 }
 
@@ -45,9 +47,13 @@ pub(super) struct ListenProjectPaths {
 pub(super) struct ListenProjectMetadata {
     pub(super) version: u8,
     pub(super) project_key: String,
+    #[serde(default)]
+    pub(super) project_selector: Option<String>,
     pub(super) project_label: String,
     pub(super) source_root: String,
     pub(super) metastack_root: String,
+    #[serde(default)]
+    pub(super) source_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,13 +81,17 @@ pub(super) struct ListenerLockGuard {
 }
 
 impl ListenProjectStore {
-    pub(super) fn resolve(root: &Path) -> Result<Self> {
+    pub(super) fn resolve(root: &Path, project_selector: Option<&str>) -> Result<Self> {
         let data_root = resolve_data_root()?;
-        Self::resolve_with_data_root(root, data_root)
+        Self::resolve_with_data_root(root, data_root, project_selector)
     }
 
-    fn resolve_with_data_root(root: &Path, data_root: PathBuf) -> Result<Self> {
-        let identity = resolve_project_identity(root)?;
+    fn resolve_with_data_root(
+        root: &Path,
+        data_root: PathBuf,
+        project_selector: Option<&str>,
+    ) -> Result<Self> {
+        let identity = resolve_project_identity(root, project_selector)?;
         let projects_root = data_root.join("listen").join("projects");
         let project_dir = projects_root.join(&identity.project_key);
         let paths = ListenProjectPaths {
@@ -101,10 +111,22 @@ impl ListenProjectStore {
         let project_dir = data_root.join("listen").join("projects").join(project_key);
         let metadata_path = project_dir.join("project.json");
         let metadata = read_json::<ListenProjectMetadata>(&metadata_path)?;
+        let source_label = if metadata.source_label.trim().is_empty() {
+            Path::new(&metadata.source_root)
+                .file_name()
+                .and_then(OsStr::to_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("project")
+                .to_string()
+        } else {
+            metadata.source_label.clone()
+        };
         let identity = ListenProjectIdentity {
             project_key: metadata.project_key.clone(),
             source_root: PathBuf::from(&metadata.source_root),
             metastack_root: PathBuf::from(&metadata.metastack_root),
+            source_label,
+            project_selector: metadata.project_selector.clone(),
             project_label: metadata.project_label.clone(),
         };
         let paths = ListenProjectPaths {
@@ -139,9 +161,11 @@ impl ListenProjectStore {
             &ListenProjectMetadata {
                 version: LISTEN_STORE_VERSION,
                 project_key: self.identity.project_key.clone(),
+                project_selector: self.identity.project_selector.clone(),
                 project_label: self.identity.project_label.clone(),
                 source_root: self.identity.source_root.display().to_string(),
                 metastack_root: self.identity.metastack_root.display().to_string(),
+                source_label: self.identity.source_label.clone(),
             },
         )
     }
@@ -367,21 +391,30 @@ impl Drop for ListenerLockGuard {
     }
 }
 
-fn resolve_project_identity(root: &Path) -> Result<ListenProjectIdentity> {
+fn resolve_project_identity(
+    root: &Path,
+    project_selector: Option<&str>,
+) -> Result<ListenProjectIdentity> {
     let requested_root = canonicalize_existing_dir(root)?;
     let source_root = resolve_source_root(&requested_root)?;
     let metastack_root = canonicalize_existing_dir(&source_root.join(".metastack"))?;
-    let project_label = source_root
+    let source_label = source_root
         .file_name()
         .and_then(OsStr::to_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("project")
         .to_string();
+    let project_selector = normalize_project_selector(project_selector);
+    let project_label = project_selector
+        .clone()
+        .unwrap_or_else(|| "All projects".to_string());
 
     Ok(ListenProjectIdentity {
-        project_key: project_key_for_metastack_root(&metastack_root),
+        project_key: project_key_for_metastack_root(&metastack_root, project_selector.as_deref()),
         source_root,
         metastack_root,
+        source_label,
+        project_selector,
         project_label,
     })
 }
@@ -409,10 +442,25 @@ fn resolve_source_root(root: &Path) -> Result<PathBuf> {
     Ok(root.to_path_buf())
 }
 
-fn project_key_for_metastack_root(metastack_root: &Path) -> String {
+fn project_key_for_metastack_root(metastack_root: &Path, project_selector: Option<&str>) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
+    normalized_project_scope_key(project_selector).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+fn normalize_project_selector(project_selector: Option<&str>) -> Option<String> {
+    project_selector
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalized_project_scope_key(project_selector: Option<&str>) -> String {
+    match normalize_project_selector(project_selector) {
+        Some(selector) => format!("project:{}", selector.to_ascii_lowercase()),
+        None => "project:all".to_string(),
+    }
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
@@ -564,8 +612,16 @@ mod tests {
         fs::create_dir_all(&metastack_root)?;
 
         assert_eq!(
-            project_key_for_metastack_root(&metastack_root),
-            project_key_for_metastack_root(&metastack_root)
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack CLI")),
+            project_key_for_metastack_root(&metastack_root, Some("metastack cli"))
+        );
+        assert_ne!(
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack CLI")),
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack API"))
+        );
+        assert_ne!(
+            project_key_for_metastack_root(&metastack_root, Some("MetaStack CLI")),
+            project_key_for_metastack_root(&metastack_root, None)
         );
 
         Ok(())
@@ -578,7 +634,11 @@ mod tests {
         let config_path = temp.path().join("metastack.toml");
         fs::create_dir_all(repo_root.join(".metastack"))?;
         let data_root = data_root_from_config_path(&config_path)?;
-        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root.clone())?;
+        let store = ListenProjectStore::resolve_with_data_root(
+            &repo_root,
+            data_root.clone(),
+            Some("MetaStack CLI"),
+        )?;
         assert!(data_root.starts_with(temp.path()));
         assert!(store.paths().state_path.starts_with(data_root));
         Ok(())
@@ -590,7 +650,7 @@ mod tests {
         let repo_root = temp.path().join("repo");
         let data_root = temp.path().join("data");
         fs::create_dir_all(repo_root.join(".metastack"))?;
-        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root)?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
         fs::write(store.paths().state_path.clone(), "{}")?;
         write_json(

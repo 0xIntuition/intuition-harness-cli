@@ -699,15 +699,16 @@ Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
-The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
+The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. `meta agents listen` is terminal-only: steady-state runs stay in the TUI, and `--once` / `--render-once` emit terminal-only summary output without serving a browser app or local dashboard port.
 
 Examples:
 
 ```bash
 meta agents listen --demo --render-once
 meta agents listen --check --root .
+meta agents listen --team MET --once
 meta agents listen --team MET --project "MetaStack CLI" --once
-meta agents listen --team MET --project "MetaStack CLI"
+meta agents listen --team MET --project "MetaStack API"
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
 
@@ -731,7 +732,7 @@ Outputs:
 - `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/briefs/<TICKET>.md`
 - `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/issue-context/<TICKET>/README.md`
 - install-scoped MetaListen state under the global MetaStack data root, keyed by the canonical
-  source project `.metastack` root
+  source project root plus the effective listen project selector for that run
 - install-scoped MetaListen logs under the same project store
 - a live terminal dashboard in steady-state mode, or a render-once terminal snapshot when requested
 
@@ -739,14 +740,17 @@ When `$METASTACK_CONFIG` points to a custom config file, the listener store live
 config file's parent `data/` directory. Otherwise the default install-scoped root is derived from
 the existing config path rules, for example `~/.config/metastack/data/`. Each project is stored in
 `listen/projects/<PROJECT_KEY>/` with `project.json`, `session.json`, an active-listener lock, and
-per-issue logs.
+per-issue logs. The same checkout can keep multiple stored listener sessions side by side as long
+as each run targets a different effective project selector; omitting `--project` uses the repo's
+configured default project identity when one is set.
 
 Stored-session management commands:
 
 ```bash
 meta listen sessions list
-meta listen sessions inspect
-meta listen sessions clear
+meta listen sessions inspect --root .
+meta listen sessions inspect --root . --project "MetaStack API"
+meta listen sessions clear --root . --project "MetaStack API"
 meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
 

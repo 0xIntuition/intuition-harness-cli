@@ -729,7 +729,7 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
     )?;
     init_repo_with_origin(&repo_root)?;
 
-    let project_dir = listen_project_store_dir(&config_path, &repo_root)?;
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, Some("MetaStack CLI"))?;
     fs::create_dir_all(&project_dir)?;
     fs::write(
         project_dir.join("active-listener.lock.json"),
@@ -756,12 +756,79 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
             "listen",
             "--demo",
             "--once",
+            "--project",
+            "MetaStack CLI",
             "--root",
             repo_root.to_str().expect("temp path should be utf-8"),
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already owns project"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_allows_active_listener_lock_for_different_project() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let alpha_dir = listen_project_store_dir(&config_path, &repo_root, Some("Alpha"))?;
+    fs::create_dir_all(&alpha_dir)?;
+    fs::write(
+        alpha_dir.join("active-listener.lock.json"),
+        format!(
+            r#"{{
+  "pid": {},
+  "acquired_at_epoch_seconds": 1773575600,
+  "source_root": "{}",
+  "metastack_root": "{}"
+}}"#,
+            std::process::id(),
+            listen_source_root(&repo_root)?.display(),
+            listen_source_root(&repo_root)?
+                .join(".metastack")
+                .canonicalize()?
+                .display()
+        ),
+    )?;
+
+    let beta_state_path =
+        listen_project_store_dir(&config_path, &repo_root, Some("Beta"))?.join("session.json");
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "Beta",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            beta_state_path.display()
+        )))
+        .stdout(predicate::str::contains(alpha_dir.display().to_string()).not());
 
     Ok(())
 }
@@ -786,7 +853,7 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
     )?;
     init_repo_with_origin(&repo_root)?;
 
-    let project_dir = listen_project_store_dir(&config_path, &repo_root)?;
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, None)?;
     fs::create_dir_all(&project_dir)?;
     let lock_path = project_dir.join("active-listener.lock.json");
     fs::write(
@@ -825,6 +892,53 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
                 .as_ref(),
         ));
     assert!(!lock_path.exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_omitted_project_uses_repo_default_project_identity() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-default"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let default_project_dir =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-default"))?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            default_project_dir.join("session.json").display()
+        )));
+
+    let metadata = fs::read_to_string(default_project_dir.join("project.json"))?;
+    assert!(metadata.contains("\"project_selector\": \"project-default\""));
+    assert!(metadata.contains("\"project_label\": \"project-default\""));
 
     Ok(())
 }
@@ -1177,8 +1291,8 @@ fn listen_uses_the_same_project_identity_for_repo_and_worktree_roots() -> Result
     init_repo_with_origin(&repo_root)?;
     let worktree_root = create_worktree_checkout(&repo_root, "feature/listen", "repo-worktree")?;
 
-    let repo_store_dir = listen_project_store_dir(&config_path, &repo_root)?;
-    let worktree_store_dir = listen_project_store_dir(&config_path, &worktree_root)?;
+    let repo_store_dir = listen_project_store_dir(&config_path, &repo_root, None)?;
+    let worktree_store_dir = listen_project_store_dir(&config_path, &worktree_root, None)?;
     assert_eq!(repo_store_dir, worktree_store_dir);
 
     meta()
@@ -1743,6 +1857,150 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
             "Cleared stored MetaListen session data",
         ));
     assert!(!state_path.exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_target_multiple_project_scopes_from_one_repo() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-default"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "project-beta",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let default_state_path =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-default"))?
+            .join("session.json");
+    let beta_state_path = listen_project_store_dir(&config_path, &repo_root, Some("project-beta"))?
+        .join("session.json");
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-default"))
+        .stdout(predicate::str::contains("project-beta"))
+        .stdout(predicate::str::contains(
+            repo_root.canonicalize()?.display().to_string(),
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            default_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-default"));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--project",
+            "project-beta",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ))
+        .stdout(predicate::str::contains("Project: project-beta"));
+
+    meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "resume",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--project",
+            "project-beta",
+            "--demo",
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            beta_state_path.display().to_string(),
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "clear",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--project",
+            "project-beta",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project-beta"));
+
+    assert!(default_state_path.parent().is_some_and(Path::exists));
+    assert!(!beta_state_path.parent().is_some_and(Path::exists));
 
     Ok(())
 }
