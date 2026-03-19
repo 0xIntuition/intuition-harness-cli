@@ -20,7 +20,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
 
@@ -137,6 +137,14 @@ enum PlanStage {
     Questions(QuestionsApp),
     Review(ReviewApp),
     Loading(LoadingApp),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanStageKind {
+    Request,
+    Questions,
+    Review,
+    Loading,
 }
 
 struct PlanSessionApp {
@@ -667,12 +675,19 @@ fn run_interactive_plan_session(
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let mut previous_stage = stage_kind(&app.stage);
+    terminal.clear()?;
 
     loop {
         if let Some(exit) = process_pending_plan_job(&mut app, root)? {
             return Ok(exit);
         }
         advance_loading_spinner(&mut app);
+        let current_stage = stage_kind(&app.stage);
+        if current_stage != previous_stage {
+            terminal.clear()?;
+            previous_stage = current_stage;
+        }
         terminal.draw(|frame| render_plan_session(frame, &app))?;
 
         if event::poll(Duration::from_millis(if app.pending.is_some() {
@@ -690,13 +705,18 @@ fn run_interactive_plan_session(
                         continue;
                     }
 
+                    let frame_size = terminal.size()?;
                     let action = match &mut app.stage {
-                        PlanStage::Request(request_app) => {
-                            handle_request_step_key(request_app, key)
-                        }
-                        PlanStage::Questions(questions_app) => {
-                            handle_questions_step_key(questions_app, key)
-                        }
+                        PlanStage::Request(request_app) => handle_request_step_key(
+                            request_app,
+                            key,
+                            request_input_width(frame_size.into()),
+                        ),
+                        PlanStage::Questions(questions_app) => handle_questions_step_key(
+                            questions_app,
+                            key,
+                            questions_answer_input_width(frame_size.into()),
+                        ),
                         PlanStage::Review(review_app) => handle_review_step_key(review_app, key),
                         PlanStage::Loading(_) => SessionAction::None,
                     };
@@ -834,7 +854,11 @@ enum SessionAction {
     Confirm(PlannedIssueSet),
 }
 
-fn handle_request_step_key(app: &mut RequestApp, key: crossterm::event::KeyEvent) -> SessionAction {
+fn handle_request_step_key(
+    app: &mut RequestApp,
+    key: crossterm::event::KeyEvent,
+    input_width: u16,
+) -> SessionAction {
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.request.paste_clipboard_with_prompt_attachments() {
@@ -879,7 +903,7 @@ fn handle_request_step_key(app: &mut RequestApp, key: crossterm::event::KeyEvent
             }
         }
         _ => {
-            if app.request.handle_key(key) {
+            if app.request.handle_key_with_width(key, input_width) {
                 app.error = None;
             }
             SessionAction::None
@@ -897,6 +921,7 @@ fn handle_request_step_paste(app: &mut RequestApp, text: &str) {
 fn handle_questions_step_key(
     app: &mut QuestionsApp,
     key: crossterm::event::KeyEvent,
+    input_width: u16,
 ) -> SessionAction {
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -911,7 +936,7 @@ fn handle_questions_step_key(
             }
             SessionAction::None
         }
-        KeyCode::Up | KeyCode::BackTab => {
+        KeyCode::BackTab => {
             if app.selected == 0 {
                 app.selected = app.questions.len().saturating_sub(1);
             } else {
@@ -920,7 +945,7 @@ fn handle_questions_step_key(
             app.error = None;
             SessionAction::None
         }
-        KeyCode::Down | KeyCode::Tab => {
+        KeyCode::Tab => {
             app.selected = (app.selected + 1) % app.questions.len();
             app.error = None;
             SessionAction::None
@@ -987,7 +1012,7 @@ fn handle_questions_step_key(
         }
         _ => {
             if let Some(question) = app.questions.get_mut(app.selected)
-                && question.answer.handle_key(key)
+                && question.answer.handle_key_with_width(key, input_width)
             {
                 question.state = FollowUpAnswerState::Pending;
                 app.error = None;
@@ -1135,6 +1160,7 @@ fn next_incomplete_question(questions: &[QuestionAnswer], selected: usize) -> Op
 }
 
 fn render_plan_session(frame: &mut Frame<'_>, app: &PlanSessionApp) {
+    frame.render_widget(Clear, frame.area());
     match &app.stage {
         PlanStage::Request(request_app) => render_request_form_frame(frame, request_app),
         PlanStage::Questions(questions_app) => render_questions_form_frame(frame, questions_app),
@@ -1150,14 +1176,16 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
         .split(layout[0]);
 
-    let rendered = app
-        .request
-        .render("Describe the feature or workflow you want to plan...", true);
     let request_block = Block::default()
         .borders(Borders::ALL)
         .title("Planning Request [editing]")
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let request_inner = request_block.inner(body[0]);
+    let rendered = app.request.render_with_width(
+        "Describe the feature or workflow you want to plan...",
+        true,
+        request_inner.width,
+    );
     let request = Paragraph::new(rendered.text.clone())
         .block(request_block)
         .wrap(Wrap { trim: false });
@@ -1182,7 +1210,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type the planning request. Enter continues. Shift+Enter inserts a newline. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        "Type the planning request. Up/Down moves between wrapped lines. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
     );
 }
 
@@ -1223,9 +1251,6 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
     .wrap(Wrap { trim: false });
     frame.render_widget(question, main[0]);
 
-    let rendered = selected
-        .answer
-        .render("Type your answer for the active question...", true);
     let answer_block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
@@ -1235,6 +1260,11 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         ))
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let answer_inner = answer_block.inner(main[1]);
+    let rendered = selected.answer.render_with_width(
+        "Type your answer for the active question...",
+        true,
+        answer_inner.width,
+    );
     let answer = Paragraph::new(rendered.text.clone())
         .block(answer_block)
         .wrap(Wrap { trim: false });
@@ -1308,7 +1338,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab/Shift-Tab or Up/Down moves between questions. Type to answer. Enter records the current response; a blank answer skips that question. Shift+Enter inserts a newline. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        "Tab/Shift-Tab moves between questions. Up/Down moves inside the active multiline answer, including wrapped lines. Enter records the current response; a blank answer skips that question. Shift+Enter inserts a newline. Once every question is answered or skipped, Enter generates the ticket plan. Ctrl+S remains available as an alternate submit key. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
     );
 }
 
@@ -1477,6 +1507,49 @@ fn base_layout(frame: &mut Frame<'_>) -> Vec<Rect> {
         .constraints([Constraint::Min(0), Constraint::Length(4)])
         .split(frame.area())
         .to_vec()
+}
+
+fn stage_kind(stage: &PlanStage) -> PlanStageKind {
+    match stage {
+        PlanStage::Request(_) => PlanStageKind::Request,
+        PlanStage::Questions(_) => PlanStageKind::Questions,
+        PlanStage::Review(_) => PlanStageKind::Review,
+        PlanStage::Loading(_) => PlanStageKind::Loading,
+    }
+}
+
+fn request_input_width(area: Rect) -> u16 {
+    let layout = base_layout_for_area(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(layout[0]);
+    inner_width(body[0])
+}
+
+fn questions_answer_input_width(area: Rect) -> u16 {
+    let layout = base_layout_for_area(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(layout[0]);
+    let main = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(42), Constraint::Min(0)])
+        .split(body[0]);
+    inner_width(main[1])
+}
+
+fn base_layout_for_area(area: Rect) -> Vec<Rect> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(4)])
+        .split(area)
+        .to_vec()
+}
+
+fn inner_width(area: Rect) -> u16 {
+    area.width.saturating_sub(2).max(1)
 }
 
 fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
@@ -1906,10 +1979,10 @@ mod tests {
         SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app, handle_questions_step_key,
         handle_questions_step_paste, handle_request_step_key, handle_request_step_paste,
         next_incomplete_question, parse_agent_json, process_pending_plan_job,
-        render_issue_merge_prompt, render_loading_frame, render_question_prompt,
-        render_questions_form_frame, render_request_form_frame, render_review_form_frame,
-        review_kept_indices, review_marker, review_merge_groups, review_submission_action,
-        selected_issue_plan, snapshot,
+        render_issue_merge_prompt, render_loading_frame, render_plan_session,
+        render_question_prompt, render_questions_form_frame, render_request_form_frame,
+        render_review_form_frame, review_kept_indices, review_marker, review_merge_groups,
+        review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
@@ -2080,6 +2153,7 @@ mod tests {
         let action = handle_request_step_key(
             &mut app,
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
         );
 
         match action {
@@ -2108,6 +2182,7 @@ mod tests {
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::SHIFT,
             ),
+            80,
         );
 
         assert!(matches!(action, SessionAction::None));
@@ -2125,6 +2200,7 @@ mod tests {
         let action = handle_request_step_key(
             &mut app,
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
         );
 
         match action {
@@ -2148,6 +2224,7 @@ mod tests {
                 crossterm::event::KeyCode::Char('s'),
                 crossterm::event::KeyModifiers::CONTROL,
             ),
+            80,
         );
 
         match action {
@@ -2220,6 +2297,7 @@ mod tests {
         let action = handle_questions_step_key(
             &mut app,
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
         );
 
         match action {
@@ -2261,12 +2339,56 @@ mod tests {
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::SHIFT,
             ),
+            80,
         );
 
         assert!(matches!(action, SessionAction::None));
         assert_eq!(app.questions[0].answer.value(), "\n");
         assert_eq!(app.questions[0].state, FollowUpAnswerState::Pending);
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn questions_step_up_down_moves_inside_active_answer_without_changing_selection() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            request_attachments: Vec::new(),
+            questions: vec![
+                pending_question("Who owns it?"),
+                answered_question("How should it be validated?", "12345\n12"),
+            ],
+            selected: 1,
+            error: None,
+        };
+
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            4,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.questions[1].answer.cursor(), 5);
+
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            4,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.selected, 1);
+        assert_eq!(
+            app.questions[1].answer.cursor(),
+            app.questions[1].answer.value().len()
+        );
     }
 
     #[test]
@@ -2288,6 +2410,7 @@ mod tests {
         let action = handle_questions_step_key(
             &mut app,
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
         );
 
         assert!(matches!(action, SessionAction::None));
@@ -2315,6 +2438,7 @@ mod tests {
         let action = handle_questions_step_key(
             &mut app,
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
         );
 
         match action {
@@ -2359,6 +2483,7 @@ mod tests {
                 crossterm::event::KeyCode::Char('s'),
                 crossterm::event::KeyModifiers::CONTROL,
             ),
+            80,
         );
 
         match action {
@@ -2396,6 +2521,7 @@ mod tests {
                 crossterm::event::KeyCode::Char('s'),
                 crossterm::event::KeyModifiers::CONTROL,
             ),
+            80,
         );
 
         assert!(matches!(action, SessionAction::None));
@@ -2428,6 +2554,7 @@ mod tests {
                 crossterm::event::KeyCode::Char('s'),
                 crossterm::event::KeyModifiers::CONTROL,
             ),
+            80,
         );
 
         match action {
@@ -2495,6 +2622,50 @@ mod tests {
 
         assert!(snapshot.contains("/ Generating suggested tickets"));
         assert!(snapshot.contains("Agent Working [loading]"));
+    }
+
+    #[test]
+    fn plan_session_clears_previous_stage_content_before_redraw() {
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+
+        terminal
+            .draw(|frame| {
+                render_plan_session(
+                    frame,
+                    &PlanSessionApp {
+                        stage: PlanStage::Request(RequestApp {
+                            request: InputFieldState::multiline(
+                                "Plan a dashboard for multi-ticket backlog work",
+                            ),
+                            error: None,
+                        }),
+                        pending: None,
+                    },
+                )
+            })
+            .expect("request frame should render");
+        terminal
+            .draw(|frame| {
+                render_plan_session(
+                    frame,
+                    &PlanSessionApp {
+                        stage: PlanStage::Loading(LoadingApp {
+                            message: "Generating suggested tickets".to_string(),
+                            detail: "Drafting Linear-ready backlog tickets from the request."
+                                .to_string(),
+                            spinner_index: 0,
+                        }),
+                        pending: None,
+                    },
+                )
+            })
+            .expect("loading frame should render");
+
+        let snapshot = snapshot(terminal.backend());
+        assert!(snapshot.contains("Agent Working [loading]"));
+        assert!(!snapshot.contains("Planning Request [editing]"));
+        assert!(!snapshot.contains("Plan a dashboard for multi-ticket backlog work"));
     }
 
     #[test]

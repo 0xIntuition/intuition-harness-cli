@@ -935,15 +935,16 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(body[1]);
 
-    let rendered_query = app.query.render(
-        "Search by identifier, title, state, project, or description...",
-        true,
-    );
     let query_block = Block::default()
         .borders(Borders::ALL)
         .title("Select Parent Issue [search]")
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let query_inner = query_block.inner(body[0]);
+    let rendered_query = app.query.render_with_width(
+        "Search by identifier, title, state, project, or description...",
+        true,
+        query_inner.width,
+    );
     let query = Paragraph::new(rendered_query.text.clone())
         .block(query_block)
         .wrap(Wrap { trim: false });

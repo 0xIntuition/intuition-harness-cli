@@ -11,7 +11,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local, Utc};
 
 use crate::agents::{
-    apply_invocation_environment, command_args_for_invocation, render_invocation_diagnostics,
+    apply_invocation_environment, apply_noninteractive_agent_environment,
+    command_args_for_invocation, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::cli::{CronDaemonArgs, CronRunArgs, CronStartArgs, RunAgentArgs};
@@ -698,6 +699,7 @@ fn execute_agent_phase(
     command.stdin(Stdio::null());
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
+    apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
         &invocation,
