@@ -348,13 +348,45 @@ exit 0
 #[test]
 fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
     let legacy = meta()
-        .args(["listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .output()?;
     assert!(legacy.status.success());
 
     let preferred = meta()
-        .args(["agents", "listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .output()?;
     assert!(preferred.status.success());
 
