@@ -38,7 +38,7 @@ const STEP_PUSH: &str = "push";
 const STEP_PUBLISH: &str = "publish_pr";
 const MAX_VALIDATION_REPAIR_ATTEMPTS: usize = 3;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MergeDiscovery {
     repository: GithubRepository,
     pull_requests: Vec<GithubPullRequest>,
@@ -63,12 +63,42 @@ struct GithubPullRequest {
     base_ref_name: String,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+    #[serde(rename = "isDraft", default)]
+    is_draft: bool,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+    #[serde(rename = "mergeStateStatus")]
+    merge_state_status: Option<String>,
+    #[serde(rename = "statusCheckRollup", default)]
+    status_check_rollup: Option<GithubStatusCheckRollup>,
+    #[serde(default)]
+    #[serde(rename = "reviewThreads")]
+    review_threads: GithubReviewThreadConnection,
     author: GithubActor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GithubActor {
     login: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GithubStatusCheckRollup {
+    state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GithubReviewThread {
+    #[serde(rename = "isResolved", default)]
+    is_resolved: bool,
+    #[serde(rename = "isOutdated", default)]
+    is_outdated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct GithubReviewThreadConnection {
+    #[serde(default)]
+    nodes: Vec<GithubReviewThread>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +113,27 @@ struct RepoViewResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GithubBranchRef {
     name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubGraphqlResponse<T> {
+    data: T,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubPullRequestQueryData {
+    repository: GithubPullRequestQueryRepository,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubPullRequestQueryRepository {
+    #[serde(rename = "pullRequests")]
+    pull_requests: GithubPullRequestConnection,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubPullRequestConnection {
+    nodes: Vec<GithubPullRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,25 +232,150 @@ struct AggregatePublication {
     action: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum PullRequestReadiness {
+    Blocked,
+    NeedsWork,
+    Ready,
+    MergeBatchCandidate,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MergeCheckpointDecision {
+    Hold,
+    Launch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PullRequestReason {
+    code: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PullRequestSweep {
+    pull_request: GithubPullRequest,
+    readiness: PullRequestReadiness,
+    reasons: Vec<PullRequestReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MergeCoordinatorReport {
+    repository: GithubRepository,
+    max_batch_size: usize,
+    launch: bool,
+    decision: MergeCheckpointDecision,
+    pull_requests: Vec<PullRequestSweep>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MergeCoordinatorArtifact {
+    run_id: String,
+    repository: GithubRepository,
+    max_batch_size: usize,
+    decision: MergeCheckpointDecision,
+    launch_requested: bool,
+    selected_pull_requests: Vec<u64>,
+    pull_requests: Vec<PullRequestSweep>,
+}
+
 #[derive(Debug, Clone)]
 struct GhCli;
 
+impl GithubPullRequest {
+    fn status_check_rollup_state(&self) -> Option<&str> {
+        self.status_check_rollup
+            .as_ref()
+            .and_then(|rollup| rollup.state.as_deref())
+    }
+}
+
 pub async fn run_merge(args: &MergeArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
-    let _planning_meta = load_required_planning_meta(&root, "merge")?;
+    let planning_meta = load_required_planning_meta(&root, "merge")?;
     ensure_planning_layout(&root, false)?;
+    if matches!(args.max_batch_size, Some(0)) {
+        bail!("`meta merge --max-batch-size` must be greater than zero");
+    }
 
     let gh = GhCli;
-    let repository = gh.resolve_repository(&root)?;
-    let pull_requests = gh.list_open_pull_requests(&root)?;
+    let (repository, pull_requests) = load_merge_inputs(&root, args, &gh)?;
 
     if args.json {
+        if args.coordinate {
+            let report = coordinate_pull_requests(
+                &repository,
+                pull_requests,
+                args.max_batch_size
+                    .unwrap_or_else(|| planning_meta.merge_max_batch_size()),
+                args.launch || planning_meta.merge.auto_launch,
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&MergeDiscovery {
+                    repository,
+                    pull_requests,
+                })?
+            );
+        }
+        return Ok(());
+    }
+
+    if args.coordinate {
+        let paths = PlanningPaths::new(&root);
+        ensure_dir(&paths.merge_runs_dir)?;
+        let report = coordinate_pull_requests(
+            &repository,
+            pull_requests,
+            args.max_batch_size
+                .unwrap_or_else(|| planning_meta.merge_max_batch_size()),
+            args.launch || planning_meta.merge.auto_launch,
+        );
+        let (run_id, run_dir) = reserve_run_dir(&paths)?;
+        let artifact = MergeCoordinatorArtifact {
+            run_id,
+            repository: report.repository.clone(),
+            max_batch_size: report.max_batch_size,
+            decision: report.decision,
+            launch_requested: report.launch,
+            selected_pull_requests: report
+                .pull_requests
+                .iter()
+                .filter(|entry| entry.readiness == PullRequestReadiness::MergeBatchCandidate)
+                .map(|entry| entry.pull_request.number)
+                .collect(),
+            pull_requests: report.pull_requests.clone(),
+        };
+        write_json_artifact(&run_dir.join("coordinator.json"), &artifact)?;
         println!(
             "{}",
-            serde_json::to_string_pretty(&MergeDiscovery {
-                repository,
-                pull_requests,
-            })?
+            render_coordinator_checkpoint(&report, &display_path_relative_to(&run_dir, &root))
+        );
+
+        if report.decision == MergeCheckpointDecision::Hold {
+            return Ok(());
+        }
+
+        let selected_pull_requests = report
+            .pull_requests
+            .iter()
+            .filter(|entry| entry.readiness == PullRequestReadiness::MergeBatchCandidate)
+            .map(|entry| entry.pull_request.clone())
+            .collect::<Vec<_>>();
+        let run = execute_merge_run(&root, args, &gh, &repository, selected_pull_requests)?;
+        let publication_verb = match run.publication.action.as_str() {
+            "updated" => "Updated",
+            _ => "Created",
+        };
+        println!(
+            "{publication_verb} aggregate PR {} for {} pull request(s). Run artifacts: {}",
+            run.publication.url,
+            run.selected_count,
+            run.run_dir.display()
         );
         return Ok(());
     }
@@ -298,6 +474,273 @@ fn build_dashboard_data(
             })
             .collect(),
     }
+}
+
+fn load_merge_inputs(
+    root: &Path,
+    args: &MergeArgs,
+    gh: &GhCli,
+) -> Result<(GithubRepository, Vec<GithubPullRequest>)> {
+    if let Some(path) = args.github_fixture.as_ref() {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read GitHub fixture `{}`", path.display()))?;
+        let discovery: MergeDiscovery = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse GitHub fixture `{}`", path.display()))?;
+        return Ok((discovery.repository, discovery.pull_requests));
+    }
+
+    let repository = gh.resolve_repository(root)?;
+    let pull_requests = gh.list_open_pull_requests(root, &repository)?;
+    Ok((repository, pull_requests))
+}
+
+fn coordinate_pull_requests(
+    repository: &GithubRepository,
+    pull_requests: Vec<GithubPullRequest>,
+    max_batch_size: usize,
+    launch: bool,
+) -> MergeCoordinatorReport {
+    let mut sweeps = pull_requests
+        .into_iter()
+        .map(|pull_request| classify_pull_request(repository, pull_request))
+        .collect::<Vec<_>>();
+
+    let mut ready_indices = sweeps
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.readiness == PullRequestReadiness::Ready)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    ready_indices.sort_by(|left, right| {
+        sweeps[*left]
+            .pull_request
+            .updated_at
+            .cmp(&sweeps[*right].pull_request.updated_at)
+            .then(
+                sweeps[*left]
+                    .pull_request
+                    .number
+                    .cmp(&sweeps[*right].pull_request.number),
+            )
+    });
+
+    for index in ready_indices.into_iter().take(max_batch_size) {
+        sweeps[index].readiness = PullRequestReadiness::MergeBatchCandidate;
+        sweeps[index].reasons.push(PullRequestReason {
+            code: "selected_for_batch".to_string(),
+            detail: format!(
+                "Selected for the coordinator batch within the max size limit of {}.",
+                max_batch_size
+            ),
+        });
+    }
+
+    for entry in sweeps
+        .iter_mut()
+        .filter(|entry| entry.readiness == PullRequestReadiness::Ready)
+    {
+        entry.reasons.push(PullRequestReason {
+            code: "batch_limit".to_string(),
+            detail: format!(
+                "Ready for merge but not selected because the coordinator batch limit is {}.",
+                max_batch_size
+            ),
+        });
+    }
+
+    let decision = if launch
+        && sweeps
+            .iter()
+            .any(|entry| entry.readiness == PullRequestReadiness::MergeBatchCandidate)
+    {
+        MergeCheckpointDecision::Launch
+    } else {
+        MergeCheckpointDecision::Hold
+    };
+
+    MergeCoordinatorReport {
+        repository: repository.clone(),
+        max_batch_size,
+        launch,
+        decision,
+        pull_requests: sweeps,
+    }
+}
+
+fn classify_pull_request(
+    repository: &GithubRepository,
+    pull_request: GithubPullRequest,
+) -> PullRequestSweep {
+    let mut readiness = PullRequestReadiness::Ready;
+    let mut reasons = Vec::new();
+
+    if pull_request.base_ref_name != repository.default_branch {
+        readiness = PullRequestReadiness::Blocked;
+        reasons.push(PullRequestReason {
+            code: "non_default_base".to_string(),
+            detail: format!(
+                "Targets `{}` instead of the repository default branch `{}`.",
+                pull_request.base_ref_name, repository.default_branch
+            ),
+        });
+    }
+
+    if pull_request.is_draft {
+        readiness = PullRequestReadiness::Blocked;
+        reasons.push(PullRequestReason {
+            code: "draft".to_string(),
+            detail: "Still marked as a draft pull request.".to_string(),
+        });
+    }
+
+    if let Some(state) = pull_request.status_check_rollup_state() {
+        match state {
+            "FAILURE" | "ERROR" => {
+                readiness = PullRequestReadiness::Blocked;
+                reasons.push(PullRequestReason {
+                    code: "checks_failed".to_string(),
+                    detail: format!("Status checks are failing with state `{state}`."),
+                });
+            }
+            "PENDING" => {
+                readiness = PullRequestReadiness::Blocked;
+                reasons.push(PullRequestReason {
+                    code: "checks_pending".to_string(),
+                    detail: "Status checks are still pending.".to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(state) = pull_request.merge_state_status.as_deref() {
+        match state {
+            "DIRTY" | "BLOCKED" | "UNKNOWN" | "UNSTABLE" | "HAS_HOOKS" | "BEHIND" => {
+                readiness = PullRequestReadiness::Blocked;
+                reasons.push(PullRequestReason {
+                    code: "merge_state".to_string(),
+                    detail: format!("GitHub reports merge state `{state}`."),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if readiness != PullRequestReadiness::Blocked {
+        if matches!(
+            pull_request.review_decision.as_deref(),
+            Some("CHANGES_REQUESTED")
+        ) {
+            readiness = PullRequestReadiness::NeedsWork;
+            reasons.push(PullRequestReason {
+                code: "changes_requested".to_string(),
+                detail: "A reviewer has requested changes.".to_string(),
+            });
+        }
+
+        let unresolved_threads = pull_request
+            .review_threads
+            .nodes
+            .iter()
+            .filter(|thread| !thread.is_resolved && !thread.is_outdated)
+            .count();
+        if unresolved_threads > 0 {
+            readiness = PullRequestReadiness::NeedsWork;
+            reasons.push(PullRequestReason {
+                code: "unresolved_review_threads".to_string(),
+                detail: format!(
+                    "{unresolved_threads} unresolved review thread(s) remain on the pull request."
+                ),
+            });
+        }
+    }
+
+    if reasons.is_empty() {
+        reasons.push(PullRequestReason {
+            code: "ready".to_string(),
+            detail: "No blocking checks, merge-state issues, or unresolved review feedback were detected.".to_string(),
+        });
+    }
+
+    PullRequestSweep {
+        pull_request,
+        readiness,
+        reasons,
+    }
+}
+
+fn render_coordinator_checkpoint(report: &MergeCoordinatorReport, artifact_path: &str) -> String {
+    let mut lines = vec![
+        format!(
+            "Merge coordinator checkpoint for {}",
+            report.repository.name_with_owner
+        ),
+        format!("Artifact: {artifact_path}"),
+        format!("Decision: {}", checkpoint_decision_label(report.decision)),
+        format!("Configured max batch size: {}", report.max_batch_size),
+        String::new(),
+    ];
+
+    for readiness in [
+        PullRequestReadiness::MergeBatchCandidate,
+        PullRequestReadiness::Ready,
+        PullRequestReadiness::NeedsWork,
+        PullRequestReadiness::Blocked,
+    ] {
+        let matching = report
+            .pull_requests
+            .iter()
+            .filter(|entry| entry.readiness == readiness)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+
+        lines.push(format!("{}:", readiness_label(readiness)));
+        for entry in matching {
+            let reason_summary = entry
+                .reasons
+                .iter()
+                .map(|reason| format!("{} ({})", reason.detail, reason.code))
+                .collect::<Vec<_>>()
+                .join("; ");
+            lines.push(format!(
+                "- #{} {} [{}]",
+                entry.pull_request.number, entry.pull_request.title, reason_summary
+            ));
+        }
+        lines.push(String::new());
+    }
+
+    if report.decision == MergeCheckpointDecision::Launch {
+        lines.push("Launching the selected batch after this checkpoint.".to_string());
+    } else {
+        lines.push("Dry run only. Re-run with `meta merge --coordinate --launch` or set `.metastack/meta.json` `merge.auto_launch` to continue into aggregate execution.".to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn readiness_label(readiness: PullRequestReadiness) -> &'static str {
+    match readiness {
+        PullRequestReadiness::Blocked => "Blocked",
+        PullRequestReadiness::NeedsWork => "Needs work",
+        PullRequestReadiness::Ready => "Ready",
+        PullRequestReadiness::MergeBatchCandidate => "Merge batch candidate",
+    }
+}
+
+fn checkpoint_decision_label(decision: MergeCheckpointDecision) -> &'static str {
+    match decision {
+        MergeCheckpointDecision::Hold => "hold",
+        MergeCheckpointDecision::Launch => "launch",
+    }
+}
+
+fn display_path_relative_to(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 fn resolve_selected_pull_requests(
@@ -1551,18 +1994,68 @@ impl GhCli {
         })
     }
 
-    fn list_open_pull_requests(&self, root: &Path) -> Result<Vec<GithubPullRequest>> {
-        self.run_json(
+    fn list_open_pull_requests(
+        &self,
+        root: &Path,
+        repository: &GithubRepository,
+    ) -> Result<Vec<GithubPullRequest>> {
+        let (owner, name) = repository.name_with_owner.split_once('/').ok_or_else(|| {
+            anyhow!(
+                "invalid GitHub repository slug `{}`",
+                repository.name_with_owner
+            )
+        })?;
+        let query = r#"
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      first: 100
+      states: OPEN
+      orderBy: { field: UPDATED_AT, direction: ASC }
+    ) {
+      nodes {
+        number
+        title
+        body
+        url
+        headRefName
+        baseRefName
+        updatedAt
+        isDraft
+        reviewDecision
+        mergeStateStatus
+        author {
+          login
+        }
+        statusCheckRollup {
+          state
+        }
+        reviewThreads(first: 50) {
+          nodes {
+            isResolved
+            isOutdated
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+        let response = self.run_json::<GithubGraphqlResponse<GithubPullRequestQueryData>>(
             root,
             &[
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--json",
-                "number,title,body,url,headRefName,baseRefName,updatedAt,author",
+                "api",
+                "graphql",
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("name={name}"),
+                "-f",
+                &format!("query={query}"),
             ],
-        )
+        )?;
+        Ok(response.data.repository.pull_requests.nodes)
     }
 
     fn publish_aggregate_pull_request(
@@ -1757,8 +2250,10 @@ mod tests {
     use crate::fs::PlanningPaths;
 
     use super::{
-        GithubActor, GithubPullRequest, MergePlan, reserve_run_dir_at, validate_merge_plan,
-        validation_commands,
+        GithubActor, GithubPullRequest, GithubRepository, GithubReviewThreadConnection,
+        GithubStatusCheckRollup, MergeCheckpointDecision, MergePlan, PullRequestReadiness,
+        classify_pull_request, coordinate_pull_requests, render_coordinator_checkpoint,
+        reserve_run_dir_at, validate_merge_plan, validation_commands,
     };
 
     fn empty_merge_args() -> MergeArgs {
@@ -1766,7 +2261,10 @@ mod tests {
             root: PathBuf::from("."),
             json: false,
             no_interactive: false,
+            coordinate: false,
+            launch: false,
             pull_requests: Vec::new(),
+            max_batch_size: None,
             validate: Vec::new(),
             agent: None,
             model: None,
@@ -1775,6 +2273,37 @@ mod tests {
             events: Vec::<MergeDashboardEventArg>::new(),
             width: 120,
             height: 32,
+            github_fixture: None,
+        }
+    }
+
+    fn sample_pull_request(number: u64) -> GithubPullRequest {
+        GithubPullRequest {
+            number,
+            title: format!("PR {number}"),
+            body: String::new(),
+            url: format!("https://example.com/{number}"),
+            head_ref_name: format!("feature/{number}"),
+            base_ref_name: "main".to_string(),
+            updated_at: format!("2026-03-16T18:{:02}:00Z", number % 60),
+            is_draft: false,
+            review_decision: None,
+            merge_state_status: Some("CLEAN".to_string()),
+            status_check_rollup: Some(GithubStatusCheckRollup {
+                state: Some("SUCCESS".to_string()),
+            }),
+            review_threads: GithubReviewThreadConnection::default(),
+            author: GithubActor {
+                login: "kames".to_string(),
+            },
+        }
+    }
+
+    fn sample_repository() -> GithubRepository {
+        GithubRepository {
+            name_with_owner: "metastack-systems/metastack-cli".to_string(),
+            url: "https://github.com/metastack-systems/metastack-cli".to_string(),
+            default_branch: "main".to_string(),
         }
     }
 
@@ -1826,32 +2355,7 @@ mod tests {
 
     #[test]
     fn validate_merge_plan_requires_the_full_selected_pull_request_set() {
-        let selected = vec![
-            GithubPullRequest {
-                number: 101,
-                title: "PR 101".to_string(),
-                body: String::new(),
-                url: "https://example.com/101".to_string(),
-                head_ref_name: "feature/101".to_string(),
-                base_ref_name: "main".to_string(),
-                updated_at: "2026-03-16T18:00:00Z".to_string(),
-                author: GithubActor {
-                    login: "kames".to_string(),
-                },
-            },
-            GithubPullRequest {
-                number: 102,
-                title: "PR 102".to_string(),
-                body: String::new(),
-                url: "https://example.com/102".to_string(),
-                head_ref_name: "feature/102".to_string(),
-                base_ref_name: "main".to_string(),
-                updated_at: "2026-03-16T18:00:00Z".to_string(),
-                author: GithubActor {
-                    login: "kames".to_string(),
-                },
-            },
-        ];
+        let selected = vec![sample_pull_request(101), sample_pull_request(102)];
 
         let error = validate_merge_plan(
             &MergePlan {
@@ -1872,18 +2376,7 @@ mod tests {
 
     #[test]
     fn validate_merge_plan_rejects_duplicate_pull_requests() {
-        let selected = vec![GithubPullRequest {
-            number: 101,
-            title: "PR 101".to_string(),
-            body: String::new(),
-            url: "https://example.com/101".to_string(),
-            head_ref_name: "feature/101".to_string(),
-            base_ref_name: "main".to_string(),
-            updated_at: "2026-03-16T18:00:00Z".to_string(),
-            author: GithubActor {
-                login: "kames".to_string(),
-            },
-        }];
+        let selected = vec![sample_pull_request(101)];
 
         let error = validate_merge_plan(
             &MergePlan {
@@ -1900,5 +2393,99 @@ mod tests {
                 .to_string()
                 .contains("duplicate pull requests in the merge order")
         );
+    }
+
+    #[test]
+    fn classify_pull_request_marks_requested_changes_as_needs_work() {
+        let repository = sample_repository();
+        let mut pull_request = sample_pull_request(101);
+        pull_request.review_decision = Some("CHANGES_REQUESTED".to_string());
+
+        let sweep = classify_pull_request(&repository, pull_request);
+
+        assert_eq!(sweep.readiness, PullRequestReadiness::NeedsWork);
+        assert!(
+            sweep
+                .reasons
+                .iter()
+                .any(|reason| reason.code == "changes_requested")
+        );
+    }
+
+    #[test]
+    fn coordinate_pull_requests_limits_selected_batch_size() {
+        let repository = sample_repository();
+        let report = coordinate_pull_requests(
+            &repository,
+            vec![
+                sample_pull_request(101),
+                sample_pull_request(102),
+                sample_pull_request(103),
+            ],
+            2,
+            false,
+        );
+
+        let selected = report
+            .pull_requests
+            .iter()
+            .filter(|entry| entry.readiness == PullRequestReadiness::MergeBatchCandidate)
+            .map(|entry| entry.pull_request.number)
+            .collect::<Vec<_>>();
+        let ready = report
+            .pull_requests
+            .iter()
+            .filter(|entry| entry.readiness == PullRequestReadiness::Ready)
+            .count();
+
+        assert_eq!(selected, vec![101, 102]);
+        assert_eq!(ready, 1);
+        assert_eq!(report.decision, MergeCheckpointDecision::Hold);
+    }
+
+    #[test]
+    fn coordinate_pull_requests_does_not_select_blocked_pull_requests() {
+        let repository = sample_repository();
+        let mut blocked = sample_pull_request(102);
+        blocked.status_check_rollup = Some(GithubStatusCheckRollup {
+            state: Some("FAILURE".to_string()),
+        });
+
+        let report = coordinate_pull_requests(
+            &repository,
+            vec![sample_pull_request(101), blocked],
+            2,
+            true,
+        );
+
+        let selected = report
+            .pull_requests
+            .iter()
+            .filter(|entry| entry.readiness == PullRequestReadiness::MergeBatchCandidate)
+            .map(|entry| entry.pull_request.number)
+            .collect::<Vec<_>>();
+        let blocked_entry = report
+            .pull_requests
+            .iter()
+            .find(|entry| entry.pull_request.number == 102)
+            .expect("blocked entry");
+
+        assert_eq!(selected, vec![101]);
+        assert_eq!(blocked_entry.readiness, PullRequestReadiness::Blocked);
+        assert_eq!(report.decision, MergeCheckpointDecision::Launch);
+    }
+
+    #[test]
+    fn render_coordinator_checkpoint_mentions_dry_run_before_launch() {
+        let repository = sample_repository();
+        let report =
+            coordinate_pull_requests(&repository, vec![sample_pull_request(101)], 1, false);
+
+        let checkpoint =
+            render_coordinator_checkpoint(&report, ".metastack/merge-runs/20260319T010101Z");
+
+        assert!(checkpoint.contains("Merge coordinator checkpoint"));
+        assert!(checkpoint.contains("Dry run only."));
+        assert!(checkpoint.contains("Merge batch candidate:"));
     }
 }

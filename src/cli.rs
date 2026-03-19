@@ -91,6 +91,8 @@ const MERGE_HELP_EXAMPLES: &str = "\
 Examples:
   meta merge --json
   meta merge
+  meta merge --coordinate
+  meta merge --coordinate --launch
   meta merge --render-once --events space,down,space,enter
   meta merge --no-interactive --pull-request 101 --pull-request 102 --validate \"make quality\"";
 
@@ -335,9 +337,18 @@ pub struct MergeArgs {
     /// Skip the one-shot dashboard and run the selected pull requests directly.
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Sweep open PR review/check metadata, classify readiness, and select a safe batch.
+    #[arg(long, conflicts_with = "render_once")]
+    pub coordinate: bool,
+    /// Launch the coordinator-selected batch after printing the checkpoint summary.
+    #[arg(long, requires = "coordinate")]
+    pub launch: bool,
     /// Repeatable pull request number used with `--no-interactive`.
     #[arg(long = "pull-request", value_name = "NUMBER")]
     pub pull_requests: Vec<u64>,
+    /// Override the maximum number of PRs the coordinator may select in one batch.
+    #[arg(long, value_name = "COUNT")]
+    pub max_batch_size: Option<usize>,
     /// Override the validation commands run after the local batch merge completes.
     #[arg(long = "validate", value_name = "COMMAND")]
     pub validate: Vec<String>,
@@ -362,6 +373,9 @@ pub struct MergeArgs {
     /// Snapshot height when --render-once is set.
     #[arg(long, hide = true, default_value_t = 32)]
     pub height: u16,
+    /// Use a deterministic GitHub fixture instead of live `gh` discovery.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub github_fixture: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]

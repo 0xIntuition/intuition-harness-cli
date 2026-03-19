@@ -18,7 +18,7 @@ fn write_github_stub(
         .iter()
         .map(|number| {
             format!(
-                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
+                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","isDraft":false,"reviewDecision":null,"mergeStateStatus":"CLEAN","statusCheckRollup":{{"state":"SUCCESS"}},"reviewThreads":{{"nodes":[]}},"author":{{"login":"kames"}}}}"#
             )
         })
         .collect::<Vec<_>>()
@@ -30,6 +30,10 @@ fn write_github_stub(
 set -eu
 if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
   printf '%s' '{{"nameWithOwner":"metastack-systems/metastack-cli","url":"https://github.com/metastack-systems/metastack-cli","defaultBranchRef":{{"name":"main"}}}}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  printf '%s' '{{"data":{{"repository":{{"pullRequests":{{"nodes":[{pr_entries}]}}}}}}}}'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
@@ -71,7 +75,7 @@ fn write_github_update_stub(
         .iter()
         .map(|number| {
             format!(
-                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
+                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","isDraft":false,"reviewDecision":null,"mergeStateStatus":"CLEAN","statusCheckRollup":{{"state":"SUCCESS"}},"reviewThreads":{{"nodes":[]}},"author":{{"login":"kames"}}}}"#
             )
         })
         .collect::<Vec<_>>()
@@ -83,6 +87,10 @@ fn write_github_update_stub(
 set -eu
 if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
   printf '%s' '{{"nameWithOwner":"metastack-systems/metastack-cli","url":"https://github.com/metastack-systems/metastack-cli","defaultBranchRef":{{"name":"main"}}}}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  printf '%s' '{{"data":{{"repository":{{"pullRequests":{{"nodes":[{pr_entries}]}}}}}}}}'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
@@ -1300,6 +1308,48 @@ transport = "arg"
     let run_dir = run_dirs.pop().expect("merge run should exist");
 
     assert!(fs::read_to_string(run_dir.join("publication.json"))?.contains("updated"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_coordinate_uses_fixture_and_prints_checkpoint_summary() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/merge-coordinator.json");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "merge": {
+    "max_batch_size": 1
+  }
+}"#,
+    )?;
+
+    cli()
+        .current_dir(&repo_root)
+        .args([
+            "merge",
+            "--coordinate",
+            "--github-fixture",
+            fixture_path
+                .to_str()
+                .expect("fixture path should be valid utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Merge coordinator checkpoint"))
+        .stdout(predicate::str::contains("Decision: hold"))
+        .stdout(predicate::str::contains("Merge batch candidate:"))
+        .stdout(predicate::str::contains("#101 Ready PR"))
+        .stdout(predicate::str::contains("Needs work:"))
+        .stdout(predicate::str::contains("Blocked:"))
+        .stdout(predicate::str::contains("Dry run only."));
 
     Ok(())
 }

@@ -29,7 +29,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
 - `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
-- `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
+- `meta merge` can either coordinate a readiness sweep for open GitHub PRs or execute one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 
@@ -156,7 +156,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
-| `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
+| `meta merge` | Sweep open GitHub PRs for readiness, select a safe batch, and publish one aggregate PR |
 
 ## Build From Source
 
@@ -181,7 +181,7 @@ A typical end-to-end loop looks like this:
 3. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
 4. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
 5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
-6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
+6. Use `meta merge` when you want to sweep open GitHub PRs, select a safe batch, and optionally run one isolated aggregate merge.
 7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
 
 ## Example Flows
@@ -217,6 +217,8 @@ Aggregate merge operator:
 ```bash
 meta merge --json
 meta merge
+meta merge --coordinate
+meta merge --coordinate --launch
 meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
 ```
 
@@ -381,7 +383,7 @@ Precedence is consistent across the CLI:
 
 ### `merge`
 
-Inspect open GitHub pull requests for the current checkout, select a batch in a one-shot ratatui dashboard, run an aggregate merge in an isolated workspace outside the source checkout, rerun validation, and open or update one aggregate PR back into the repository default branch.
+Inspect open GitHub pull requests for the current checkout, either coordinate a readiness sweep or select a manual batch in a one-shot ratatui dashboard, then run an aggregate merge in an isolated workspace outside the source checkout and open or update one aggregate PR back into the repository default branch.
 
 `meta merge` requires:
 
@@ -394,6 +396,8 @@ Common invocations:
 ```bash
 meta merge --json
 meta merge
+meta merge --coordinate
+meta merge --coordinate --launch
 meta merge --render-once --events space,down,space,enter
 meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
 ```
@@ -401,15 +405,37 @@ meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "ma
 Behavior summary:
 
 - `--json` emits the resolved GitHub repository metadata plus the open PR list used by the dashboard and planner.
+- `--coordinate` runs a repo-scoped PR sweep, classifies each PR as `blocked`, `needs-work`, `ready`, or `merge-batch-candidate`, writes `.metastack/merge-runs/<RUN_ID>/coordinator.json`, and prints a checkpoint summary before any merge workspace is prepared.
+- `--coordinate` defaults to a dry run. Add `--launch` to continue from the checkpoint into the existing aggregate merge execution path. Repo-scoped automation can also set `.metastack/meta.json` `merge.auto_launch: true`.
 - Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
+- `--max-batch-size <COUNT>` overrides the repo-scoped coordinator cap from `.metastack/meta.json` `merge.max_batch_size`. When unset, the coordinator defaults to `3`.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
 - Publication is gated on those validation commands succeeding. When validation fails, `meta merge` invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
+Coordinator readiness rules are intentionally conservative:
+
+- `blocked`: draft PRs, non-default base branches, failing or pending checks, or GitHub merge-state problems
+- `needs-work`: changes requested or unresolved review threads
+- `ready`: clear to consider, but not selected because of the batch-size cap
+- `merge-batch-candidate`: selected ready PRs that will be handed to the aggregate merge engine
+
+Repo-scoped merge policy lives under `.metastack/meta.json`:
+
+```json
+{
+  "merge": {
+    "max_batch_size": 3,
+    "auto_launch": false
+  }
+}
+```
+
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
 
+- `coordinator.json` with readiness classifications, reason codes, batch selection, and checkpoint decision when `--coordinate` is used
 - `context.json` with the repository, selected PR set, aggregate branch, and isolated workspace path
 - `agent-plan-prompt.md` with the exact planner prompt sent to the configured local agent
 - `plan.json` with the agent-selected merge order and conflict hotspots

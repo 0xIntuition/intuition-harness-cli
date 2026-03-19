@@ -1,0 +1,98 @@
+{
+  "repository": {
+    "name_with_owner": "metastack-systems/metastack-cli",
+    "url": "https://github.com/metastack-systems/metastack-cli",
+    "default_branch": "main"
+  },
+  "pull_requests": [
+    {
+      "number": 101,
+      "title": "Ready PR",
+      "body": "",
+      "url": "https://example.com/101",
+      "headRefName": "feature/ready-101",
+      "baseRefName": "main",
+      "updatedAt": "2026-03-19T01:00:00Z",
+      "isDraft": false,
+      "reviewDecision": null,
+      "mergeStateStatus": "CLEAN",
+      "statusCheckRollup": {
+        "state": "SUCCESS"
+      },
+      "reviewThreads": {
+        "nodes": []
+      },
+      "author": {
+        "login": "kames"
+      }
+    },
+    {
+      "number": 102,
+      "title": "Needs Work PR",
+      "body": "",
+      "url": "https://example.com/102",
+      "headRefName": "feature/rework-102",
+      "baseRefName": "main",
+      "updatedAt": "2026-03-19T01:01:00Z",
+      "isDraft": false,
+      "reviewDecision": "CHANGES_REQUESTED",
+      "mergeStateStatus": "CLEAN",
+      "statusCheckRollup": {
+        "state": "SUCCESS"
+      },
+      "reviewThreads": {
+        "nodes": [
+          {
+            "isResolved": false,
+            "isOutdated": false
+          }
+        ]
+      },
+      "author": {
+        "login": "kames"
+      }
+    },
+    {
+      "number": 103,
+      "title": "Blocked PR",
+      "body": "",
+      "url": "https://example.com/103",
+      "headRefName": "feature/blocked-103",
+      "baseRefName": "main",
+      "updatedAt": "2026-03-19T01:02:00Z",
+      "isDraft": false,
+      "reviewDecision": null,
+      "mergeStateStatus": "CLEAN",
+      "statusCheckRollup": {
+        "state": "FAILURE"
+      },
+      "reviewThreads": {
+        "nodes": []
+      },
+      "author": {
+        "login": "kames"
+      }
+    },
+    {
+      "number": 104,
+      "title": "Second Ready PR",
+      "body": "",
+      "url": "https://example.com/104",
+      "headRefName": "feature/ready-104",
+      "baseRefName": "main",
+      "updatedAt": "2026-03-19T01:03:00Z",
+      "isDraft": false,
+      "reviewDecision": null,
+      "mergeStateStatus": "CLEAN",
+      "statusCheckRollup": {
+        "state": "SUCCESS"
+      },
+      "reviewThreads": {
+        "nodes": []
+      },
+      "author": {
+        "login": "kames"
+      }
+    }
+  ]
+}

@@ -21,6 +21,7 @@ pub const DEFAULT_LISTEN_POLL_INTERVAL_SECONDS: u64 = 7;
 pub const DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
 pub const MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 1;
 pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+pub const DEFAULT_MERGE_MAX_BATCH_SIZE: usize = 3;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
 pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
@@ -49,6 +50,8 @@ pub struct PlanningMeta {
     pub listen: PlanningListenSettings,
     #[serde(default)]
     pub plan: PlanningPlanSettings,
+    #[serde(default)]
+    pub merge: PlanningMergeSettings,
     #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
 }
@@ -117,6 +120,13 @@ pub struct PlanningListenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanningPlanSettings {
     pub interactive_follow_up_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningMergeSettings {
+    pub max_batch_size: Option<usize>,
+    #[serde(default)]
+    pub auto_launch: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -528,6 +538,12 @@ impl PlanningMeta {
             .unwrap_or(DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT)
     }
 
+    pub fn merge_max_batch_size(&self) -> usize {
+        self.merge
+            .max_batch_size
+            .unwrap_or(DEFAULT_MERGE_MAX_BATCH_SIZE)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if let Some(provider) = normalize_optional_ref(self.agent.provider.as_deref()) {
             validate_agent_model(&provider, self.agent.model.as_deref())?;
@@ -550,6 +566,11 @@ impl PlanningMeta {
         }
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
+        }
+        if matches!(self.merge.max_batch_size, Some(0)) {
+            return Err(anyhow!(
+                "repo merge max_batch_size under `.metastack/meta.json` must be greater than zero"
+            ));
         }
         Ok(())
     }
