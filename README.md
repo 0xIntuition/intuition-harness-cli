@@ -771,8 +771,11 @@ meta listen sessions list
 meta listen sessions inspect --root .
 meta listen sessions inspect --root . --project "MetaStack API"
 meta listen sessions clear --root . --project "MetaStack API"
-meta listen sessions resume --project-key <PROJECT_KEY> --once
+meta listen sessions resume --root . --project "MetaStack API" --once
 ```
+
+If you already know the stored install-scoped key, `meta listen sessions resume --project-key
+<PROJECT_KEY> --once` targets the same project-scoped session directly.
 
 Reference:
 
