@@ -2693,9 +2693,9 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDaemon, ListenCycleData, ListenState, SessionPhase, TODO_STATE, TokenUsage,
-        capture_workspace_snapshot, compact_identifier, format_duration, format_number,
-        listen_scope_label, mark_running_session_stale, render_agent_prompt, AgentSession,
+        AgentDaemon, AgentSession, ListenCycleData, ListenState, SessionPhase, TODO_STATE,
+        TokenUsage, capture_workspace_snapshot, compact_identifier, format_duration, format_number,
+        listen_scope_label, mark_running_session_stale, render_agent_prompt,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
