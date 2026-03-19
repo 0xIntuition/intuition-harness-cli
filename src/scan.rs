@@ -12,8 +12,8 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::agents::{
     AgentExecutionOptions, apply_invocation_environment, apply_noninteractive_agent_environment,
-    command_args_for_invocation, render_invocation_diagnostics, resolve_agent_invocation_for_planning,
-    validate_invocation_command_surface,
+    command_args_for_invocation, render_invocation_diagnostics,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::cli::{RunAgentArgs, ScanArgs};
 use crate::config::{

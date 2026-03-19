@@ -683,20 +683,16 @@ fn run_interactive_plan_session(
 
                     let frame_size = terminal.size()?;
                     let action = match &mut app.stage {
-                        PlanStage::Request(request_app) => {
-                            handle_request_step_key(
-                                request_app,
-                                key,
-                                request_input_width(frame_size.into()),
-                            )
-                        }
-                        PlanStage::Questions(questions_app) => {
-                            handle_questions_step_key(
-                                questions_app,
-                                key,
-                                questions_answer_input_width(frame_size.into()),
-                            )
-                        }
+                        PlanStage::Request(request_app) => handle_request_step_key(
+                            request_app,
+                            key,
+                            request_input_width(frame_size.into()),
+                        ),
+                        PlanStage::Questions(questions_app) => handle_questions_step_key(
+                            questions_app,
+                            key,
+                            questions_answer_input_width(frame_size.into()),
+                        ),
                         PlanStage::Review(review_app) => handle_review_step_key(review_app, key),
                         PlanStage::Loading(_) => SessionAction::None,
                     };
@@ -1859,8 +1855,8 @@ mod tests {
         SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app, handle_questions_step_key,
         handle_questions_step_paste, handle_request_step_key, handle_request_step_paste,
         next_incomplete_question, parse_agent_json, process_pending_plan_job,
-        render_issue_merge_prompt, render_loading_frame, render_question_prompt,
-        render_plan_session, render_questions_form_frame, render_request_form_frame,
+        render_issue_merge_prompt, render_loading_frame, render_plan_session,
+        render_question_prompt, render_questions_form_frame, render_request_form_frame,
         render_review_form_frame, review_kept_indices, review_marker, review_merge_groups,
         review_submission_action, selected_issue_plan, snapshot,
     };

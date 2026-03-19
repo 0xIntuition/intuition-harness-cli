@@ -218,9 +218,7 @@ impl InputFieldState {
         for point in points.iter().filter(|point| point.row == target_row) {
             match best_match {
                 None => best_match = Some(point),
-                Some(best)
-                    if point.column <= preferred_column && point.column >= best.column =>
-                {
+                Some(best) if point.column <= preferred_column && point.column >= best.column => {
                     best_match = Some(point);
                 }
                 Some(best) if best.column > preferred_column && point.column < best.column => {
@@ -709,10 +707,7 @@ mod tests {
         assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 4));
         assert_eq!(field.cursor(), 5);
 
-        assert!(field.handle_key_with_width(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            4
-        ));
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 4));
         assert_eq!(field.cursor(), field.value().len());
     }
 
@@ -726,10 +721,7 @@ mod tests {
         assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), 8));
         assert_eq!(field.cursor(), 6);
 
-        assert!(field.handle_key_with_width(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            8
-        ));
+        assert!(field.handle_key_with_width(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 8));
         assert_eq!(field.cursor(), "abcdef\nab".len());
     }
 
