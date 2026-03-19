@@ -486,6 +486,32 @@ JSON
     assert!(payload.contains("artifacts/parent-parent-reference.svg"));
     assert!(payload.contains("Need parent art"));
     assert!(payload.contains("Repository directory snapshot"));
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--render-once",
+            "--events",
+            "enter,down,enter",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
+        ))
+        .stdout(predicate::str::contains("Backlog Search"))
+        .stdout(predicate::str::contains("Ready to push MET-36"))
+        .stdout(predicate::str::contains(
+            "Technical: Create the technical and sync commands",
+        ))
+        .stdout(predicate::str::contains("MET-35  Create the technical and sync commands").not());
+
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);
 
