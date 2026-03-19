@@ -578,7 +578,7 @@ transport = "arg"
         ])
         .assert()
         .failure()
-        .stdout(predicate::str::contains("Phase 4/6: Validation"))
+        .stdout(predicate::str::contains("Running phase 4/6: Validation"))
         .stderr(predicate::str::contains(
             "validation failed for aggregate branch",
         ))

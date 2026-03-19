@@ -1678,7 +1678,7 @@ mod tests {
             spinner_index: 2,
         });
 
-        assert!(snapshot.contains("- Generating technical backlog"));
+        assert!(snapshot.contains("[=== ] Generating technical backlog"));
         assert!(snapshot.contains("Agent Working [loading]"));
     }
 
