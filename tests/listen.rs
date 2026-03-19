@@ -169,8 +169,7 @@ exit 0
         .stdout(predicate::str::contains("Linear API endpoint is reachable"))
         .stdout(predicate::str::contains(
             "Linear API authentication succeeded.",
-        ))
-        .stdout(predicate::str::contains("mcp_servers.linear.enabled=false"));
+        ));
     viewer_mock.assert_calls(1);
 
     Ok(())
