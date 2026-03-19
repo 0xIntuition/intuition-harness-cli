@@ -14,3 +14,5 @@ Use a shared semantic palette for MetaStack dashboards and loading flows. Gradie
 ## Fallback boundary
 
 When richer color output is unavailable, the shared theme falls back to a single accent color instead of approximating gradients with ANSI palettes. The fallback boundary is `src/tui/theme.rs`, which checks terminal hints such as `NO_COLOR`, `TERM=dumb`, and `COLORTERM=truecolor` before selecting accent colors.
+
+Planning and technical backlog loading screens stay inside this same boundary because `src/plan.rs` and `src/technical.rs` both render their waiting state through `src/progress.rs::render_loading_panel`. That keeps long-running dashboard flows on one shared treatment instead of introducing command-specific loading styles.
