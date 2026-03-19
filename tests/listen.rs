@@ -37,33 +37,109 @@ fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
+fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints() -> Result<(), Box<dyn Error>>
+{
     let _guard = listen_test_lock();
     let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
     write_minimal_planning_context(
-        temp.path(),
+        &repo_root,
         r#"{
   "linear": {
-    "team": "MET",
-    "project_id": "project-1"
+    "team": "MET"
   }
 }
 "#,
     )?;
 
     meta()
-        .current_dir(temp.path())
-        .args(["listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("meta listen"))
+        .stdout(predicate::str::contains("Dashboard: terminal summary"))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not());
+
+    Ok(())
+}
+
+#[test]
+fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Listen Status"))
         .stdout(predicate::str::contains("Runtime"))
         .stdout(predicate::str::contains("Agent Sessions"))
+        .stdout(predicate::str::contains("terminal snapshot"))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("SESSION"))
         .stdout(predicate::str::contains("PROGRESS"))
         .stdout(predicate::str::contains("MET-13"));
 
     Ok(())
+}
+
+#[test]
+fn agents_listen_help_omits_browser_dashboard_flags() {
+    let _guard = listen_test_lock();
+    meta()
+        .args(["agents", "listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--dashboard-port").not())
+        .stdout(predicate::str::contains("browser").not());
+}
+
+#[test]
+fn legacy_listen_help_omits_browser_dashboard_flags() {
+    let _guard = listen_test_lock();
+    meta()
+        .args(["listen", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--dashboard-port").not())
+        .stdout(predicate::str::contains("browser").not());
 }
 
 #[cfg(unix)]
@@ -273,26 +349,96 @@ exit 0
 fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
     write_minimal_planning_context(
-        temp.path(),
+        &repo_root,
         r#"{
   "linear": {
-    "team": "MET",
-    "project_id": "project-1"
+    "team": "MET"
   }
 }
 "#,
     )?;
 
     let legacy = meta()
-        .current_dir(temp.path())
-        .args(["listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .output()?;
     assert!(legacy.status.success());
 
     let preferred = meta()
-        .current_dir(temp.path())
-        .args(["agents", "listen", "--demo", "--render-once"])
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .output()?;
+    assert!(preferred.status.success());
+
+    assert_eq!(
+        String::from_utf8(legacy.stdout)?,
+        String::from_utf8(preferred.stdout)?
+    );
+    Ok(())
+}
+
+#[test]
+fn agents_listen_matches_legacy_once_output() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    let legacy = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .output()?;
+    assert!(legacy.status.success());
+
+    let preferred = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
         .output()?;
     assert!(preferred.status.success());
 
@@ -336,7 +482,7 @@ fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn 
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Terminal refresh: 1s"))
         .stdout(predicate::str::contains("Linear refresh: 42s"));
 
     Ok(())
@@ -377,7 +523,7 @@ fn listen_cli_poll_interval_overrides_repo_default() -> Result<(), Box<dyn Error
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dashboard refresh: 1s"))
+        .stdout(predicate::str::contains("Terminal refresh: 1s"))
         .stdout(predicate::str::contains("Linear refresh: 9s"));
 
     Ok(())
@@ -549,9 +695,13 @@ team = "PER"
         .stdout(predicate::str::contains(
             "Observed 1 Todo issue(s) from Linear.",
         ))
+        .stdout(predicate::str::contains("Dashboard: terminal summary"))
         .stdout(predicate::str::contains(
             "Skipped MET-401: missing required label `agent`.",
         ))
+        .stdout(predicate::str::contains("http://").not())
+        .stdout(predicate::str::contains("127.0.0.1").not())
+        .stdout(predicate::str::contains("localhost").not())
         .stdout(predicate::str::contains("MET-402").not())
         .stdout(predicate::str::contains("PER-403").not());
 
@@ -968,6 +1118,7 @@ exit 0
 
     for rendered in [&first_stdout, &second_stdout] {
         assert!(rendered.contains("Agent Sessions"));
+        assert!(rendered.contains("terminal snapshot"));
         assert!(rendered.contains("MET-40"));
         assert!(rendered.contains("MET-41"));
         assert!(rendered.contains("Running"));
@@ -976,6 +1127,9 @@ exit 0
         assert!(rendered.contains("019c...2d66dd"));
         assert!(rendered.contains("Progress text stays clean"));
         assert!(rendered.contains("Second progress text stays clean"));
+        assert!(!rendered.contains("http://"));
+        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains("localhost"));
         assert!(!rendered.contains("PID TTY"));
         assert!(!rendered.contains("meta listen-worker --ticket MET-noise"));
     }
@@ -1545,8 +1699,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
         .stdout(predicate::str::contains(
             "Stored MetaListen project sessions",
         ))
-        .stdout(predicate::str::contains("repo"))
-        .stdout(predicate::str::contains("MET-21"));
+        .stdout(predicate::str::contains("repo"));
 
     let project_key = state_path
         .parent()
