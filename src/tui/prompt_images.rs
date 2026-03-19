@@ -66,12 +66,11 @@ pub(crate) fn resolve_clipboard_prompt_paste() -> Result<ClipboardPromptPaste> {
     match clipboard_paste_platform(running_in_wsl()?) {
         ClipboardPastePlatform::MacOs => resolve_macos_clipboard_prompt_paste(),
         ClipboardPastePlatform::Linux => resolve_linux_clipboard_prompt_paste(),
-        ClipboardPastePlatform::Windows => {
-            bail!("{WINDOWS_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE}")
-        }
-        ClipboardPastePlatform::Wsl => bail!("{WSL_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE}"),
-        ClipboardPastePlatform::Unsupported => {
-            bail!("{GENERIC_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE}")
+        unsupported => {
+            if let Some(message) = clipboard_platform_unsupported_message(unsupported) {
+                bail!("{message}");
+            }
+            unreachable!("supported clipboard platforms should return before this branch");
         }
     }
 }
@@ -393,12 +392,23 @@ fn clipboard_paste_platform(in_wsl: bool) -> ClipboardPastePlatform {
     ClipboardPastePlatform::Unsupported
 }
 
+fn clipboard_platform_unsupported_message(
+    platform: ClipboardPastePlatform,
+) -> Option<&'static str> {
+    match platform {
+        ClipboardPastePlatform::Windows => Some(WINDOWS_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE),
+        ClipboardPastePlatform::Wsl => Some(WSL_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE),
+        ClipboardPastePlatform::Unsupported => Some(GENERIC_CLIPBOARD_PASTE_UNSUPPORTED_MESSAGE),
+        ClipboardPastePlatform::MacOs | ClipboardPastePlatform::Linux => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ClipboardPastePlatform, EncodedPromptImage, MAX_PROVIDER_IMAGE_HEIGHT,
-        MAX_PROVIDER_IMAGE_WIDTH, clipboard_paste_platform, encode_prompt_images_for_provider,
-        resolve_attachment_from_pasted_text,
+        MAX_PROVIDER_IMAGE_WIDTH, clipboard_paste_platform, clipboard_platform_unsupported_message,
+        encode_prompt_images_for_provider, resolve_attachment_from_pasted_text,
     };
     use crate::tui::prompt_images::PromptImageAttachment;
     use anyhow::Result;
@@ -488,6 +498,36 @@ mod tests {
         assert_eq!(
             clipboard_paste_platform(false),
             ClipboardPastePlatform::Windows
+        );
+    }
+
+    #[test]
+    fn unsupported_clipboard_platforms_report_clear_messages() {
+        assert_eq!(
+            clipboard_platform_unsupported_message(ClipboardPastePlatform::Windows),
+            Some(
+                "clipboard image paste is not supported on Windows yet; paste a readable local image path or file:// URL instead"
+            )
+        );
+        assert_eq!(
+            clipboard_platform_unsupported_message(ClipboardPastePlatform::Wsl),
+            Some(
+                "clipboard image paste is not supported on WSL yet; paste a readable local image path or file:// URL instead"
+            )
+        );
+        assert_eq!(
+            clipboard_platform_unsupported_message(ClipboardPastePlatform::Unsupported),
+            Some(
+                "clipboard image paste is not supported on this platform yet; paste a readable local image path or file:// URL instead"
+            )
+        );
+        assert_eq!(
+            clipboard_platform_unsupported_message(ClipboardPastePlatform::MacOs),
+            None
+        );
+        assert_eq!(
+            clipboard_platform_unsupported_message(ClipboardPastePlatform::Linux),
+            None
         );
     }
 }
