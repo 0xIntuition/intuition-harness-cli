@@ -458,7 +458,7 @@ fn resolve_workspace_context(root: &Path) -> Result<WorkspaceContext> {
 }
 
 fn discover_workspace_entries(context: &WorkspaceContext) -> Result<Vec<WorkspaceEntry>> {
-    let entries = match fs::read_dir(&context.workspace_root) {
+    let dir_entries = match fs::read_dir(&context.workspace_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
@@ -467,8 +467,9 @@ fn discover_workspace_entries(context: &WorkspaceContext) -> Result<Vec<Workspac
         }
     };
 
-    let mut discovered = Vec::new();
-    for entry in entries {
+    // Collect candidate directories first (fast filesystem check)
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    for entry in dir_entries {
         let entry = entry
             .with_context(|| format!("failed to read `{}`", context.workspace_root.display()))?;
         if !entry
@@ -487,8 +488,24 @@ fn discover_workspace_entries(context: &WorkspaceContext) -> Result<Vec<Workspac
             continue;
         }
 
-        discovered.push(read_workspace_entry(context, name, &entry.path())?);
+        candidates.push((name.to_string(), entry.path()));
     }
+
+    // Read workspace entries in parallel (git + du subprocesses per clone)
+    let mut discovered: Vec<WorkspaceEntry> = std::thread::scope(|scope| {
+        let handles: Vec<_> = candidates
+            .iter()
+            .map(|(name, path)| {
+                scope.spawn(move || read_workspace_entry(context, name, path))
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .filter_map(|result| result.ok())
+            .collect()
+    });
 
     discovered.sort_by(|left, right| left.ticket.cmp(&right.ticket));
     Ok(discovered)
@@ -763,7 +780,7 @@ fn remove_workspace_clone(context: &WorkspaceContext, entry: &WorkspaceEntry) ->
     let reclaimed = entry.disk_usage_bytes;
     fs::remove_dir_all(&entry.path)
         .with_context(|| format!("failed to remove `{}`", entry.path.display()))?;
-    let store = ListenProjectStore::resolve(&context.source_root)?;
+    let store = ListenProjectStore::resolve(&context.source_root, None)?;
     store.remove_ticket_artifacts(&entry.ticket)?;
     Ok(reclaimed)
 }
