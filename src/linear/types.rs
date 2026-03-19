@@ -35,7 +35,7 @@ pub struct IssueComment {
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
-    pub author_name: Option<String>,
+    pub user_name: Option<String>,
     #[serde(default)]
     pub resolved_at: Option<String>,
 }
@@ -65,6 +65,8 @@ pub struct IssueLink {
     pub identifier: String,
     pub title: String,
     pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

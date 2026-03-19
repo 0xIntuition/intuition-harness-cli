@@ -105,9 +105,7 @@ comments(first: 50) {
     body
     createdAt
     user {
-      id
       name
-      email
     }
     resolvedAt
   }
@@ -154,9 +152,7 @@ comments(first: 50) {
     body
     createdAt
     user {
-      id
       name
-      email
     }
     resolvedAt
   }
@@ -184,6 +180,7 @@ parent {
   identifier
   title
   url
+  description
 }
 children(first: 100) {
   nodes {
