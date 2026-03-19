@@ -138,6 +138,16 @@ fn legacy_listen_help_omits_browser_dashboard_flags() {
         .args(["listen", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("meta listen sessions list"))
+        .stdout(predicate::str::contains(
+            "meta listen sessions inspect --root . --project \"MetaStack API\"",
+        ))
+        .stdout(predicate::str::contains(
+            "meta listen sessions clear --root . --project \"MetaStack API\"",
+        ))
+        .stdout(predicate::str::contains(
+            "meta agents listen --team MET --project \"MetaStack API\"",
+        ))
         .stdout(predicate::str::contains("--dashboard-port").not())
         .stdout(predicate::str::contains("browser").not());
 }

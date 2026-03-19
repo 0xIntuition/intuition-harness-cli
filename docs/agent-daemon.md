@@ -57,6 +57,18 @@ Primary options:
   install-scoped key.
 - Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, and `q` / `Ctrl-C` exits.
 
+Examples:
+
+```bash
+meta agents listen --team MET
+meta listen sessions list
+meta agents listen --team MET --project "MetaStack CLI"
+meta agents listen --team MET --project "MetaStack API"
+meta listen sessions inspect --root . --project "MetaStack API"
+meta listen sessions clear --root . --project "MetaStack API"
+meta listen sessions resume --root . --project "MetaStack API" --once
+```
+
 Repo-scoped listen settings in `.metastack/meta.json`:
 
 - `listen.required_label`: only issues carrying this label are eligible.
