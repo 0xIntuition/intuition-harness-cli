@@ -635,6 +635,7 @@ struct DynamicLinearState {
     claimed: bool,
     issue_refreshes_after_claim: usize,
     review_transition_applied: bool,
+    complete_after_claim_refreshes: usize,
 }
 
 #[cfg(unix)]
@@ -647,11 +648,20 @@ struct DynamicLinearServer {
 #[cfg(unix)]
 impl DynamicLinearServer {
     fn start() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_completion_after_refreshes(6)
+    }
+
+    fn start_with_completion_after_refreshes(
+        complete_after_claim_refreshes: usize,
+    ) -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(Mutex::new(DynamicLinearState::default()));
+        let state = Arc::new(Mutex::new(DynamicLinearState {
+            complete_after_claim_refreshes,
+            ..DynamicLinearState::default()
+        }));
         let thread_shutdown = shutdown.clone();
         let handle = thread::spawn(move || {
             while !thread_shutdown.load(Ordering::Relaxed) {
@@ -986,7 +996,12 @@ fn dynamic_linear_response(
             ("state-3", "Human Review", "started")
         } else if state.claimed {
             state.issue_refreshes_after_claim += 1;
-            if state.issue_refreshes_after_claim >= 6 {
+            let threshold = if state.complete_after_claim_refreshes > 0 {
+                state.complete_after_claim_refreshes
+            } else {
+                6
+            };
+            if state.issue_refreshes_after_claim >= threshold {
                 state.review_transition_applied = true;
                 ("state-3", "Human Review", "started")
             } else {
