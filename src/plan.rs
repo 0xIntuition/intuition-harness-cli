@@ -2056,6 +2056,45 @@ mod tests {
     }
 
     #[test]
+    fn request_step_paste_accepts_image_paths_and_submit_preserves_attachments() {
+        use image::{ImageBuffer, Rgba};
+
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("request.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .expect("save image");
+
+        let mut app = RequestApp {
+            request: InputFieldState::multiline_with_prompt_attachments("Plan: "),
+            error: Some("stale".to_string()),
+        };
+
+        handle_request_step_paste(&mut app, image_path.to_str().expect("utf8"));
+
+        assert_eq!(app.request.display_value(), "Plan: [Image #1]");
+        assert_eq!(app.request.prompt_attachments().len(), 1);
+        assert_eq!(app.error, None);
+
+        let action = handle_request_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+        );
+
+        match action {
+            SessionAction::GenerateQuestions {
+                request,
+                request_attachments,
+            } => {
+                assert_eq!(request, "Plan: [Image #1]");
+                assert_eq!(request_attachments.len(), 1);
+                assert_eq!(request_attachments[0].display_name, "request.png");
+            }
+            _ => panic!("expected enter to preserve request attachments"),
+        }
+    }
+
+    #[test]
     fn request_step_shift_enter_adds_a_newline() {
         let mut app = RequestApp {
             request: InputFieldState::multiline("Plan:"),
@@ -2140,6 +2179,69 @@ mod tests {
         );
         assert_eq!(app.questions[1].state, FollowUpAnswerState::Pending);
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn questions_step_paste_accepts_image_paths_and_generate_plan_preserves_order() {
+        use image::{ImageBuffer, Rgba};
+
+        let temp = tempdir().expect("temp dir");
+        let request_image_path = temp.path().join("request.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([1, 2, 3, 255]))
+            .save(&request_image_path)
+            .expect("save request image");
+        let request_attachment = crate::tui::prompt_images::resolve_attachment_from_pasted_text(
+            request_image_path.to_str().expect("utf8"),
+        )
+        .expect("resolve request attachment")
+        .expect("request attachment");
+
+        let answer_image_path = temp.path().join("answer.png");
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2, 2, Rgba([4, 5, 6, 255]))
+            .save(&answer_image_path)
+            .expect("save answer image");
+
+        let mut app = QuestionsApp {
+            request: "Plan a new command [Image #1]".to_string(),
+            request_attachments: vec![request_attachment.clone()],
+            questions: vec![pending_question("Attach the design reference?")],
+            selected: 0,
+            error: Some("stale".to_string()),
+        };
+
+        handle_questions_step_paste(&mut app, answer_image_path.to_str().expect("utf8"));
+
+        assert_eq!(app.questions[0].answer.display_value(), "[Image #1]");
+        assert_eq!(app.questions[0].answer.prompt_attachments().len(), 1);
+        assert_eq!(app.questions[0].state, FollowUpAnswerState::Pending);
+        assert_eq!(app.error, None);
+
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+        );
+
+        match action {
+            SessionAction::GeneratePlan {
+                request,
+                request_attachments,
+                follow_ups,
+            } => {
+                assert_eq!(request, "Plan a new command [Image #1]");
+                assert_eq!(request_attachments.len(), 1);
+                assert_eq!(request_attachments[0].display_name, "request.png");
+                assert_eq!(follow_ups.len(), 1);
+                assert_eq!(follow_ups[0].answer, "[Image #1]");
+                assert_eq!(follow_ups[0].attachments.len(), 1);
+                assert_eq!(follow_ups[0].attachments[0].display_name, "answer.png");
+
+                let combined = super::collect_prompt_attachments(&request_attachments, &follow_ups);
+                assert_eq!(combined.len(), 2);
+                assert_eq!(combined[0].display_name, "request.png");
+                assert_eq!(combined[1].display_name, "answer.png");
+            }
+            _ => panic!("expected enter to preserve follow-up attachments"),
+        }
     }
 
     #[test]
