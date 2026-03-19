@@ -215,11 +215,11 @@ impl ListenCycleData {
         }
     }
 
-    fn demo(root: &Path) -> Self {
-        Self::demo_at(root, DEMO_NOW_EPOCH_SECONDS)
+    fn demo(root: &Path, state_file: String) -> Self {
+        Self::demo_at(root, DEMO_NOW_EPOCH_SECONDS, state_file)
     }
 
-    fn demo_at(root: &Path, reference_now: u64) -> Self {
+    fn demo_at(_root: &Path, reference_now: u64, state_file: String) -> Self {
         Self {
             scope: "MET / MetaStack CLI".to_string(),
             claimed_this_cycle: 1,
@@ -294,16 +294,9 @@ impl ListenCycleData {
             notes: vec![
                 "Demo mode: no Linear requests were made.".to_string(),
                 "The live terminal dashboard adapts to the full viewport.".to_string(),
-                format!(
-                    "State file: {}",
-                    ListenProjectStore::resolve(root)
-                        .map(|store| display_path(&store.paths().state_path, root))
-                        .unwrap_or_else(|_| "n/a".to_string())
-                ),
+                format!("State file: {state_file}"),
             ],
-            state_file: ListenProjectStore::resolve(root)
-                .map(|store| display_path(&store.paths().state_path, root))
-                .unwrap_or_else(|_| "n/a".to_string()),
+            state_file,
             rate_limits: Some(
                 "codex | primary 12% / reset 1,773,515,901s | secondary 8% / reset 1,773,855,871s | credits n/a".to_string(),
             ),
@@ -1229,14 +1222,15 @@ where
 
         let mut command = Command::new(current_exe);
         command.current_dir(&self.root);
+        command.arg("listen-worker").arg("--source-root").arg(
+            self.root
+                .to_str()
+                .ok_or_else(|| anyhow!("source root is not valid utf-8"))?,
+        );
+        if let Some(project_selector) = self.store.identity().project_selector.as_deref() {
+            command.arg("--project").arg(project_selector);
+        }
         command
-            .arg("listen-worker")
-            .arg("--source-root")
-            .arg(
-                self.root
-                    .to_str()
-                    .ok_or_else(|| anyhow!("source root is not valid utf-8"))?,
-            )
             .arg("--workspace")
             .arg(
                 workspace_path
@@ -1290,8 +1284,12 @@ struct WorkspaceSnapshot {
     status_entries: Vec<String>,
 }
 
-fn write_listen_session(root: &Path, session: AgentSession) -> Result<()> {
-    ListenProjectStore::resolve(root)?.upsert_session(session)
+fn write_listen_session(
+    root: &Path,
+    project_selector: Option<&str>,
+    session: AgentSession,
+) -> Result<()> {
+    ListenProjectStore::resolve(root, project_selector)?.upsert_session(session)
 }
 
 fn current_workspace_branch(workspace_path: &Path) -> Result<String> {
@@ -1299,8 +1297,8 @@ fn current_workspace_branch(workspace_path: &Path) -> Result<String> {
         .context("failed to inspect the workspace branch")
 }
 
-fn agent_log_path(root: &Path, identifier: &str) -> PathBuf {
-    ListenProjectStore::resolve(root)
+fn agent_log_path(root: &Path, project_selector: Option<&str>, identifier: &str) -> PathBuf {
+    ListenProjectStore::resolve(root, project_selector)
         .map(|store| store.log_path(identifier))
         .unwrap_or_else(|_| PathBuf::from(format!("{identifier}.log")))
 }
@@ -1581,6 +1579,19 @@ fn normalize_issue_state_name(state_name: &str) -> String {
     state_name.trim().to_ascii_lowercase()
 }
 
+fn listen_scope_label(
+    team: Option<&str>,
+    project_selector: Option<&str>,
+    project_label: &str,
+) -> String {
+    match (team, project_selector) {
+        (Some(team), Some(_)) => format!("{team} / {project_label}"),
+        (Some(team), None) => team.to_string(),
+        (None, Some(_)) => project_label.to_string(),
+        (None, None) => "all teams".to_string(),
+    }
+}
+
 pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     let projects = ListenProjectStore::list_projects()?;
     if projects.is_empty() {
@@ -1718,10 +1729,11 @@ pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String>
 pub async fn run_listen_session_resume(args: &ListenSessionResumeArgs) -> Result<()> {
     let store = match args.project_key.as_deref() {
         Some(project_key) => ListenProjectStore::from_project_key(project_key)?,
-        None => ListenProjectStore::resolve(&args.run.root)?,
+        None => resolve_project_store(&args.run.root, args.run.project.as_deref())?,
     };
     let mut run_args = args.run.clone();
     run_args.root = store.identity().source_root.clone();
+    run_args.project = store.identity().project_selector.clone();
     run_listen(&run_args).await
 }
 
@@ -1734,12 +1746,13 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let poll_interval_seconds = resolve_listen_poll_interval_seconds(args, &planning_meta);
 
     if args.demo {
-        let store = ListenProjectStore::resolve(&root)?;
+        let store = resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta)?;
         let _lock = store.acquire_listener_lock(std::process::id())?;
         let demo_now = now_epoch_seconds();
-        let cycle = ListenCycleData::demo_at(&root, demo_now);
+        let demo_state_file = display_path(&store.paths().state_path, &root);
+        let cycle = ListenCycleData::demo_at(&root, demo_now, demo_state_file.clone());
         if args.render_once {
-            let cycle = ListenCycleData::demo(&root);
+            let cycle = ListenCycleData::demo(&root, demo_state_file.clone());
             let data = build_dashboard_data(
                 &cycle,
                 &DashboardRuntimeContext {
@@ -1758,7 +1771,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             return Ok(());
         }
         if args.once {
-            let cycle = ListenCycleData::demo(&root);
+            let cycle = ListenCycleData::demo(&root, demo_state_file.clone());
             let data = build_dashboard_data(
                 &cycle,
                 &DashboardRuntimeContext {
@@ -1821,7 +1834,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             profile: args.profile.clone(),
         },
     )?;
-    let store = ListenProjectStore::resolve(&root)?;
+    let store = resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta)?;
     let _lock = store.acquire_listener_lock(std::process::id())?;
     let client = ReqwestLinearClient::new(config.clone())?;
     let service = LinearService::new(client, config.default_team.clone());
@@ -1918,12 +1931,11 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
 
     let started_at_epoch_seconds = now_epoch_seconds();
     let initial_cycle = ListenCycleData::loading(
-        match (&daemon.filters.team, &daemon.filters.project) {
-            (Some(team), Some(project)) => format!("{team} / {project}"),
-            (Some(team), None) => team.clone(),
-            (None, Some(project)) => project.clone(),
-            (None, None) => "all teams".to_string(),
-        },
+        listen_scope_label(
+            daemon.filters.team.as_deref(),
+            daemon.store.identity().project_selector.as_deref(),
+            &daemon.store.identity().project_label,
+        ),
         display_path(&daemon.store.paths().state_path, &daemon.root),
     );
     run_live_loop(
@@ -1946,8 +1958,40 @@ fn resolve_session_store(
 ) -> Result<ListenProjectStore> {
     match target.project_key.as_deref() {
         Some(project_key) => ListenProjectStore::from_project_key(project_key),
-        None => ListenProjectStore::resolve(&target.root),
+        None => resolve_project_store(&target.root, target.project.as_deref()),
     }
+}
+
+fn resolve_project_store(
+    root: &Path,
+    explicit_project: Option<&str>,
+) -> Result<ListenProjectStore> {
+    let requested_root = canonicalize_existing_dir(root)?;
+    let source_root = resolve_source_project_root(&requested_root)?;
+    let planning_meta = load_required_planning_meta(&source_root, "listen")?;
+    resolve_project_store_for_run(&source_root, explicit_project, &planning_meta)
+}
+
+fn resolve_project_store_for_run(
+    root: &Path,
+    explicit_project: Option<&str>,
+    planning_meta: &PlanningMeta,
+) -> Result<ListenProjectStore> {
+    ListenProjectStore::resolve(
+        root,
+        effective_listen_project_selector(explicit_project, planning_meta).as_deref(),
+    )
+}
+
+fn effective_listen_project_selector(
+    explicit_project: Option<&str>,
+    planning_meta: &PlanningMeta,
+) -> Option<String> {
+    explicit_project
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| planning_meta.linear.project_id.clone())
 }
 
 fn store_summary(store: &ListenProjectStore) -> Result<StoredListenProjectSummary> {
@@ -2539,6 +2583,7 @@ mod tests {
         AgentSession, ListenCycleData, ListenState, SessionPhase, TokenUsage,
         capture_workspace_snapshot, compact_identifier, format_duration, format_number,
         mark_running_session_stale,
+        listen_scope_label,
     };
     use std::fs;
     use std::path::Path;
@@ -2651,7 +2696,10 @@ mod tests {
 
     #[test]
     fn cycle_state_snapshot_refreshes_sessions_without_resetting_linear_data() {
-        let mut cycle = ListenCycleData::demo(Path::new("."));
+        let mut cycle = ListenCycleData::demo(
+            Path::new("."),
+            ".metastack/agents/sessions/listen-state.json".to_string(),
+        );
         let existing_pending_count = cycle.pending_issues.len();
         let existing_pending_identifier = cycle
             .pending_issues
@@ -2735,6 +2783,20 @@ mod tests {
             "expected src.rs in status entries: {:?}",
             updated.status_entries
         );
+    }
+
+    #[test]
+    fn listen_scope_label_uses_effective_default_project_identity() {
+        assert_eq!(
+            listen_scope_label(Some("MET"), Some("project-default"), "project-default"),
+            "MET / project-default"
+        );
+    }
+
+    #[test]
+    fn listen_scope_label_falls_back_to_team_without_project_scope() {
+        assert_eq!(listen_scope_label(Some("MET"), None, "All projects"), "MET");
+        assert_eq!(listen_scope_label(None, None, "All projects"), "all teams");
     }
 
     fn run_git(repo: &std::path::Path, args: &[&str]) -> anyhow::Result<()> {

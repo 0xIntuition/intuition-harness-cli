@@ -35,6 +35,23 @@ Examples:
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root . --dry-run";
 
+const LISTEN_HELP_EXAMPLES: &str = "\
+Terminal-only examples:
+  meta agents listen --check --root .
+  meta agents listen --team MET --once
+  meta listen sessions list
+
+Concurrent project-scoped examples from one checkout:
+  meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents listen --team MET --project \"MetaStack API\"
+  meta listen sessions inspect --root . --project \"MetaStack API\"
+  meta listen sessions clear --root . --project \"MetaStack API\"
+  meta listen sessions resume --root . --project \"MetaStack API\" --once
+
+Default-project example:
+  meta runtime setup --root . --team MET --project \"MetaStack CLI\"
+  meta agents listen --team MET";
+
 const CONTEXT_HELP_EXAMPLES: &str = "\
 Examples:
   meta context show --root .
@@ -642,6 +659,7 @@ pub struct SetupArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = LISTEN_HELP_EXAMPLES)]
 pub struct ListenArgs {
     #[command(subcommand)]
     pub command: Option<ListenCommands>,
@@ -678,6 +696,9 @@ pub struct ListenSessionTargetArgs {
     /// Resolve the stored project session from this repository root.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Resolve the stored project session for this effective Linear project selector.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Resolve the stored project session from an install-scoped project key.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
@@ -890,6 +911,9 @@ pub struct ListenWorkerArgs {
     /// Repository root whose listen state should be updated.
     #[arg(long, value_name = "PATH")]
     pub source_root: PathBuf,
+    /// Effective Linear project selector for the listener session store.
+    #[arg(long)]
+    pub project: Option<String>,
     /// Workspace checkout where the agent should run.
     #[arg(long, value_name = "PATH")]
     pub workspace: PathBuf,

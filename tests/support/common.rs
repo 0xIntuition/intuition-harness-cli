@@ -108,11 +108,13 @@ fn meta() -> Command {
 fn listen_project_store_dir(
     config_path: &Path,
     repo_root: &Path,
+    project_selector: Option<&str>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let source_root = listen_source_root(repo_root)?;
     let metastack_root = source_root.join(".metastack").canonicalize()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
+    listen_project_scope_key(project_selector, repo_root)?.hash(&mut hasher);
     let project_key = format!("{:016x}", hasher.finish());
     Ok(config_path
         .parent()
@@ -125,7 +127,7 @@ fn listen_project_store_dir(
 
 #[cfg(unix)]
 fn listen_state_path(config_path: &Path, repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(listen_project_store_dir(config_path, repo_root)?.join("session.json"))
+    Ok(listen_project_store_dir(config_path, repo_root, None)?.join("session.json"))
 }
 
 #[cfg(unix)]
@@ -134,9 +136,36 @@ fn listen_log_path(
     repo_root: &Path,
     issue_identifier: &str,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    Ok(listen_project_store_dir(config_path, repo_root)?
+    Ok(listen_project_store_dir(config_path, repo_root, None)?
         .join("logs")
         .join(format!("{issue_identifier}.log")))
+}
+
+#[cfg(unix)]
+fn listen_project_scope_key(
+    project_selector: Option<&str>,
+    repo_root: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let selector = match project_selector
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+    {
+        Some(selector) => Some(selector),
+        None => {
+            let meta = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+            serde_json::from_str::<serde_json::Value>(&meta)?
+                .get("linear")
+                .and_then(|value| value.get("project_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        }
+    };
+
+    Ok(match selector {
+        Some(selector) => format!("project:{}", selector.to_ascii_lowercase()),
+        None => "project:all".to_string(),
+    })
 }
 
 #[cfg(unix)]
