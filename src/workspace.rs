@@ -102,6 +102,15 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
         ));
     }
 
+    let is_interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+
+    if is_interactive {
+        eprint!(
+            "Discovered {} workspace clones. Loading Linear and GitHub data...",
+            entries.len()
+        );
+    }
+
     let linear = load_linear_command_context(&args.client, None)?;
     let github = discover_github_prs(&context.source_root);
     let records = enrich_workspace_entries(entries, &linear.service, &github).await?;
@@ -111,8 +120,12 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
         _ => None,
     };
 
-    // Launch TUI dashboard when interactive, fall back to text output
-    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+    if is_interactive {
+        // Clear the loading message before entering TUI
+        eprint!("\r\x1b[2K");
+    }
+
+    if is_interactive {
         let dashboard_data = records_to_dashboard_data(
             &context.workspace_root.display().to_string(),
             &records,
