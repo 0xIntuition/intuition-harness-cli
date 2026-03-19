@@ -560,7 +560,7 @@ The command requires a configured local agent, or one of the built-in supported 
 
 `meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
-Before the agent prompt is rendered, `meta backlog tech` now localizes markdown image references found in the parent issue description, parent-of-parent description, and Linear comments. The generated backlog item always includes `artifacts/ticket-images.md` as a traceability manifest plus `context/ticket-discussion.md` with author-attributed comment context, and the agent sees those rewritten `artifacts/...` paths in its prompt context.
+Before the agent prompt is rendered, `meta backlog tech` now localizes markdown image references found in the parent issue description, parent-of-parent description, and Linear comments. The generated backlog item always includes `artifacts/ticket-images.md` as a traceability manifest plus `context/ticket-discussion.md` with author-attributed comment context, and the agent sees those rewritten `artifacts/...` paths in its prompt context. Downloads from `uploads.linear.app` send the raw Linear API key in the `Authorization` header; other hosts are fetched with a plain GET.
 
 Side effects:
 
@@ -630,6 +630,7 @@ Side effects:
 - `pull` writes `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
 - `pull` writes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
 - `pull` logs per-image download failures without failing the overall sync
+- `pull` uses raw `Authorization: <LINEAR_API_KEY>` only for `uploads.linear.app` image downloads; other hosts are fetched without that special auth header
 - `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, and `last_sync_at` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
