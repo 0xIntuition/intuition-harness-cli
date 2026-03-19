@@ -628,15 +628,47 @@ mod tests {
         SyncDashboardIssue, SyncDashboardOptions, run_sync_dashboard,
     };
     use crate::backlog::BacklogSyncStatus;
-    use crate::linear::DashboardData;
+    use crate::linear::{DashboardData, IssueSummary, ProjectRef, WorkflowState};
     use crate::tui::fields::InputFieldState;
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();
+        let mut issues = demo.issues;
+        let team = issues
+            .first()
+            .map(|issue| issue.team.clone())
+            .expect("demo issues should not be empty");
+        issues.push(IssueSummary {
+            id: "issue-13".to_string(),
+            identifier: "MET-13".to_string(),
+            title: "Manual Follow-up".to_string(),
+            description: Some(
+                "Track the local-only backlog entry before it is linked to Linear.".to_string(),
+            ),
+            url: "https://linear.app/metastack/MET-13".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-14T16:10:00Z".to_string(),
+            team,
+            project: Some(ProjectRef {
+                id: "project-demo".to_string(),
+                name: "MetaStack CLI".to_string(),
+            }),
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: Some(WorkflowState {
+                id: "state-backlog".to_string(),
+                name: "Backlog".to_string(),
+                kind: Some("backlog".to_string()),
+            }),
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        });
         SyncDashboardData {
             title: demo.title,
-            issues: demo
-                .issues
+            issues: issues
                 .into_iter()
                 .enumerate()
                 .map(|(index, issue)| SyncDashboardIssue {
@@ -726,7 +758,10 @@ mod tests {
             panic!("render_once should return a snapshot");
         };
         assert!(snapshot.contains("link required"));
-        assert!(snapshot.contains("Run `meta backlog sync link <ISSUE> --entry MET-13`"));
+        assert!(snapshot.contains("This backlog entry is unlinked."));
+        assert!(
+            snapshot.contains("<ISSUE> --entry MET-13` before pull or push becomes available.")
+        );
         assert!(!snapshot.contains("Ready to push"));
     }
 }
