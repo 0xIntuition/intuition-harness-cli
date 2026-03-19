@@ -713,6 +713,7 @@ mod tests {
         assert!(snapshot.contains("Backlog Search"));
         assert!(snapshot.contains("Sync Action [focus]"));
         assert!(snapshot.contains("diverged"));
+        assert!(snapshot.contains("Backlog Entries"));
     }
 
     #[test]

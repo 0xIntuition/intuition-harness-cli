@@ -2339,6 +2339,17 @@ team = "PER"
 "#
         ),
     )?;
+    let issue_dir = repo_root.join(".metastack/backlog/MET-210");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Repo default sync issue\n")?;
+    write_linked_metadata(
+        &issue_dir,
+        "MET-210",
+        "Repo default sync issue",
+        Some("baseline"),
+        Some("remote-baseline"),
+        Some("2026-03-18T10:15:00Z"),
+    )?;
 
     let issues_mock = right_server.mock(|when, then| {
         when.method(POST)
@@ -2364,7 +2375,7 @@ team = "PER"
         when.method(POST)
             .path("/graphql")
             .header("authorization", "repo-token")
-            .body_includes("query Issue")
+            .body_includes("query Issue($id: String!)")
             .body_includes("\"id\":\"issue-selected\"");
         then.status(200).json_body(json!({
             "data": {
@@ -2402,6 +2413,114 @@ team = "PER"
 
     issues_mock.assert();
     issue_detail_mock.assert();
+    Ok(())
+}
+
+#[test]
+fn sync_render_once_prefers_linked_backlog_children_over_project_rows() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    let issue_dir = temp.path().join(".metastack/backlog/MET-36");
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Child backlog docs\n")?;
+    write_linked_metadata(
+        &issue_dir,
+        "MET-36",
+        "Technical child sync issue",
+        Some("baseline"),
+        Some("remote-baseline"),
+        Some("2026-03-18T10:15:00Z"),
+    )?;
+
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        issue_node(
+                            "parent-1",
+                            "MET-35",
+                            "Parent issue",
+                            "Parent issue description",
+                            "state-2",
+                            "In Progress",
+                        ),
+                        issue_node(
+                            "child-1",
+                            "MET-36",
+                            "Technical child sync issue",
+                            "Technical child description",
+                            "state-1",
+                            "Todo",
+                        )
+                    ]
+                }
+            }
+        }));
+    });
+    let child_detail_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"child-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "child-1",
+                    "MET-36",
+                    "Technical child sync issue",
+                    "Technical child description",
+                    Vec::new(),
+                    Some(json!({
+                        "id": "parent-1",
+                        "identifier": "MET-35",
+                        "title": "Parent issue",
+                        "url": "https://linear.app/issues/MET-35"
+                    })),
+                )
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--render-once",
+            "--events",
+            "enter,down,enter",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
+        ))
+        .stdout(predicate::str::contains("Ready to push MET-36"))
+        .stdout(predicate::str::contains("Backlog Entries (1/1)"))
+        .stdout(predicate::str::contains("Parent issue").not());
+
+    issues_mock.assert();
+    child_detail_mock.assert();
     Ok(())
 }
 

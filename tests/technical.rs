@@ -183,30 +183,6 @@ JSON
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .body_includes("query Issue")
-            .body_includes("\"id\":\"child-1\"");
-        then.status(200).json_body(json!({
-            "data": {
-                "issue": issue_detail_node(
-                    "child-1",
-                    "MET-36",
-                    "Technical: Create the technical and sync commands",
-                    "Technical child description",
-                    Vec::new(),
-                    Some(json!({
-                        "id": "parent-1",
-                        "identifier": "MET-35",
-                        "title": "Create the technical and sync commands",
-                        "url": "https://linear.app/issues/MET-35"
-                    })),
-                )
-            }
-        }));
-    });
-
-    server.mock(|when, then| {
-        when.method(POST)
-            .path("/graphql")
             .body_includes("query Teams");
         then.status(200).json_body(team_payload());
     });

@@ -86,6 +86,10 @@ fn resolve_ticket_discussion_budgets(
     }
 }
 
+/// Launch the interactive sync dashboard using local backlog entries as the selection source.
+///
+/// Returns an error when planning metadata is missing, backlog discovery fails, or
+/// Linear-backed dashboard actions for linked entries cannot be completed.
 pub async fn run_sync_dashboard_command(
     client_args: &LinearClientArgs,
     project_override: Option<&str>,
@@ -144,22 +148,33 @@ async fn load_sync_dashboard_issues(
 ) -> Result<Vec<SyncDashboardIssue>> {
     let mut dashboard_issues = Vec::with_capacity(entries.len());
     for entry in entries {
-        if let Some(metadata) = entry.metadata.as_ref() {
-            let issue = service.load_issue(&metadata.identifier).await?;
-            let resolution = resolve_backlog_sync_status(
-                Some(metadata),
-                entry.local_hash.clone(),
-                Some(issue_remote_hash(&issue)),
-            );
-            dashboard_issues.push(SyncDashboardIssue {
-                entry_slug: entry.slug.clone(),
-                issue,
-                linked_issue_identifier: Some(metadata.identifier.clone()),
-                local_status: resolution.status,
-            });
-        } else {
+        let metadata = entry.metadata.as_ref();
+        if metadata.is_none() {
             dashboard_issues.push(build_unlinked_sync_dashboard_issue(entry));
+            continue;
         }
+        let remote_issue = if let Some(metadata) = metadata {
+            service.load_issue(&metadata.identifier).await.ok()
+        } else {
+            None
+        };
+        let remote_hash = remote_issue
+            .as_ref()
+            .map(issue_remote_hash)
+            .or_else(|| metadata.and_then(|metadata| metadata.remote_hash.clone()));
+        let resolution =
+            resolve_backlog_sync_status(metadata, entry.local_hash.clone(), remote_hash);
+        let issue = match remote_issue {
+            Some(issue) => issue,
+            None => build_local_dashboard_issue(entry)?,
+        };
+
+        dashboard_issues.push(SyncDashboardIssue {
+            entry_slug: entry.slug.clone(),
+            issue,
+            linked_issue_identifier: metadata.map(|metadata| metadata.identifier.clone()),
+            local_status: resolution.status,
+        });
     }
 
     Ok(dashboard_issues)
@@ -206,19 +221,59 @@ fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboar
     }
 }
 
-fn sync_dashboard_title(
-    project_override: Option<&str>,
-    default_project_id: Option<&str>,
-) -> String {
-    if let Some(project_name) = project_override {
-        format!("meta backlog sync ({project_name})")
-    } else if let Some(project_id) = default_project_id {
-        format!("meta backlog sync ({project_id})")
-    } else {
-        "meta backlog sync".to_string()
-    }
-}
+fn build_local_dashboard_issue(entry: &BacklogSyncEntry) -> Result<IssueSummary> {
+    let description = read_optional_text_file(&entry.issue_dir.join(INDEX_FILE_NAME))?;
+    let metadata = entry.metadata.as_ref();
+    let project = metadata.and_then(|metadata| {
+        let name = metadata
+            .project_name
+            .clone()
+            .or_else(|| metadata.project_id.clone())?;
+        Some(ProjectRef {
+            id: metadata.project_id.clone().unwrap_or_else(|| name.clone()),
+            name,
+        })
+    });
+    let team_key = metadata
+        .map(|metadata| metadata.team_key.clone())
+        .unwrap_or_else(|| "LOCAL".to_string());
 
+    Ok(IssueSummary {
+        id: metadata
+            .map(|metadata| metadata.issue_id.clone())
+            .unwrap_or_else(|| format!("local-{}", entry.slug)),
+        identifier: metadata
+            .map(|metadata| metadata.identifier.clone())
+            .unwrap_or_else(|| entry.slug.clone()),
+        title: entry.title.clone(),
+        description: (!description.trim().is_empty()).then_some(description),
+        url: metadata
+            .map(|metadata| metadata.url.clone())
+            .unwrap_or_else(|| entry.issue_dir.display().to_string()),
+        priority: None,
+        estimate: None,
+        updated_at: metadata
+            .and_then(|metadata| metadata.last_sync_at.clone())
+            .unwrap_or_else(|| "-".to_string()),
+        team: TeamRef {
+            id: format!("team-{team_key}"),
+            key: team_key.clone(),
+            name: if team_key == "LOCAL" {
+                "Local backlog".to_string()
+            } else {
+                team_key.clone()
+            },
+        },
+        project,
+        assignee: None,
+        labels: Vec::new(),
+        comments: Vec::new(),
+        state: None,
+        attachments: Vec::new(),
+        parent: None,
+        children: Vec::new(),
+    })
+}
 /// Link an existing backlog entry to a Linear issue and optionally pull the remote packet.
 ///
 /// Returns an error when planning metadata is missing, the requested issue or backlog entry
@@ -469,6 +524,20 @@ pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncPushArgs) 
         false,
     )
     .await?;
+    Ok(())
+}
+
+/// Push CLI-managed backlog files for a preloaded Linear issue without reloading it from Linear.
+///
+/// Returns an error when the backlog directory is missing, required managed files cannot be read,
+/// or attachment synchronization to Linear fails.
+pub(crate) async fn run_sync_push_for_issue(
+    root: &Path,
+    service: &LinearService<ReqwestLinearClient>,
+    issue: &IssueSummary,
+    issue_dir: &Path,
+) -> Result<()> {
+    let _ = sync_push_issue(root, service, issue, issue_dir, false, false).await?;
     Ok(())
 }
 
@@ -933,20 +1002,28 @@ async fn sync_push_issue(
         issue.description.clone().unwrap_or_default()
     };
     let remote_hash = compute_remote_sync_hash(&remote_description, &managed_files);
-    save_issue_metadata(
-        issue_dir,
-        &build_issue_metadata(
-            issue,
-            managed_files,
-            Some(local_hash),
-            Some(remote_hash),
-            Some(sync_timestamp()),
-            metadata
-                .as_ref()
-                .map(|metadata| metadata.last_pulled_comment_ids.clone())
-                .unwrap_or_default(),
-        ),
-    )?;
+    let mut updated_metadata = build_issue_metadata(
+        issue,
+        managed_files,
+        Some(local_hash),
+        Some(remote_hash),
+        Some(sync_timestamp()),
+        metadata
+            .as_ref()
+            .map(|metadata| metadata.last_pulled_comment_ids.clone())
+            .unwrap_or_default(),
+    );
+    if updated_metadata.parent_id.is_none() {
+        updated_metadata.parent_id = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.parent_id.clone());
+    }
+    if updated_metadata.parent_identifier.is_none() {
+        updated_metadata.parent_identifier = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.parent_identifier.clone());
+    }
+    save_issue_metadata(issue_dir, &updated_metadata)?;
 
     println!(
         "Pushed {} from {} (synced {} managed attachment file{}; {}; {}).",
@@ -1142,7 +1219,7 @@ async fn load_sync_project_issues(
                 limit: usize::MAX,
                 ..IssueListFilters::default()
             },
-            format!("meta backlog sync ({project_name})"),
+            sync_dashboard_title(Some(project_name), default_project_id.as_deref()),
         )
     } else {
         let project_id = default_project_id.ok_or_else(|| {
@@ -1157,12 +1234,27 @@ async fn load_sync_project_issues(
                 limit: usize::MAX,
                 ..IssueListFilters::default()
             },
-            format!("meta backlog sync ({project_id})"),
+            sync_dashboard_title(None, Some(project_id.as_str())),
         )
     };
 
     let issues = service.list_issues(filter).await?;
     Ok((service, issues, title))
+}
+
+fn sync_dashboard_title(
+    project_override: Option<&str>,
+    default_project_id: Option<&str>,
+) -> String {
+    if let Some(project_name) = project_override {
+        return format!("meta backlog sync ({project_name})");
+    }
+
+    if let Some(project_id) = default_project_id {
+        format!("meta backlog sync ({project_id})")
+    } else {
+        "meta backlog sync".to_string()
+    }
 }
 
 fn discover_backlog_entries(root: &Path) -> Result<Vec<BacklogSyncEntry>> {
