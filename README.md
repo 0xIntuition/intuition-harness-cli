@@ -560,6 +560,12 @@ The command requires a configured local agent, or one of the built-in supported 
 
 `meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
+In a TTY, the parent-issue picker now uses the shared Linear issue browser:
+
+- type to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- shared semantic styling highlights identifiers, titles, state, priority, project, and preview metadata while you review the selected parent issue
+
 Side effects:
 
 - ensures `.metastack/backlog/_TEMPLATE/` exists
@@ -632,6 +638,12 @@ Side effects:
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 - pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
 
+The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
+
+- type while the issue list is focused to search by identifier, title, state, project, or description
+- matching is case-insensitive and ranks exact identifiers first, then identifier prefixes and exact token matches, then broader substring matches
+- the shared browser highlights matches in issue rows and previews and keeps sync-specific actions on the right-hand side
+
 The sync dashboard and render-once snapshot also show each issue's local sync state:
 
 - `synced`: current local and remote hashes still match the stored baselines
@@ -665,6 +677,8 @@ Legacy aliases: `meta issues`, `meta projects`, `meta dashboard`
 Notes:
 
 - `meta linear issues list` opens an interactive issue browser unless you pass `--json`
+- `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
+- the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
 - In the interactive create/edit forms, multiline descriptions advance on `Enter` and insert a newline on `Shift+Enter`
 - `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`

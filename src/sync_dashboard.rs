@@ -16,6 +16,11 @@ use ratatui::{Frame, Terminal};
 
 use crate::backlog::BacklogSyncStatus;
 use crate::linear::IssueSummary;
+use crate::linear::browser::{
+    IssueSearchResult, empty_search_result, render_issue_preview as render_linear_issue_preview,
+    render_issue_row, search_issues,
+};
+use crate::tui::fields::InputFieldState;
 
 #[derive(Debug, Clone)]
 pub struct SyncDashboardData {
@@ -74,6 +79,7 @@ enum Focus {
 struct SyncDashboardApp {
     data: SyncDashboardData,
     focus: Focus,
+    query: InputFieldState,
     issue_index: usize,
     action_index: usize,
     completed: Option<SyncSelection>,
@@ -116,7 +122,7 @@ pub fn run_sync_dashboard(
                 KeyCode::Up => Some(SyncDashboardAction::Up),
                 KeyCode::Down => Some(SyncDashboardAction::Down),
                 KeyCode::Enter => Some(SyncDashboardAction::Enter),
-                KeyCode::Esc | KeyCode::Backspace => Some(SyncDashboardAction::Back),
+                KeyCode::Esc => Some(SyncDashboardAction::Back),
                 _ => None,
             };
 
@@ -124,6 +130,8 @@ pub fn run_sync_dashboard(
                 && let Some(selection) = app.apply(action)
             {
                 return Ok(SyncDashboardExit::Selected(selection));
+            } else {
+                let _ = app.handle_query_key(key);
             }
         }
     }
@@ -144,12 +152,16 @@ fn render_once(data: SyncDashboardData, options: SyncDashboardOptions) -> Result
 fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
         .split(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
-        .split(outer[1]);
+        .split(outer[2]);
     let details = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -162,11 +174,29 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from(app.data.title.clone()),
         Line::from(app.summary_line()),
-        Line::from("Keys: Up/Down moves selection, Enter advances, Esc goes back, q exits"),
+        Line::from("Keys: Type to search while choosing an issue. Up/Down moves selection, Enter advances, Esc goes back, q exits."),
     ]))
     .wrap(Wrap { trim: true })
     .block(Block::default().borders(Borders::ALL).title("meta sync"));
     frame.render_widget(header, outer[0]);
+
+    let rendered_query = app.query.render(
+        "Search by identifier, title, state, project, or description...",
+        app.focus == Focus::Issues,
+    );
+    let query_block = Block::default()
+        .borders(Borders::ALL)
+        .title(if app.focus == Focus::Issues {
+            "Issue Search [active]"
+        } else {
+            "Issue Search"
+        });
+    let query_inner = query_block.inner(outer[1]);
+    let query = Paragraph::new(rendered_query.text.clone())
+        .block(query_block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(query, outer[1]);
+    rendered_query.set_cursor(frame, query_inner);
 
     render_issue_list(frame, body[0], app);
     render_issue_preview(frame, details[0], app);
@@ -176,27 +206,41 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
 
 fn render_issue_list(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &SyncDashboardApp) {
     let title = if app.focus == Focus::Issues {
-        format!("Project Issues [focus] ({})", app.data.issues.len())
+        format!(
+            "Project Issues [focus] ({}/{})",
+            app.visible_issue_results().len(),
+            app.data.issues.len()
+        )
     } else {
-        format!("Project Issues ({})", app.data.issues.len())
+        format!(
+            "Project Issues ({}/{})",
+            app.visible_issue_results().len(),
+            app.data.issues.len()
+        )
     };
-    let items = if app.data.issues.is_empty() {
-        vec![ListItem::new(
-            "No issues found for the configured default project.",
-        )]
+    let results = app.visible_issue_results();
+    let items = if results.is_empty() {
+        vec![ListItem::new("No issues match the current search.")]
     } else {
-        app.data
-            .issues
+        results
             .iter()
-            .map(render_issue_list_item)
+            .filter_map(|result| {
+                app.data.issues.get(result.issue_index).map(|issue| {
+                    render_issue_row(
+                        &issue.issue,
+                        Some(result),
+                        Some(issue.local_status.as_str()),
+                    )
+                })
+            })
             .collect::<Vec<_>>()
     };
 
     let mut state = ListState::default();
-    if app.data.issues.is_empty() {
+    if results.is_empty() {
         state.select(Some(0));
     } else {
-        state.select(Some(app.issue_index.min(app.data.issues.len() - 1)));
+        state.select(Some(app.issue_index.min(results.len() - 1)));
     }
 
     let list = List::new(items)
@@ -254,23 +298,12 @@ fn render_status(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &SyncD
     frame.render_widget(status, area);
 }
 
-fn render_issue_list_item(issue: &SyncDashboardIssue) -> ListItem<'static> {
-    ListItem::new(Text::from(vec![
-        Line::from(format!("{}  {}", issue.issue.identifier, issue.issue.title)),
-        Line::from(format!(
-            "{} • local: {} • {}",
-            issue_state_label(&issue.issue),
-            issue.local_status.as_str(),
-            issue.issue.updated_at
-        )),
-    ]))
-}
-
 impl SyncDashboardApp {
     fn new(data: SyncDashboardData) -> Self {
         Self {
             data,
             focus: Focus::Issues,
+            query: InputFieldState::default(),
             issue_index: 0,
             action_index: 0,
             completed: None,
@@ -282,11 +315,17 @@ impl SyncDashboardApp {
 
         match action {
             SyncDashboardAction::Up => match self.focus {
-                Focus::Issues => shift_index(&mut self.issue_index, self.data.issues.len(), -1),
+                Focus::Issues => {
+                    let len = self.visible_issue_results().len();
+                    shift_index(&mut self.issue_index, len, -1)
+                }
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), -1),
             },
             SyncDashboardAction::Down => match self.focus {
-                Focus::Issues => shift_index(&mut self.issue_index, self.data.issues.len(), 1),
+                Focus::Issues => {
+                    let len = self.visible_issue_results().len();
+                    shift_index(&mut self.issue_index, len, 1)
+                }
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), 1),
             },
             SyncDashboardAction::Back => {
@@ -315,8 +354,37 @@ impl SyncDashboardApp {
         None
     }
 
+    fn handle_query_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if self.focus != Focus::Issues {
+            return false;
+        }
+        if self.query.handle_key(key) {
+            self.issue_index = 0;
+            return true;
+        }
+        false
+    }
+
+    fn visible_issue_results(&self) -> Vec<IssueSearchResult> {
+        if self.query.value().trim().is_empty() {
+            return (0..self.data.issues.len())
+                .map(empty_search_result)
+                .collect();
+        }
+
+        let issues = self
+            .data
+            .issues
+            .iter()
+            .map(|issue| issue.issue.clone())
+            .collect::<Vec<_>>();
+        search_issues(&issues, self.query.value().trim())
+    }
+
     fn selected_issue(&self) -> Option<&SyncDashboardIssue> {
-        self.data.issues.get(self.issue_index)
+        self.visible_issue_results()
+            .get(self.issue_index)
+            .and_then(|result| self.data.issues.get(result.issue_index))
     }
 
     fn summary_line(&self) -> String {
@@ -334,8 +402,8 @@ impl SyncDashboardApp {
                     "No issues matched the configured default project.".to_string()
                 } else {
                     format!(
-                        "{} issues loaded from the repo default project. Press Enter to choose push or pull.",
-                        self.data.issues.len()
+                        "{} issues loaded from the repo default project. Search narrows the list before you choose pull or push.",
+                        self.visible_issue_results().len()
                     )
                 }
             }
@@ -348,32 +416,17 @@ impl SyncDashboardApp {
         }
     }
 
-    fn preview_text(&self) -> String {
-        let Some(issue) = self.selected_issue() else {
-            return "No issue is available for the configured default project.".to_string();
+    fn preview_text(&self) -> Text<'static> {
+        let results = self.visible_issue_results();
+        let Some(result) = results.get(self.issue_index) else {
+            return Text::from("No issue is available for the current search.");
         };
-
-        let project = issue
-            .issue
-            .project
-            .as_ref()
-            .map(|project| project.name.clone())
-            .unwrap_or_else(|| "No project".to_string());
-        let description = issue
-            .issue
-            .description
-            .as_deref()
-            .filter(|description| !description.trim().is_empty())
-            .unwrap_or("No description provided.");
-
-        format!(
-            "{}\n{}\n\nProject: {project}\nState: {}\nLocal sync: {}\nUpdated: {}\n\n{}",
-            issue.issue.identifier,
-            issue.issue.title,
-            issue_state_label(&issue.issue),
-            issue.local_status.as_str(),
-            issue.issue.updated_at,
-            description,
+        let issue = &self.data.issues[result.issue_index];
+        render_linear_issue_preview(
+            &issue.issue,
+            Some(result),
+            Some(issue.local_status.as_str()),
+            "No description provided.",
         )
     }
 
@@ -392,7 +445,7 @@ impl SyncDashboardApp {
                     "Configure `.metastack/meta.json` with a default project that has Linear issues, then rerun `meta sync`."
                         .to_string()
                 } else {
-                    "Step 1 of 2: choose an issue from the default project list.".to_string()
+                    "Step 1 of 2: search or choose an issue from the default project list.".to_string()
                 }
             }
             Focus::Actions => "Step 2 of 2: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
@@ -423,14 +476,6 @@ impl SyncSelectionAction {
             Self::Push => "push",
         }
     }
-}
-
-fn issue_state_label(issue: &IssueSummary) -> String {
-    issue
-        .state
-        .as_ref()
-        .map(|state| state.name.clone())
-        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 fn shift_index(index: &mut usize, len: usize, delta: isize) {
@@ -481,6 +526,7 @@ mod tests {
     };
     use crate::backlog::BacklogSyncStatus;
     use crate::linear::DashboardData;
+    use crate::tui::fields::InputFieldState;
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();
@@ -524,9 +570,9 @@ mod tests {
             panic!("render_once should return a snapshot");
         };
         assert!(snapshot.contains("Ready to push MET-12"));
+        assert!(snapshot.contains("Issue Search"));
         assert!(snapshot.contains("Sync Action [focus]"));
-        assert!(snapshot.contains("local: diverged"));
-        assert!(snapshot.contains("Local sync: diverged"));
+        assert!(snapshot.contains("diverged"));
     }
 
     #[test]
@@ -538,5 +584,14 @@ mod tests {
         assert_eq!(app.focus, Focus::Actions);
         app.apply(SyncDashboardAction::Back);
         assert_eq!(app.focus, Focus::Issues);
+    }
+
+    #[test]
+    fn sync_dashboard_search_can_narrow_to_zero_results() {
+        let mut app = SyncDashboardApp::new(demo_data());
+        app.query = InputFieldState::new("zzz");
+
+        assert!(app.visible_issue_results().is_empty());
+        assert!(format!("{:?}", app.preview_text()).contains("No issue is available"));
     }
 }

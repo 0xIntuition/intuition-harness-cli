@@ -1,3 +1,4 @@
+pub(crate) mod browser;
 mod command;
 pub mod create;
 pub mod dashboard;
