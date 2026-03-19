@@ -3711,6 +3711,7 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
         .stdout(predicate::str::contains("MET-32"));
 
     wait_for_path(&stub_dir.join("payload-2.txt"))?;
+    wait_for_path(&stub_dir.join("instructions-2.txt"))?;
     let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
         .trim()
         .parse::<u32>()?;
