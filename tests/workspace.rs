@@ -723,6 +723,7 @@ fn workspace_prune_removes_completed_clones_without_github_auth() -> Result<(), 
         .args([
             "workspace",
             "prune",
+            "--force",
             "--root",
             repo_root.to_string_lossy().as_ref(),
         ])

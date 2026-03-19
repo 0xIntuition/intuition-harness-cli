@@ -274,6 +274,9 @@ pub struct WorkspacePruneArgs {
     /// Preview which clones would be removed without deleting anything.
     #[arg(long)]
     pub dry_run: bool,
+    /// Skip confirmation before removing workspace clones.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]

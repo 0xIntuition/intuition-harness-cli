@@ -15,8 +15,6 @@ use crate::fs::{canonicalize_existing_dir, ensure_workspace_path_is_safe, siblin
 use crate::linear::{IssueListFilters, load_linear_command_context};
 use crate::listen::store::{ListenProjectStore, resolve_source_project_root};
 
-const GIGABYTE: f64 = 1_000_000_000.0;
-
 #[derive(Debug, Clone)]
 struct WorkspaceContext {
     source_root: PathBuf,
@@ -174,7 +172,8 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
     let entries = discover_workspace_entries(&context)?;
     if entries.is_empty() {
         return Ok(format!(
-            "Removed 0 clones, freed 0.00 GB. Kept 0 clones.\nWorkspace root: {}",
+            "Removed 0 clones, freed {}. Kept 0 clones.\nWorkspace root: {}",
+            format_bytes(0),
             context.workspace_root.display()
         ));
     }
@@ -218,6 +217,26 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
     }
 
     if !args.dry_run {
+        let removals = decisions
+            .iter()
+            .filter(|d| d.action == PruneAction::Remove)
+            .count();
+        if removals > 0 && !args.force {
+            let prompt = format!("Remove {removals} workspace clone{}? [y/N]: ", if removals == 1 { "" } else { "s" });
+            if io::stdin().is_terminal() {
+                print!("{prompt}");
+                io::stdout().flush().context("failed to flush confirmation prompt")?;
+            } else {
+                eprint!("{prompt}");
+                io::stderr().flush().context("failed to flush confirmation prompt")?;
+            }
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).context("failed to read confirmation input")?;
+            if !matches!(input.trim(), "y" | "Y" | "yes" | "YES") {
+                bail!("workspace prune canceled");
+            }
+        }
+
         for decision in &decisions {
             match decision.action {
                 PruneAction::Remove => {
@@ -242,7 +261,7 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
     lines.push(String::new());
     lines.push(format!(
         "Removed {removed} clones, freed {}. Kept {kept} clones.",
-        format_gigabytes(freed_bytes)
+        format_bytes(freed_bytes)
     ));
     Ok(lines.join("\n"))
 }
@@ -476,8 +495,21 @@ fn clean_targets(context: &WorkspaceContext, ticket: Option<&str>) -> Result<Str
 
 fn find_target_dirs(context: &WorkspaceContext, entry: &WorkspaceEntry) -> Result<Vec<PathBuf>> {
     ensure_workspace_path_is_safe(&context.source_root, &context.workspace_root, &entry.path)?;
+    // Check top-level target/ first (where Cargo puts build artifacts).
+    // This avoids walking the entire clone tree which can be very slow for large workspaces.
+    let top_level_target = entry.path.join("target");
+    if top_level_target.is_dir() {
+        let canonical = top_level_target
+            .canonicalize()
+            .with_context(|| format!("failed to resolve `{}`", top_level_target.display()))?;
+        if canonical.starts_with(&entry.path) {
+            return Ok(vec![top_level_target]);
+        }
+    }
+
+    // Fallback: walk the tree for nested target/ dirs (e.g., workspace members).
     let mut targets = Vec::new();
-    for node in WalkDir::new(&entry.path) {
+    for node in WalkDir::new(&entry.path).max_depth(3) {
         let node = node.with_context(|| format!("failed to walk `{}`", entry.path.display()))?;
         if !node.file_type().is_dir() || node.file_name() != OsStr::new("target") {
             continue;
@@ -493,7 +525,6 @@ fn find_target_dirs(context: &WorkspaceContext, entry: &WorkspaceEntry) -> Resul
                 canonical.display()
             );
         }
-        ensure_workspace_path_is_safe(&context.source_root, &context.workspace_root, &entry.path)?;
         targets.push(path);
     }
 
@@ -697,10 +728,6 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
-}
-
-fn format_gigabytes(bytes: u64) -> String {
-    format!("{:.2} GB", bytes as f64 / GIGABYTE)
 }
 
 fn format_system_time(value: SystemTime) -> String {
