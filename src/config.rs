@@ -21,6 +21,8 @@ pub const DEFAULT_LISTEN_POLL_INTERVAL_SECONDS: u64 = 7;
 pub const DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
 pub const MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 1;
 pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+pub const DEFAULT_SYNC_DISCUSSION_FILE_CHAR_LIMIT: usize = 20_000;
+pub const DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT: usize = 6_000;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
 pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
@@ -43,6 +45,8 @@ pub struct AppConfig {
 pub struct PlanningMeta {
     #[serde(default)]
     pub linear: PlanningLinearSettings,
+    #[serde(default)]
+    pub sync: PlanningSyncSettings,
     #[serde(default)]
     pub agent: PlanningAgentSettings,
     #[serde(default)]
@@ -93,6 +97,12 @@ pub struct PlanningLinearSettings {
 pub struct PlanningTicketContextSettings {
     pub discussion_prompt_chars: Option<usize>,
     pub discussion_persisted_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningSyncSettings {
+    pub discussion_file_char_limit: Option<usize>,
+    pub discussion_prompt_char_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -551,6 +561,7 @@ impl PlanningMeta {
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
         }
+        self.sync.validate()?;
         Ok(())
     }
 }
@@ -570,6 +581,32 @@ impl PlanningListenSettings {
     pub fn poll_interval_seconds(&self) -> u64 {
         self.poll_interval_seconds
             .unwrap_or(DEFAULT_LISTEN_POLL_INTERVAL_SECONDS)
+    }
+}
+
+impl PlanningSyncSettings {
+    pub fn discussion_file_char_limit(&self) -> usize {
+        self.discussion_file_char_limit
+            .unwrap_or(DEFAULT_SYNC_DISCUSSION_FILE_CHAR_LIMIT)
+    }
+
+    pub fn discussion_prompt_char_limit(&self) -> usize {
+        self.discussion_prompt_char_limit
+            .unwrap_or(DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if matches!(self.discussion_file_char_limit, Some(0)) {
+            return Err(anyhow!(
+                "repo sync discussion file char limit must be greater than zero"
+            ));
+        }
+        if matches!(self.discussion_prompt_char_limit, Some(0)) {
+            return Err(anyhow!(
+                "repo sync discussion prompt char limit must be greater than zero"
+            ));
+        }
+        Ok(())
     }
 }
 

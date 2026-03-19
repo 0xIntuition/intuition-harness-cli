@@ -646,18 +646,22 @@ Side effects:
 - `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `.metastack/backlog/<ISSUE_ID>/artifacts/`
 - `pull` writes `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
 - `pull` writes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
+- `pull` filters generated workpad and `[harness-sync]` comments out of the persisted discussion context and stores `last_pulled_comment_ids` in `.metastack/backlog/<ISSUE_ID>/.linear.json`
 - `pull` logs per-image download failures without failing the overall sync
 - `pull` uses raw `Authorization: <LINEAR_API_KEY>` only for `uploads.linear.app` image downloads; other hosts are fetched without that special auth header
-- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, and `last_sync_at` alongside the existing issue metadata
+- `pull` reuses previously localized ticket images when the same generated artifact path is still current
+- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, `last_sync_at`, and `last_pulled_comment_ids` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
 - `pull --all` walks every linked backlog entry sequentially and prints a synced/skipped/error summary
 - `push` replaces only CLI-managed attachments by default, leaving unrelated Linear attachments untouched
+- `push` parses `.metastack/backlog/<ISSUE_ID>/checklist.md` when present and upserts a single `[harness-sync]` Linear comment with per-milestone and overall completion status
 - `push` leaves the Linear issue description unchanged unless you pass `--update-description`
 - `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
 - `push --all` walks every linked backlog entry sequentially, respects `--update-description`, and exits non-zero when any entry fails
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 - pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
+- `.metastack/meta.json` optionally accepts `sync.discussion_file_char_limit` and `sync.discussion_prompt_char_limit` to tune the persisted discussion file budget and the `meta listen` prompt excerpt budget
 
 The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
 
@@ -673,7 +677,7 @@ The sync dashboard and render-once snapshot also show each issue's local sync st
 - `diverged`: both local backlog files and the Linear issue changed since the last stored baseline
 - `unlinked`: the local packet is missing or the existing `.linear.json` predates hash baselines
 
-Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded so repeat no-op syncs remain `synced`.
+Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded, and generated discussion/image artifacts stay local-only so repeat no-op syncs remain `synced`.
 
 ### `linear issues`, `linear projects`, and `dashboard`
 

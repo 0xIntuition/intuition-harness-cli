@@ -233,13 +233,15 @@ where
 
     let mut failures = Vec::new();
     for image in &context.images {
+        let relative_path = format!("artifacts/{}", image.filename);
+        let destination = issue_dir.join(&relative_path);
+        if previous_images.contains(&relative_path) && destination.is_file() {
+            continue;
+        }
+
         match service.download_file(&image.original_url).await {
             Ok(contents) => {
-                write_issue_attachment_file(
-                    issue_dir,
-                    &format!("artifacts/{}", image.filename),
-                    &contents,
-                )?;
+                write_issue_attachment_file(issue_dir, &relative_path, &contents)?;
             }
             Err(error) => failures.push(TicketImageDownloadFailure {
                 filename: image.filename.clone(),

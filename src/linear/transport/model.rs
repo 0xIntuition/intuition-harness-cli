@@ -65,6 +65,11 @@ pub(super) struct IssueByIdPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsPayload {
+    pub(super) issue: Option<IssueCommentsNode>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssueCreatePayload {
     #[serde(rename = "issueCreate")]
     pub(super) issue_create: IssueMutationNode,
@@ -110,6 +115,12 @@ pub(super) struct UploadPayload {
 pub(super) struct IssueMutationNode {
     pub(super) success: bool,
     pub(super) issue: Option<IssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsNode {
+    #[serde(default)]
+    pub(super) comments: Option<Connection<CommentNode>>,
 }
 
 #[derive(Debug, Deserialize)]
