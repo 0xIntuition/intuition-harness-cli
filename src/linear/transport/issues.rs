@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::linear::{IssueCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest};
+use crate::linear::{
+    IssueAssigneeFilter, IssueCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest,
+};
 
 use super::{
     ReqwestLinearClient,
@@ -382,6 +384,73 @@ fn render_issue_filter(filters: &IssueListFilters) -> Value {
             }),
         );
     }
+    match &filters.assignee {
+        IssueAssigneeFilter::Any => {}
+        IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
+            filter.insert(
+                "or".to_string(),
+                json!([
+                    {
+                        "assignee": {
+                            "id": {
+                                "eq": viewer_id,
+                            }
+                        }
+                    },
+                    {
+                        "assignee": {
+                            "null": true,
+                        }
+                    }
+                ]),
+            );
+        }
+    }
 
     Value::Object(filter)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::render_issue_filter;
+    use crate::linear::{IssueAssigneeFilter, IssueListFilters};
+
+    #[test]
+    fn render_issue_filter_includes_viewer_or_unassigned_assignee_scope() {
+        let filter = render_issue_filter(&IssueListFilters {
+            assignee: IssueAssigneeFilter::ViewerOrUnassigned {
+                viewer_id: "viewer-1".to_string(),
+            },
+            ..IssueListFilters::default()
+        });
+
+        assert_eq!(
+            filter,
+            json!({
+                "or": [
+                    {
+                        "assignee": {
+                            "id": {
+                                "eq": "viewer-1"
+                            }
+                        }
+                    },
+                    {
+                        "assignee": {
+                            "null": true
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn render_issue_filter_omits_assignee_clause_for_all_assignees_scope() {
+        let filter = render_issue_filter(&IssueListFilters::default());
+
+        assert_eq!(filter, json!({}));
+    }
 }

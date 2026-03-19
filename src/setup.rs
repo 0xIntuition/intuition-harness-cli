@@ -730,7 +730,7 @@ impl SetupApp {
             assignment_field: SelectFieldState::new(
                 vec![
                     "Any eligible issue".to_string(),
-                    "Only issues assigned to the Linear viewer".to_string(),
+                    "Viewer-assigned issues plus unassigned issues".to_string(),
                 ],
                 match view.planning_meta.listen.assignment_scope {
                     ListenAssignmentScope::Any => 0,
@@ -1523,7 +1523,7 @@ fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
 fn assignment_scope_label(scope: ListenAssignmentScope) -> &'static str {
     match scope {
         ListenAssignmentScope::Any => "Any eligible issue",
-        ListenAssignmentScope::Viewer => "Only issues assigned to the Linear viewer",
+        ListenAssignmentScope::Viewer => "Viewer-assigned issues plus unassigned issues",
     }
 }
 
