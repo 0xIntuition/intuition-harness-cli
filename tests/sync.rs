@@ -623,8 +623,12 @@ fn sync_push_updates_a_single_harness_sync_comment_and_skips_generated_discussio
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("synced 2 managed attachment files"))
-        .stdout(predicate::str::contains("updated [harness-sync] progress comment"));
+        .stdout(predicate::str::contains(
+            "synced 2 managed attachment files",
+        ))
+        .stdout(predicate::str::contains(
+            "updated [harness-sync] progress comment",
+        ));
 
     update_comment_mock.assert_calls(1);
     upload_implementation_mock.assert_calls(1);

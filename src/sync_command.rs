@@ -211,8 +211,8 @@ pub async fn run_sync_link(
         && metadata.identifier.eq_ignore_ascii_case(&issue.identifier)
     {
         if args.pull {
-            let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false, pull_options)
-                .await?;
+            let _ =
+                sync_pull_issue(&root, &service, &issue, &issue_dir, false, pull_options).await?;
         } else {
             println!(
                 "{} is already linked to {} at {}.",
@@ -230,8 +230,7 @@ pub async fn run_sync_link(
     )?;
 
     if args.pull {
-        let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false, pull_options)
-            .await?;
+        let _ = sync_pull_issue(&root, &service, &issue, &issue_dir, false, pull_options).await?;
     } else {
         println!(
             "Linked {} to {}.",
@@ -431,26 +430,21 @@ async fn run_sync_pull_all(
             .as_ref()
             .ok_or_else(|| anyhow!("linked backlog entry metadata unexpectedly missing"))?;
         match service.load_issue(&metadata.identifier).await {
-            Ok(issue) => match sync_pull_issue(
-                root,
-                service,
-                &issue,
-                &entry.issue_dir,
-                true,
-                options,
-            )
-            .await {
-                Ok(SyncExecutionOutcome::Synced) => summary.synced += 1,
-                Ok(SyncExecutionOutcome::Skipped) => summary.skipped += 1,
-                Err(error) => {
-                    summary.errors += 1;
-                    eprintln!(
-                        "Failed to pull {} from {}: {error:#}",
-                        metadata.identifier,
-                        display_path(&entry.issue_dir, root),
-                    );
+            Ok(issue) => {
+                match sync_pull_issue(root, service, &issue, &entry.issue_dir, true, options).await
+                {
+                    Ok(SyncExecutionOutcome::Synced) => summary.synced += 1,
+                    Ok(SyncExecutionOutcome::Skipped) => summary.skipped += 1,
+                    Err(error) => {
+                        summary.errors += 1;
+                        eprintln!(
+                            "Failed to pull {} from {}: {error:#}",
+                            metadata.identifier,
+                            display_path(&entry.issue_dir, root),
+                        );
+                    }
                 }
-            },
+            }
             Err(error) => {
                 summary.errors += 1;
                 eprintln!(
@@ -585,10 +579,7 @@ async fn sync_pull_issue(
 
     if needs_pull_overwrite_confirmation(resolution.status) {
         let local_description = read_optional_text_file(&issue_dir.join(INDEX_FILE_NAME))?;
-        let diff = render_sync_diff(
-            &local_description,
-            normalized_issue_description(issue),
-        );
+        let diff = render_sync_diff(&local_description, normalized_issue_description(issue));
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
             if !prompt_pull_overwrite(&issue.identifier, resolution.status, &diff)? {
@@ -873,7 +864,8 @@ async fn sync_push_issue(
         } else {
             "left the Linear issue description unchanged; pass --update-description to send index.md"
         },
-        progress_comment_status.unwrap_or("skipped [harness-sync] progress comment because checklist.md is missing"),
+        progress_comment_status
+            .unwrap_or("skipped [harness-sync] progress comment because checklist.md is missing"),
     );
 
     Ok(SyncExecutionOutcome::Synced)
@@ -1102,13 +1094,21 @@ fn render_ticket_discussion(
     let mut kept = Vec::new();
     let mut used = header.len();
     for rendered in rendered_comments.iter().rev() {
-        let separator_len = if kept.is_empty() { 0 } else { "\n\n---\n\n".len() };
-        if !kept.is_empty() && used + separator_len + rendered.len() > options.discussion_file_char_limit
+        let separator_len = if kept.is_empty() {
+            0
+        } else {
+            "\n\n---\n\n".len()
+        };
+        if !kept.is_empty()
+            && used + separator_len + rendered.len() > options.discussion_file_char_limit
         {
             break;
         }
         if kept.is_empty() && used + rendered.len() > options.discussion_file_char_limit {
-            kept.push(truncate_tail(rendered, options.discussion_file_char_limit.saturating_sub(used)));
+            kept.push(truncate_tail(
+                rendered,
+                options.discussion_file_char_limit.saturating_sub(used),
+            ));
             break;
         }
         used += separator_len + rendered.len();
@@ -1132,7 +1132,10 @@ fn render_ticket_discussion(
     body
 }
 
-fn render_discussion_comment(comment: &DiscussionComment, images: &[DiscussionImageAsset]) -> String {
+fn render_discussion_comment(
+    comment: &DiscussionComment,
+    images: &[DiscussionImageAsset],
+) -> String {
     let author = comment
         .author_name
         .as_deref()
@@ -1174,7 +1177,10 @@ fn rewrite_comment_images(body: &str, images: &[&DiscussionImageAsset]) -> Strin
 
         rendered.push_str(&body[cursor..start]);
         if let Some(image) = images.get(image_index) {
-            rendered.push_str(&format!("![{}]({})", image.alt, image.discussion_relative_path));
+            rendered.push_str(&format!(
+                "![{}]({})",
+                image.alt, image.discussion_relative_path
+            ));
         } else {
             rendered.push_str(&body[start..=url_end]);
         }
@@ -1265,7 +1271,10 @@ fn parse_checklist_progress_summary(contents: &str) -> ChecklistProgressSummary 
     }
 }
 
-fn render_harness_sync_comment(issue: &IssueSummary, progress: &ChecklistProgressSummary) -> String {
+fn render_harness_sync_comment(
+    issue: &IssueSummary,
+    progress: &ChecklistProgressSummary,
+) -> String {
     let mut lines = vec![
         HARNESS_SYNC_MARKER.to_string(),
         format!("Issue: `{}`", issue.identifier),
@@ -1302,7 +1311,12 @@ fn completion_percentage(completed: usize, total: usize) -> String {
 fn format_comment_timestamp(created_at: Option<&str>) -> String {
     created_at
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc).format("%Y-%m-%d %H:%M UTC").to_string())
+        .map(|value| {
+            value
+                .with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        })
         .or_else(|| created_at.map(str::to_string))
         .unwrap_or_else(|| "Unknown time".to_string())
 }

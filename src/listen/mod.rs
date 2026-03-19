@@ -27,16 +27,15 @@ use walkdir::WalkDir;
 use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, TICKET_DISCUSSION_FILE_NAME,
-    TemplateContext,
-    render_template_files, save_issue_metadata, write_issue_description,
+    TemplateContext, render_template_files, save_issue_metadata, write_issue_description,
 };
 use crate::cli::{
     ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs, ListenSessionListArgs,
     ListenSessionResumeArgs, ListenWorkerArgs,
 };
 use crate::config::{
-    AppConfig, LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
-    PlanningMeta, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, load_required_planning_meta,
+    AppConfig, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, LinearConfig, LinearConfigOverrides,
+    ListenAssignmentScope, PlanningListenSettings, PlanningMeta, load_required_planning_meta,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{
@@ -2663,8 +2662,7 @@ mod tests {
         let workspace = temp.path();
         fs::create_dir_all(workspace.join(".metastack/backlog/MET-24/context"))
             .expect("discussion dir should build");
-        fs::create_dir_all(workspace.join(".metastack"))
-            .expect("metastack dir should build");
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
         fs::write(
             workspace.join(".metastack/meta.json"),
             r#"{
