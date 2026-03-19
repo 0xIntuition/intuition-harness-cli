@@ -403,6 +403,7 @@ fn build_issue_metadata(issue: &IssueSummary) -> BacklogIssueMetadata {
         local_hash: None,
         remote_hash: None,
         last_sync_at: None,
+        last_pulled_comment_ids: Vec::new(),
         managed_files: Vec::<ManagedFileRecord>::new(),
     }
 }

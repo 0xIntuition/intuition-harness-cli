@@ -837,6 +837,9 @@ pub struct ListenRunArgs {
     /// Poll interval in seconds for the live daemon loop.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub poll_interval: Option<u64>,
+    /// Watch Todo issues for all assignees during this run without changing repo setup.
+    #[arg(long)]
+    pub all_assignees: bool,
     /// Run listen prerequisite checks and exit without polling Linear or starting the daemon.
     #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
     pub check: bool,

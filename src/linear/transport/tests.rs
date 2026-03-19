@@ -4,8 +4,8 @@ use serde_json::json;
 
 use crate::config::LinearConfig;
 use crate::linear::{
-    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, LinearClient,
-    ReqwestLinearClient,
+    IssueAssigneeFilter, IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters,
+    LinearClient, ReqwestLinearClient,
 };
 
 #[tokio::test]
@@ -87,6 +87,9 @@ async fn reqwest_client_sends_server_side_issue_filters() {
             project: None,
             project_id: Some("project-1".to_string()),
             state: Some("Todo".to_string()),
+            assignee: IssueAssigneeFilter::ViewerOrUnassigned {
+                viewer_id: "viewer-1".to_string(),
+            },
             limit: 5,
         })
         .await

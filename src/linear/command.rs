@@ -76,6 +76,7 @@ pub(crate) async fn run_issues_command(
                     project_id: applied_project_id.clone(),
                     project: list_args.project.clone(),
                     state: list_args.state.clone(),
+                    assignee: crate::linear::IssueAssigneeFilter::Any,
                     limit: list_args.limit,
                 })
                 .await?;

@@ -344,6 +344,8 @@ Legacy alias: `meta setup`
 
 `meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
 
+For listen setup, `assignment_scope = "viewer"` now means `viewer + unassigned` for unattended listen runs. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
+
 For unattended `meta agents listen` runs, setup should be paired with a provider preflight:
 
 - Codex requires `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`, and `[mcp_servers.linear]` should be removed or disabled.
@@ -631,16 +633,25 @@ Side effects:
 - `status` resolves only local change state by default; pass `--fetch` to check the current Linear issue and surface `remote-ahead` or `diverged`
 - `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
 - `pull` restores CLI-managed attachment files into the same directory when present
-- `pull` persists `.linear.json`, including `local_hash`, `remote_hash`, and `last_sync_at` alongside the existing issue metadata
+- `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `.metastack/backlog/<ISSUE_ID>/artifacts/`
+- `pull` writes `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
+- `pull` writes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
+- `pull` filters generated workpad and `[harness-sync]` comments out of the persisted discussion context and stores `last_pulled_comment_ids` in `.metastack/backlog/<ISSUE_ID>/.linear.json`
+- `pull` logs per-image download failures without failing the overall sync
+- `pull` uses raw `Authorization: <LINEAR_API_KEY>` only for `uploads.linear.app` image downloads; other hosts are fetched without that special auth header
+- `pull` reuses previously localized ticket images when the same generated artifact path is still current
+- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, `last_sync_at`, and `last_pulled_comment_ids` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
 - `pull --all` walks every linked backlog entry sequentially and prints a synced/skipped/error summary
 - `push` replaces only CLI-managed attachments by default, leaving unrelated Linear attachments untouched
+- `push` parses `.metastack/backlog/<ISSUE_ID>/checklist.md` when present and upserts a single `[harness-sync]` Linear comment with per-milestone and overall completion status
 - `push` leaves the Linear issue description unchanged unless you pass `--update-description`
 - `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
 - `push --all` walks every linked backlog entry sequentially, respects `--update-description`, and exits non-zero when any entry fails
 - during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 - pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
+- `.metastack/meta.json` optionally accepts `sync.discussion_file_char_limit` and `sync.discussion_prompt_char_limit` to tune the persisted discussion file budget and the `meta listen` prompt excerpt budget
 
 The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
 
@@ -656,7 +667,7 @@ The sync dashboard and render-once snapshot also show each issue's local sync st
 - `diverged`: both local backlog files and the Linear issue changed since the last stored baseline
 - `unlinked`: the local packet is missing or the existing `.linear.json` predates hash baselines
 
-Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded so repeat no-op syncs remain `synced`.
+Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded, and generated discussion/image artifacts stay local-only so repeat no-op syncs remain `synced`.
 
 ### `linear issues`, `linear projects`, and `dashboard`
 
@@ -698,6 +709,8 @@ Required auth:
 
 Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work.
 
+With repo setup `assignment_scope = "viewer"`, listen watches Todo issues assigned to the authenticated viewer plus unassigned Todo issues. Use `--all-assignees` to disable assignee filtering for just the active run.
+
 Legacy alias: `meta listen`
 
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
@@ -709,7 +722,11 @@ Examples:
 ```bash
 meta agents listen --demo --render-once
 meta agents listen --check --root .
+meta agents listen --team MET --once
+meta agents listen --check --root . --all-assignees
 meta agents listen --team MET --project "MetaStack CLI" --once
+meta agents listen --team MET --project "MetaStack API"
+meta agents listen --team MET --project "MetaStack CLI" --once --all-assignees
 meta agents listen --team MET --project "MetaStack CLI"
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
@@ -726,6 +743,7 @@ sandbox_mode = "danger-full-access"
 - Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; the preflight warns when Linear MCP is detected.
 - Claude: `claude` must be on `PATH`, and `ANTHROPIC_API_KEY` should be unset for unattended subscription-backed runs.
 - `meta agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
+- `--check` also prints the effective assignee filter, for example `Kames + unassigned` or `all assignees`.
 
 Outputs:
 
@@ -789,7 +807,8 @@ Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`, while interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; for listen runs, `assignment_scope = "viewer"` means `viewer + unassigned`, and `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; for listen runs, `assignment_scope = "viewer"` means `viewer + unassigned`, and `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
 ## Agent Configuration
 
 Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:

@@ -1,15 +1,21 @@
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::linear::{IssueCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest};
+use crate::linear::{
+    IssueAssigneeFilter, IssueCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest,
+};
 
 use super::{
     ReqwestLinearClient,
-    model::{IssueByIdPayload, IssueCreatePayload, IssueUpdatePayload, IssuesPayload},
+    model::{
+        Connection, IssueByIdPayload, IssueCommentsPayload, IssueCreatePayload, IssueUpdatePayload,
+        IssuesPayload,
+    },
     pagination::CursorPager,
 };
 
 const ISSUES_PAGE_SIZE: usize = 100;
+const ISSUE_COMMENTS_PAGE_SIZE: usize = 50;
 
 const ISSUES_QUERY: &str = r#"
 query Issues($first: Int!, $after: String, $filter: IssueFilter) {
@@ -152,6 +158,10 @@ comments(first: 50) {
     }
     resolvedAt
   }
+  pageInfo {
+    hasNextPage
+    endCursor
+  }
 }
 state {
   id
@@ -214,9 +224,88 @@ query Issue($id: String!) {{
             .graphql()
             .query(&query, json!({ "id": issue_id }))
             .await?;
-        data.issue
-            .map(IssueSummary::from)
-            .ok_or_else(|| anyhow!("Linear issue `{issue_id}` returned no issue body"))
+        let mut issue = data
+            .issue
+            .ok_or_else(|| anyhow!("Linear issue `{issue_id}` returned no issue body"))?;
+
+        let mut all_comments = issue
+            .comments
+            .as_mut()
+            .map(|comments| std::mem::take(&mut comments.nodes))
+            .unwrap_or_default();
+        let mut cursor = issue.comments.as_ref().and_then(|comments| {
+            comments.page_info.as_ref().and_then(|page_info| {
+                page_info
+                    .has_next_page
+                    .then(|| page_info.end_cursor.clone())
+                    .flatten()
+            })
+        });
+
+        while let Some(after) = cursor {
+            let page = self.get_issue_comments_page(issue_id, Some(after)).await?;
+            let connection = page
+                .issue
+                .and_then(|issue| issue.comments)
+                .unwrap_or(Connection {
+                    nodes: Vec::new(),
+                    page_info: None,
+                });
+            all_comments.extend(connection.nodes);
+            cursor = connection.page_info.and_then(|page_info| {
+                page_info
+                    .has_next_page
+                    .then_some(page_info.end_cursor)
+                    .flatten()
+            });
+        }
+
+        if let Some(comments) = issue.comments.as_mut() {
+            comments.nodes = all_comments;
+        }
+
+        Ok(IssueSummary::from(issue))
+    }
+
+    async fn get_issue_comments_page(
+        &self,
+        issue_id: &str,
+        after: Option<String>,
+    ) -> Result<IssueCommentsPayload> {
+        let query = r#"
+query IssueComments($id: String!, $first: Int!, $after: String) {
+  issue(id: $id) {
+    comments(first: $first, after: $after) {
+      nodes {
+        id
+        body
+        createdAt
+        user {
+          id
+          name
+          email
+        }
+        resolvedAt
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"#;
+
+        self.graphql()
+            .query(
+                query,
+                json!({
+                    "id": issue_id,
+                    "first": ISSUE_COMMENTS_PAGE_SIZE,
+                    "after": after,
+                }),
+            )
+            .await
     }
 
     pub(super) async fn create_issue_resource(
@@ -391,6 +480,73 @@ fn render_issue_filter(filters: &IssueListFilters) -> Value {
             }),
         );
     }
+    match &filters.assignee {
+        IssueAssigneeFilter::Any => {}
+        IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
+            filter.insert(
+                "or".to_string(),
+                json!([
+                    {
+                        "assignee": {
+                            "id": {
+                                "eq": viewer_id,
+                            }
+                        }
+                    },
+                    {
+                        "assignee": {
+                            "null": true,
+                        }
+                    }
+                ]),
+            );
+        }
+    }
 
     Value::Object(filter)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::render_issue_filter;
+    use crate::linear::{IssueAssigneeFilter, IssueListFilters};
+
+    #[test]
+    fn render_issue_filter_includes_viewer_or_unassigned_assignee_scope() {
+        let filter = render_issue_filter(&IssueListFilters {
+            assignee: IssueAssigneeFilter::ViewerOrUnassigned {
+                viewer_id: "viewer-1".to_string(),
+            },
+            ..IssueListFilters::default()
+        });
+
+        assert_eq!(
+            filter,
+            json!({
+                "or": [
+                    {
+                        "assignee": {
+                            "id": {
+                                "eq": "viewer-1"
+                            }
+                        }
+                    },
+                    {
+                        "assignee": {
+                            "null": true
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn render_issue_filter_omits_assignee_clause_for_all_assignees_scope() {
+        let filter = render_issue_filter(&IssueListFilters::default());
+
+        assert_eq!(filter, json!({}));
+    }
 }

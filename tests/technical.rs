@@ -272,6 +272,26 @@ JSON
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("\"issueId\":\"child-1\"")
+            .body_includes("[harness-sync]");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-sync-1",
+                        "body": "[harness-sync]\nupdated progress",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
             .body_includes("mutation UpdateIssue")
             .body_includes("\"id\":\"child-1\"")
             .body_includes("Agent-generated technical backlog");

@@ -42,7 +42,7 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .body_includes("query Issue")
+            .body_includes("query Issue($id: String!)")
             .body_includes("\"id\":\"issue-1\"");
         then.status(200).json_body(json!({
             "data": {
@@ -176,7 +176,8 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
 }
 
 #[test]
-fn sync_pull_localizes_ticket_images_and_writes_discussion_context() -> Result<(), Box<dyn Error>> {
+fn sync_pull_rebuilds_discussion_context_downloads_images_with_auth_and_reuses_known_files()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let server = MockServer::start();
     let api_url = server.url("/graphql");
@@ -186,6 +187,9 @@ fn sync_pull_localizes_ticket_images_and_writes_discussion_context() -> Result<(
   "linear": {
     "team": "MET",
     "project_id": "project-1"
+  },
+  "sync": {
+    "discussion_file_char_limit": 500
   }
 }
 "#,
@@ -211,101 +215,201 @@ fn sync_pull_localizes_ticket_images_and_writes_discussion_context() -> Result<(
         }));
     });
 
-    let detail_payload = serde_json::from_str::<serde_json::Value>(
-        &json!({
-            "data": {
-                "issue": {
-                    "id": "issue-1",
-                    "identifier": "MET-35",
-                    "title": "Create the technical and sync commands",
-                    "description": "Pulled description\n\n![issue-shot](ISSUE_IMAGE)",
-                    "url": "https://linear.app/issues/MET-35",
-                    "priority": 2,
-                    "updatedAt": "2026-03-14T16:00:00Z",
-                    "team": {
-                        "id": "team-1",
-                        "key": "MET",
-                        "name": "Metastack"
-                    },
-                    "project": {
-                        "id": "project-1",
-                        "name": "MetaStack CLI"
-                    },
-                    "labels": { "nodes": [] },
-                    "comments": {
-                        "nodes": [{
-                            "id": "comment-1",
-                            "body": "Need parent art\n\n![comment-shot](COMMENT_IMAGE)",
-                            "createdAt": "2026-03-16T10:00:00Z",
-                            "user": {
-                                "name": "Alice"
-                            },
-                            "resolvedAt": null
-                        }]
-                    },
-                    "state": {
-                        "id": "state-2",
-                        "name": "In Progress",
-                        "type": "started"
-                    },
-                    "attachments": {
-                        "nodes": [{
-                            "id": "attachment-1",
-                            "title": "implementation.md",
-                            "url": "ATTACHMENT_URL",
-                            "sourceType": "upload",
-                            "metadata": {
-                                "managedBy": "metastack-cli",
-                                "relativePath": "implementation.md"
-                            }
-                        }]
-                    },
-                    "parent": {
-                        "id": "parent-1",
-                        "identifier": "MET-10",
-                        "title": "Parent issue",
-                        "url": "https://linear.app/issues/MET-10",
-                        "description": "Parent issue context\n\n![parent-shot](PARENT_IMAGE)"
-                    },
-                    "children": {
-                        "nodes": []
-                    }
-                }
-            }
-        })
-        .to_string()
-        .replace("ISSUE_IMAGE", &server.url("/images/issue-shot.png"))
-        .replace("COMMENT_IMAGE", &server.url("/images/comment-shot.jpg"))
-        .replace("PARENT_IMAGE", &server.url("/images/parent-shot.svg"))
-        .replace(
-            "ATTACHMENT_URL",
-            &server.url("/downloads/implementation.md"),
-        ),
-    )?;
-
-    server.mock(move |when, then| {
+    server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .body_includes("query Issue")
             .body_includes("\"id\":\"issue-1\"");
-        then.status(200).json_body(detail_payload);
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": sync_issue_detail_node_with_comments(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Pulled description\n",
+                    vec![
+                        sync_comment_node(
+                            "comment-1",
+                            "Taylor",
+                            "2026-03-18T14:00:00Z",
+                            &format!(
+                                "Need the updated flow.\n\n![mockup]({})",
+                                server.url("/uploads/mockup.png")
+                            ),
+                        ),
+                        sync_comment_node(
+                            "comment-2",
+                            "Morgan",
+                            "2026-03-18T15:00:00Z",
+                            "Follow-up note.",
+                        ),
+                        sync_comment_node(
+                            "comment-workpad",
+                            "Codex",
+                            "2026-03-18T15:30:00Z",
+                            "## Codex Workpad\n\nIgnore this generated note.",
+                        ),
+                        sync_comment_node(
+                            "comment-sync",
+                            "Harness",
+                            "2026-03-18T16:00:00Z",
+                            "[harness-sync]\nIgnore this generated progress note.",
+                        ),
+                    ],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    let image_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/uploads/mockup.png");
+        then.status(200).body("fake-image");
+    });
+
+    for _ in 0..2 {
+        cli()
+            .current_dir(temp.path())
+            .args([
+                "sync",
+                "--api-key",
+                "token",
+                "--api-url",
+                &api_url,
+                "pull",
+                "MET-35",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("rebuilt discussion context"));
+    }
+
+    image_mock.assert_calls(1);
+
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    let discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
+    assert!(discussion.contains("### **Taylor** (2026-03-18)"));
+    assert!(discussion.contains("### **Morgan** (2026-03-18)"));
+    assert!(discussion.contains("![mockup](artifacts/comment-1-mockup.png)"));
+    assert!(!discussion.contains("## Codex Workpad"));
+    assert!(!discussion.contains("[harness-sync]"));
+
+    let manifest = fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?;
+    assert!(manifest.contains("/uploads/mockup.png"));
+
+    let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
+    assert!(metadata.contains("\"last_pulled_comment_ids\""));
+    assert!(metadata.contains("\"comment-1\""));
+    assert!(metadata.contains("\"comment-2\""));
+    assert!(!metadata.contains("\"comment-workpad\""));
+    assert!(!metadata.contains("\"comment-sync\""));
+    assert_eq!(
+        fs::read(issue_dir.join("artifacts/comment-1-mockup.png"))?,
+        b"fake-image"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sync_pull_fetches_paginated_issue_comments() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    let first_page_comments = (1..=50)
+        .map(|index| {
+            sync_comment_node(
+                &format!("comment-{index}"),
+                "Taylor",
+                &format!("2026-03-18T14:{:02}:00Z", index % 60),
+                &format!("Comment {index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(move |when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": sync_issue_detail_node_with_comments(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "# Pulled description\n",
+                    first_page_comments.clone(),
+                    true,
+                    Some("cursor-1"),
+                    vec![],
+                    None,
+                )
+            }
+        }));
     });
 
     server.mock(|when, then| {
-        when.method(GET).path("/downloads/implementation.md");
-        then.status(200).body("# Downloaded implementation\n");
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueComments")
+            .body_includes("\"after\":\"cursor-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "comments": {
+                        "nodes": [
+                            sync_comment_node(
+                                "comment-51",
+                                "Morgan",
+                                "2026-03-18T16:00:00Z",
+                                "Comment 51"
+                            )
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": false,
+                            "endCursor": null
+                        }
+                    }
+                }
+            }
+        }));
     });
-
-    for path in [
-        "/images/issue-shot.png",
-        "/images/comment-shot.jpg",
-        "/images/parent-shot.svg",
-    ] {
-        server.mock(move |when, then| {
-            when.method(GET).path(path);
-            then.status(200).body("image-bytes");
-        });
-    }
 
     cli()
         .current_dir(temp.path())
@@ -319,35 +423,528 @@ fn sync_pull_localizes_ticket_images_and_writes_discussion_context() -> Result<(
             "MET-35",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Pulled MET-35"));
+        .success();
 
-    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
-    let index = fs::read_to_string(issue_dir.join("index.md"))?;
-    let implementation = fs::read_to_string(issue_dir.join("implementation.md"))?;
-    let ticket_images = fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?;
-    let ticket_discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
-
-    assert!(index.contains("![issue-shot](artifacts/issue-shot.png)"));
-    assert!(implementation.contains("Downloaded implementation"));
-    assert!(ticket_images.contains("| `issue-shot.png` | issue-shot | Issue description |"));
-    assert!(
-        ticket_images.contains("| `parent-parent-shot.svg` | parent-shot | Parent description |")
-    );
-    assert!(
-        ticket_images.contains("| `comment-1-comment-shot.jpg` | comment-shot | Need parent art |")
-    );
-    assert!(ticket_discussion.contains("### **Alice** (2026-03-16)"));
-    assert!(ticket_discussion.contains("![comment-shot](artifacts/comment-1-comment-shot.jpg)"));
-    assert!(issue_dir.join("artifacts/issue-shot.png").is_file());
-    assert!(issue_dir.join("artifacts/parent-parent-shot.svg").is_file());
-    assert!(
-        issue_dir
-            .join("artifacts/comment-1-comment-shot.jpg")
-            .is_file()
-    );
+    let discussion = fs::read_to_string(
+        temp.path()
+            .join(".metastack/backlog/MET-35/context/ticket-discussion.md"),
+    )?;
+    assert!(discussion.contains("Comment 1"));
+    assert!(discussion.contains("Comment 50"));
+    assert!(discussion.contains("Comment 51"));
 
     Ok(())
+}
+
+#[test]
+fn sync_push_updates_a_single_harness_sync_comment_and_skips_generated_discussion_artifacts()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    fs::create_dir_all(issue_dir.join("context"))?;
+    fs::create_dir_all(issue_dir.join("artifacts/ticket-images"))?;
+    fs::write(issue_dir.join("index.md"), "# Updated description\n")?;
+    fs::write(
+        issue_dir.join("checklist.md"),
+        "# Checklist\n\n## Milestone A\n- [x] done\n- [ ] todo\n\n## Milestone B\n- [x] done\n- [x] done\n- [ ] todo\n",
+    )?;
+    fs::write(
+        issue_dir.join("implementation.md"),
+        "# Local implementation\n",
+    )?;
+    fs::write(
+        issue_dir.join("context/ticket-discussion.md"),
+        "# Machine owned discussion file\n",
+    )?;
+    fs::write(
+        issue_dir.join("artifacts/ticket-images.md"),
+        "# Machine owned image manifest\n",
+    )?;
+    fs::write(
+        issue_dir.join("artifacts/ticket-images/comment-1-01.png"),
+        "fake-image",
+    )?;
+    fs::write(
+        issue_dir.join("artifacts/issue-shot.png"),
+        "localized-image",
+    )?;
+    fs::write(
+        issue_dir.join(".ticket-context.json"),
+        serde_json::to_string_pretty(&json!({
+            "ignored_paths": [
+                "context/ticket-discussion.md",
+                "artifacts/ticket-images.md",
+                "artifacts/issue-shot.png"
+            ]
+        }))?,
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": sync_issue_detail_node_with_comments(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "Parent issue description",
+                    vec![sync_comment_node(
+                        "comment-sync",
+                        "Harness",
+                        "2026-03-18T17:00:00Z",
+                        "[harness-sync]\nold progress"
+                    )],
+                    false,
+                    None,
+                    vec![json!({
+                        "id": "managed-attachment",
+                        "title": "implementation.md",
+                        "url": server.url("/assets/old-implementation.md"),
+                        "sourceType": "upload",
+                        "metadata": {
+                            "managedBy": "metastack-cli",
+                            "relativePath": "implementation.md"
+                        }
+                    })],
+                    None,
+                )
+            }
+        }));
+    });
+
+    let update_comment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateComment")
+            .body_includes("\"id\":\"comment-sync\"")
+            .body_includes("Milestone A -- 1/2 complete")
+            .body_includes("Milestone B -- 2/3 complete")
+            .body_includes("Overall: 60% (3/5)");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentUpdate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-sync",
+                        "body": "[harness-sync]\nupdated progress",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation DeleteAttachment")
+            .body_includes("\"id\":\"managed-attachment\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "attachmentDelete": {
+                    "success": true
+                }
+            }
+        }));
+    });
+
+    let upload_implementation_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UploadFile")
+            .body_includes("\"filename\":\"implementation.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "fileUpload": {
+                    "success": true,
+                    "uploadFile": {
+                        "uploadUrl": server.url("/uploads/implementation.md"),
+                        "assetUrl": server.url("/assets/implementation.md"),
+                        "headers": [{
+                            "key": "x-goog-content-length-range",
+                            "value": "1,100000"
+                        }]
+                    }
+                }
+            }
+        }));
+    });
+
+    let upload_checklist_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UploadFile")
+            .body_includes("\"filename\":\"checklist.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "fileUpload": {
+                    "success": true,
+                    "uploadFile": {
+                        "uploadUrl": server.url("/uploads/checklist.md"),
+                        "assetUrl": server.url("/assets/checklist.md"),
+                        "headers": [{
+                            "key": "x-goog-content-length-range",
+                            "value": "1,100000"
+                        }]
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(httpmock::Method::PUT)
+            .path("/uploads/implementation.md");
+        then.status(200);
+    });
+    server.mock(|when, then| {
+        when.method(httpmock::Method::PUT)
+            .path("/uploads/checklist.md");
+        then.status(200);
+    });
+
+    let create_implementation_attachment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateAttachment")
+            .body_includes("\"relativePath\":\"implementation.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "attachmentCreate": {
+                    "success": true,
+                    "attachment": {
+                        "id": "attachment-implementation",
+                        "title": "implementation.md",
+                        "url": server.url("/assets/implementation.md"),
+                        "sourceType": "upload",
+                        "metadata": {
+                            "managedBy": "metastack-cli",
+                            "relativePath": "implementation.md"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    let create_checklist_attachment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateAttachment")
+            .body_includes("\"relativePath\":\"checklist.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "attachmentCreate": {
+                    "success": true,
+                    "attachment": {
+                        "id": "attachment-checklist",
+                        "title": "checklist.md",
+                        "url": server.url("/assets/checklist.md"),
+                        "sourceType": "upload",
+                        "metadata": {
+                            "managedBy": "metastack-cli",
+                            "relativePath": "checklist.md"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "push",
+            "MET-35",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "synced 2 managed attachment files",
+        ))
+        .stdout(predicate::str::contains(
+            "updated [harness-sync] progress comment",
+        ));
+
+    update_comment_mock.assert_calls(1);
+    upload_implementation_mock.assert_calls(1);
+    upload_checklist_mock.assert_calls(1);
+    create_implementation_attachment_mock.assert_calls(1);
+    create_checklist_attachment_mock.assert_calls(1);
+
+    Ok(())
+}
+
+#[test]
+fn sync_push_groups_checklist_progress_by_nested_markdown_headings() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let issue_dir = temp.path().join(".metastack/backlog/MET-35");
+    write_minimal_planning_context(
+        temp.path(),
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+
+    fs::create_dir_all(&issue_dir)?;
+    fs::write(issue_dir.join("index.md"), "# Updated description\n")?;
+    fs::write(
+        issue_dir.join("checklist.md"),
+        "# Checklist\n\n## Implementation\n\n### Comment sync\n- [x] pull comments\n- [ ] rewrite images\n\n### Progress sync\n- [x] parse checklist\n- [x] update comment\n",
+    )?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [issue_node(
+                        "issue-1",
+                        "MET-35",
+                        "Create the technical and sync commands",
+                        "Parent issue description",
+                        "state-2",
+                        "In Progress",
+                    )]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"issue-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": sync_issue_detail_node_with_comments(
+                    "issue-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "Parent issue description",
+                    vec![sync_comment_node(
+                        "comment-sync",
+                        "Harness",
+                        "2026-03-18T17:00:00Z",
+                        "[harness-sync]\nold progress"
+                    )],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                )
+            }
+        }));
+    });
+
+    let update_comment_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateComment")
+            .body_includes("\"id\":\"comment-sync\"")
+            .body_includes("Comment sync -- 1/2 complete")
+            .body_includes("Progress sync -- 2/2 complete")
+            .body_includes("Overall: 75% (3/4)");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentUpdate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-sync",
+                        "body": "[harness-sync]\nupdated progress",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UploadFile")
+            .body_includes("\"filename\":\"checklist.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "fileUpload": {
+                    "success": true,
+                    "uploadFile": {
+                        "uploadUrl": server.url("/uploads/checklist.md"),
+                        "assetUrl": server.url("/assets/checklist.md"),
+                        "headers": [{
+                            "key": "x-goog-content-length-range",
+                            "value": "1,100000"
+                        }]
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(httpmock::Method::PUT)
+            .path("/uploads/checklist.md");
+        then.status(200);
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateAttachment")
+            .body_includes("\"relativePath\":\"checklist.md\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "attachmentCreate": {
+                    "success": true,
+                    "attachment": {
+                        "id": "attachment-checklist",
+                        "title": "checklist.md",
+                        "url": server.url("/assets/checklist.md"),
+                        "sourceType": "upload",
+                        "metadata": {
+                            "managedBy": "metastack-cli",
+                            "relativePath": "checklist.md"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    cli()
+        .current_dir(temp.path())
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "push",
+            "MET-35",
+        ])
+        .assert()
+        .success();
+
+    update_comment_mock.assert_calls(1);
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_issue_detail_node_with_comments(
+    id: &str,
+    identifier: &str,
+    title: &str,
+    description: &str,
+    comments: Vec<serde_json::Value>,
+    has_next_page: bool,
+    end_cursor: Option<&str>,
+    attachments: Vec<serde_json::Value>,
+    parent: Option<serde_json::Value>,
+) -> serde_json::Value {
+    json!({
+        "id": id,
+        "identifier": identifier,
+        "title": title,
+        "description": description,
+        "url": format!("https://linear.app/issues/{identifier}"),
+        "priority": 2,
+        "updatedAt": "2026-03-14T16:00:00Z",
+        "team": {
+            "id": "team-1",
+            "key": "MET",
+            "name": "Metastack"
+        },
+        "project": {
+            "id": "project-1",
+            "name": "MetaStack CLI"
+        },
+        "labels": { "nodes": [] },
+        "comments": {
+            "nodes": comments,
+            "pageInfo": {
+                "hasNextPage": has_next_page,
+                "endCursor": end_cursor
+            }
+        },
+        "state": {
+            "id": "state-1",
+            "name": "Todo",
+            "type": "unstarted"
+        },
+        "attachments": { "nodes": attachments },
+        "parent": parent,
+        "children": { "nodes": [] }
+    })
+}
+
+fn sync_comment_node(
+    id: &str,
+    author_name: &str,
+    created_at: &str,
+    body: &str,
+) -> serde_json::Value {
+    json!({
+        "id": id,
+        "body": body,
+        "createdAt": created_at,
+        "user": {
+            "id": format!("user-{id}"),
+            "name": author_name,
+            "email": format!("{author_name}@example.com")
+        },
+        "resolvedAt": null
+    })
 }
 
 #[test]
@@ -462,8 +1059,6 @@ fn sync_pull_logs_nonfatal_ticket_image_download_failures() -> Result<(), Box<dy
 
     Ok(())
 }
-
-#[test]
 fn sync_push_leaves_issue_description_unchanged_by_default_and_replaces_managed_attachments()
 -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;

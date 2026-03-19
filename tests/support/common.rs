@@ -638,7 +638,7 @@ fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("listen test lock should not be poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(unix)]
@@ -761,10 +761,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
     let mut chunk = [0u8; 4096];
     let mut header_end = None;
     let mut content_length = 0usize;
+    let mut idle_reads_after_data = 0usize;
 
     loop {
         let read = match stream.read(&mut chunk) {
-            Ok(read) => read,
+            Ok(read) => {
+                idle_reads_after_data = 0;
+                read
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -774,12 +778,32 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
                 if buffer.is_empty() {
                     return Ok(String::new());
                 }
-                break;
+                idle_reads_after_data += 1;
+                if idle_reads_after_data >= 20 {
+                    return Err(format!(
+                        "timed out waiting for a complete HTTP request after receiving {} bytes",
+                        buffer.len()
+                    )
+                    .into());
+                }
+                continue;
             }
             Err(error) => return Err(error.into()),
         };
         if read == 0 {
-            break;
+            if buffer.is_empty() {
+                return Ok(String::new());
+            }
+            if let Some(end) = header_end
+                && buffer.len() >= end + content_length
+            {
+                break;
+            }
+            return Err(format!(
+                "peer closed the HTTP request before the body completed (received {} bytes)",
+                buffer.len()
+            )
+            .into());
         }
         buffer.extend_from_slice(&chunk[..read]);
 
