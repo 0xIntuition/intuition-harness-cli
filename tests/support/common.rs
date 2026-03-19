@@ -73,20 +73,7 @@ fn isolated_home_dir() -> &'static PathBuf {
 }
 
 fn test_command() -> Command {
-    let meta_bin = std::env::var_os("CARGO_BIN_EXE_meta")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::current_exe().ok().and_then(|path| {
-                let target_dir = path.parent()?.parent()?;
-                let candidates = ["meta", "meta.exe"];
-                candidates
-                    .into_iter()
-                    .map(|name| target_dir.join(name))
-                    .find(|candidate| candidate.is_file())
-            })
-        })
-        .expect("meta binary should build for tests");
-    let mut command = Command::new(meta_bin);
+    let mut command = Command::cargo_bin("meta").expect("meta binary should build for tests");
     for key in TEST_ENV_REMOVALS {
         command.env_remove(key);
     }
@@ -626,7 +613,7 @@ fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("listen test lock should not be poisoned")
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 #[cfg(unix)]

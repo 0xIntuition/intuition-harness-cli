@@ -9,6 +9,7 @@ clippy:
 	cargo clippy --all-targets --all-features -- -D warnings
 
 test:
+	cargo build
 	cargo test -- --test-threads=1
 
 release-verify:

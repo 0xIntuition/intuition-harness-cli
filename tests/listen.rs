@@ -67,6 +67,19 @@ fn listen_session_json(
     })
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_test_lock_recovers_after_poisoning() {
+    let result = thread::spawn(|| {
+        let _guard = listen_test_lock();
+        panic!("intentional poison for regression coverage");
+    })
+    .join();
+    assert!(result.is_err(), "poisoning thread should panic");
+
+    drop(listen_test_lock());
+}
+
 #[test]
 fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
