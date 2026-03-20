@@ -663,6 +663,12 @@ impl MergeSettings {
         if let Some(limit) = self.validation_repair_attempts {
             validate_merge_validation_repair_attempts(limit)?;
         }
+        if let Some(limit) = self.validation_transient_retry_attempts {
+            validate_merge_validation_transient_retry_attempts(limit)?;
+        }
+        if let Some(limit) = self.publication_retry_attempts {
+            validate_merge_publication_retry_attempts(limit)?;
+        }
         Ok(())
     }
 }
@@ -1457,6 +1463,26 @@ fn validate_merge_validation_repair_attempts(limit: usize) -> Result<()> {
     }
 }
 
+fn validate_merge_validation_transient_retry_attempts(limit: usize) -> Result<()> {
+    if limit <= 10 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "merge transient validation retry attempt limit must be between 0 and 10; got {limit}"
+        ))
+    }
+}
+
+fn validate_merge_publication_retry_attempts(limit: usize) -> Result<()> {
+    if limit >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "merge publication retry attempt limit must be at least 1; got {limit}"
+        ))
+    }
+}
+
 fn resolve_named_profile<'a>(
     settings: &'a LinearSettings,
     name: &str,
@@ -1704,6 +1730,38 @@ mod tests {
         assert_eq!(
             config.validate().unwrap_err().to_string(),
             "merge validation repair attempt limit must be at least 1; got 0"
+        );
+    }
+
+    #[test]
+    fn app_config_validation_rejects_excessive_merge_transient_retry_attempts() {
+        let config = AppConfig {
+            merge: MergeSettings {
+                validation_transient_retry_attempts: Some(11),
+                ..MergeSettings::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "merge transient validation retry attempt limit must be between 0 and 10; got 11"
+        );
+    }
+
+    #[test]
+    fn app_config_validation_rejects_zero_merge_publication_retry_attempts() {
+        let config = AppConfig {
+            merge: MergeSettings {
+                publication_retry_attempts: Some(0),
+                ..MergeSettings::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "merge publication retry attempt limit must be at least 1; got 0"
         );
     }
 

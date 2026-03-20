@@ -185,6 +185,14 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         view.app_config.merge.validation_repair_attempts()
     ));
     lines.push(format!(
+        "Merge transient validation retries: {}",
+        view.app_config.merge.validation_transient_retry_attempts()
+    ));
+    lines.push(format!(
+        "Merge publication retries: {}",
+        view.app_config.merge.publication_retry_attempts()
+    ));
+    lines.push(format!(
         "Advanced route overrides: {}",
         render_route_override_summary(&view.app_config)
     ));
@@ -241,6 +249,8 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.default_model.is_some()
         || args.default_reasoning.is_some()
         || args.merge_validation_repair_attempts.is_some()
+        || args.merge_validation_transient_retry_attempts.is_some()
+        || args.merge_publication_retry_attempts.is_some()
         || args.route.is_some()
         || args.clear_route.is_some()
         || args.route_agent.is_some()
@@ -304,6 +314,26 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
                     anyhow!(
                         "merge validation repair attempt limit must be a positive integer: {error}"
                     )
+                })
+            })
+            .transpose()?;
+    }
+    if let Some(limit) = &args.merge_validation_transient_retry_attempts {
+        view.app_config.merge.validation_transient_retry_attempts = normalize_optional(limit)
+            .map(|value| {
+                value.parse::<usize>().map_err(|error| {
+                    anyhow!(
+                        "merge transient validation retry attempt limit must be a non-negative integer: {error}"
+                    )
+                })
+            })
+            .transpose()?;
+    }
+    if let Some(limit) = &args.merge_publication_retry_attempts {
+        view.app_config.merge.publication_retry_attempts = normalize_optional(limit)
+            .map(|value| {
+                value.parse::<usize>().map_err(|error| {
+                    anyhow!("merge publication retry attempt limit must be at least 1: {error}")
                 })
             })
             .transpose()?;
