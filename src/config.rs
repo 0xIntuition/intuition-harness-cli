@@ -27,6 +27,7 @@ pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
 pub const DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 pub const DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS: usize = 5;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
+pub const AGENT_ROUTE_BACKLOG_REVIEW: &str = "backlog.review";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
 pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
 pub const AGENT_ROUTE_CONTEXT_RELOAD: &str = "context.reload";
@@ -67,6 +68,8 @@ pub struct PlanningMeta {
     #[serde(default)]
     pub plan: PlanningPlanSettings,
     #[serde(default)]
+    pub review: PlanningReviewSettings,
+    #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
 }
 
@@ -78,6 +81,8 @@ pub struct InstallDefaults {
     pub listen: InstallListenSettings,
     #[serde(default)]
     pub plan: InstallPlanSettings,
+    #[serde(default)]
+    pub review: InstallReviewSettings,
     #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
 }
@@ -98,6 +103,13 @@ pub struct InstallListenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InstallPlanSettings {
     pub interactive_follow_up_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallReviewSettings {
+    #[serde(default)]
+    pub default_states: Vec<String>,
+    pub reviewed_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -175,6 +187,13 @@ pub struct PlanningListenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanningPlanSettings {
     pub interactive_follow_up_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningReviewSettings {
+    #[serde(default)]
+    pub default_states: Vec<String>,
+    pub reviewed_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -822,6 +841,31 @@ impl PlanningMeta {
             .unwrap_or_else(|| self.issue_labels.technical_label())
     }
 
+    /// Resolves the effective backlog-review workflow states using repo defaults before install defaults.
+    pub fn effective_review_states(&self, app_config: &AppConfig) -> Vec<String> {
+        normalize_review_states(self.review.default_states.iter().map(String::as_str))
+            .or_else(|| {
+                normalize_review_states(
+                    app_config
+                        .defaults
+                        .review
+                        .default_states
+                        .iter()
+                        .map(String::as_str),
+                )
+            })
+            .unwrap_or_else(|| vec!["Backlog".to_string()])
+    }
+
+    /// Resolves the effective backlog-review label using repo defaults before install defaults.
+    pub fn effective_reviewed_label(&self, app_config: &AppConfig) -> String {
+        normalize_optional_ref(self.review.reviewed_label.as_deref())
+            .or_else(|| {
+                normalize_optional_ref(app_config.defaults.review.reviewed_label.as_deref())
+            })
+            .unwrap_or_else(|| "reviewed".to_string())
+    }
+
     /// Validates repo-scoped planning metadata before command execution or persistence.
     ///
     /// Returns an error when agent settings or promoted workflow defaults are invalid.
@@ -849,6 +893,8 @@ impl PlanningMeta {
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
         }
+        validate_review_states(&self.review.default_states, "repo review states")?;
+        validate_reviewed_label(self.review.reviewed_label.as_deref(), "repo reviewed label")?;
         self.sync.validate()?;
         Ok(())
     }
@@ -900,6 +946,11 @@ impl InstallDefaults {
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
         }
+        validate_review_states(&self.review.default_states, "install review states")?;
+        validate_reviewed_label(
+            self.review.reviewed_label.as_deref(),
+            "install reviewed label",
+        )?;
         Ok(())
     }
 }
@@ -1096,6 +1147,7 @@ pub async fn ensure_saved_issue_labels(
 ) -> Result<()> {
     let mut labels = BTreeSet::from([
         planning_meta.effective_plan_label(app_config),
+        planning_meta.effective_reviewed_label(app_config),
         planning_meta.effective_technical_label(app_config),
     ]);
     if planning_meta.listen.required_label_names().is_empty() {
@@ -1270,6 +1322,11 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
             key: AGENT_ROUTE_BACKLOG_PLAN,
             family: "backlog",
             label: "meta backlog plan",
+        },
+        AgentRouteDefinition {
+            key: AGENT_ROUTE_BACKLOG_REVIEW,
+            family: "backlog",
+            label: "meta backlog review",
         },
         AgentRouteDefinition {
             key: AGENT_ROUTE_BACKLOG_SPLIT,
@@ -1658,9 +1715,38 @@ where
     (!normalized.is_empty()).then_some(normalized)
 }
 
+fn normalize_review_states<I, S>(values: I) -> Option<Vec<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    normalize_required_labels(values)
+}
+
 /// Parses comma-separated listen labels and removes empty or duplicate values.
 pub(crate) fn parse_listen_required_labels_csv(value: &str) -> Option<Vec<String>> {
     normalize_required_labels(value.split(','))
+}
+
+/// Parses comma-separated review states and removes empty or duplicate values.
+pub(crate) fn parse_review_states_csv(value: &str) -> Option<Vec<String>> {
+    normalize_review_states(value.split(','))
+}
+
+pub(crate) fn validate_review_states(states: &[String], scope: &str) -> Result<()> {
+    for state in states {
+        if state.trim().is_empty() {
+            return Err(anyhow!("{scope} cannot include an empty state"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_reviewed_label(label: Option<&str>, scope: &str) -> Result<()> {
+    if label.is_some_and(|value| value.trim().is_empty()) {
+        return Err(anyhow!("{scope} cannot be empty"));
+    }
+    Ok(())
 }
 
 fn resolve_supported_model(
@@ -2012,13 +2098,13 @@ mod tests {
         DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
-        InstallListenSettings, InstallPlanSettings, ListenAssignmentScope, MergeSettings,
-        NoAgentSelectedError, PlanningAgentSettings, PlanningIssueLabels, PlanningListenSettings,
-        PlanningMeta, PlanningPlanSettings, VelocityAutoAssign, VelocityDefaults,
-        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
-        parse_listen_required_labels_csv, resolve_agent_config, resolve_agent_route,
-        validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-        validate_listen_poll_interval_seconds,
+        InstallListenSettings, InstallPlanSettings, InstallReviewSettings, ListenAssignmentScope,
+        MergeSettings, NoAgentSelectedError, PlanningAgentSettings, PlanningIssueLabels,
+        PlanningListenSettings, PlanningMeta, PlanningPlanSettings, VelocityAutoAssign,
+        VelocityDefaults, is_no_agent_selected_error, no_agent_selected_route_key,
+        normalize_agent_route_key, parse_listen_required_labels_csv, resolve_agent_config,
+        resolve_agent_route, validate_agent_reasoning,
+        validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
 
     #[test]
@@ -2176,6 +2262,10 @@ mod tests {
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),
                 },
+                review: InstallReviewSettings {
+                    default_states: vec!["Backlog".to_string()],
+                    reviewed_label: Some("reviewed".to_string()),
+                },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),
                     technical: Some("engineering".to_string()),
@@ -2324,6 +2414,10 @@ mod tests {
                 },
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),
+                },
+                review: InstallReviewSettings {
+                    default_states: vec!["Backlog".to_string()],
+                    reviewed_label: Some("reviewed".to_string()),
                 },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),

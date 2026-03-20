@@ -609,6 +609,7 @@ async fn edit_issue_updates_requested_fields_after_loading_context() {
             project: Some("MetaStack CLI".to_string()),
             state: Some("In Progress".to_string()),
             priority: Some(1),
+            labels: None,
         })
         .await
         .expect("issue edit should succeed");

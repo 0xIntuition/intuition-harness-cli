@@ -922,6 +922,7 @@ async fn sync_push_issue(
                 project: None,
                 state: None,
                 priority: None,
+                labels: None,
             })
             .await?;
     }

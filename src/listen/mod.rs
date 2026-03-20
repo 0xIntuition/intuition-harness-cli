@@ -981,6 +981,7 @@ where
                 project: None,
                 state: Some(IN_PROGRESS_STATE.to_string()),
                 priority: None,
+                labels: None,
             })
             .await?;
 
@@ -1635,6 +1636,7 @@ where
                 project: None,
                 state: Some((*candidate).to_string()),
                 priority: None,
+                labels: None,
             })
             .await
         {

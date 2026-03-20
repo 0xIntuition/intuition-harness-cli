@@ -24,6 +24,8 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog plan --root . ENG-10144
   meta backlog plan --root . ENG-10144 --velocity
+  meta backlog review --root .
+  meta backlog review --root . --state Backlog --json
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
@@ -241,6 +243,8 @@ pub struct BacklogArgs {
 pub enum BacklogCommands {
     /// Plan a backlog request into one or more Linear backlog issues.
     Plan(PlanArgs),
+    /// Review backlog tickets in the active repo project before refining or technical scoping.
+    Review(BacklogReviewArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
@@ -741,6 +745,12 @@ pub struct ConfigArgs {
     /// Update the install-scoped plan follow-up question limit.
     #[arg(long)]
     pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped default backlog-review state filter. Repeat the flag or pass comma-separated values.
+    #[arg(long = "review-state")]
+    pub review_states: Vec<String>,
+    /// Update the install-scoped backlog-review label added to confirmed reviewed tickets.
+    #[arg(long)]
+    pub reviewed_label: Option<String>,
     /// Update the install-scoped default plan label.
     #[arg(long)]
     pub plan_label: Option<String>,
@@ -833,6 +843,12 @@ pub struct SetupArgs {
     /// Update the interactive `meta plan` follow-up question limit.
     #[arg(long)]
     pub interactive_plan_follow_up_question_limit: Option<String>,
+    /// Update the repo-scoped default backlog-review state filter. Repeat the flag or pass comma-separated values.
+    #[arg(long = "review-state")]
+    pub review_states: Vec<String>,
+    /// Update the repo-scoped backlog-review label added to confirmed reviewed tickets.
+    #[arg(long)]
+    pub reviewed_label: Option<String>,
     /// Update the default label applied to issues created by `meta plan`.
     #[arg(long)]
     pub plan_label: Option<String>,
@@ -1058,6 +1074,33 @@ pub struct TechnicalArgs {
     #[arg(long)]
     pub model: Option<String>,
     /// Override the resolved built-in reasoning option for backlog generation.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BacklogReviewArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Filter review to one Linear project name instead of the repo default project.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Review tickets in one or more workflow states. Repeat the flag or pass comma-separated values.
+    #[arg(long = "state", value_name = "STATE")]
+    pub states: Vec<String>,
+    /// Emit the review scan as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Skip the interactive confirmation flow and only report review outcomes.
+    #[arg(long)]
+    pub no_interactive: bool,
+    /// Override the configured default agent/provider for ticket review assessment.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for ticket review assessment.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for ticket review assessment.
     #[arg(long)]
     pub reasoning: Option<String>,
 }

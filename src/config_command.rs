@@ -22,11 +22,12 @@ use crate::cli::ConfigArgs;
 use crate::config::{
     AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
     ListenRefreshPolicy, VelocityAutoAssign, detect_supported_agents, normalize_agent_name,
-    normalize_agent_route_key, resolve_agent_route, supported_agent_models, supported_agent_names,
-    supported_agent_route_definitions, supported_agent_route_families, supported_reasoning_options,
-    validate_agent_model, validate_agent_name, validate_agent_reasoning,
-    validate_backlog_default_priority, validate_backlog_labels,
-    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    normalize_agent_route_key, parse_review_states_csv, resolve_agent_route,
+    supported_agent_models, supported_agent_names, supported_agent_route_definitions,
+    supported_agent_route_families, supported_reasoning_options, validate_agent_model,
+    validate_agent_name, validate_agent_reasoning, validate_backlog_default_priority,
+    validate_backlog_labels, validate_interactive_plan_follow_up_question_limit,
+    validate_listen_poll_interval_seconds, validate_reviewed_label,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
@@ -219,6 +220,14 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
+        "Install review states: {}",
+        render_label_summary(&view.app_config.defaults.review.default_states)
+    ));
+    lines.push(format!(
+        "Install reviewed label: {}",
+        display_optional(view.app_config.defaults.review.reviewed_label.as_deref())
+    ));
+    lines.push(format!(
         "Install plan label: {}",
         display_optional(view.app_config.defaults.issue_labels.plan.as_deref())
     ));
@@ -363,6 +372,8 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
         || args.plan_follow_up_limit.is_some()
+        || !args.review_states.is_empty()
+        || args.reviewed_label.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
         || args.default_profile.is_some()
@@ -424,6 +435,18 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             "plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
         )?;
+    }
+    if !args.review_states.is_empty() {
+        let states = args
+            .review_states
+            .iter()
+            .flat_map(|value| parse_review_states_csv(value).unwrap_or_else(|| vec![value.clone()]))
+            .collect::<Vec<_>>();
+        view.app_config.defaults.review.default_states = states;
+    }
+    if let Some(reviewed_label) = &args.reviewed_label {
+        validate_reviewed_label(Some(reviewed_label), "install reviewed label")?;
+        view.app_config.defaults.review.reviewed_label = normalize_optional(reviewed_label);
     }
     if let Some(plan_label) = &args.plan_label {
         view.app_config.defaults.issue_labels.plan = normalize_optional(plan_label);
@@ -584,6 +607,10 @@ fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
     Ok(labels)
 }
 
+fn parse_review_states(value: &str) -> Vec<String> {
+    parse_review_states_csv(value).unwrap_or_default()
+}
+
 fn parse_velocity_auto_assign(value: &str) -> Result<Option<VelocityAutoAssign>> {
     let Some(value) = normalize_optional(value) else {
         return Ok(None);
@@ -729,6 +756,8 @@ enum ConfigStep {
     RefreshPolicy,
     PollInterval,
     PlanFollowUpLimit,
+    ReviewStates,
+    ReviewedLabel,
     PlanLabel,
     TechnicalLabel,
     DefaultProfile,
@@ -739,7 +768,7 @@ enum ConfigStep {
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 15] {
+    fn all() -> [Self; 17] {
         [
             Self::ApiKey,
             Self::Team,
@@ -749,6 +778,8 @@ impl ConfigStep {
             Self::RefreshPolicy,
             Self::PollInterval,
             Self::PlanFollowUpLimit,
+            Self::ReviewStates,
+            Self::ReviewedLabel,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::DefaultProfile,
@@ -786,6 +817,8 @@ impl ConfigStep {
             Self::RefreshPolicy => "Refresh policy",
             Self::PollInterval => "Poll interval",
             Self::PlanFollowUpLimit => "Plan follow-ups",
+            Self::ReviewStates => "Review states",
+            Self::ReviewedLabel => "Reviewed label",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::DefaultProfile => "Default profile",
@@ -806,6 +839,8 @@ impl ConfigStep {
             Self::RefreshPolicy => "Workspace refresh policy",
             Self::PollInterval => "Listen poll interval",
             Self::PlanFollowUpLimit => "Plan follow-up limit",
+            Self::ReviewStates => "Default backlog review states",
+            Self::ReviewedLabel => "Default reviewed label",
             Self::PlanLabel => "Default plan label",
             Self::TechnicalLabel => "Default technical label",
             Self::DefaultProfile => "Default Linear profile",
@@ -836,6 +871,8 @@ struct ConfigApp {
     listen_label: InputFieldState,
     poll_interval: InputFieldState,
     plan_follow_up_limit: InputFieldState,
+    review_states: InputFieldState,
+    reviewed_label: InputFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
     assignment_scope: SelectFieldState,
@@ -858,6 +895,8 @@ struct SubmittedConfig {
     refresh_policy: ListenRefreshPolicy,
     poll_interval_seconds: Option<u64>,
     interactive_follow_up_questions: Option<usize>,
+    review_states: Vec<String>,
+    reviewed_label: Option<String>,
     plan_label: Option<String>,
     technical_label: Option<String>,
     default_profile: Option<String>,
@@ -931,6 +970,17 @@ impl ConfigApp {
                     .plan
                     .interactive_follow_up_questions
                     .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            review_states: InputFieldState::new(
+                view.app_config.defaults.review.default_states.join(", "),
+            ),
+            reviewed_label: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .review
+                    .reviewed_label
+                    .clone()
                     .unwrap_or_default(),
             ),
             plan_label: InputFieldState::new(
@@ -1138,6 +1188,12 @@ impl ConfigApp {
                     ConfigStep::PlanFollowUpLimit => {
                         let _ = self.plan_follow_up_limit.handle_key(key);
                     }
+                    ConfigStep::ReviewStates => {
+                        let _ = self.review_states.handle_key(key);
+                    }
+                    ConfigStep::ReviewedLabel => {
+                        let _ = self.reviewed_label.handle_key(key);
+                    }
                     ConfigStep::PlanLabel => {
                         let _ = self.plan_label.handle_key(key);
                     }
@@ -1186,6 +1242,12 @@ impl ConfigApp {
             }
             ConfigStep::PlanFollowUpLimit => {
                 let _ = self.plan_follow_up_limit.paste(text);
+            }
+            ConfigStep::ReviewStates => {
+                let _ = self.review_states.paste(text);
+            }
+            ConfigStep::ReviewedLabel => {
+                let _ = self.reviewed_label.paste(text);
             }
             ConfigStep::PlanLabel => {
                 let _ = self.plan_label.paste(text);
@@ -1236,6 +1298,8 @@ impl ConfigApp {
             "plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
         )?;
+        let reviewed_label = normalize_optional(self.reviewed_label.value());
+        validate_reviewed_label(reviewed_label.as_deref(), "install reviewed label")?;
 
         Ok(SubmittedConfig {
             api_key: normalize_optional(self.api_key.value()),
@@ -1252,6 +1316,8 @@ impl ConfigApp {
             },
             poll_interval_seconds,
             interactive_follow_up_questions,
+            review_states: parse_review_states(self.review_states.value()),
+            reviewed_label,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
             default_profile,
@@ -1283,6 +1349,8 @@ impl SubmittedConfig {
             .defaults
             .plan
             .interactive_follow_up_questions = self.interactive_follow_up_questions;
+        view.app_config.defaults.review.default_states = self.review_states.clone();
+        view.app_config.defaults.review.reviewed_label = self.reviewed_label.clone();
         view.app_config.defaults.issue_labels.plan = self.plan_label.clone();
         view.app_config.defaults.issue_labels.technical = self.technical_label.clone();
         view.app_config.linear.default_profile = self.default_profile.clone();
@@ -2180,6 +2248,20 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             &app.plan_follow_up_limit,
             "Max follow-up questions for interactive `meta backlog plan` (e.g. 10).",
         ),
+        ConfigStep::ReviewStates => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.review_states,
+            "Workflow states reviewed by default. Use commas, for example `Backlog,Todo`.",
+        ),
+        ConfigStep::ReviewedLabel => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.reviewed_label,
+            "Label added when a ticket is confirmed as reviewed (e.g. reviewed).",
+        ),
         ConfigStep::PlanLabel => render_input_panel(
             frame,
             area,
@@ -2234,6 +2316,14 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
                 "Plan follow-ups",
                 summarize_optional_value(&app.plan_follow_up_limit),
             ),
+            (
+                "Review states",
+                summarize_optional_value(&app.review_states),
+            ),
+            (
+                "Reviewed label",
+                summarize_optional_value(&app.reviewed_label),
+            ),
             ("Plan label", summarize_optional_value(&app.plan_label)),
             ("Tech label", summarize_optional_value(&app.technical_label)),
             (
@@ -2282,6 +2372,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         | ConfigStep::ListenLabel
         | ConfigStep::PollInterval
         | ConfigStep::PlanFollowUpLimit
+        | ConfigStep::ReviewStates
+        | ConfigStep::ReviewedLabel
         | ConfigStep::PlanLabel
         | ConfigStep::TechnicalLabel
         | ConfigStep::DefaultProfile => {

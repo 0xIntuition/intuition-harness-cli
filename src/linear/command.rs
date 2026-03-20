@@ -223,6 +223,7 @@ pub(crate) async fn run_issues_command(
                         project: edit_args.project,
                         state: edit_args.state,
                         priority: edit_args.priority,
+                        labels: None,
                     })
                     .await?;
 
@@ -288,6 +289,7 @@ pub(crate) async fn run_issues_command(
                                 project: edit_args.project,
                                 state: changed_state(&existing_issue, values.state.as_deref()),
                                 priority: changed_priority(&existing_issue, values.priority),
+                                labels: None,
                             })
                             .await?;
 

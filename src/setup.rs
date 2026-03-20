@@ -24,10 +24,11 @@ use crate::config::{
     DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, LinearConfig, LinearConfigOverrides,
     ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, VelocityAutoAssign,
     ensure_saved_issue_labels, normalize_agent_name, parse_listen_required_labels_csv,
-    supported_agent_models, supported_agent_names, supported_reasoning_options,
-    validate_agent_model, validate_agent_name, validate_agent_reasoning,
-    validate_backlog_default_priority, validate_backlog_labels,
+    parse_review_states_csv, supported_agent_models, supported_agent_names,
+    supported_reasoning_options, validate_agent_model, validate_agent_name,
+    validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    validate_reviewed_label,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
@@ -76,6 +77,8 @@ struct SetupApp {
     instructions_path: InputFieldState,
     listen_poll_interval: InputFieldState,
     interactive_plan_limit: InputFieldState,
+    review_states: InputFieldState,
+    reviewed_label: InputFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
     detected_agents: Vec<String>,
@@ -97,6 +100,8 @@ struct SubmittedSetup {
     instructions_path: Option<String>,
     listen_poll_interval: Option<u64>,
     interactive_plan_limit: Option<usize>,
+    review_states: Vec<String>,
+    reviewed_label: Option<String>,
     plan_label: Option<String>,
     technical_label: Option<String>,
 }
@@ -123,13 +128,15 @@ enum SetupStep {
     InstructionsPath,
     ListenPollInterval,
     InteractivePlanLimit,
+    ReviewStates,
+    ReviewedLabel,
     PlanLabel,
     TechnicalLabel,
     Save,
 }
 
 impl SetupStep {
-    fn all() -> [Self; 16] {
+    fn all() -> [Self; 18] {
         [
             Self::LinearAuth,
             Self::LinearApiKey,
@@ -144,6 +151,8 @@ impl SetupStep {
             Self::InstructionsPath,
             Self::ListenPollInterval,
             Self::InteractivePlanLimit,
+            Self::ReviewStates,
+            Self::ReviewedLabel,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::Save,
@@ -182,6 +191,8 @@ impl SetupStep {
             Self::InstructionsPath => "Instructions file",
             Self::ListenPollInterval => "Listen poll interval",
             Self::InteractivePlanLimit => "Plan follow-up limit",
+            Self::ReviewStates => "Review states",
+            Self::ReviewedLabel => "Reviewed label",
             Self::PlanLabel => "Plan issue label",
             Self::TechnicalLabel => "Technical issue label",
             Self::Save => "Save",
@@ -203,6 +214,8 @@ impl SetupStep {
             Self::InstructionsPath => "Instructions",
             Self::ListenPollInterval => "Poll interval",
             Self::InteractivePlanLimit => "Plan limit",
+            Self::ReviewStates => "Review states",
+            Self::ReviewedLabel => "Reviewed label",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::Save => "Save",
@@ -224,6 +237,8 @@ impl SetupStep {
             Self::InstructionsPath => "Listen instructions file",
             Self::ListenPollInterval => "Listen poll interval in seconds",
             Self::InteractivePlanLimit => "Interactive plan follow-up question limit",
+            Self::ReviewStates => "Backlog review workflow states",
+            Self::ReviewedLabel => "Backlog review confirmed label",
             Self::PlanLabel => "Default plan issue label",
             Self::TechnicalLabel => "Default technical issue label",
             Self::Save => "Save repo setup",
@@ -472,6 +487,17 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_plan_limit(view.planning_meta.plan.interactive_follow_up_questions)
     ));
     lines.push(format!(
+        "Review states: {}",
+        render_label_summary(&view.planning_meta.review.default_states)
+    ));
+    lines.push(format!(
+        "Reviewed label: {}",
+        effective_label(
+            view.planning_meta.review.reviewed_label.as_deref(),
+            "reviewed"
+        )
+    ));
+    lines.push(format!(
         "Plan issue label: {}",
         effective_label(view.planning_meta.issue_labels.plan.as_deref(), "plan")
     ));
@@ -557,6 +583,8 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.instructions_path.is_some()
         || args.listen_poll_interval.is_some()
         || args.interactive_plan_follow_up_question_limit.is_some()
+        || !args.review_states.is_empty()
+        || args.reviewed_label.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
         || args.default_assignee.is_some()
@@ -670,6 +698,17 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     }
     if let Some(limit) = &args.interactive_plan_follow_up_question_limit {
         view.planning_meta.plan.interactive_follow_up_questions = parse_plan_limit(limit)?;
+    }
+    if !args.review_states.is_empty() {
+        view.planning_meta.review.default_states = args
+            .review_states
+            .iter()
+            .flat_map(|value| parse_review_states_csv(value).unwrap_or_else(|| vec![value.clone()]))
+            .collect();
+    }
+    if let Some(label) = &args.reviewed_label {
+        validate_reviewed_label(Some(label), "repo reviewed label")?;
+        view.planning_meta.review.reviewed_label = normalize_optional(label);
     }
     if let Some(label) = &args.plan_label {
         view.planning_meta.issue_labels.plan = normalize_optional(label);
@@ -843,6 +882,16 @@ impl SetupApp {
                     .plan
                     .interactive_follow_up_questions
                     .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
+            review_states: InputFieldState::new(
+                view.planning_meta.review.default_states.join(", "),
+            ),
+            reviewed_label: InputFieldState::new(
+                view.planning_meta
+                    .review
+                    .reviewed_label
+                    .clone()
                     .unwrap_or_default(),
             ),
             plan_label: InputFieldState::new(
@@ -1030,6 +1079,12 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.paste(text);
             }
+            SetupStep::ReviewStates => {
+                let _ = self.review_states.paste(text);
+            }
+            SetupStep::ReviewedLabel => {
+                let _ = self.reviewed_label.paste(text);
+            }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.paste(text);
             }
@@ -1069,6 +1124,12 @@ impl SetupApp {
             }
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.handle_key(key);
+            }
+            SetupStep::ReviewStates => {
+                let _ = self.review_states.handle_key(key);
+            }
+            SetupStep::ReviewedLabel => {
+                let _ = self.reviewed_label.handle_key(key);
             }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.handle_key(key);
@@ -1112,6 +1173,8 @@ impl SetupApp {
             | SetupStep::InstructionsPath
             | SetupStep::ListenPollInterval
             | SetupStep::InteractivePlanLimit
+            | SetupStep::ReviewStates
+            | SetupStep::ReviewedLabel
             | SetupStep::PlanLabel
             | SetupStep::TechnicalLabel
             | SetupStep::Save => {}
@@ -1138,6 +1201,8 @@ impl SetupApp {
         if let Some(provider) = provider.as_deref() {
             validate_agent_reasoning(provider, model.as_deref(), reasoning.as_deref())?;
         }
+        let reviewed_label = normalize_optional(self.reviewed_label.value());
+        validate_reviewed_label(reviewed_label.as_deref(), "repo reviewed label")?;
         Ok(SubmittedSetup {
             api_key: match self.repo_auth_field.selected() {
                 1 => normalize_optional(self.api_key.value()),
@@ -1162,6 +1227,8 @@ impl SetupApp {
             instructions_path: normalize_optional(self.instructions_path.value()),
             listen_poll_interval: parse_poll_interval(self.listen_poll_interval.value())?,
             interactive_plan_limit: parse_plan_limit(self.interactive_plan_limit.value())?,
+            review_states: parse_review_states(self.review_states.value()),
+            reviewed_label,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
         })
@@ -1194,6 +1261,8 @@ impl SubmittedSetup {
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
         view.planning_meta.listen.poll_interval_seconds = self.listen_poll_interval;
         view.planning_meta.plan.interactive_follow_up_questions = self.interactive_plan_limit;
+        view.planning_meta.review.default_states = self.review_states.clone();
+        view.planning_meta.review.reviewed_label = self.reviewed_label.clone();
         view.planning_meta.issue_labels.plan = self.plan_label.clone();
         view.planning_meta.issue_labels.technical = self.technical_label.clone();
         Ok(())
@@ -1459,6 +1528,20 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             &app.interactive_plan_limit,
             "Optional `meta backlog plan` interactive follow-up limit between 1 and 10.",
         ),
+        SetupStep::ReviewStates => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.review_states,
+            "Optional backlog-review workflow states. Use commas, for example `Backlog,Todo`.",
+        ),
+        SetupStep::ReviewedLabel => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.reviewed_label,
+            "Optional label added when review actions are confirmed. Leave blank for `reviewed`.",
+        ),
         SetupStep::PlanLabel => render_input_panel(
             frame,
             area,
@@ -1535,6 +1618,8 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
                 "Interactive plan limit",
                 summarize_optional(&app.interactive_plan_limit),
             ),
+            ("Review states", summarize_optional(&app.review_states)),
+            ("Reviewed label", summarize_optional(&app.reviewed_label)),
             ("Plan label", summarize_optional(&app.plan_label)),
             ("Technical label", summarize_optional(&app.technical_label)),
         ],
@@ -1749,6 +1834,10 @@ fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
         .collect::<Vec<_>>();
     validate_backlog_labels(&labels)?;
     Ok(labels)
+}
+
+fn parse_review_states(value: &str) -> Vec<String> {
+    parse_review_states_csv(value).unwrap_or_default()
 }
 
 fn parse_velocity_auto_assign(value: &str) -> Result<Option<VelocityAutoAssign>> {

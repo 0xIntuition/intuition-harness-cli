@@ -232,6 +232,21 @@ default_model = "gpt-5.4"
             }
         }));
     });
+    let create_reviewed_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "repo-token")
+            .body_includes("mutation CreateIssueLabel")
+            .body_includes("\"name\":\"reviewed\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabelCreate": {
+                    "success": true,
+                    "issueLabel": { "id": "label-reviewed", "name": "reviewed" }
+                }
+            }
+        }));
+    });
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -372,6 +387,81 @@ default_model = "gpt-5.4"
     create_plan_mock.assert();
     create_technical_mock.assert();
     create_listen_mock.assert();
+    create_reviewed_mock.assert();
+
+    Ok(())
+}
+
+#[test]
+fn runtime_config_persists_review_defaults_in_json_and_summary() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--review-state",
+            "Backlog,Todo",
+            "--reviewed-label",
+            "triaged",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Install review states: Backlog, Todo",
+        ))
+        .stdout(predicate::str::contains("Install reviewed label: triaged"));
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["runtime", "config", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"default_states\": ["))
+        .stdout(predicate::str::contains("\"Backlog\""))
+        .stdout(predicate::str::contains("\"Todo\""))
+        .stdout(predicate::str::contains("\"reviewed_label\": \"triaged\""));
+
+    Ok(())
+}
+
+#[test]
+fn runtime_setup_persists_repo_review_defaults() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "setup",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--review-state",
+            "Backlog",
+            "--review-state",
+            "Todo",
+            "--reviewed-label",
+            "reviewed-ready",
+        ])
+        .assert()
+        .success();
+
+    let meta = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+    assert!(meta.contains("\"default_states\""));
+    assert!(meta.contains("\"Backlog\""));
+    assert!(meta.contains("\"Todo\""));
+    assert!(meta.contains("\"reviewed_label\": \"reviewed-ready\""));
 
     Ok(())
 }
@@ -759,7 +849,6 @@ default_reasoning = "medium"
         .assert()
         .success()
         .stdout(predicate::str::contains("Global configuration"))
-        .stdout(predicate::str::contains("Default reasoning"))
         .stdout(predicate::str::contains("Meta Config"))
         .stdout(predicate::str::contains("Listen label"))
         .stdout(predicate::str::contains("Project ID"))
@@ -767,6 +856,8 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Refresh policy"))
         .stdout(predicate::str::contains("Poll interval"))
         .stdout(predicate::str::contains("Plan follow-ups"))
+        .stdout(predicate::str::contains("Review states"))
+        .stdout(predicate::str::contains("Reviewed label"))
         .stdout(predicate::str::contains("Plan label"))
         .stdout(predicate::str::contains("Tech label"));
 
@@ -884,7 +975,7 @@ default_reasoning = "high"
         .assert()
         .success()
         .stdout(predicate::str::contains("Steps"))
-        .stdout(predicate::str::contains("Default reasoning"))
+        .stdout(predicate::str::contains("Review states"))
         .stdout(predicate::str::contains("high"))
         .stdout(predicate::str::contains("MetaStack Team West"))
         .stdout(predicate::str::contains("Summary"));
@@ -1032,8 +1123,9 @@ default_model = "gpt-5.4"
         .stdout(predicate::str::contains("Questions"))
         .stdout(predicate::str::contains("Summary"))
         .stdout(predicate::str::contains("agent ticket needing extra room"))
-        .stdout(predicate::str::contains("14. Plan label"))
-        .stdout(predicate::str::contains("15. Tech label"));
+        .stdout(predicate::str::contains("14. Review states"))
+        .stdout(predicate::str::contains("16. Plan label"))
+        .stdout(predicate::str::contains("17. Tech label"));
 
     Ok(())
 }

@@ -130,8 +130,10 @@ fn backlog_help_lists_tech_and_sync_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  plan "))
+        .stdout(predicate::str::contains("\n  review "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
+        .stdout(predicate::str::contains("meta backlog review --root ."))
         .stdout(predicate::str::contains("meta backlog tech MET-35"));
 }
 

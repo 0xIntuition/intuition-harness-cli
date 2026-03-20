@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog plan`, `meta backlog review`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
@@ -266,12 +266,14 @@ meta runtime config --api-key lin_api_work
 meta runtime config --default-profile work
 meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
 meta runtime config --default-assignee viewer --default-state Backlog --default-priority 2 --default-label platform --default-label cli
+meta runtime config --review-state Backlog --review-state Todo --reviewed-label reviewed
 meta runtime config --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
 meta runtime config --merge-validation-repair-attempts 8
 meta runtime config --merge-validation-transient-retry-attempts 2
 meta runtime config --merge-publication-retry-attempts 6
 meta runtime config --route backlog --route-agent claude --route-model opus
 meta runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
+meta runtime config --route backlog.review --route-agent codex --route-model gpt-5.4
 meta runtime config --clear-route backlog.plan
 meta runtime config --advanced-routing
 meta runtime config --replay-onboarding
@@ -290,7 +292,7 @@ The persisted config can store:
 - install-scoped backlog ticket defaults under `[backlog]`, including `default_assignee`, `default_state`, `default_priority`, additive `default_labels`, and zero-prompt `velocity_defaults`
 - install-scoped onboarding completion state
 - install-scoped Linear API key/default team/default project values
-- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, and plan/technical issue labels
+- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, backlog-review state filters, the reviewed label, and plan/technical issue labels
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
@@ -340,6 +342,7 @@ Supported route families:
 Supported command route keys:
 
 - `backlog.plan`
+- `backlog.review`
 - `backlog.split`
 - `context.scan`
 - `context.reload`
@@ -402,6 +405,7 @@ meta runtime setup --team MET --project "MetaStack CLI"
 meta runtime setup --api-key lin_api_repo --team MET --project "MetaStack CLI"
 meta runtime setup --provider codex --model gpt-5.4 --reasoning medium
 meta runtime setup --listen-label agent --assignment-scope viewer-only --refresh-policy reuse-and-refresh
+meta runtime setup --review-state Backlog --reviewed-label reviewed
 meta runtime setup --default-assignee viewer --default-state Todo --default-priority 3 --default-label platform
 meta runtime setup --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
 ```
@@ -451,6 +455,28 @@ For unattended `meta agents listen` runs, setup should be paired with a provider
 If setup finds canonical template files with local changes, interactive TTY runs prompt for `overwrite`, `skip`, or `cancel`. Non-interactive paths such as `--json` and direct flag updates stop with a clear error instead of silently overwriting those backlog template files.
 
 Repo-dependent commands such as `meta backlog plan`, `meta backlog tech`, `meta backlog sync`, and `meta agents listen` now require repo setup and point back to `meta runtime setup` when `.metastack/meta.json` is missing.
+
+### `backlog review`
+
+Review backlog tickets in the active repo-scoped Linear project before implementation or technical handoff:
+
+```bash
+meta backlog review --root .
+meta backlog review --root . --project "MetaStack CLI" --state Backlog --state Todo
+meta backlog review --root . --no-interactive --json
+```
+
+`meta backlog review` resolves project scope from `.metastack/meta.json` by default and only supports one project per run. The default review-state filter comes from `meta runtime setup` or `meta runtime config`, falling back to `Backlog`. Confirmed review actions add the configured reviewed label, while scan-only runs stay read-only.
+
+Non-interactive runs emit deterministic classifications and proposed next actions:
+
+- `already_reviewed`: the ticket already carries the reviewed label and is left unchanged
+- `already_good`: the ticket is ready as-is and can be marked reviewed
+- `suggested_edits`: a proposed replacement description is available and can be applied on confirmation
+- `follow_up_questions`: the command surfaces concrete questions without editing the ticket first
+- `ready_for_technical_scoping`: a `plan`-labeled ticket is ready to hand off through `meta backlog tech`
+
+When the review path needs the local agent, the command also reports the resolved provider, model, reasoning, route key, and config source. Use the `backlog.review` route key with `meta runtime config --route backlog.review ...` when you want review-specific agent defaults.
 
 Example repo-scoped config:
 

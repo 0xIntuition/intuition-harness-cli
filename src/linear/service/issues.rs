@@ -212,9 +212,16 @@ where
             && spec.project.is_none()
             && spec.state.is_none()
             && spec.priority.is_none()
+            && spec.labels.is_none()
         {
             bail!("no issue fields were provided to edit");
         }
+
+        let label_ids = if let Some(labels) = spec.labels.as_ref() {
+            Some(self.resolve_label_ids(labels, &issue.team.key).await?)
+        } else {
+            None
+        };
 
         self.client
             .update_issue(
@@ -225,6 +232,7 @@ where
                     project_id,
                     state_id,
                     priority: spec.priority,
+                    label_ids,
                 },
             )
             .await

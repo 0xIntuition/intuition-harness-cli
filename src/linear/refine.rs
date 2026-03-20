@@ -275,6 +275,7 @@ async fn refine_issue(
                     project: None,
                     state: None,
                     priority: None,
+                    labels: None,
                 })
                 .await
             {

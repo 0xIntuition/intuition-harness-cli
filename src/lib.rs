@@ -2,6 +2,7 @@ mod agent_provider;
 mod agents;
 mod backlog;
 mod backlog_defaults;
+mod backlog_review;
 mod cli;
 mod config;
 mod config_command;
@@ -38,6 +39,7 @@ use std::ffi::OsString;
 use anyhow::{Result, bail};
 use clap::Parser;
 
+use crate::backlog_review::run_backlog_review;
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
     DashboardEventArg, IssueCreateEventArg, IssueEditEventArg, LinearCommands,
@@ -107,6 +109,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             BacklogCommands::Plan(args) => {
                 let report = run_plan(&args).await?;
                 println!("{}", report.render());
+            }
+            BacklogCommands::Review(args) => {
+                run_backlog_review(&args).await?;
             }
             BacklogCommands::Tech(args) => {
                 run_technical(&args).await?;
