@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -1005,7 +1006,12 @@ fn run_interactive_plan_session(
     };
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -1042,16 +1048,18 @@ fn run_interactive_plan_session(
 
                     let frame_size = terminal.size()?;
                     let action = match &mut app.stage {
-                        PlanStage::Request(request_app) => handle_request_step_key(
+                        PlanStage::Request(request_app) => handle_request_step_key_with_viewport(
                             request_app,
                             key,
-                            request_input_width(frame_size.into()),
+                            request_input_viewport(frame_size.into()),
                         ),
-                        PlanStage::Questions(questions_app) => handle_questions_step_key(
-                            questions_app,
-                            key,
-                            questions_answer_input_width(frame_size.into()),
-                        ),
+                        PlanStage::Questions(questions_app) => {
+                            handle_questions_step_key_with_viewport(
+                                questions_app,
+                                key,
+                                questions_answer_input_viewport(frame_size.into()),
+                            )
+                        }
                         PlanStage::Review(review_app) => handle_review_step_key(review_app, key),
                         PlanStage::Loading(_) => SessionAction::None,
                     };
@@ -1125,6 +1133,47 @@ fn run_interactive_plan_session(
                     }
                     PlanStage::Review(_) | PlanStage::Loading(_) => {}
                 },
+                Event::Mouse(mouse) => {
+                    if app.pending.is_some() {
+                        continue;
+                    }
+                    let frame_size = terminal.size()?;
+                    match &mut app.stage {
+                        PlanStage::Request(request_app) => {
+                            let viewport = request_input_viewport(frame_size.into());
+                            if matches!(
+                                mouse.kind,
+                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                            ) {
+                                let _ = request_app.request.handle_mouse_scroll(
+                                    mouse,
+                                    viewport,
+                                    viewport.width,
+                                    viewport.height,
+                                );
+                            }
+                        }
+                        PlanStage::Questions(questions_app) => {
+                            if let Some(question) =
+                                questions_app.questions.get_mut(questions_app.selected)
+                            {
+                                let viewport = questions_answer_input_viewport(frame_size.into());
+                                if matches!(
+                                    mouse.kind,
+                                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                                ) {
+                                    let _ = question.answer.handle_mouse_scroll(
+                                        mouse,
+                                        viewport,
+                                        viewport.width,
+                                        viewport.height,
+                                    );
+                                }
+                            }
+                        }
+                        PlanStage::Review(_) | PlanStage::Loading(_) => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -1189,10 +1238,19 @@ enum SessionAction {
     Confirm(PlannedIssueSet),
 }
 
+#[cfg(test)]
 fn handle_request_step_key(
     app: &mut RequestApp,
     key: crossterm::event::KeyEvent,
     input_width: u16,
+) -> SessionAction {
+    handle_request_step_key_with_viewport(app, key, Rect::new(0, 0, input_width.max(1), 8))
+}
+
+fn handle_request_step_key_with_viewport(
+    app: &mut RequestApp,
+    key: crossterm::event::KeyEvent,
+    input_viewport: Rect,
 ) -> SessionAction {
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1238,7 +1296,11 @@ fn handle_request_step_key(
             }
         }
         _ => {
-            if app.request.handle_key_with_width(key, input_width) {
+            if app.request.handle_key_with_viewport(
+                key,
+                input_viewport.width,
+                input_viewport.height,
+            ) {
                 app.error = None;
             }
             SessionAction::None
@@ -1253,10 +1315,19 @@ fn handle_request_step_paste(app: &mut RequestApp, text: &str) {
     }
 }
 
+#[cfg(test)]
 fn handle_questions_step_key(
     app: &mut QuestionsApp,
     key: crossterm::event::KeyEvent,
     input_width: u16,
+) -> SessionAction {
+    handle_questions_step_key_with_viewport(app, key, Rect::new(0, 0, input_width.max(1), 8))
+}
+
+fn handle_questions_step_key_with_viewport(
+    app: &mut QuestionsApp,
+    key: crossterm::event::KeyEvent,
+    input_viewport: Rect,
 ) -> SessionAction {
     match key.code {
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1347,7 +1418,11 @@ fn handle_questions_step_key(
         }
         _ => {
             if let Some(question) = app.questions.get_mut(app.selected)
-                && question.answer.handle_key_with_width(key, input_width)
+                && question.answer.handle_key_with_viewport(
+                    key,
+                    input_viewport.width,
+                    input_viewport.height,
+                )
             {
                 question.state = FollowUpAnswerState::Pending;
                 app.error = None;
@@ -1516,10 +1591,11 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         .title("Planning Request [editing]")
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let request_inner = request_block.inner(body[0]);
-    let rendered = app.request.render_with_width(
+    let rendered = app.request.render_with_viewport(
         "Describe the feature or workflow you want to plan...",
         true,
         request_inner.width,
+        request_inner.height,
     );
     let request = Paragraph::new(rendered.text.clone())
         .block(request_block)
@@ -1595,10 +1671,11 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         ))
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let answer_inner = answer_block.inner(main[1]);
-    let rendered = selected.answer.render_with_width(
+    let rendered = selected.answer.render_with_viewport(
         "Type your answer for the active question...",
         true,
         answer_inner.width,
+        answer_inner.height,
     );
     let answer = Paragraph::new(rendered.text.clone())
         .block(answer_block)
@@ -1853,16 +1930,16 @@ fn stage_kind(stage: &PlanStage) -> PlanStageKind {
     }
 }
 
-fn request_input_width(area: Rect) -> u16 {
+fn request_input_viewport(area: Rect) -> Rect {
     let layout = base_layout_for_area(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
         .split(layout[0]);
-    inner_width(body[0])
+    inner_rect(body[0])
 }
 
-fn questions_answer_input_width(area: Rect) -> u16 {
+fn questions_answer_input_viewport(area: Rect) -> Rect {
     let layout = base_layout_for_area(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1872,7 +1949,7 @@ fn questions_answer_input_width(area: Rect) -> u16 {
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(42), Constraint::Min(0)])
         .split(body[0]);
-    inner_width(main[1])
+    inner_rect(main[1])
 }
 
 fn base_layout_for_area(area: Rect) -> Vec<Rect> {
@@ -1883,8 +1960,13 @@ fn base_layout_for_area(area: Rect) -> Vec<Rect> {
         .to_vec()
 }
 
-fn inner_width(area: Rect) -> u16 {
-    area.width.saturating_sub(2).max(1)
+fn inner_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2).max(1),
+        area.height.saturating_sub(2).max(1),
+    )
 }
 
 fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
@@ -2325,7 +2407,12 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
     }
 }
 
@@ -2764,6 +2851,42 @@ mod tests {
             app.questions[1].answer.cursor(),
             app.questions[1].answer.value().len()
         );
+    }
+
+    #[test]
+    fn questions_step_page_down_advances_within_active_answer() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            request_attachments: Vec::new(),
+            questions: vec![QuestionAnswer {
+                question: "How should it be validated?".to_string(),
+                answer: InputFieldState::multiline(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: FollowUpAnswerState::Pending,
+            }],
+            selected: 0,
+            error: None,
+        };
+        let _ = app.questions[0]
+            .answer
+            .handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Home,
+            ));
+
+        let before = app.questions[0].answer.cursor();
+        let action = handle_questions_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::PageDown),
+            12,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.selected, 0);
+        assert!(app.questions[0].answer.cursor() > before);
     }
 
     #[test]

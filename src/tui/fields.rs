@@ -12,6 +12,7 @@ use crate::tui::prompt_images::{
     ClipboardPromptPaste, MAX_PROMPT_IMAGES, PromptImageAttachment,
     resolve_attachment_from_pasted_text, resolve_clipboard_prompt_paste,
 };
+use crate::tui::scroll::{ScrollState, clamp_offset, wrapped_rows};
 
 const ATTACHMENT_MARKER: char = '\u{fffc}';
 
@@ -23,12 +24,14 @@ pub(crate) struct InputFieldState {
     attachment_mode: AttachmentMode,
     attachments: Vec<PromptImageAttachment>,
     preferred_column: Option<usize>,
+    scroll: ScrollState,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct InputFieldRender {
     pub(crate) text: Text<'static>,
     cursor_prefix: Option<String>,
+    scroll_offset: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +70,7 @@ impl InputFieldState {
             attachment_mode: AttachmentMode::Disabled,
             attachments: Vec::new(),
             preferred_column: None,
+            scroll: ScrollState::default(),
         }
     }
 
@@ -79,6 +83,7 @@ impl InputFieldState {
             attachment_mode: AttachmentMode::Disabled,
             attachments: Vec::new(),
             preferred_column: None,
+            scroll: ScrollState::default(),
         }
     }
 
@@ -91,6 +96,7 @@ impl InputFieldState {
             attachment_mode: AttachmentMode::Enabled,
             attachments: Vec::new(),
             preferred_column: None,
+            scroll: ScrollState::default(),
         }
     }
 
@@ -108,6 +114,7 @@ impl InputFieldState {
             },
             attachments: Vec::new(),
             preferred_column: None,
+            scroll: ScrollState::default(),
         }
     }
 
@@ -129,14 +136,24 @@ impl InputFieldState {
     }
 
     pub(crate) fn render(&self, placeholder: &str, active: bool) -> InputFieldRender {
-        self.render_with_width(placeholder, active, 1)
+        self.render_with_viewport(placeholder, active, 1, 1)
     }
 
     pub(crate) fn render_with_width(
         &self,
         placeholder: &str,
         active: bool,
-        _width: u16,
+        width: u16,
+    ) -> InputFieldRender {
+        self.render_with_viewport(placeholder, active, width, 1)
+    }
+
+    pub(crate) fn render_with_viewport(
+        &self,
+        placeholder: &str,
+        active: bool,
+        width: u16,
+        height: u16,
     ) -> InputFieldRender {
         let display_value = self.display_value();
         if display_value.is_empty() {
@@ -147,19 +164,25 @@ impl InputFieldState {
             return InputFieldRender {
                 text,
                 cursor_prefix: active.then(String::new),
+                scroll_offset: 0,
             };
         }
+
+        let content_rows = wrapped_rows(&display_value, width);
+        let scroll_offset = clamp_offset(self.scroll.offset(), height, content_rows);
 
         if !active {
             return InputFieldRender {
                 text: Text::from(display_value),
                 cursor_prefix: None,
+                scroll_offset,
             };
         }
 
         InputFieldRender {
             text: Text::from(display_value),
             cursor_prefix: Some(render_prefix_with_attachments(&self.value[..self.cursor])),
+            scroll_offset,
         }
     }
 
@@ -278,8 +301,8 @@ impl InputFieldRender {
         };
 
         let (column, row) = wrapped_cursor_position(prefix, area.width);
-        if row < area.height {
-            frame.set_cursor_position((area.x + column, area.y + row));
+        if row >= self.scroll_offset && row - self.scroll_offset < area.height {
+            frame.set_cursor_position((area.x + column, area.y + row - self.scroll_offset));
         }
     }
 
@@ -345,6 +368,7 @@ impl InputFieldState {
         self.cursor = 0;
         self.attachments.clear();
         self.preferred_column = None;
+        self.scroll.reset();
     }
 
     fn move_left(&mut self) {
@@ -384,6 +408,14 @@ impl InputFieldState {
 
     fn move_down(&mut self, width: u16) {
         self.move_vertical(width, 1);
+    }
+
+    fn move_page_up(&mut self, width: u16, height: u16) {
+        self.move_vertical(width, -(height.saturating_sub(1).max(1) as isize));
+    }
+
+    fn move_page_down(&mut self, width: u16, height: u16) {
+        self.move_vertical(width, height.saturating_sub(1).max(1) as isize);
     }
 
     fn move_vertical(&mut self, width: u16, delta: isize) {
@@ -427,6 +459,31 @@ impl InputFieldState {
             self.cursor = target.byte;
             self.preferred_column = Some(preferred_column);
         }
+    }
+
+    fn sync_cursor_scroll(&mut self, width: u16, height: u16) {
+        let prefix = render_prefix_with_attachments(&self.value[..self.cursor]);
+        let (_, row) = wrapped_cursor_position(&prefix, width.max(1));
+        let content_rows = wrapped_rows(&self.display_value(), width.max(1));
+        let _ = self
+            .scroll
+            .ensure_row_visible(row, height.max(1), content_rows.max(1));
+    }
+
+    pub(crate) fn handle_mouse_scroll(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        area: Rect,
+        width: u16,
+        height: u16,
+    ) -> bool {
+        if self.mode != InputFieldMode::MultiLine {
+            return false;
+        }
+
+        let content_rows = wrapped_rows(&self.display_value(), width.max(1));
+        self.scroll
+            .apply_mouse(mouse, area, height.max(1), content_rows.max(1))
     }
 }
 
@@ -586,11 +643,21 @@ fn wrapped_cursor_boundaries(value: &str, width: u16) -> Vec<CursorBoundary> {
 
 impl InputFieldState {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
-        self.handle_key_with_width(key, 1)
+        self.handle_key_with_viewport(key, 1, 1)
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_key_with_width(&mut self, key: KeyEvent, width: u16) -> bool {
-        match key.code {
+        self.handle_key_with_viewport(key, width, 1)
+    }
+
+    pub(crate) fn handle_key_with_viewport(
+        &mut self,
+        key: KeyEvent,
+        width: u16,
+        height: u16,
+    ) -> bool {
+        let handled = match key.code {
             KeyCode::Enter
                 if self.mode == InputFieldMode::MultiLine
                     && key.modifiers.contains(KeyModifiers::SHIFT) =>
@@ -638,8 +705,22 @@ impl InputFieldState {
                 self.move_down(width);
                 true
             }
+            KeyCode::PageUp if self.mode == InputFieldMode::MultiLine => {
+                self.move_page_up(width, height);
+                true
+            }
+            KeyCode::PageDown if self.mode == InputFieldMode::MultiLine => {
+                self.move_page_down(width, height);
+                true
+            }
             _ => false,
+        };
+
+        if handled && self.mode == InputFieldMode::MultiLine {
+            self.sync_cursor_scroll(width, height);
         }
+
+        handled
     }
 }
 

@@ -2,7 +2,10 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -137,7 +140,7 @@ pub fn run_issue_edit_form(
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _cleanup = TerminalCleanup;
 
     let backend = CrosstermBackend::new(stdout);
@@ -149,11 +152,28 @@ pub fn run_issue_edit_form(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key(key) {
+                    let viewport = step_input_viewport(terminal.size()?.into());
+                    if let Some(exit) = app.handle_key_in_viewport(key, viewport) {
                         return Ok(exit);
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
+                Event::Mouse(mouse) => {
+                    if app.step == EditStep::Description
+                        && matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        )
+                    {
+                        let viewport = step_input_viewport(terminal.size()?.into());
+                        let _ = app.description.handle_mouse_scroll(
+                            mouse,
+                            viewport,
+                            viewport.width,
+                            viewport.height,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -235,9 +255,12 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
                 .title("Title [editing]")
                 .border_style(Style::default().add_modifier(Modifier::BOLD));
             let inner = block.inner(area);
-            let rendered =
-                app.title
-                    .render_with_width("Type the issue title...", true, inner.width);
+            let rendered = app.title.render_with_viewport(
+                "Type the issue title...",
+                true,
+                inner.width,
+                inner.height,
+            );
             let paragraph = Paragraph::new(rendered.text.clone())
                 .block(block)
                 .wrap(Wrap { trim: false });
@@ -250,10 +273,11 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
                 .title("Description [editing]")
                 .border_style(Style::default().add_modifier(Modifier::BOLD));
             let inner = block.inner(area);
-            let rendered = app.description.render_with_width(
+            let rendered = app.description.render_with_viewport(
                 "Type the issue description...",
                 true,
                 inner.width,
+                inner.height,
             );
             let paragraph = Paragraph::new(rendered.text.clone())
                 .block(block)
@@ -402,7 +426,19 @@ impl IssueEditApp {
         })
     }
 
+    #[cfg(test)]
     fn handle_key(&mut self, key: KeyEvent) -> Option<IssueEditFormExit> {
+        self.handle_key_in_viewport(
+            key,
+            step_input_viewport(ratatui::layout::Rect::new(0, 0, 120, 24)),
+        )
+    }
+
+    fn handle_key_in_viewport(
+        &mut self,
+        key: KeyEvent,
+        viewport: ratatui::layout::Rect,
+    ) -> Option<IssueEditFormExit> {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(IssueEditFormExit::Cancelled)
@@ -412,7 +448,13 @@ impl IssueEditApp {
                 None
             }
             KeyCode::Char(_) | KeyCode::Backspace => {
-                self.apply_text_key(key);
+                self.apply_text_key(key, viewport);
+                None
+            }
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                if self.step != EditStep::StatusPriority =>
+            {
+                self.apply_text_key(key, viewport);
                 None
             }
             KeyCode::Up => self.apply_action(IssueEditAction::Up),
@@ -503,14 +545,18 @@ impl IssueEditApp {
         }
     }
 
-    fn apply_text_key(&mut self, key: KeyEvent) {
+    fn apply_text_key(&mut self, key: KeyEvent, viewport: ratatui::layout::Rect) {
         self.error = None;
         match self.step {
             EditStep::Title => {
-                let _ = self.title.handle_key(key);
+                let _ = self
+                    .title
+                    .handle_key_with_viewport(key, viewport.width, viewport.height);
             }
             EditStep::Description => {
-                let _ = self.description.handle_key(key);
+                let _ =
+                    self.description
+                        .handle_key_with_viewport(key, viewport.width, viewport.height);
             }
             EditStep::StatusPriority => {}
         }
@@ -570,6 +616,32 @@ impl IssueEditApp {
     fn selected_priority_label(&self) -> &'static str {
         PRIORITY_OPTIONS[self.selected_priority].label
     }
+}
+
+fn step_input_viewport(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(24),
+            Constraint::Min(0),
+            Constraint::Length(34),
+        ])
+        .split(layout[1]);
+    let panel = body[1];
+    ratatui::layout::Rect::new(
+        panel.x.saturating_add(1),
+        panel.y.saturating_add(1),
+        panel.width.saturating_sub(2).max(1),
+        panel.height.saturating_sub(2).max(1),
+    )
 }
 
 impl IssueEditFormContext {
@@ -688,7 +760,7 @@ impl Drop for TerminalCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
 }
 
@@ -853,6 +925,35 @@ mod tests {
 
         assert_eq!(app.description.value(), "Line one\nLine two\n");
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn issue_edit_app_page_down_moves_within_long_description() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.step = EditStep::Description;
+        let _ = app
+            .description
+            .handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+
+        let before = app.description.cursor();
+        let exit = app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+
+        assert_eq!(exit, None);
+        assert!(app.description.cursor() > before);
     }
 
     #[test]
