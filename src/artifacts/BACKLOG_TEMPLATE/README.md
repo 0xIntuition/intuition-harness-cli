@@ -22,10 +22,10 @@ This directory is the canonical backlog template embedded into `meta setup`, `me
 
 ## Editing Notes
 
-1. Replace placeholders:
-   - `{{BACKLOG_TITLE}}`
-   - `{{BACKLOG_SLUG}}`
-   - `{{TODAY}}`
-2. Keep this template lightweight. Add large docs only when needed.
-3. Use relative links that resolve from each file's own directory.
-4. `index.md` is the required root document for both planning and technical generation.
+1. This backlog has already been rendered with issue-specific values. Edit the generated markdown
+   in this directory directly.
+2. If you need to change future generated backlogs, update the canonical template files under
+   `.metastack/backlog/_TEMPLATE/` and keep their placeholder tokens intact there.
+3. Keep this template lightweight. Add large docs only when needed.
+4. Use relative links that resolve from each file's own directory.
+5. `index.md` is the required root document for both planning and technical generation.

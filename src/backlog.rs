@@ -723,8 +723,8 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklogIssueMetadata, BacklogSyncStatus, ManagedFileRecord, compute_local_sync_hash,
-        resolve_backlog_sync_status,
+        BacklogIssueMetadata, BacklogSyncStatus, ManagedFileRecord, TemplateContext,
+        compute_local_sync_hash, render_template_files, resolve_backlog_sync_status,
     };
     use anyhow::Result;
     use std::fs;
@@ -775,5 +775,34 @@ mod tests {
         );
 
         assert_eq!(resolution.status, BacklogSyncStatus::Unlinked);
+    }
+
+    #[test]
+    fn rendered_readme_keeps_actionable_editing_guidance() -> Result<()> {
+        let temp = tempdir()?;
+        let rendered_files = render_template_files(
+            temp.path(),
+            &TemplateContext {
+                backlog_title: Some("TEST BACKLOG ISSUE".to_string()),
+                backlog_slug: Some("test-backlog-issue".to_string()),
+                today: Some("2026-03-20".to_string()),
+                ..TemplateContext::default()
+            },
+        )?;
+        let readme = rendered_files
+            .into_iter()
+            .find(|file| file.relative_path == "README.md")
+            .expect("canonical backlog template should include README.md");
+
+        assert!(
+            readme
+                .contents
+                .contains("This backlog has already been rendered with issue-specific values.")
+        );
+        assert!(readme.contents.contains(".metastack/backlog/_TEMPLATE/"));
+        assert!(!readme.contents.contains("TEST BACKLOG ISSUE"));
+        assert!(!readme.contents.contains("test-backlog-issue"));
+        assert!(!readme.contents.contains("2026-03-20"));
+        Ok(())
     }
 }
