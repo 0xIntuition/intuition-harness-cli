@@ -3339,6 +3339,11 @@ printf '%s' "$METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH" > "$TEST_OUTPUT_DIR/atta
     wait_for_path(&stub_dir.join("attachment-context-path.txt"))?;
     let workspace_root = temp.path().join("repo-workspace/MET-24");
     let context_dir = workspace_root.join(".metastack/agents/issue-context/MET-24");
+    wait_for_path(&context_dir.join("README.md"))?;
+    wait_for_path(&context_dir.join("files/01-specification.md"))?;
+    wait_for_path(&context_dir.join("files/02-diagram.png"))?;
+    wait_for_path(&stub_dir.join("payload.txt"))?;
+    wait_for_path(&stub_dir.join("instructions.txt"))?;
     let reported_context_dir = PathBuf::from(fs::read_to_string(
         stub_dir.join("attachment-context-path.txt"),
     )?);
