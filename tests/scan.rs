@@ -177,6 +177,106 @@ done
 
 #[cfg(unix)]
 #[test]
+fn scan_uses_branded_repo_state_root_and_excludes_it_from_repo_facts() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let output_dir = temp.path().join("agent-output");
+    let stub_path = temp.path().join("scan-agent");
+
+    fs::create_dir_all(repo_root.join("src"))?;
+    fs::create_dir_all(repo_root.join(".intuition/hidden"))?;
+    fs::create_dir_all(&output_dir)?;
+    fs::write(
+        repo_root.join("Cargo.toml"),
+        r#"[package]
+name = "demo-cli"
+version = "0.1.0"
+edition = "2024"
+"#,
+    )?;
+    fs::write(repo_root.join("README.md"), "# Demo CLI\n")?;
+    fs::write(repo_root.join("src/main.rs"), "fn main() {}\n")?;
+    fs::write(
+        repo_root.join(".intuition/hidden/secret.rs"),
+        "fn hidden() {}\n",
+    )?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "branding": {
+    "command_name": "intuition",
+    "repo_state_root": ".intuition",
+    "backlog_root": ".intuition/backlog"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "scan-stub"
+
+[agents.commands.scan-stub]
+command = "{}"
+args = ["{{payload}}"]
+transport = "arg"
+"#,
+            stub_path.display()
+        ),
+    )?;
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+codebase_dir=$(dirname "$METASTACK_SCAN_FACT_BASE")
+mkdir -p "$codebase_dir"
+for pair in \
+  "ARCHITECTURE.md:# Architecture" \
+  "CONCERNS.md:# Codebase Concerns" \
+  "CONVENTIONS.md:# Coding Conventions" \
+  "INTEGRATIONS.md:# External Integrations" \
+  "STACK.md:# Technology Stack" \
+  "STRUCTURE.md:# Codebase Structure" \
+  "TESTING.md:# Testing Patterns"
+do
+  file="${pair%%:*}"
+  header="${pair#*:}"
+  printf '%s\n' "$header" > "$codebase_dir/$file"
+done
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .arg("scan")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".intuition/codebase/CONCERNS.md"))
+        .stdout(predicate::str::contains(".metastack/codebase/CONCERNS.md").not());
+
+    let scan = fs::read_to_string(repo_root.join(".intuition/codebase/SCAN.md"))?;
+    assert!(scan.contains("- `.intuition`"));
+    assert!(scan.contains("- `.metastack`"));
+    assert!(!scan.contains(".intuition/hidden/secret.rs"));
+    assert!(!scan.contains("- `.intuition` (directory)"));
+    assert!(
+        repo_root
+            .join(".intuition/agents/sessions/scan.log")
+            .is_file()
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn scan_failure_hides_raw_agent_output_and_reports_log_path() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

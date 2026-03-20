@@ -98,6 +98,9 @@ pub async fn run_sync_dashboard_command(
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let paths = crate::fs::PlanningPaths::for_root(&root)?;
+    let command_name = crate::fs::effective_command_name(Some(&root))?;
+    let backlog_dir_label = paths.backlog_dir_label(&root);
     let entries = discover_backlog_entries(&root)?;
     let LinearCommandContext {
         service,
@@ -109,12 +112,15 @@ pub async fn run_sync_dashboard_command(
     match run_sync_dashboard(
         SyncDashboardData {
             title,
-            command_name: crate::fs::effective_command_name(Some(&root))?,
-            backlog_dir_label: crate::fs::display_path(
-                &crate::fs::PlanningPaths::for_root(&root)?.backlog_dir,
-                &root,
-            ),
-            issues: load_sync_dashboard_issues(&service, &entries).await?,
+            command_name: command_name.clone(),
+            backlog_dir_label: backlog_dir_label.clone(),
+            issues: load_sync_dashboard_issues(
+                &service,
+                &entries,
+                &backlog_dir_label,
+                &command_name,
+            )
+            .await?,
         },
         options,
     )? {
@@ -151,12 +157,18 @@ pub async fn run_sync_dashboard_command(
 async fn load_sync_dashboard_issues(
     service: &LinearService<ReqwestLinearClient>,
     entries: &[BacklogSyncEntry],
+    backlog_dir_label: &str,
+    command_name: &str,
 ) -> Result<Vec<SyncDashboardIssue>> {
     let mut dashboard_issues = Vec::with_capacity(entries.len());
     for entry in entries {
         let metadata = entry.metadata.as_ref();
         if metadata.is_none() {
-            dashboard_issues.push(build_unlinked_sync_dashboard_issue(entry));
+            dashboard_issues.push(build_unlinked_sync_dashboard_issue(
+                entry,
+                backlog_dir_label,
+                command_name,
+            ));
             continue;
         }
         let remote_issue = if let Some(metadata) = metadata {
@@ -186,7 +198,11 @@ async fn load_sync_dashboard_issues(
     Ok(dashboard_issues)
 }
 
-fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboardIssue {
+fn build_unlinked_sync_dashboard_issue(
+    entry: &BacklogSyncEntry,
+    backlog_dir_label: &str,
+    command_name: &str,
+) -> SyncDashboardIssue {
     let slug = entry.slug.clone();
     SyncDashboardIssue {
         entry_slug: slug.clone(),
@@ -195,9 +211,9 @@ fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboar
             identifier: slug.clone(),
             title: entry.title.clone(),
             description: Some(format!(
-                "Local backlog entry under `.metastack/backlog/{slug}`. Link it with `meta backlog sync link <ISSUE> --entry {slug}` to enable pull and push."
+                "Local backlog entry under `{backlog_dir_label}/{slug}`. Link it with `{command_name} backlog sync link <ISSUE> --entry {slug}` to enable pull and push."
             )),
-            url: format!(".metastack/backlog/{slug}"),
+            url: format!("{backlog_dir_label}/{slug}"),
             priority: None,
             estimate: None,
             updated_at: "local-only".to_string(),
@@ -387,10 +403,12 @@ pub async fn run_sync_link(
 pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let paths = PlanningPaths::for_root(&root)?;
+    let backlog_dir_label = paths.backlog_dir_label(&root);
     let entries = discover_backlog_entries(&root)?;
 
     if entries.is_empty() {
-        println!("No backlog entries found under .metastack/backlog/.");
+        println!("No backlog entries found under {backlog_dir_label}/.");
         return Ok(());
     }
 
@@ -571,13 +589,14 @@ async fn run_sync_pull_all(
     service: &LinearService<ReqwestLinearClient>,
     discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<()> {
+    let backlog_dir_label = PlanningPaths::for_root(root)?.backlog_dir_label(root);
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
         .into_iter()
         .filter(|entry| entry.metadata.is_some())
         .collect::<Vec<_>>();
     if linked_entries.is_empty() {
-        println!("No linked backlog entries found under .metastack/backlog/.");
+        println!("No linked backlog entries found under {backlog_dir_label}/.");
         return Ok(());
     }
 
@@ -641,13 +660,14 @@ async fn run_sync_push_all(
     service: &LinearService<ReqwestLinearClient>,
     update_description: bool,
 ) -> Result<()> {
+    let backlog_dir_label = PlanningPaths::for_root(root)?.backlog_dir_label(root);
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
         .into_iter()
         .filter(|entry| entry.metadata.is_some())
         .collect::<Vec<_>>();
     if linked_entries.is_empty() {
-        println!("No linked backlog entries found under .metastack/backlog/.");
+        println!("No linked backlog entries found under {backlog_dir_label}/.");
         return Ok(());
     }
 
@@ -1419,17 +1439,16 @@ fn linked_entry_for_issue<'a>(
 }
 
 fn resolve_entry_by_slug(root: &Path, entries: &[BacklogSyncEntry], slug: &str) -> Result<PathBuf> {
+    let paths = PlanningPaths::for_root(root)?;
+    let backlog_dir_label = paths.backlog_dir_label(root);
     let entry = entries
         .iter()
         .find(|entry| entry.slug == slug)
         .ok_or_else(|| {
-            anyhow!("backlog entry `{slug}` was not found under `.metastack/backlog/`")
+            anyhow!("backlog entry `{slug}` was not found under `{backlog_dir_label}/`")
         })?;
-    if !entry
-        .issue_dir
-        .starts_with(PlanningPaths::for_root(root)?.backlog_dir)
-    {
-        bail!("refusing to use backlog entry outside `.metastack/backlog/`");
+    if !entry.issue_dir.starts_with(&paths.backlog_dir) {
+        bail!("refusing to use backlog entry outside `{backlog_dir_label}/`");
     }
     Ok(entry.issue_dir.clone())
 }

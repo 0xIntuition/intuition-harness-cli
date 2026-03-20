@@ -28,7 +28,7 @@ use crate::scaffold::ensure_planning_layout;
 use crate::scan_dashboard::{ScanDashboard, ScanDashboardData, ScanDashboardRow, ScanItemState};
 use crate::scan_prompts::{build_scan_agent_prompt, scan_document_file_names};
 
-const EXCLUDED_DIRS: &[&str] = &[".git", ".metastack", "node_modules", "target"];
+const STATIC_EXCLUDED_DIRS: &[&str] = &[".git", "node_modules", "target"];
 const MAX_KEY_FILES: usize = 12;
 const SCAN_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const STEP_COLLECT_FACTS: usize = 0;
@@ -78,6 +78,12 @@ struct ScanProgress {
     files: Vec<TrackedScanFile>,
 }
 
+#[derive(Debug, Clone)]
+struct ScanExclusions {
+    labels: Vec<String>,
+    paths: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RustManifestSummary {
     package_name: Option<String>,
@@ -91,6 +97,7 @@ pub(crate) struct CodebaseContext {
     top_level_entries: Vec<(String, &'static str)>,
     file_count: usize,
     directory_count: usize,
+    exclusions: Vec<String>,
     languages: Vec<(String, usize)>,
     manifests: Vec<String>,
     readme_summary: Option<String>,
@@ -110,7 +117,8 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
     let root = canonicalize_existing_dir(&args.root)?;
     ensure_planning_layout(&root, false)?;
     let paths = PlanningPaths::for_root(&root)?;
-    let context = CodebaseContext::collect(&root)?;
+    let exclusions = ScanExclusions::for_root(&root)?;
+    let context = CodebaseContext::collect_with_exclusions(&root, &exclusions)?;
     let agent = resolve_scan_agent_name(&root, route_key)?;
     let log_path = display_path(&paths.scan_log_path(), &root);
     let mut progress = ScanProgress::new(
@@ -273,16 +281,18 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
 
 impl ScanReport {
     pub fn render(&self) -> String {
+        let paths =
+            PlanningPaths::for_root(&self.root).unwrap_or_else(|_| PlanningPaths::new(&self.root));
+        let codebase_dir_label = paths.codebase_dir_label(&self.root);
         let mut lines = vec![format!(
             "Codebase scan completed in {} with agent `{}`.",
-            display_path(&self.root.join(".metastack/codebase"), &self.root),
-            self.agent,
+            codebase_dir_label, self.agent,
         )];
 
         lines.push(String::new());
         lines.push("Steps:".to_string());
         lines.push("  [done] Collect repository facts".to_string());
-        lines.push("  [done] Write `.metastack/codebase/SCAN.md`".to_string());
+        lines.push(format!("  [done] Write `{codebase_dir_label}/SCAN.md`"));
         lines.push(format!(
             "  [done] Refresh reusable codebase docs with agent `{}`",
             self.agent
@@ -416,6 +426,44 @@ impl ScanProgress {
                 .collect(),
             log_path: self.log_path.clone(),
         }
+    }
+}
+
+impl ScanExclusions {
+    fn for_root(root: &Path) -> Result<Self> {
+        let paths = PlanningPaths::for_root(root).unwrap_or_else(|_| PlanningPaths::new(root));
+        let mut labels = STATIC_EXCLUDED_DIRS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        let mut excluded_paths = Vec::new();
+
+        for path in [paths.metadata_dir, paths.metastack_dir, paths.backlog_dir] {
+            if !path.starts_with(root) {
+                continue;
+            }
+
+            let label = display_path(&path, root);
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+            if !excluded_paths.contains(&path) {
+                excluded_paths.push(path);
+            }
+        }
+
+        Ok(Self {
+            labels,
+            paths: excluded_paths,
+        })
+    }
+
+    fn contains_path(&self, path: &Path) -> bool {
+        self.paths.iter().any(|excluded| path == excluded)
+    }
+
+    fn contains_dir_name(&self, name: &str) -> bool {
+        STATIC_EXCLUDED_DIRS.contains(&name)
     }
 }
 
@@ -588,15 +636,20 @@ fn run_scan_agent_with_dashboard(
 
 impl CodebaseContext {
     pub(crate) fn collect(root: &Path) -> Result<Self> {
+        let exclusions = ScanExclusions::for_root(root)?;
+        Self::collect_with_exclusions(root, &exclusions)
+    }
+
+    fn collect_with_exclusions(root: &Path, exclusions: &ScanExclusions) -> Result<Self> {
         let repo_name = root
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
-        let top_level_entries = collect_top_level_entries(root)?;
+        let top_level_entries = collect_top_level_entries(root, exclusions)?;
         let readme_summary = read_readme_summary(root)?;
         let rust_manifest = read_rust_manifest(root)?;
-        let manifests = collect_manifests(root)?;
-        let (file_count, directory_count, language_counts) = collect_stats(root)?;
+        let manifests = collect_manifests(root, exclusions)?;
+        let (file_count, directory_count, language_counts) = collect_stats(root, exclusions)?;
         let mut languages: Vec<_> = language_counts.into_iter().collect();
         languages.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
 
@@ -605,18 +658,19 @@ impl CodebaseContext {
             top_level_entries,
             file_count,
             directory_count,
+            exclusions: exclusions.labels.clone(),
             languages,
             manifests,
             readme_summary,
             rust_manifest,
-            tree_lines: build_tree(root, 3)?,
-            entrypoints: collect_files(root, MAX_KEY_FILES, |relative, path| {
+            tree_lines: build_tree(root, 3, exclusions)?,
+            entrypoints: collect_files(root, MAX_KEY_FILES, exclusions, |relative, path| {
                 relative == "src/main.rs"
                     || relative == "src/lib.rs"
                     || relative.starts_with("src/bin/")
                     || is_script_entrypoint(relative, path)
             })?,
-            key_source_files: collect_files(root, MAX_KEY_FILES, |relative, path| {
+            key_source_files: collect_files(root, MAX_KEY_FILES, exclusions, |relative, path| {
                 relative.starts_with("src/")
                     && path
                         .extension()
@@ -625,7 +679,7 @@ impl CodebaseContext {
                             matches!(extension, "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go")
                         })
             })?,
-            test_files: collect_files(root, MAX_KEY_FILES, |relative, path| {
+            test_files: collect_files(root, MAX_KEY_FILES, exclusions, |relative, path| {
                 relative.starts_with("tests/")
                     || relative.contains("/tests/")
                     || path
@@ -636,7 +690,7 @@ impl CodebaseContext {
                             lowercase.contains("test") || lowercase.contains("spec")
                         })
             })?,
-            doc_files: collect_files(root, MAX_KEY_FILES, |relative, path| {
+            doc_files: collect_files(root, MAX_KEY_FILES, exclusions, |relative, path| {
                 relative == "README.md"
                     || relative.starts_with("docs/")
                     || path
@@ -734,7 +788,7 @@ impl CodebaseContext {
         lines.push(String::new());
         lines.push("## Exclusions".to_string());
         lines.push(String::new());
-        for entry in EXCLUDED_DIRS {
+        for entry in &self.exclusions {
             lines.push(format!("- `{entry}`"));
         }
 
@@ -885,7 +939,10 @@ fn push_list(lines: &mut Vec<String>, entries: &[String], empty_line: &str) {
     }
 }
 
-fn collect_top_level_entries(root: &Path) -> Result<Vec<(String, &'static str)>> {
+fn collect_top_level_entries(
+    root: &Path,
+    exclusions: &ScanExclusions,
+) -> Result<Vec<(String, &'static str)>> {
     let mut entries = Vec::new();
 
     for entry in
@@ -893,7 +950,7 @@ fn collect_top_level_entries(root: &Path) -> Result<Vec<(String, &'static str)>>
     {
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().to_string();
-        if EXCLUDED_DIRS.contains(&file_name.as_str()) {
+        if exclusions.contains_dir_name(&file_name) || exclusions.contains_path(&entry.path()) {
             continue;
         }
 
@@ -954,7 +1011,7 @@ fn read_rust_manifest(root: &Path) -> Result<Option<RustManifestSummary>> {
     }))
 }
 
-fn collect_manifests(root: &Path) -> Result<Vec<String>> {
+fn collect_manifests(root: &Path, exclusions: &ScanExclusions) -> Result<Vec<String>> {
     let known = BTreeSet::from([
         "Cargo.toml",
         "package.json",
@@ -969,7 +1026,7 @@ fn collect_manifests(root: &Path) -> Result<Vec<String>> {
     ]);
     let mut manifests = BTreeSet::new();
 
-    for entry in walk_entries(root) {
+    for entry in walk_entries(root, exclusions) {
         let entry = entry?;
         if entry.file_type().is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -982,12 +1039,15 @@ fn collect_manifests(root: &Path) -> Result<Vec<String>> {
     Ok(manifests.into_iter().collect())
 }
 
-fn collect_stats(root: &Path) -> Result<(usize, usize, BTreeMap<String, usize>)> {
+fn collect_stats(
+    root: &Path,
+    exclusions: &ScanExclusions,
+) -> Result<(usize, usize, BTreeMap<String, usize>)> {
     let mut files = 0;
     let mut directories = 0;
     let mut languages = BTreeMap::new();
 
-    for entry in walk_entries(root) {
+    for entry in walk_entries(root, exclusions) {
         let entry = entry?;
         if entry.depth() == 0 {
             continue;
@@ -1007,9 +1067,9 @@ fn collect_stats(root: &Path) -> Result<(usize, usize, BTreeMap<String, usize>)>
     Ok((files, directories, languages))
 }
 
-fn build_tree(root: &Path, max_depth: usize) -> Result<Vec<String>> {
+fn build_tree(root: &Path, max_depth: usize, exclusions: &ScanExclusions) -> Result<Vec<String>> {
     let mut lines = Vec::new();
-    for entry in walk_entries(root) {
+    for entry in walk_entries(root, exclusions) {
         let entry = entry?;
         if entry.depth() == 0 || entry.depth() > max_depth {
             continue;
@@ -1026,13 +1086,18 @@ fn build_tree(root: &Path, max_depth: usize) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn collect_files<F>(root: &Path, limit: usize, mut predicate: F) -> Result<Vec<String>>
+fn collect_files<F>(
+    root: &Path,
+    limit: usize,
+    exclusions: &ScanExclusions,
+    mut predicate: F,
+) -> Result<Vec<String>>
 where
     F: FnMut(&str, &Path) -> bool,
 {
     let mut matches = BTreeSet::new();
 
-    for entry in walk_entries(root) {
+    for entry in walk_entries(root, exclusions) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
@@ -1058,20 +1123,24 @@ fn is_script_entrypoint(relative: &str, path: &Path) -> bool {
     ) && (relative.starts_with("bin/") || relative.starts_with("scripts/"))
 }
 
-fn walk_entries(root: &Path) -> impl Iterator<Item = Result<DirEntry, walkdir::Error>> {
+fn walk_entries<'a>(
+    root: &'a Path,
+    exclusions: &'a ScanExclusions,
+) -> impl Iterator<Item = Result<DirEntry, walkdir::Error>> + 'a {
     WalkDir::new(root)
         .sort_by_file_name()
         .into_iter()
-        .filter_entry(|entry| !should_skip(entry))
+        .filter_entry(move |entry| !should_skip(entry, exclusions))
 }
 
-fn should_skip(entry: &DirEntry) -> bool {
+fn should_skip(entry: &DirEntry, exclusions: &ScanExclusions) -> bool {
     if entry.depth() == 0 {
         return false;
     }
 
     let name = entry.file_name().to_string_lossy();
-    entry.file_type().is_dir() && EXCLUDED_DIRS.contains(&name.as_ref())
+    entry.file_type().is_dir()
+        && (exclusions.contains_dir_name(&name) || exclusions.contains_path(entry.path()))
 }
 
 fn detect_language(path: &Path) -> Option<&'static str> {

@@ -135,6 +135,14 @@ impl PlanningPaths {
         self.metadata_dir.join("meta.json")
     }
 
+    pub fn backlog_dir_label(&self, root: &Path) -> String {
+        display_path(&self.backlog_dir, root)
+    }
+
+    pub fn codebase_dir_label(&self, root: &Path) -> String {
+        display_path(&self.codebase_dir, root)
+    }
+
     pub fn legacy_agent_dir(&self) -> PathBuf {
         self.metastack_dir.join("agent")
     }

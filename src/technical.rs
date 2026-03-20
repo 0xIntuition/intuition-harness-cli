@@ -272,14 +272,16 @@ fn run_interactive_technical_session(
     discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<InteractiveTechnicalExit> {
     let mut app = if let Some(parent) = initial_parent {
+        let backlog_template_label =
+            display_path(&PlanningPaths::for_root(root)?.backlog_template_dir, root);
         let criteria = extract_acceptance_criteria(parent.description.as_deref());
         if criteria.is_empty() {
             let mut app = TechnicalSessionApp {
                 stage: TechnicalStage::Loading(LoadingApp {
                     message: "Generating technical backlog".to_string(),
                     detail: format!(
-                        "Building `.metastack/backlog/_TEMPLATE` for {}.",
-                        parent.identifier
+                        "Building `{backlog_template_label}` for {}.",
+                        parent.identifier,
                     ),
                     spinner_index: 0,
                 }),
