@@ -1703,7 +1703,9 @@ mod tests {
         BacklogTemplateConflictAction, SetupApp, SetupViewData,
         parse_backlog_template_conflict_action, prompt_backlog_template_conflicts_with_io,
     };
-    use crate::config::{AgentSettings, AppConfig, PlanningAgentSettings, PlanningMeta};
+    use crate::config::{
+        AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings, PlanningMeta,
+    };
     use anyhow::Result;
     use std::io::Cursor;
 
@@ -1801,5 +1803,21 @@ mod tests {
         assert!(output.contains("Enter `o`, `s`, or `c`"));
 
         Ok(())
+    }
+
+    #[test]
+    fn assignment_scope_labels_match_explicit_listen_semantics() {
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::Any),
+            "Any eligible issue"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOnly),
+            "Only issues assigned to the authenticated viewer"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOrUnassigned),
+            "Viewer-assigned issues plus unassigned issues"
+        );
     }
 }

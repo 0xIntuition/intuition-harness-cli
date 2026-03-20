@@ -3169,6 +3169,31 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn render_watch_scope_reports_effective_assignee_scope() {
+        let viewer = UserRef {
+            id: "viewer-1".to_string(),
+            name: "Kames".to_string(),
+            email: Some("sudo@example.com".to_string()),
+        };
+
+        assert_eq!(
+            crate::listen::render_watch_scope(ListenAssignmentScope::Any, Some(&viewer)),
+            "all assignees"
+        );
+        assert_eq!(
+            crate::listen::render_watch_scope(ListenAssignmentScope::ViewerOnly, Some(&viewer)),
+            "only Kames"
+        );
+        assert_eq!(
+            crate::listen::render_watch_scope(
+                ListenAssignmentScope::ViewerOrUnassigned,
+                Some(&viewer)
+            ),
+            "Kames + unassigned"
+        );
+    }
+
     #[tokio::test]
     async fn reconcile_sessions_marks_reassigned_issue_completed_after_turn_ends() -> Result<()> {
         let temp = tempdir()?;
