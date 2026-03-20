@@ -209,6 +209,24 @@ exit 1
 }
 
 #[cfg(unix)]
+fn write_failing_review_gh_stub(path: &Path, stderr: &str) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' '{stderr}' >&2
+exit 1
+"#
+        ),
+    )?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn write_review_planning_context(
     repo_root: &Path,
     _api_url: &str,
@@ -476,6 +494,62 @@ fn review_direct_no_remediation_exits_without_follow_up_pr() -> Result<(), Box<d
 
 #[cfg(unix)]
 #[test]
+fn review_direct_fails_when_linear_linkage_is_missing() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let git_config = temp.path().join("gitconfig");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "seed\n")?;
+    init_repo_with_origin(&repo_root)?;
+    configure_github_remote_alias(&repo_root, &git_config)?;
+
+    let linear = MockServer::start();
+    let agent_path = bin_dir.join("review-agent");
+    write_review_agent_stub(&agent_path)?;
+    write_onboarded_config(
+        &config_path,
+        review_agent_config(&linear.url("/graphql"), &agent_path),
+    )?;
+    write_review_planning_context(&repo_root, &linear.url("/graphql"), &agent_path)?;
+
+    write_review_gh_stub(
+        &bin_dir.join("gh"),
+        r#"[{"number":123,"title":"add review","url":"https://github.com/metastack-systems/metastack-cli/pull/123","headRefName":"feature/review-without-linear-key","baseRefName":"main","updatedAt":"2026-03-20T10:00:00Z","author":{"login":"kames"},"labels":[{"name":"metastack"}]}]"#,
+        r#"{"number":123,"title":"add review","body":"Implements review flow without explicit issue linkage","url":"https://github.com/metastack-systems/metastack-cli/pull/123","headRefName":"feature/review-without-linear-key","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","changedFiles":1,"files":[{"path":"src/lib.rs","additions":10,"deletions":2}],"reviews":[],"author":{"login":"kames"}}"#,
+        "diff --git a/src/lib.rs b/src/lib.rs",
+        "https://github.com/metastack-systems/metastack-cli/pull/999",
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("GIT_CONFIG_GLOBAL", &git_config)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "agents",
+            "review",
+            "123",
+            "--root",
+            repo_root.to_str().expect("utf-8 path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "failed to resolve a linked Linear issue from PR #123",
+        ))
+        .stderr(predicate::str::contains(
+            "include exactly one issue identifier such as `ENG-1234`",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn review_direct_remediation_creates_follow_up_pr_and_linear_comment() -> Result<(), Box<dyn Error>>
 {
     let _guard = listen_test_lock();
@@ -530,6 +604,60 @@ fn review_direct_remediation_creates_follow_up_pr_and_linear_comment() -> Result
         ));
 
     comment_mock.assert_calls(1);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn review_listener_render_once_shows_empty_state() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let git_config = temp.path().join("gitconfig");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "seed\n")?;
+    init_repo_with_origin(&repo_root)?;
+    configure_github_remote_alias(&repo_root, &git_config)?;
+
+    let linear = MockServer::start();
+    let agent_path = bin_dir.join("review-agent");
+    write_review_agent_stub(&agent_path)?;
+    write_onboarded_config(
+        &config_path,
+        review_agent_config(&linear.url("/graphql"), &agent_path),
+    )?;
+    write_review_planning_context(&repo_root, &linear.url("/graphql"), &agent_path)?;
+
+    write_review_gh_stub(
+        &bin_dir.join("gh"),
+        "[]",
+        r#"{"number":123,"title":"unused","body":"unused","url":"https://github.com/metastack-systems/metastack-cli/pull/123","headRefName":"feature/unused","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","changedFiles":1,"files":[],"reviews":[],"author":{"login":"kames"}}"#,
+        "",
+        "https://github.com/metastack-systems/metastack-cli/pull/999",
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("GIT_CONFIG_GLOBAL", &git_config)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "agents",
+            "review",
+            "--root",
+            repo_root.to_str().expect("utf-8 path"),
+            "--render-once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "No open pull requests with the `metastack` label are waiting for review.",
+        ))
+        .stdout(predicate::str::contains("Stored review sessions: none"));
+
     Ok(())
 }
 
@@ -611,6 +739,58 @@ fn review_listener_json_and_lock_behave_deterministically() -> Result<(), Box<dy
         .failure()
         .stderr(predicate::str::contains(
             "another `meta agents review` listener already owns this repository",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn review_listener_surfaces_gh_auth_failures() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let git_config = temp.path().join("gitconfig");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "seed\n")?;
+    init_repo_with_origin(&repo_root)?;
+    configure_github_remote_alias(&repo_root, &git_config)?;
+
+    let linear = MockServer::start();
+    let agent_path = bin_dir.join("review-agent");
+    write_review_agent_stub(&agent_path)?;
+    write_onboarded_config(
+        &config_path,
+        review_agent_config(&linear.url("/graphql"), &agent_path),
+    )?;
+    write_review_planning_context(&repo_root, &linear.url("/graphql"), &agent_path)?;
+    write_failing_review_gh_stub(
+        &bin_dir.join("gh"),
+        "authentication failed; run `gh auth login`",
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("GIT_CONFIG_GLOBAL", &git_config)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "agents",
+            "review",
+            "--root",
+            repo_root.to_str().expect("utf-8 path"),
+            "--check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "gh repo view --json nameWithOwner,url,defaultBranchRef failed",
+        ))
+        .stderr(predicate::str::contains(
+            "authentication failed; run `gh auth login`",
         ));
 
     Ok(())
