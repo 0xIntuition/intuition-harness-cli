@@ -244,6 +244,7 @@ fn render_sessions(
             Cell::from(session.pid_label()),
             Cell::from(session.age_label(data.runtime.current_epoch_seconds)),
             Cell::from(session.tokens_label()),
+            Cell::from(session.latest_resume_provider_label()),
             Cell::from(session.session_label()),
             Cell::from(session.summary.clone()),
         ])
@@ -254,6 +255,7 @@ fn render_sessions(
         Cell::from("PID"),
         Cell::from("AGE"),
         Cell::from("TOKENS"),
+        Cell::from("PROVIDER"),
         Cell::from("SESSION"),
         Cell::from("PROGRESS"),
     ])
@@ -271,6 +273,7 @@ fn render_sessions(
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(14),
+            Constraint::Length(9),
             Constraint::Length(14),
             Constraint::Min(24),
         ],
@@ -443,6 +446,7 @@ mod tests {
         assert!(snapshot.contains("Agent Sessions"));
         assert!(snapshot.contains("Active (2)"));
         assert!(snapshot.contains("Completed (0)"));
+        assert!(snapshot.contains("PROVIDER"));
         assert!(snapshot.contains("SESSION"));
         assert!(snapshot.contains("PROGRESS"));
         assert!(snapshot.contains("MET-13"));
