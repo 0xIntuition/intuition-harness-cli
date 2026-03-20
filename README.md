@@ -116,8 +116,9 @@ sandbox_mode = "danger-full-access"
 
 ```text
 .metastack/
-  README.md
   meta.json
+.intuition/
+  README.md
   agents/
     README.md
     briefs/
@@ -145,6 +146,8 @@ sandbox_mode = "danger-full-access"
   cron/
     README.md
 ```
+
+When you keep the default layout, the operational tree above remains under `.metastack/` instead.
 
 ## Command Overview
 
@@ -355,7 +358,7 @@ meta runtime setup --listen-label agent --assignment-scope viewer --refresh-poli
 
 Legacy alias: `meta setup`
 
-`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+`meta runtime setup` is safe to rerun in an existing checkout. It ensures `.metastack/` exists for canonical metadata, seeds `<backlog-root>/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
 
 Repo setup also accepts branding/layout overrides such as `--command-name intuition --repo-state-root .intuition --backlog-root .intuition/backlog`; add `--migrate-layout` to move the operational repo-local state into the configured destination while keeping canonical metadata discoverable at `.metastack/meta.json`.
 
@@ -432,7 +435,7 @@ Behavior summary:
 - Publication is gated on those validation commands succeeding. When validation fails, `meta merge` invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
-Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
+Each run writes local audit artifacts under `<repo-state-root>/merge-runs/<RUN_ID>/`, including:
 
 - `context.json` with the repository, selected PR set, aggregate branch, and isolated workspace path
 - `agent-plan-prompt.md` with the exact planner prompt sent to the configured local agent
@@ -457,22 +460,22 @@ Legacy alias: `meta scan`
 
 Outputs:
 
-- `.metastack/codebase/SCAN.md`
-- `.metastack/codebase/ARCHITECTURE.md`
-- `.metastack/codebase/CONCERNS.md`
-- `.metastack/codebase/CONVENTIONS.md`
-- `.metastack/codebase/INTEGRATIONS.md`
-- `.metastack/codebase/STACK.md`
-- `.metastack/codebase/STRUCTURE.md`
-- `.metastack/codebase/TESTING.md`
+- `<repo-state-root>/codebase/SCAN.md`
+- `<repo-state-root>/codebase/ARCHITECTURE.md`
+- `<repo-state-root>/codebase/CONCERNS.md`
+- `<repo-state-root>/codebase/CONVENTIONS.md`
+- `<repo-state-root>/codebase/INTEGRATIONS.md`
+- `<repo-state-root>/codebase/STACK.md`
+- `<repo-state-root>/codebase/STRUCTURE.md`
+- `<repo-state-root>/codebase/TESTING.md`
 
-When stdout is attached to a TTY, `meta context scan` renders a compact progress dashboard. The underlying agent output is captured in `.metastack/agents/sessions/scan.log`.
+When stdout is attached to a TTY, `meta context scan` renders a compact progress dashboard. The underlying agent output is captured in `<repo-state-root>/agents/sessions/scan.log`.
 
 `meta context scan` treats the resolved repository root as the default target scope for the run. In monorepos, that means the top-level directory you invoked as `--root` (or the current working directory when `--root` is omitted). The scan prompt stays focused on that repository only and should narrow to a subproject only when the user explicitly asks for it.
 
 ### `agents workflows`
 
-List, explain, and run reusable workflow playbooks. The CLI ships with built-in playbooks for backlog planning, ticket implementation, PR review, and incident triage, and it also loads repo-local playbooks from `.metastack/workflows/`.
+List, explain, and run reusable workflow playbooks. The CLI ships with built-in playbooks for backlog planning, ticket implementation, PR review, and incident triage, and it also loads repo-local playbooks from `<repo-state-root>/workflows/`.
 
 ```bash
 meta agents workflows list
@@ -483,7 +486,7 @@ meta agents workflows run ticket-implementation --param issue=MET-93
 
 Legacy alias: `meta workflows`
 
-Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `.metastack/workflows/README.md` for the repo-local scaffold.
+Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `<repo-state-root>/workflows/README.md` for the repo-local scaffold.
 
 ### `context`
 
@@ -498,7 +501,7 @@ meta context reload
 
 - `show` prints the effective repo-scoped instructions, loaded project rules, and known codebase context sources
 - `map` prints a repo-map style summary derived from the live repository tree
-- `doctor` reports missing or stale inputs such as `.metastack/meta.json`, repo rules, instructions files, and generated codebase docs
+- `doctor` reports missing or stale inputs such as `.metastack/meta.json`, repo rules, instructions files, and generated codebase docs under the effective repo-local state root
 - `reload` re-runs the context refresh path used by `meta scan`
 
 ### `runtime cron`
@@ -518,10 +521,10 @@ Legacy alias: `meta cron`
 
 Side effects:
 
-- ensures `.metastack/cron/` exists
-- creates `.metastack/cron/<NAME>.md` job definitions
+- ensures `<repo-state-root>/cron/` exists
+- creates `<repo-state-root>/cron/<NAME>.md` job definitions
 - runs the shell command first when configured, then the optional agent in the same working directory
-- creates `.metastack/cron/.runtime/` on demand for scheduler state and logs
+- creates `<repo-state-root>/cron/.runtime/` on demand for scheduler state and logs
 
 In the interactive cron editor, the prompt field submits on `Enter` and inserts a newline on `Shift+Enter`.
 
@@ -562,18 +565,18 @@ For deterministic automation, pass `--no-interactive` with `--request` and repea
 
 `meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
 
-Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
+Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `<backlog-root>/<ISSUE>/` files unchanged in this slice.
 
 The planning prompt is repo-scoped by default: it derives the active project identity from the resolved repository root, plans for the full repository directory, and asks the agent to create backlog issues only for that repository unless the user explicitly narrows the request to a subproject.
 
 Side effects:
 
-- ensures `.metastack/backlog/_TEMPLATE/` exists
+- ensures `<backlog-root>/_TEMPLATE/` exists
 - creates one or more Linear backlog issues
-- copies the full canonical template tree into `.metastack/backlog/<NEW_ISSUE_ID>/`
-- writes each generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
-- uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
-- writes `.metastack/backlog/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
+- copies the full canonical template tree into `<backlog-root>/<NEW_ISSUE_ID>/`
+- writes each generated backlog item to `<backlog-root>/<NEW_ISSUE_ID>/`
+- uses `<backlog-root>/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
+- writes `<backlog-root>/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
 
 ### `backlog tech`
 
@@ -599,12 +602,12 @@ In a TTY, the parent-issue picker now uses the shared Linear issue browser:
 
 Side effects:
 
-- ensures `.metastack/backlog/_TEMPLATE/` exists
-- asks the configured local agent to inspect the parent Linear issue and author the backlog files from `.metastack/backlog/_TEMPLATE/`
+- ensures `<backlog-root>/_TEMPLATE/` exists
+- asks the configured local agent to inspect the parent Linear issue and author the backlog files from `<backlog-root>/_TEMPLATE/`
 - creates a new Linear child issue under the referenced parent
-- copies the full canonical template tree into `.metastack/backlog/<NEW_ISSUE_ID>/`
-- writes the generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
-- uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
+- copies the full canonical template tree into `<backlog-root>/<NEW_ISSUE_ID>/`
+- writes the generated backlog item to `<backlog-root>/<NEW_ISSUE_ID>/`
+- uses `<backlog-root>/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
 
 ### `issues refine`
@@ -617,21 +620,21 @@ meta issues refine MET-35 MET-36 --passes 2
 meta issues refine MET-35 --apply
 ```
 
-`meta issues refine` is the quality-improvement step after `meta plan` or `meta backlog tech`. It reuses the configured local agent to critique the current Linear description, persist each refinement pass under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`, and generate a proposed rewrite. By default the command is critique-only.
+`meta issues refine` is the quality-improvement step after `meta plan` or `meta backlog tech`. It reuses the configured local agent to critique the current Linear description, persist each refinement pass under `<backlog-root>/<ISSUE>/artifacts/refinement/<RUN_ID>/`, and generate a proposed rewrite. By default the command is critique-only.
 
-Pass `--apply` only when you want to promote the final rewrite into `.metastack/backlog/<ISSUE>/index.md` and then push that rewritten description back to Linear. The command always writes the local before/after snapshots first so the refinement run stays auditable even if the remote mutation fails.
+Pass `--apply` only when you want to promote the final rewrite into `<backlog-root>/<ISSUE>/index.md` and then push that rewritten description back to Linear. The command always writes the local before/after snapshots first so the refinement run stays auditable even if the remote mutation fails.
 
 Side effects:
 
 - validates that every requested issue matches the configured repo team/project scope
-- writes `original.md`, per-pass findings JSON/Markdown, `final-proposed.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`
-- keeps the default flow critique-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue description
-- with `--apply`, updates `.metastack/backlog/<ISSUE>/index.md` before attempting the Linear description update
+- writes `original.md`, per-pass findings JSON/Markdown, `final-proposed.md`, and `summary.json` under `<backlog-root>/<ISSUE>/artifacts/refinement/<RUN_ID>/`
+- keeps the default flow critique-only, without mutating `<backlog-root>/<ISSUE>/index.md` or the Linear issue description
+- with `--apply`, updates `<backlog-root>/<ISSUE>/index.md` before attempting the Linear description update
 - during `meta listen`, blocks `--apply` for the active ticket so the primary issue description is not overwritten in unattended execution
 
 ### `backlog sync`
 
-Browse backlog entries from local `.metastack/backlog/`, hydrate linked rows from Linear, and pull or push the selected linked entry without leaving the terminal:
+Browse backlog entries from the local effective backlog root, hydrate linked rows from Linear, and pull or push the selected linked entry without leaving the terminal:
 
 ```bash
 meta backlog sync --api-key "$LINEAR_API_KEY"
@@ -650,29 +653,29 @@ Legacy alias: `meta sync`
 
 Side effects:
 
-- bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.metastack/backlog/` state
+- bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `<backlog-root>/` state
 - linked dashboard rows hydrate the mapped Linear issue from `.linear.json`, while unlinked rows stay visible with explicit `unlinked` state
 - unlinked dashboard rows are local-only until you run `meta backlog sync link <ISSUE> --entry <SLUG>`
-- `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
+- `link` associates an existing `<backlog-root>/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
 - `link` prompts for an unlinked backlog entry in a TTY when `--entry <SLUG>` is omitted
 - `link --pull` immediately hydrates the linked entry from Linear after writing metadata
-- `status` scans `.metastack/backlog/` and prints `identifier | title | status | last sync`
+- `status` scans `<backlog-root>/` and prints `identifier | title | status | last sync`
 - `status` resolves only local change state by default; pass `--fetch` to check the current Linear issue and surface `remote-ahead` or `diverged`
-- `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
+- `pull` refreshes `<backlog-root>/<ISSUE_ID>/index.md` from the Linear description
 - `pull` restores CLI-managed attachment files into the same directory when present
-- `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `.metastack/backlog/<ISSUE_ID>/artifacts/`
-- `pull` writes `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
-- `pull` writes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
-- `pull` filters generated workpad and `[harness-sync]` comments out of the persisted discussion context and stores `last_pulled_comment_ids` in `.metastack/backlog/<ISSUE_ID>/.linear.json`
+- `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `<backlog-root>/<ISSUE_ID>/artifacts/`
+- `pull` writes `<backlog-root>/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
+- `pull` writes `<backlog-root>/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
+- `pull` filters generated workpad and `[harness-sync]` comments out of the persisted discussion context and stores `last_pulled_comment_ids` in `<backlog-root>/<ISSUE_ID>/.linear.json`
 - `pull` logs per-image download failures without failing the overall sync
 - `pull` uses raw `Authorization: <LINEAR_API_KEY>` only for `uploads.linear.app` image downloads; other hosts are fetched without that special auth header
 - `pull` reuses previously localized ticket images when the same generated artifact path is still current
-- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, `last_sync_at`, and `last_pulled_comment_ids` alongside the existing issue metadata
+- `pull` persists `<backlog-root>/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, `last_sync_at`, and `last_pulled_comment_ids` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
 - `pull --all` walks every linked backlog entry sequentially and prints a synced/skipped/error summary
 - `push` replaces only CLI-managed attachments by default, leaving unrelated Linear attachments untouched
-- `push` parses `.metastack/backlog/<ISSUE_ID>/checklist.md` when present and upserts a single `[harness-sync]` Linear comment with per-milestone and overall completion status
+- `push` parses `<backlog-root>/<ISSUE_ID>/checklist.md` when present and upserts a single `[harness-sync]` Linear comment with per-milestone and overall completion status
 - `push` leaves the Linear issue description unchanged unless you pass `--update-description`
 - `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
 - `push --all` walks every linked backlog entry sequentially, respects `--update-description`, and exits non-zero when any entry fails
@@ -694,7 +697,7 @@ The sync dashboard and render-once snapshot also show each issue's local sync st
 - `diverged`: both local backlog files and the Linear issue changed since the last stored baseline
 - `unlinked`: the local packet is missing or the existing `.linear.json` predates hash baselines
 
-Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded, and generated discussion/image artifacts stay local-only so repeat no-op syncs remain `synced`.
+Local hashes are derived deterministically from tracked files under `<backlog-root>/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded, and generated discussion/image artifacts stay local-only so repeat no-op syncs remain `synced`.
 
 ### `linear issues`, `linear projects`, and `dashboard`
 
@@ -734,7 +737,7 @@ Required auth:
 
 ### `agents listen`
 
-Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work.
+Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `<repo-state-root>/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work.
 
 With repo setup `assignment_scope = "viewer"`, listen watches Todo issues assigned to the authenticated viewer plus unassigned Todo issues. Use `--all-assignees` to disable assignee filtering for just the active run.
 
@@ -776,10 +779,10 @@ Outputs:
 
 - `<parent>/<repo>-workspace/<TICKET>/`
 - repo-scoped listen refresh policy in `.metastack/meta.json`
-- `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/briefs/<TICKET>.md`
-- `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/issue-context/<TICKET>/README.md`
+- `<parent>/<repo>-workspace/<TICKET>/<repo-state-root>/agents/briefs/<TICKET>.md`
+- `<parent>/<repo>-workspace/<TICKET>/<repo-state-root>/agents/issue-context/<TICKET>/README.md`
 - install-scoped MetaListen state under the global MetaStack data root, keyed by the canonical
-  source project `.metastack` root
+  source project metadata root
 - install-scoped MetaListen logs under the same project store
 - a live terminal dashboard in steady-state mode, or a render-once terminal snapshot when requested
 
