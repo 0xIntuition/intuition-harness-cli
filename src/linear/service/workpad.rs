@@ -8,6 +8,17 @@ impl<C> LinearService<C>
 where
     C: LinearClient,
 {
+    /// Create a plain comment on the provided issue.
+    ///
+    /// Returns an error when the underlying Linear comment mutation fails.
+    pub async fn create_issue_comment(
+        &self,
+        issue: &IssueSummary,
+        body: String,
+    ) -> Result<IssueComment> {
+        self.client.create_comment(&issue.id, body).await
+    }
+
     /// Create or update a single active issue comment identified by a stable body marker.
     ///
     /// Returns an error when the underlying Linear comment mutation fails.

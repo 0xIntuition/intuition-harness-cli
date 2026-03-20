@@ -114,13 +114,17 @@ fn workspace_help_lists_lifecycle_commands() {
 }
 
 #[test]
-fn agents_help_lists_listen_and_workflows() {
+fn agents_help_lists_review_listen_and_workflows() {
     cli()
         .args(["agents", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("\n  review "))
         .stdout(predicate::str::contains("\n  listen "))
-        .stdout(predicate::str::contains("\n  workflows "));
+        .stdout(predicate::str::contains("\n  workflows "))
+        .stdout(predicate::str::contains(
+            "meta agents review 123 --root . --dry-run",
+        ));
 }
 
 #[test]

@@ -33,6 +33,9 @@ Examples:
 
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
+  meta agents review 123 --root . --dry-run
+  meta agents review --root . --check
+  meta agents review --root . --once
   meta agents listen --team MET --project \"MetaStack CLI\"
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root . --dry-run";
@@ -342,10 +345,70 @@ pub struct UpgradeArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum AgentsCommands {
+    /// Review one GitHub pull request or watch labeled pull requests for review/remediation.
+    Review(ReviewArgs),
     /// Listen to Linear for new backlog requests and run agents.
     Listen(ListenArgs),
     /// List, explain, and run reusable workflow playbooks.
     Workflows(WorkflowsArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReviewArgs {
+    /// GitHub pull request number for one-shot review mode.
+    #[arg(value_name = "PR_NUMBER")]
+    pub pull_request: Option<u64>,
+    /// Repository root containing the `.metastack` workspace.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Linear API token. Falls back to LINEAR_API_KEY.
+    #[arg(long, hide_env_values = true)]
+    pub api_key: Option<String>,
+    /// Override the Linear GraphQL endpoint.
+    #[arg(long)]
+    pub api_url: Option<String>,
+    /// Override the named Linear profile used by review runs.
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Default Linear team key.
+    #[arg(long)]
+    pub team: Option<String>,
+    /// Render planned review execution and route diagnostics without mutating GitHub or Linear.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Require direct flag-driven execution instead of any interactive path.
+    #[arg(long)]
+    pub no_interactive: bool,
+    /// Emit discovered repository, pull request, and stored session metadata as JSON.
+    #[arg(long, conflicts_with_all = ["check", "render_once"])]
+    pub json: bool,
+    /// Run GitHub/provider preflight checks and exit without starting listener execution.
+    #[arg(long, conflicts_with_all = ["json", "render_once", "once", "dry_run"])]
+    pub check: bool,
+    /// Execute a single listener poll cycle and print a textual summary.
+    #[arg(long, conflicts_with = "render_once")]
+    pub once: bool,
+    /// Execute a single listener cycle and print a deterministic ratatui snapshot.
+    #[arg(long)]
+    pub render_once: bool,
+    /// Poll interval in seconds for long-running listener mode.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub poll_interval: Option<u64>,
+    /// Snapshot width when --render-once is set.
+    #[arg(long, default_value_t = 120)]
+    pub width: u16,
+    /// Snapshot height when --render-once is set.
+    #[arg(long, default_value_t = 32)]
+    pub height: u16,
+    /// Override the configured default agent/provider for review auditing and remediation.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for review auditing and remediation.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for review auditing and remediation.
+    #[arg(long)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

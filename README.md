@@ -30,6 +30,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta context scan` turns the codebase into reusable planning context.
 - `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
+- `meta agents review` audits GitHub PRs, opens remediation PRs when blocking fixes are required, and can watch labeled PRs in listener mode.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
 - `meta workspace` inventories and cleans those sibling listener workspace clones after the listener finishes.
@@ -182,7 +183,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | --- | --- |
 | `meta backlog` | Plan, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
-| `meta agents` | Run the unattended listener and reusable workflow playbooks |
+| `meta agents` | Review PRs, run the unattended listener, and launch reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
@@ -213,9 +214,10 @@ A typical end-to-end loop looks like this:
 3. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
 4. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
 5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
-6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
-7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
-8. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
+6. Use `meta agents review` when you want to audit one GitHub PR or watch labeled PRs for remediation work.
+7. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
+8. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
+9. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
 
 ## Example Flows
 
@@ -251,6 +253,16 @@ Aggregate merge operator:
 meta merge --json
 meta merge
 meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
+```
+
+PR review operator:
+
+```bash
+meta agents review 123 --root . --dry-run
+meta agents review 123 --root .
+meta agents review --root . --check
+meta agents review --root . --json
+meta agents review --root . --once
 ```
 
 ## Command Reference
@@ -525,6 +537,46 @@ Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, i
 - `publication.json` with the aggregate PR publication result
 - `conflict-prompt-pr-<NUMBER>.md` and `conflict-resolution-pr-<NUMBER>.md` when agent-assisted conflict handling was required
 - `validation-repair-prompt-attempt-<N>.md` and `validation-repair-output-attempt-<N>.md` when agent-assisted validation repair was required
+
+### `agents review`
+
+Audit one GitHub pull request or watch open PRs with the `metastack` label in the current repository.
+
+`meta agents review` requires:
+
+- `gh` on `PATH`
+- a repository whose `origin` remote points at GitHub
+- a configured local agent for review auditing and remediation
+- Linear auth, because direct review resolves the linked issue and remediation comments back to Linear
+
+Common invocations:
+
+```bash
+meta agents review 123 --root . --dry-run
+meta agents review 123 --root .
+meta agents review --root . --check
+meta agents review --root . --json
+meta agents review --root . --render-once
+meta agents review --root . --once
+```
+
+Behavior summary:
+
+- `meta agents review <PR_NUMBER>` resolves one linked Linear issue from the PR title/body/branch, assembles GitHub + Linear + local repo context, runs the review audit, and exits cleanly when no remediation is required.
+- `--dry-run` prints the planned execution plus the resolved provider/model/reasoning, route key, and config-source diagnostics without mutating GitHub or Linear.
+- When the audit reports blocking fixes, review mode creates an isolated sibling workspace, applies the fixes on a follow-up branch, pushes that branch, opens a remediation PR back to the original PR branch, and posts a Linear comment explaining why the remediation PR was opened.
+- Plain `meta agents review` without a PR number switches into GitHub-only listener mode for the current repo origin and only admits open PRs carrying the `metastack` label.
+- `--check` validates GitHub access and the resolved review agent configuration without starting listener execution.
+- `--json` emits the resolved repository metadata, discovered PR set, and stored listener session state.
+- `--render-once` prints a deterministic terminal snapshot of the listener dashboard state.
+- `--once` runs one discovery/review cycle and prints a textual summary instead of entering the steady-state poll loop.
+
+Listener persistence:
+
+- listener state is stored under the install-scoped MetaStack data root at `review/projects/<PROJECT_KEY>/session.json`
+- the active listener lock for a repository lives beside that state file as `active-review.lock.json`
+- stored PR session phases include `claimed`, `review_started`, `running`, `completed`, `blocked`, and `retryable`
+- a second `meta agents review` listener for the same repository is rejected while the active lock owner is still running
 
 ### `context scan`
 
@@ -926,7 +978,7 @@ Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, `meta agents review`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override

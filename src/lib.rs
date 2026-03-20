@@ -17,6 +17,7 @@ mod onboarding;
 mod plan;
 mod progress;
 mod repo_target;
+mod review;
 mod scaffold;
 mod scan;
 mod scan_dashboard;
@@ -63,6 +64,7 @@ use crate::onboarding::{
     OnboardingLaunchMode, OnboardingOptions, OnboardingResult, run_onboarding,
 };
 use crate::plan::run_plan;
+use crate::review::run_review;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
 use crate::setup::run_setup;
@@ -155,6 +157,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             },
         },
         Command::Agents(args) => match args.command {
+            AgentsCommands::Review(args) => {
+                run_review(&args).await?;
+            }
             AgentsCommands::Listen(args) => match args.command {
                 Some(crate::cli::ListenCommands::Sessions(session_args)) => {
                     match session_args.command {
