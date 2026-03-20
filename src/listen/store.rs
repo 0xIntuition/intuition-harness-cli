@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::resolve_data_root;
-use crate::fs::{canonicalize_existing_dir, ensure_dir};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
 
 use super::state::{AgentSession, COMPLETED_SESSION_TTL_SECONDS, ListenState, SessionPhase};
 
@@ -496,7 +496,8 @@ fn resolve_project_identity(
 ) -> Result<ListenProjectIdentity> {
     let requested_root = canonicalize_existing_dir(root)?;
     let source_root = resolve_source_root(&requested_root)?;
-    let metastack_root = canonicalize_existing_dir(&source_root.join(".metastack"))?;
+    let metastack_root =
+        canonicalize_existing_dir(&PlanningPaths::for_root(&source_root)?.metastack_dir)?;
     let source_label = source_root
         .file_name()
         .and_then(OsStr::to_str)
@@ -519,7 +520,7 @@ fn resolve_project_identity(
 }
 
 /// Resolves the source repository root for a requested path, collapsing git worktrees back to the
-/// owning repository when the shared `.metastack/` directory lives there.
+/// owning repository when the shared repo-local state directory lives there.
 ///
 /// Returns an error when the requested path cannot be resolved.
 pub(crate) fn resolve_source_project_root(root: &Path) -> Result<PathBuf> {
@@ -536,7 +537,9 @@ fn resolve_source_root(root: &Path) -> Result<PathBuf> {
         let common_dir = PathBuf::from(common_dir);
         if common_dir.file_name() == Some(OsStr::new(".git"))
             && let Some(source_root) = common_dir.parent()
-            && source_root.join(".metastack").is_dir()
+            && PlanningPaths::for_root(source_root)
+                .map(|paths| paths.metastack_dir.is_dir())
+                .unwrap_or(false)
         {
             return canonicalize_existing_dir(source_root);
         }
@@ -648,7 +651,17 @@ mod tests {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
         let worktree_root = temp.path().join("repo-worktree");
+        fs::create_dir_all(repo_root.join(".intuition"))?;
         fs::create_dir_all(repo_root.join(".metastack"))?;
+        fs::write(
+            repo_root.join(".metastack/meta.json"),
+            r#"{
+  "branding": {
+    "repo_state_root": ".intuition"
+  }
+}
+"#,
+        )?;
         std::process::Command::new("git")
             .args(["init", "-b", "main", repo_root.to_string_lossy().as_ref()])
             .status()?;
@@ -698,6 +711,12 @@ mod tests {
 
         let source_root = resolve_source_root(&worktree_root)?;
         assert_eq!(source_root.canonicalize()?, repo_root.canonicalize()?);
+
+        let store = ListenProjectStore::resolve(&worktree_root, Some("MetaStack CLI"))?;
+        assert_eq!(
+            store.identity().metastack_root,
+            repo_root.join(".intuition").canonicalize()?
+        );
 
         Ok(())
     }
