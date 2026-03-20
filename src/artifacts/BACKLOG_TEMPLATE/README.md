@@ -22,10 +22,7 @@ This directory is the canonical backlog template embedded into `meta setup`, `me
 
 ## Editing Notes
 
-1. Replace placeholders:
-   - `{{BACKLOG_TITLE}}`
-   - `{{BACKLOG_SLUG}}`
-   - `{{TODAY}}`
+1. When adapting this template manually, update the backlog title, slug-derived identifiers, and date stamps so they match the target issue.
 2. Keep this template lightweight. Add large docs only when needed.
 3. Use relative links that resolve from each file's own directory.
 4. `index.md` is the required root document for both planning and technical generation.
