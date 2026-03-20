@@ -31,7 +31,7 @@ pub(crate) struct InputFieldState {
 pub(crate) struct InputFieldRender {
     pub(crate) text: Text<'static>,
     cursor_prefix: Option<String>,
-    scroll_offset: u16,
+    pub(crate) scroll_offset: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

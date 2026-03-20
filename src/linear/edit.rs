@@ -263,6 +263,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
             );
             let paragraph = Paragraph::new(rendered.text.clone())
                 .block(block)
+                .scroll((rendered.scroll_offset, 0))
                 .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, area);
             rendered.set_cursor(frame, inner);
@@ -281,6 +282,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
             );
             let paragraph = Paragraph::new(rendered.text.clone())
                 .block(block)
+                .scroll((rendered.scroll_offset, 0))
                 .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, area);
             rendered.set_cursor(frame, inner);
@@ -768,10 +770,11 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         EditStep, IssueEditAction, IssueEditApp, IssueEditFormContext, IssueEditFormExit,
-        IssueEditFormPrefill, IssueEditValues,
+        IssueEditFormPrefill, IssueEditValues, render_issue_edit_form,
     };
     use crate::linear::WorkflowState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn context() -> IssueEditFormContext {
         IssueEditFormContext {
@@ -793,6 +796,27 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn render_editor_viewport_snapshot(app: &IssueEditApp, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| render_issue_edit_form(frame, app))
+            .expect("edit form should render");
+        let area = super::step_input_viewport(ratatui::layout::Rect::new(0, 0, width, height));
+        let buffer = terminal.backend().buffer();
+        let mut lines = Vec::new();
+
+        for y in area.y..area.y.saturating_add(area.height) {
+            let mut line = String::new();
+            for x in area.x..area.x.saturating_add(area.width) {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            lines.push(line.trim_end().to_string());
+        }
+
+        lines.join("\n")
     }
 
     #[test]
@@ -954,6 +978,37 @@ mod tests {
 
         assert_eq!(exit, None);
         assert!(app.description.cursor() > before);
+    }
+
+    #[test]
+    fn issue_edit_description_snapshot_scrolls_to_visible_bottom_rows() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("EDIT-{index:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.step = EditStep::Description;
+
+        let exit = app.handle_key_in_viewport(
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            super::step_input_viewport(ratatui::layout::Rect::new(0, 0, 140, 16)),
+        );
+
+        assert_eq!(exit, None);
+
+        let snapshot = render_editor_viewport_snapshot(&app, 140, 16);
+        assert!(snapshot.contains("EDIT-20"));
+        assert!(!snapshot.contains("EDIT-01"));
     }
 
     #[test]

@@ -1599,6 +1599,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
     );
     let request = Paragraph::new(rendered.text.clone())
         .block(request_block)
+        .scroll((rendered.scroll_offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(request, body[0]);
     rendered.set_cursor(frame, request_inner);
@@ -1679,6 +1680,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
     );
     let answer = Paragraph::new(rendered.text.clone())
         .block(answer_block)
+        .scroll((rendered.scroll_offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(answer, main[1]);
     rendered.set_cursor(frame, answer_inner);
@@ -2438,18 +2440,20 @@ mod tests {
         PlanSessionApp, PlanStage, PlanWorkerOutcome, PlanWorkerReport, PlannedIssueDraft,
         PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
         ReviewApp, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
-        build_review_app, handle_questions_step_key, handle_questions_step_paste,
-        handle_request_step_key, handle_request_step_paste, next_incomplete_question,
-        parse_agent_json, process_pending_plan_job, render_issue_merge_prompt,
-        render_loading_frame, render_plan_session, render_question_prompt,
-        render_questions_form_frame, render_request_form_frame, render_review_form_frame,
-        review_kept_indices, review_marker, review_merge_groups, review_submission_action,
-        selected_issue_plan, snapshot,
+        build_review_app, handle_questions_step_key, handle_questions_step_key_with_viewport,
+        handle_questions_step_paste, handle_request_step_key,
+        handle_request_step_key_with_viewport, handle_request_step_paste, next_incomplete_question,
+        parse_agent_json, process_pending_plan_job, questions_answer_input_viewport,
+        render_issue_merge_prompt, render_loading_frame, render_plan_session,
+        render_question_prompt, render_questions_form_frame, render_request_form_frame,
+        render_review_form_frame, request_input_viewport, review_kept_indices, review_marker,
+        review_merge_groups, review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use std::sync::mpsc;
     use tempfile::tempdir;
 
@@ -2487,8 +2491,8 @@ mod tests {
         }
     }
 
-    fn render_request_snapshot(app: &RequestApp) -> String {
-        let backend = TestBackend::new(120, 32);
+    fn render_request_snapshot_with_size(app: &RequestApp, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
             .draw(|frame| render_request_form_frame(frame, app))
@@ -2496,13 +2500,21 @@ mod tests {
         snapshot(terminal.backend())
     }
 
-    fn render_questions_snapshot(app: &QuestionsApp) -> String {
-        let backend = TestBackend::new(140, 36);
+    fn render_request_snapshot(app: &RequestApp) -> String {
+        render_request_snapshot_with_size(app, 120, 32)
+    }
+
+    fn render_questions_snapshot_with_size(app: &QuestionsApp, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
             .draw(|frame| render_questions_form_frame(frame, app))
             .expect("questions form should render");
         snapshot(terminal.backend())
+    }
+
+    fn render_questions_snapshot(app: &QuestionsApp) -> String {
+        render_questions_snapshot_with_size(app, 140, 36)
     }
 
     fn render_review_snapshot(app: &ReviewApp) -> String {
@@ -2698,6 +2710,31 @@ mod tests {
     }
 
     #[test]
+    fn request_editor_snapshot_scrolls_to_visible_bottom_rows() {
+        let mut app = RequestApp {
+            request: InputFieldState::multiline(
+                (1..=20)
+                    .map(|index| format!("REQ-{index:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            error: None,
+        };
+
+        let action = handle_request_step_key_with_viewport(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
+            request_input_viewport(Rect::new(0, 0, 120, 16)),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+
+        let snapshot = render_request_snapshot_with_size(&app, 120, 16);
+        assert!(snapshot.contains("REQ-20"));
+        assert!(!snapshot.contains("REQ-01"));
+    }
+
+    #[test]
     fn questions_step_paste_updates_only_the_active_answer() {
         let mut app = QuestionsApp {
             request: "Plan a new command".to_string(),
@@ -2887,6 +2924,38 @@ mod tests {
         assert!(matches!(action, SessionAction::None));
         assert_eq!(app.selected, 0);
         assert!(app.questions[0].answer.cursor() > before);
+    }
+
+    #[test]
+    fn questions_editor_snapshot_scrolls_to_visible_bottom_rows() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            request_attachments: Vec::new(),
+            questions: vec![QuestionAnswer {
+                question: "How should it be validated?".to_string(),
+                answer: InputFieldState::multiline(
+                    (1..=20)
+                        .map(|index| format!("ANS-{index:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: FollowUpAnswerState::Pending,
+            }],
+            selected: 0,
+            error: None,
+        };
+
+        let action = handle_questions_step_key_with_viewport(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
+            questions_answer_input_viewport(Rect::new(0, 0, 120, 18)),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+
+        let snapshot = render_questions_snapshot_with_size(&app, 120, 18);
+        assert!(snapshot.contains("ANS-20"));
+        assert!(!snapshot.contains("ANS-01"));
     }
 
     #[test]
