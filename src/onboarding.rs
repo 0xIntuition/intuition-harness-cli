@@ -14,7 +14,7 @@ use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::config::{
@@ -25,10 +25,12 @@ use crate::linear::{
     LinearClient, LinearService, ProjectSummary, ReqwestLinearClient, TeamSummary, UserRef,
 };
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
-use crate::tui::fields::{InputFieldRender, InputFieldState, SelectFieldState};
+use crate::tui::fields::{
+    FilterableSelectFieldState, InputFieldRender, InputFieldState, SelectFieldState,
+};
 use crate::tui::theme::{Tone, badge, emphasis_style, label_style, tone_style};
 
-const PROJECT_FETCH_LIMIT: usize = 250;
+const PROJECT_FETCH_LIMIT: usize = 100;
 
 /// Entry mode for the shared onboarding wizard.
 #[derive(Debug, Clone)]
@@ -155,7 +157,7 @@ struct OnboardingApp {
     assignment_scope: SelectFieldState,
     refresh_policy: SelectFieldState,
     team: SelectFieldState,
-    project: SelectFieldState,
+    project: FilterableSelectFieldState,
     team_ids: Vec<String>,
     project_ids: Vec<String>,
     all_projects: Vec<ProjectSummary>,
@@ -167,7 +169,7 @@ struct OnboardingApp {
 struct OnboardingSubmission {
     api_key: String,
     team_key: String,
-    project_id: String,
+    project_id: Option<String>,
     listen_label: Option<String>,
     assignment_scope: ListenAssignmentScope,
     refresh_policy: ListenRefreshPolicy,
@@ -287,7 +289,9 @@ impl OnboardingApp {
                 },
             ),
             team: SelectFieldState::new(vec!["Validate Linear auth first".to_string()], 0),
-            project: SelectFieldState::new(vec!["Choose a team first".to_string()], 0),
+            project: FilterableSelectFieldState::new(vec![
+                "Choose a team first".to_string(),
+            ]),
             team_ids: Vec::new(),
             project_ids: Vec::new(),
             all_projects: Vec::new(),
@@ -319,7 +323,9 @@ impl OnboardingApp {
 
     fn sync_project_options(&mut self) {
         let Some(team_id) = self.team_ids.get(self.team.selected()).cloned() else {
-            self.project = SelectFieldState::new(vec!["Choose a team first".to_string()], 0);
+            self.project = FilterableSelectFieldState::new(vec![
+                "Choose a team first".to_string(),
+            ]);
             self.project_ids.clear();
             return;
         };
@@ -327,19 +333,13 @@ impl OnboardingApp {
         let mut project_rows = Vec::new();
         let mut project_ids = Vec::new();
         for project in &self.all_projects {
-            if project.teams.iter().any(|team| team.id == team_id) {
+            if project.teams.iter().any(|team| team.key == team_id) {
                 project_rows.push(format!("{} ({})", project.name, project.id));
                 project_ids.push(project.id.clone());
             }
         }
 
-        if project_rows.is_empty() {
-            self.project = SelectFieldState::new(vec!["No projects found for team".to_string()], 0);
-            self.project_ids.clear();
-            return;
-        }
-
-        self.project = SelectFieldState::new(project_rows, 0);
+        self.project = FilterableSelectFieldState::new(project_rows);
         self.project_ids = project_ids;
     }
 
@@ -357,10 +357,9 @@ impl OnboardingApp {
             .cloned()
             .ok_or_else(|| anyhow!("select one Linear team before saving"))?;
         let project_id = self
-            .project_ids
-            .get(self.project.selected())
-            .cloned()
-            .ok_or_else(|| anyhow!("select one Linear project before saving"))?;
+            .project
+            .selected_original_index()
+            .and_then(|i| self.project_ids.get(i).cloned());
         let poll_interval_seconds = parse_optional_u64(
             self.poll_interval.value(),
             "listen poll interval",
@@ -515,11 +514,7 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
                     }
                 }
                 OnboardingStep::Project => {
-                    if app.project_ids.is_empty() {
-                        app.error = Some("Select a Linear project to continue.".to_string());
-                    } else {
-                        app.step = app.step.next();
-                    }
+                    app.step = app.step.next();
                 }
                 OnboardingStep::Review => {
                     return Ok(DashboardExit::Submitted(app.submission()?));
@@ -580,7 +575,7 @@ async fn save_submission(config: &mut AppConfig, submitted: OnboardingSubmission
     config.linear.api_url = normalize_optional(&config.linear.api_url)
         .unwrap_or_else(|| DEFAULT_LINEAR_API_URL.to_string());
     config.linear.team = Some(submitted.team_key.clone());
-    config.defaults.linear.project_id = Some(submitted.project_id.clone());
+    config.defaults.linear.project_id = submitted.project_id.clone();
     config.defaults.listen.required_label = submitted.listen_label.clone();
     config.defaults.listen.assignment_scope = Some(submitted.assignment_scope);
     config.defaults.listen.refresh_policy = Some(submitted.refresh_policy);
@@ -628,7 +623,7 @@ fn render_onboarding(frame: &mut Frame<'_>, app: &OnboardingApp) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
+            Constraint::Length(3),
             Constraint::Min(16),
             Constraint::Length(4),
         ])
@@ -663,17 +658,11 @@ fn render_header(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
         app.step.index() + 1,
         OnboardingStep::all().len()
     );
-    let art = [
-        "╔═ MetaStack ═══════════════════╗",
-        "║ onboarding • install defaults ║",
-        "╚═══════════════════════════════╝",
-    ];
-    let mut lines = art.into_iter().map(Line::from).collect::<Vec<_>>();
-    lines.push(Line::from(vec![
+    let lines = vec![Line::from(vec![
         Span::styled(title, emphasis_style()),
         Span::raw(" "),
         badge(progress, Tone::Accent),
-    ]));
+    ])];
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().borders(Borders::ALL).title("MetaStack"))
         .wrap(Wrap { trim: false });
@@ -682,18 +671,14 @@ fn render_header(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
 
 fn render_left_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
     let title = format!("Guide • {}", app.step.label());
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Why this exists: ", label_style()),
-            Span::raw(
-                "MetaStack needs one install-scoped baseline so planning, listen, and Linear flows resolve defaults consistently.",
-            ),
-        ]),
-        Line::from(""),
-    ];
+    let mut lines = Vec::new();
     lines.extend(step_copy(app));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .padding(Padding::new(1, 1, 1, 0));
     let paragraph = Paragraph::new(Text::from(lines))
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
@@ -701,17 +686,20 @@ fn render_left_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
 fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
     match app.step {
         OnboardingStep::Welcome => vec![
+            Line::from(Span::styled("MetaStack", emphasis_style())),
             Line::from(
-                "This wizard is shared by first-run interception and `meta config --replay-onboarding`.",
+                "Linear-native planning and agent automation CLI for repo-scoped workflows.",
             ),
             Line::from(""),
-            Line::from("Left: guidance, links, consequences."),
-            Line::from("Right: the active control for the current step."),
+            Line::from(Span::styled("What it does:", label_style())),
+            Line::from("  Repo-scoped planning synced to Linear"),
+            Line::from("  Automated agent supervision via `meta listen`"),
+            Line::from("  Workflow automation with labels, teams, and projects"),
             Line::from(""),
-            Line::from("Linear key docs: https://linear.app/settings/api"),
             Line::from(
-                "MetaStack uses the key to validate auth, list teams/projects, create missing labels, and drive Linear-backed commands.",
+                "This wizard configures install-scoped defaults shared across all repositories.",
             ),
+            Line::from("Repo-level overrides live in `.metastack/meta.json`."),
         ],
         OnboardingStep::ApiKey => vec![
             Line::from("Paste a personal or workspace Linear API key."),
@@ -719,7 +707,9 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             Line::from(
                 "On Enter, MetaStack will validate the key, fetch your viewer identity, and load available teams/projects.",
             ),
-            Line::from("No offline completion path is offered for first-run onboarding."),
+            Line::from(""),
+            Line::from("Get your key here:"),
+            Line::from("https://linear.app/0xintuition/settings/account/security"),
             Line::from(""),
             validation_lines(&app.validation_state),
         ],
@@ -728,7 +718,7 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             Line::from("Repo-scoped `.metastack/meta.json` can still override this later."),
         ],
         OnboardingStep::Project => vec![
-            Line::from("Choose exactly one install default project."),
+            Line::from("Choose an install default project, or press Enter to skip."),
             Line::from(
                 "The saved value is the canonical Linear project ID, which matches existing project resolution behavior.",
             ),
@@ -821,11 +811,21 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
     match app.step {
         OnboardingStep::Welcome => {
             let paragraph = Paragraph::new(Text::from(vec![
-                Line::from("Press Enter to start."),
+                Line::from(Span::styled("This wizard will configure:", label_style())),
                 Line::from(""),
-                Line::from("This flow saves install defaults, not repo defaults."),
+                Line::from("  Linear authentication (API key)"),
+                Line::from("  Default team and project"),
+                Line::from("  Listen settings (label, scope, refresh, poll)"),
+                Line::from("  Planning defaults (follow-ups, labels)"),
+                Line::from(""),
+                Line::from("Press Enter to begin."),
             ]))
-            .block(Block::default().borders(Borders::ALL).title("Start"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Start")
+                    .padding(Padding::new(1, 1, 1, 0)),
+            )
             .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, area);
         }
@@ -834,7 +834,7 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
         }
         OnboardingStep::Team => render_select_panel(frame, area, "Default team", &app.team),
         OnboardingStep::Project => {
-            render_select_panel(frame, area, "Default project", &app.project)
+            render_filterable_select_panel(frame, area, "Default project", &app.project)
         }
         OnboardingStep::ListenLabel => render_input_panel(
             frame,
@@ -871,7 +871,12 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
         ),
         OnboardingStep::Review => {
             let summary = Paragraph::new(Text::from(review_lines(app)))
-                .block(Block::default().borders(Borders::ALL).title("Review"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Review")
+                        .padding(Padding::new(1, 1, 1, 0)),
+                )
                 .wrap(Wrap { trim: false });
             frame.render_widget(summary, area);
         }
@@ -881,10 +886,12 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
     let controls = match app.step {
         OnboardingStep::Team
-        | OnboardingStep::Project
         | OnboardingStep::AssignmentScope
         | OnboardingStep::RefreshPolicy => {
             "Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels"
+        }
+        OnboardingStep::Project => {
+            "Type to search • Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels"
         }
         OnboardingStep::Review => {
             "Enter saves install defaults • Shift+Tab goes back • Esc cancels"
@@ -960,7 +967,8 @@ fn render_input_panel(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!("{title} [editing]"))
-        .border_style(Style::default().add_modifier(Modifier::BOLD));
+        .border_style(Style::default().add_modifier(Modifier::BOLD))
+        .padding(Padding::new(1, 1, 1, 0));
     let inner = block.inner(area);
     let rendered: InputFieldRender = field.render_with_width(placeholder, true, inner.width);
     let paragraph = Paragraph::new(rendered.text.clone())
@@ -987,9 +995,67 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
         })
         .collect::<Vec<_>>();
     let list = Paragraph::new(Text::from(lines))
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .padding(Padding::new(1, 1, 1, 0)),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(list, area);
+}
+
+fn render_filterable_select_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    field: &FilterableSelectFieldState,
+) {
+    let filter_value = field.filter_value();
+    let filter_line = if filter_value.is_empty() {
+        Line::from(Span::styled(
+            "Type to filter…",
+            Style::default().add_modifier(Modifier::DIM),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("Filter: ", label_style()),
+            Span::raw(filter_value.to_string()),
+        ])
+    };
+
+    let visible = field.visible_options();
+    let mut lines = vec![filter_line, Line::from("")];
+    if visible.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No matches — clear filter or press Enter to skip",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    } else {
+        for (index, option) in visible.iter().enumerate() {
+            let selected = index == field.cursor_index();
+            let marker = if selected { "> " } else { "  " };
+            let style = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker}{option}"),
+                style,
+            )));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("{title} [search]"))
+        .border_style(Style::default().add_modifier(Modifier::BOLD))
+        .padding(Padding::new(1, 1, 1, 0));
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn snapshot(backend: &TestBackend) -> String {
@@ -1071,7 +1137,7 @@ mod tests {
         assert!(snapshot.contains("MetaStack"));
         assert!(snapshot.contains("Guide"));
         assert!(snapshot.contains("Start"));
-        assert!(snapshot.contains("install defaults"));
+        assert!(snapshot.contains("Press Enter to begin"));
         Ok(())
     }
 

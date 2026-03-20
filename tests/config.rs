@@ -609,15 +609,21 @@ default_reasoning = "medium"
             "--width",
             "110",
             "--height",
-            "32",
+            "50",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Global configuration"))
         .stdout(predicate::str::contains("Default reasoning"))
         .stdout(predicate::str::contains("Meta Config"))
-        .stdout(predicate::str::contains("Listen label").not())
-        .stdout(predicate::str::contains("Default project").not());
+        .stdout(predicate::str::contains("Listen label"))
+        .stdout(predicate::str::contains("Project ID"))
+        .stdout(predicate::str::contains("Assignee scope"))
+        .stdout(predicate::str::contains("Refresh policy"))
+        .stdout(predicate::str::contains("Poll interval"))
+        .stdout(predicate::str::contains("Plan follow-ups"))
+        .stdout(predicate::str::contains("Plan label"))
+        .stdout(predicate::str::contains("Tech label"));
 
     Ok(())
 }
@@ -728,7 +734,7 @@ default_reasoning = "high"
             "--width",
             "92",
             "--height",
-            "34",
+            "70",
         ])
         .assert()
         .success()

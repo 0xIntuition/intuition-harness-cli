@@ -3,9 +3,9 @@ name = "metastack-cli"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Agent orchestration CLI that polls Linear, creates per-issue workspaces, and runs coding agents unattended"
-repository = "https://github.com/metastack-dev/metastack-cli"
-homepage = "https://github.com/metastack-dev/metastack-cli"
+description = "Agent orchestration for modern engineering teams"
+repository = "https://github.com/metastack-labs/metastack-cli"
+homepage = "https://github.com/metastack-labs/metastack-cli"
 readme = "README.md"
 keywords = ["cli", "agents", "linear", "orchestration", "automation"]
 categories = ["command-line-utilities", "development-tools"]
@@ -22,6 +22,7 @@ exclude = [
     "AGENTS.md",
     "WORKFLOW.md",
 ]
+
 
 [[bin]]
 name = "meta"
@@ -56,7 +57,13 @@ httpmock = "0.8.3"
 predicates = "3.1.4"
 tempfile = "3.27.0"
 
+
 [profile.release]
 lto = true
 strip = true
 codegen-units = 1
+
+[profile.fast]
+inherits = "release"
+lto = 'thin'
+codegen-units = 16

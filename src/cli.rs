@@ -619,6 +619,30 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Update the install-scoped default Linear project ID.
+    #[arg(long)]
+    pub project_id: Option<String>,
+    /// Update the install-scoped default listen label.
+    #[arg(long)]
+    pub listen_label: Option<String>,
+    /// Update the install-scoped listen assignee scope.
+    #[arg(long, value_enum)]
+    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    /// Update the install-scoped listen refresh policy.
+    #[arg(long, value_enum)]
+    pub refresh_policy: Option<ListenRefreshPolicyArg>,
+    /// Update the install-scoped listen poll interval (seconds).
+    #[arg(long)]
+    pub poll_interval: Option<String>,
+    /// Update the install-scoped plan follow-up question limit.
+    #[arg(long)]
+    pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped default plan label.
+    #[arg(long)]
+    pub plan_label: Option<String>,
+    /// Update the install-scoped default technical label.
+    #[arg(long)]
+    pub technical_label: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,

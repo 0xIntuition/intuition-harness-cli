@@ -1164,6 +1164,22 @@ fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
     }
 }
 
+/// Minimum column width to show every step label without wrapping (single-column mode).
+/// Accounts for `"> XX. Label"` prefix plus two border characters.
+fn setup_step_column_width() -> u16 {
+    let steps = SetupStep::all();
+    let max_label = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let digits = if i + 1 >= 10 { 2 } else { 1 };
+            2 + digits + 2 + s.label().len()
+        })
+        .max()
+        .unwrap_or(20);
+    (max_label + 2) as u16
+}
+
 fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let area = frame.area();
     let header_height = if area.width >= 110 { 5 } else { 6 };
@@ -1198,12 +1214,13 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);
 
+    let step_col = setup_step_column_width();
     let body_area = layout[1];
     if body_area.width >= 118 {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(28),
+                Constraint::Length(step_col),
                 Constraint::Min(38),
                 Constraint::Length(44),
             ])
@@ -1212,9 +1229,10 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
         render_step_panel(frame, app, body[1]);
         render_summary_panel(frame, app, body[2]);
     } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(40);
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(40), Constraint::Min(40)])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)
