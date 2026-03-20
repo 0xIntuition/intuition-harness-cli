@@ -3,6 +3,21 @@
 include!("support/common.rs");
 
 #[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -58,7 +73,7 @@ fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(
         repo_root.join(".metastack/backlog/_TEMPLATE/validation.md"),
         "# Validation\n\n- `meta backlog tech {{parent_identifier}}`\n- Generated on {{TODAY}}\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -183,32 +198,45 @@ JSON
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .body_includes("query Issue")
-            .body_includes("\"id\":\"child-1\"");
+            .body_includes("query Issues");
         then.status(200).json_body(json!({
             "data": {
-                "issue": issue_detail_node(
-                    "child-1",
-                    "MET-36",
-                    "Technical: Create the technical and sync commands",
-                    "Technical child description",
-                    Vec::new(),
-                    Some(json!({
-                        "id": "parent-1",
-                        "identifier": "MET-35",
-                        "title": "Create the technical and sync commands",
-                        "url": "https://linear.app/issues/MET-35"
-                    })),
-                )
+                "issues": {
+                    "nodes": [child_issue.clone()]
+                }
             }
         }));
     });
-
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .body_includes("query Teams");
         then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-install",
+                        "name": "Install Project",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-install",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
     });
 
     server.mock(|when, then| {
@@ -257,6 +285,7 @@ JSON
             .path("/graphql")
             .body_includes("mutation CreateIssue")
             .body_includes("\"parentId\":\"parent-1\"")
+            .body_includes("\"stateId\":\"state-backlog\"")
             .body_includes("\"labelIds\":[\"label-technical\"]")
             .body_includes("Agent-generated technical backlog");
         then.status(200).json_body(json!({
@@ -264,6 +293,26 @@ JSON
                 "issueCreate": {
                     "success": true,
                     "issue": child_issue
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("\"issueId\":\"child-1\"")
+            .body_includes("[harness-sync]");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-sync-1",
+                        "body": "[harness-sync]\nupdated progress",
+                        "resolvedAt": null
+                    }
                 }
             }
         }));
@@ -466,6 +515,32 @@ JSON
     assert!(payload.contains("artifacts/parent-parent-reference.svg"));
     assert!(payload.contains("Need parent art"));
     assert!(payload.contains("Repository directory snapshot"));
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "sync",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--render-once",
+            "--events",
+            "enter,down,enter",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
+        ))
+        .stdout(predicate::str::contains("Backlog Search"))
+        .stdout(predicate::str::contains("Ready to push MET-36"))
+        .stdout(predicate::str::contains(
+            "Technical: Create the technical and sync commands",
+        ))
+        .stdout(predicate::str::contains("MET-35  Create the technical and sync commands").not());
+
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);
 
@@ -492,6 +567,7 @@ fn technical_command_requires_an_agent_to_generate_backlog_content() -> Result<(
 
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&empty_bin)?;
+    write_onboarded_config(&missing_config, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{

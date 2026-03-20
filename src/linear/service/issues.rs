@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow, bail};
 
 use crate::linear::{
-    IssueCreateRequest, IssueCreateSpec, IssueEditContext, IssueEditSpec, IssueListFilters,
-    IssueSummary, IssueUpdateRequest, LinearClient,
+    IssueAssigneeFilter, IssueCreateRequest, IssueCreateSpec, IssueEditContext, IssueEditSpec,
+    IssueListFilters, IssueSummary, IssueUpdateRequest, LinearClient,
 };
 
 use super::{
@@ -16,6 +16,7 @@ struct IssueListSelection {
     project: Option<String>,
     project_id: Option<String>,
     state: Option<String>,
+    assignee: IssueAssigneeFilter,
     limit: usize,
 }
 
@@ -26,6 +27,7 @@ impl IssueListSelection {
             project: filters.project,
             project_id: filters.project_id,
             state: filters.state,
+            assignee: filters.assignee,
             limit: filters.limit.max(1),
         }
     }
@@ -35,6 +37,7 @@ impl IssueListSelection {
             || self.project.is_some()
             || self.project_id.is_some()
             || self.state.is_some()
+            || !matches!(self.assignee, IssueAssigneeFilter::Any)
     }
 }
 
@@ -51,6 +54,7 @@ where
                     project: selection.project.clone(),
                     project_id: selection.project_id.clone(),
                     state: selection.state.clone(),
+                    assignee: selection.assignee.clone(),
                     limit: selection.limit,
                 })
                 .await?
@@ -89,6 +93,27 @@ where
                     .map(|entry| entry.name.eq_ignore_ascii_case(state))
                     .unwrap_or(false)
             });
+        }
+        match &selection.assignee {
+            IssueAssigneeFilter::Any => {}
+            IssueAssigneeFilter::Viewer { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(false)
+                });
+            }
+            IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(true)
+                });
+            }
         }
 
         issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));
@@ -168,6 +193,7 @@ where
                 parent_id: spec.parent_id,
                 state_id,
                 priority: spec.priority,
+                assignee_id: spec.assignee_id,
                 label_ids,
             })
             .await

@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use anyhow::{Result, anyhow};
 
 use crate::cli::{DashboardCommandArgs, IssueCommands, LinearClientArgs, ProjectsCommands};
-use crate::config::{LinearConfig, LinearConfigOverrides, PlanningMeta};
+use crate::config::{AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta};
 use crate::fs::canonicalize_existing_dir;
 use crate::linear::create::{
     IssueCreateAction, IssueCreateFormContext, IssueCreateFormExit, IssueCreateFormOptions,
@@ -76,6 +76,7 @@ pub(crate) async fn run_issues_command(
                     project_id: applied_project_id.clone(),
                     project: list_args.project.clone(),
                     state: list_args.state.clone(),
+                    assignee: crate::linear::IssueAssigneeFilter::Any,
                     limit: list_args.limit,
                 })
                 .await?;
@@ -148,6 +149,7 @@ pub(crate) async fn run_issues_command(
                         parent_id: None,
                         state: create_args.state,
                         priority: create_args.priority,
+                        assignee_id: None,
                         labels: Vec::new(),
                     })
                     .await?;
@@ -201,6 +203,7 @@ pub(crate) async fn run_issues_command(
                                 parent_id: None,
                                 state: values.state,
                                 priority: values.priority,
+                                assignee_id: None,
                                 labels: Vec::new(),
                             })
                             .await?;
@@ -360,6 +363,7 @@ pub(crate) fn load_linear_command_context(
     cli_default_team: Option<String>,
 ) -> Result<LinearCommandContext> {
     let root = canonicalize_existing_dir(&client_args.root)?;
+    let app_config = AppConfig::load()?;
     let planning_meta = PlanningMeta::load(&root)?;
     let config = LinearConfig::new_with_root(
         Some(&root),
@@ -371,7 +375,7 @@ pub(crate) fn load_linear_command_context(
         },
     )?;
     let default_team = config.default_team.clone();
-    let default_project_id = planning_meta.linear.project_id.clone();
+    let default_project_id = planning_meta.effective_project_id(&app_config);
     let client = ReqwestLinearClient::new(config)?;
     let service = LinearService::new(client, default_team.clone());
 

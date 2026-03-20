@@ -39,6 +39,11 @@ pub(super) struct ProjectsPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct UsersPayload {
+    pub(super) users: Connection<UserRef>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssuesPayload {
     pub(super) issues: Connection<IssueNode>,
 }
@@ -62,6 +67,11 @@ pub(super) struct ViewerPayload {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueByIdPayload {
     pub(super) issue: Option<IssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsPayload {
+    pub(super) issue: Option<IssueCommentsNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +120,12 @@ pub(super) struct UploadPayload {
 pub(super) struct IssueMutationNode {
     pub(super) success: bool,
     pub(super) issue: Option<IssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueCommentsNode {
+    #[serde(default)]
+    pub(super) comments: Option<Connection<CommentNode>>,
 }
 
 #[derive(Debug, Deserialize)]

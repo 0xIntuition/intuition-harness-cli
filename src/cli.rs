@@ -22,6 +22,8 @@ Example flows:
 const BACKLOG_HELP_EXAMPLES: &str = "\
 Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
+  meta backlog plan --root . ENG-10144
+  meta backlog plan --root . ENG-10144 --velocity
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
@@ -111,6 +113,24 @@ Examples:
   meta merge --render-once --events space,down,space,enter
   meta merge --no-interactive --pull-request 101 --pull-request 102 --validate \"make quality\"";
 
+const WORKSPACE_HELP_EXAMPLES: &str = "\
+Examples:
+  meta workspace list --root .
+  meta workspace clean ENG-10175 --root .
+  meta workspace clean --target-only --root .
+  meta workspace prune --dry-run --root .";
+
+const UPGRADE_HELP_EXAMPLES: &str = "\
+Default latest-stable path:
+  meta upgrade --check
+  meta upgrade --dry-run
+  meta upgrade
+
+Advanced version-management path:
+  meta upgrade --version 0.2.0 --dry-run
+  meta upgrade --version 0.3.0-rc.1 --prerelease
+  meta upgrade --version 0.1.0 --allow-downgrade";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "meta",
@@ -140,6 +160,10 @@ pub enum Command {
     Dashboard(DashboardArgs),
     /// Inspect open pull requests, batch them in a one-shot dashboard, and publish one aggregate PR.
     Merge(MergeArgs),
+    /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
+    Workspace(WorkspaceArgs),
+    /// Securely self-update a GitHub Release install of `meta` on macOS/Linux.
+    Upgrade(UpgradeArgs),
     /// Compatibility alias for `meta backlog plan`.
     Plan(PlanArgs),
     /// Compatibility alias for `meta backlog tech`.
@@ -218,6 +242,91 @@ pub enum BacklogCommands {
 pub struct AgentsArgs {
     #[command(subcommand)]
     pub command: AgentsCommands,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = WORKSPACE_HELP_EXAMPLES)]
+pub struct WorkspaceArgs {
+    #[command(subcommand)]
+    pub command: WorkspaceCommands,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum WorkspaceCommands {
+    /// List ticket workspace clones with local git safety signals plus Linear and optional PR status.
+    List(WorkspaceListArgs),
+    /// Remove one workspace clone or delete `target/` directories across all clones.
+    Clean(WorkspaceCleanArgs),
+    /// Remove completed workspace clones and print reclaimed-space summaries.
+    Prune(WorkspacePruneArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspaceListArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspaceCleanArgs {
+    #[command(flatten)]
+    pub root: RepositoryRootArgs,
+    /// Ticket identifier to clean, for example ENG-10175.
+    #[arg(value_name = "TICKET", required_unless_present = "target_only")]
+    pub ticket: Option<String>,
+    /// Remove `target/` directories instead of deleting workspace clones.
+    #[arg(long)]
+    pub target_only: bool,
+    /// Skip confirmation before deleting a workspace clone.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WorkspacePruneArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Preview which clones would be removed without deleting anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip confirmation before removing workspace clones.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = UPGRADE_HELP_EXAMPLES)]
+pub struct UpgradeArgs {
+    /// Check the latest stable release and report whether this install is up to date.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub check: bool,
+    /// Resolve the selected release and print the replacement plan without modifying the install.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Install a specific release version instead of the latest stable release.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+    /// Allow prerelease versions for explicit version requests or latest-release resolution.
+    #[arg(long)]
+    pub prerelease: bool,
+    /// Allow replacing the current install with an older version.
+    #[arg(long)]
+    pub allow_downgrade: bool,
+    /// Testing override for the GitHub Releases API root.
+    #[arg(long, hide = true, default_value = "https://api.github.com")]
+    pub github_api_url: String,
+    /// Testing override for the GitHub repository used for release discovery.
+    #[arg(long, hide = true, default_value = "metastack-systems/metastack-cli")]
+    pub repository: String,
+    /// Testing override for the executable path that should be replaced.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub executable_path: Option<PathBuf>,
+    /// Testing override for the detected operating system slug.
+    #[arg(long, hide = true, value_name = "OS")]
+    pub os: Option<String>,
+    /// Testing override for the detected architecture slug.
+    #[arg(long, hide = true, value_name = "ARCH")]
+    pub arch: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -352,6 +461,9 @@ pub struct MergeArgs {
     /// Skip the one-shot dashboard and run the selected pull requests directly.
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Resume an existing merge run by run id under `.metastack/merge-runs/<RUN_ID>/`.
+    #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["json", "render_once", "pull_requests"])]
+    pub resume_run: Option<String>,
     /// Repeatable pull request number used with `--no-interactive`.
     #[arg(long = "pull-request", value_name = "NUMBER")]
     pub pull_requests: Vec<u64>,
@@ -502,12 +614,27 @@ pub struct CronDaemonArgs {
 pub struct PlanArgs {
     #[command(flatten)]
     pub client: LinearClientArgs,
+    /// Existing issue identifier to reshape in place, for example ENG-10144.
+    #[arg(value_name = "IDENTIFIER", conflicts_with = "request")]
+    pub target: Option<String>,
     /// Override the Linear team used for created backlog issues.
     #[arg(long)]
     pub team: Option<String>,
     /// Override the Linear project name attached to created backlog issues.
     #[arg(long)]
     pub project: Option<String>,
+    /// Override the Linear workflow state attached to created backlog issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Override the Linear priority attached to created backlog issues (1-4).
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Add one or more extra Linear labels to created backlog issues.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Override the assignee attached to created backlog issues. Supports `viewer`, user IDs, names, and emails.
+    #[arg(long)]
+    pub assignee: Option<String>,
     /// Prefill the initial planning request. Required when `--no-interactive` is used.
     #[arg(long)]
     pub request: Option<String>,
@@ -523,6 +650,9 @@ pub struct PlanArgs {
     /// Override the resolved built-in reasoning option for this planning run.
     #[arg(long)]
     pub reasoning: Option<String>,
+    /// Skip the reshape diff preview and apply the in-place update immediately.
+    #[arg(long)]
+    pub velocity: bool,
     /// Skip the ratatui workflow and run directly from flags/stdin context.
     #[arg(long)]
     pub no_interactive: bool,
@@ -552,6 +682,60 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Update how many times `meta merge` will ask the agent to repair failed validation by default.
+    #[arg(long)]
+    pub merge_validation_repair_attempts: Option<String>,
+    /// Update how many transient validation reruns `meta merge` will allow before escalating.
+    #[arg(long)]
+    pub merge_validation_transient_retry_attempts: Option<String>,
+    /// Update how many times `meta merge` retries push and PR publication after transient remote failures.
+    #[arg(long)]
+    pub merge_publication_retry_attempts: Option<String>,
+    /// Update the default assignee used by backlog ticket creation.
+    #[arg(long)]
+    pub default_assignee: Option<String>,
+    /// Update the default state used by backlog ticket creation.
+    #[arg(long)]
+    pub default_state: Option<String>,
+    /// Update the default priority used by backlog ticket creation.
+    #[arg(long)]
+    pub default_priority: Option<String>,
+    /// Update the additive default labels used by backlog ticket creation. Pass `none` to clear them.
+    #[arg(long = "default-label")]
+    pub default_labels: Vec<String>,
+    /// Update the zero-prompt default project selector used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_project: Option<String>,
+    /// Update the zero-prompt default state used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_state: Option<String>,
+    /// Update zero-prompt auto-assignment for backlog ticket creation. Supported values: `viewer`.
+    #[arg(long)]
+    pub velocity_auto_assign: Option<String>,
+    /// Update the install-scoped default Linear project ID.
+    #[arg(long)]
+    pub project_id: Option<String>,
+    /// Update the install-scoped default listen label.
+    #[arg(long)]
+    pub listen_label: Option<String>,
+    /// Update the install-scoped listen assignee scope.
+    #[arg(long, value_enum)]
+    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    /// Update the install-scoped listen refresh policy.
+    #[arg(long, value_enum)]
+    pub refresh_policy: Option<ListenRefreshPolicyArg>,
+    /// Update the install-scoped listen poll interval (seconds).
+    #[arg(long)]
+    pub poll_interval: Option<String>,
+    /// Update the install-scoped plan follow-up question limit.
+    #[arg(long)]
+    pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped default plan label.
+    #[arg(long)]
+    pub plan_label: Option<String>,
+    /// Update the install-scoped default technical label.
+    #[arg(long)]
+    pub technical_label: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
@@ -570,6 +754,9 @@ pub struct ConfigArgs {
     /// Launch the dedicated advanced agent-routing dashboard instead of the primary simple config flow.
     #[arg(long)]
     pub advanced_routing: bool,
+    /// Launch the shared first-run onboarding wizard instead of the manual config dashboard.
+    #[arg(long)]
+    pub replay_onboarding: bool,
     /// Emit the install-scoped config view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,
@@ -617,7 +804,7 @@ pub struct SetupArgs {
     /// Update the repo-scoped default built-in reasoning option.
     #[arg(long)]
     pub reasoning: Option<String>,
-    /// Update the label required for `meta listen` pickup.
+    /// Update the labels required for `meta listen` pickup. Provide a comma-separated list.
     #[arg(long)]
     pub listen_label: Option<String>,
     /// Update the assignee filter used by `meta listen`.
@@ -641,6 +828,27 @@ pub struct SetupArgs {
     /// Update the default label applied to issues created by `meta backlog tech`.
     #[arg(long)]
     pub technical_label: Option<String>,
+    /// Update the default assignee used by backlog ticket creation.
+    #[arg(long)]
+    pub default_assignee: Option<String>,
+    /// Update the default state used by backlog ticket creation.
+    #[arg(long)]
+    pub default_state: Option<String>,
+    /// Update the default priority used by backlog ticket creation.
+    #[arg(long)]
+    pub default_priority: Option<String>,
+    /// Update the additive default labels used by backlog ticket creation. Pass `none` to clear them.
+    #[arg(long = "default-label")]
+    pub default_labels: Vec<String>,
+    /// Update the zero-prompt default project selector used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_project: Option<String>,
+    /// Update the zero-prompt default state used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_state: Option<String>,
+    /// Update zero-prompt auto-assignment for backlog ticket creation. Supported values: `viewer`.
+    #[arg(long)]
+    pub velocity_auto_assign: Option<String>,
     /// Emit the repo-scoped setup view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,
@@ -778,6 +986,9 @@ pub struct ListenRunArgs {
     /// Poll interval in seconds for the live daemon loop.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub poll_interval: Option<u64>,
+    /// Watch Todo issues for all assignees during this run without changing repo setup.
+    #[arg(long)]
+    pub all_assignees: bool,
     /// Run listen prerequisite checks and exit without polling Linear or starting the daemon.
     #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
     pub check: bool,
@@ -814,6 +1025,21 @@ pub struct TechnicalArgs {
     /// Optional parent issue identifier, for example MET-35.
     #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
+    /// Override the Linear workflow state attached to created backlog issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Override the Linear priority attached to created backlog issues (1-4).
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Add one or more extra Linear labels to created backlog issues.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Override the assignee attached to created backlog issues. Supports `viewer`, user IDs, names, and emails.
+    #[arg(long)]
+    pub assignee: Option<String>,
+    /// Skip the ratatui workflow and require explicit input instead of prompting.
+    #[arg(long)]
+    pub no_interactive: bool,
     /// Override the configured default agent/provider for backlog generation.
     #[arg(long)]
     pub agent: Option<String>,
@@ -1329,7 +1555,8 @@ pub enum PromptTransportArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ListenAssignmentScopeArg {
     Any,
-    Viewer,
+    ViewerOnly,
+    ViewerOrUnassigned,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

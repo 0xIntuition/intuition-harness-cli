@@ -1,6 +1,7 @@
 mod agent_provider;
 mod agents;
 mod backlog;
+mod backlog_defaults;
 mod cli;
 mod config;
 mod config_command;
@@ -12,6 +13,7 @@ mod linear;
 mod listen;
 mod merge;
 mod merge_dashboard;
+mod onboarding;
 mod plan;
 mod progress;
 mod repo_target;
@@ -23,9 +25,13 @@ mod setup;
 mod sync_command;
 mod sync_dashboard;
 mod technical;
+mod text_diff;
 mod tui;
+mod upgrade;
 mod workflow_contract;
 mod workflows;
+mod workspace;
+mod workspace_dashboard;
 
 use std::ffi::OsString;
 
@@ -53,6 +59,9 @@ use crate::listen::{
 };
 use crate::merge::run_merge;
 use crate::merge_dashboard::MergeDashboardAction;
+use crate::onboarding::{
+    OnboardingLaunchMode, OnboardingOptions, OnboardingResult, run_onboarding,
+};
 use crate::plan::run_plan;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
@@ -62,7 +71,9 @@ use crate::sync_command::{
 };
 use crate::sync_dashboard::{SyncDashboardAction, SyncDashboardOptions};
 use crate::technical::run_technical;
+use crate::upgrade::run_upgrade;
 use crate::workflows::run_workflows;
+use crate::workspace::{run_workspace_clean, run_workspace_list, run_workspace_prune};
 
 pub async fn run() -> Result<()> {
     run_with_args(std::env::args_os()).await
@@ -78,6 +89,19 @@ where
 }
 
 async fn dispatch(cli: Cli) -> Result<()> {
+    match maybe_run_onboarding(&cli).await? {
+        Some(OnboardingResult::Completed) => {}
+        Some(OnboardingResult::Rendered(output)) => {
+            println!("{output}");
+            return Ok(());
+        }
+        Some(OnboardingResult::Cancelled) => {
+            println!("Onboarding cancelled.");
+            return Ok(());
+        }
+        None => {}
+    }
+
     match cli.command {
         Command::Backlog(args) => match args.command {
             BacklogCommands::Plan(args) => {
@@ -247,6 +271,20 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Merge(args) => {
             run_merge(&args).await?;
         }
+        Command::Workspace(args) => match args.command {
+            crate::cli::WorkspaceCommands::List(args) => {
+                println!("{}", run_workspace_list(&args).await?);
+            }
+            crate::cli::WorkspaceCommands::Clean(args) => {
+                println!("{}", run_workspace_clean(&args)?);
+            }
+            crate::cli::WorkspaceCommands::Prune(args) => {
+                println!("{}", run_workspace_prune(&args).await?);
+            }
+        },
+        Command::Upgrade(args) => {
+            run_upgrade(&args).await?;
+        }
         Command::Scaffold(args) => {
             let report = run_scaffold(&args)?;
             println!("{}", report.render());
@@ -373,6 +411,113 @@ async fn dispatch(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+async fn maybe_run_onboarding(cli: &Cli) -> Result<Option<OnboardingResult>> {
+    let app_config = crate::config::AppConfig::load()?;
+    let replay = matches!(
+        &cli.command,
+        Command::Runtime(args)
+            if matches!(
+                &args.command,
+                RuntimeCommands::Config(config_args) if config_args.replay_onboarding
+            )
+    ) || matches!(&cli.command, Command::Config(config_args) if config_args.replay_onboarding);
+
+    if replay {
+        return Ok(Some(
+            run_onboarding(OnboardingOptions {
+                mode: OnboardingLaunchMode::Replay,
+                render_once: config_render_once(cli),
+                width: config_snapshot_width(cli),
+                height: config_snapshot_height(cli),
+            })
+            .await?,
+        ));
+    }
+
+    if app_config.onboarding_complete() || command_bypasses_onboarding(cli) {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        run_onboarding(OnboardingOptions {
+            mode: OnboardingLaunchMode::Intercepted {
+                command_label: command_label(cli),
+            },
+            render_once: false,
+            width: 120,
+            height: 32,
+        })
+        .await?,
+    ))
+}
+
+fn command_bypasses_onboarding(cli: &Cli) -> bool {
+    matches!(
+        &cli.command,
+        Command::Runtime(args) if matches!(&args.command, RuntimeCommands::Config(_))
+    ) || matches!(&cli.command, Command::Config(_) | Command::Upgrade(_))
+}
+
+fn command_label(cli: &Cli) -> String {
+    match &cli.command {
+        Command::Backlog(_) => "meta backlog".to_string(),
+        Command::Agents(_) => "meta agents".to_string(),
+        Command::Linear(_) => "meta linear".to_string(),
+        Command::Context(_) => "meta context".to_string(),
+        Command::Runtime(_) => "meta runtime".to_string(),
+        Command::Dashboard(_) => "meta dashboard".to_string(),
+        Command::Merge(_) => "meta merge".to_string(),
+        Command::Workspace(_) => "meta workspace".to_string(),
+        Command::Plan(_) => "meta plan".to_string(),
+        Command::Technical(_) => "meta technical".to_string(),
+        Command::Listen(_) => "meta listen".to_string(),
+        Command::Issues(_) => "meta issues".to_string(),
+        Command::Projects(_) => "meta projects".to_string(),
+        Command::Cron(_) => "meta cron".to_string(),
+        Command::Scan(_) => "meta scan".to_string(),
+        Command::Workflows(_) => "meta workflows".to_string(),
+        Command::Config(_) => "meta config".to_string(),
+        Command::Setup(_) => "meta setup".to_string(),
+        Command::Sync(_) => "meta sync".to_string(),
+        Command::ListenWorker(_) => "meta listen-worker".to_string(),
+        Command::Scaffold(_) => "meta scaffold".to_string(),
+        Command::Upgrade(_) => "meta upgrade".to_string(),
+    }
+}
+
+fn config_render_once(cli: &Cli) -> bool {
+    match &cli.command {
+        Command::Config(args) => args.render_once,
+        Command::Runtime(args) => match &args.command {
+            RuntimeCommands::Config(config) => config.render_once,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn config_snapshot_width(cli: &Cli) -> u16 {
+    match &cli.command {
+        Command::Config(args) => args.width,
+        Command::Runtime(args) => match &args.command {
+            RuntimeCommands::Config(config) => config.width,
+            _ => 120,
+        },
+        _ => 120,
+    }
+}
+
+fn config_snapshot_height(cli: &Cli) -> u16 {
+    match &cli.command {
+        Command::Config(args) => args.height,
+        Command::Runtime(args) => match &args.command {
+            RuntimeCommands::Config(config) => config.height,
+            _ => 32,
+        },
+        _ => 32,
+    }
+}
+
 fn print_compatibility_hint(legacy_command: &str, preferred_command: &str) {
     eprintln!("hint: `{legacy_command}` is a compatibility alias; prefer `{preferred_command}`.");
 }
@@ -445,7 +590,10 @@ impl From<ListenAssignmentScopeArg> for ListenAssignmentScope {
     fn from(value: ListenAssignmentScopeArg) -> Self {
         match value {
             ListenAssignmentScopeArg::Any => ListenAssignmentScope::Any,
-            ListenAssignmentScopeArg::Viewer => ListenAssignmentScope::Viewer,
+            ListenAssignmentScopeArg::ViewerOnly => ListenAssignmentScope::ViewerOnly,
+            ListenAssignmentScopeArg::ViewerOrUnassigned => {
+                ListenAssignmentScope::ViewerOrUnassigned
+            }
         }
     }
 }

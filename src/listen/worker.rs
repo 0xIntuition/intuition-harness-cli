@@ -41,6 +41,10 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let source_root = canonicalize_existing_dir(&args.source_root)?;
     let workspace_path = canonicalize_existing_dir(&args.workspace)?;
     let planning_meta = crate::config::PlanningMeta::load(&source_root)?;
+    let project_selector = args
+        .project
+        .as_deref()
+        .or(planning_meta.linear.project_id.as_deref());
     let app_config = AppConfig::load()?;
     let linear_config = LinearConfig::new_with_root(
         Some(&source_root),
@@ -72,7 +76,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         planning_meta: &planning_meta,
         args,
         source_root: &source_root,
-        project_selector: args.project.as_deref(),
+        project_selector,
         workspace_path: &workspace_path,
         workpad_comment_id: &args.workpad_comment_id,
         backlog_issue: backlog_issue.as_ref(),
@@ -80,7 +84,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     };
     let mut session_context = WorkerSessionContext {
         source_root: &source_root,
-        project_selector: args.project.as_deref(),
+        project_selector,
         workspace_path: &workspace_path,
         branch: branch.as_deref(),
         workpad_comment_id: &args.workpad_comment_id,
@@ -115,7 +119,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             .transpose()?;
         write_listen_session(
             &source_root,
-            args.project.as_deref(),
+            project_selector,
             build_worker_session(
                 &issue,
                 SessionPhase::Blocked,
@@ -134,7 +138,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
             write_listen_session(
                 &source_root,
-                args.project.as_deref(),
+                project_selector,
                 build_worker_session(
                     &issue,
                     SessionPhase::Completed,
@@ -155,7 +159,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 .transpose()?;
             write_listen_session(
                 &source_root,
-                args.project.as_deref(),
+                project_selector,
                 build_worker_session(
                     &issue,
                     SessionPhase::Blocked,
@@ -182,7 +186,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         session_context.latest_resume_handle = None;
         write_listen_session(
             &source_root,
-            args.project.as_deref(),
+            project_selector,
             build_worker_session(
                 &issue,
                 SessionPhase::Running,
@@ -204,7 +208,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             Err(error) => {
                 write_listen_session(
                     &source_root,
-                    args.project.as_deref(),
+                    project_selector,
                     build_worker_session(
                         &issue,
                         SessionPhase::Blocked,
@@ -249,7 +253,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 if !saw_implementation_progress {
                     write_listen_session(
                         &source_root,
-                        args.project.as_deref(),
+                        project_selector,
                         build_worker_session(
                             &issue,
                             SessionPhase::Blocked,
@@ -294,7 +298,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     );
                     write_listen_session(
                         &source_root,
-                        args.project.as_deref(),
+                        project_selector,
                         build_worker_session(
                             &refreshed_issue,
                             SessionPhase::Completed,
@@ -308,7 +312,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
                 write_listen_session(
                     &source_root,
-                    args.project.as_deref(),
+                    project_selector,
                     build_worker_session(
                         &refreshed_issue,
                         SessionPhase::Blocked,
@@ -327,7 +331,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             if stalled_turns >= MAX_STALLED_TURNS {
                 write_listen_session(
                     &source_root,
-                    args.project.as_deref(),
+                    project_selector,
                     build_worker_session(
                         &issue,
                         SessionPhase::Blocked,
@@ -345,7 +349,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
             write_listen_session(
                 &source_root,
-                args.project.as_deref(),
+                project_selector,
                 build_worker_session(
                     &issue,
                     SessionPhase::Running,
@@ -362,7 +366,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         } else {
             write_listen_session(
                 &source_root,
-                args.project.as_deref(),
+                project_selector,
                 build_worker_session(
                     &issue,
                     SessionPhase::Running,
@@ -1137,7 +1141,7 @@ mod tests {
         .expect("session index should write");
 
         let ids =
-            read_codex_session_index(&codex_root, 1_742_396_400, 1_742_396_420).expect("index");
+            read_codex_session_index(&codex_root, 1_773_932_400, 1_773_932_420).expect("index");
 
         assert_eq!(ids, vec!["recent".to_string()]);
     }

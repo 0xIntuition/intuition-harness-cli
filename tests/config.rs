@@ -2,6 +2,17 @@
 
 include!("support/common.rs");
 
+fn write_onboarded_config(config_path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
+    let body = body.trim_start();
+    let content = if body.is_empty() {
+        "[onboarding]\ncompleted = true\n".to_string()
+    } else {
+        format!("[onboarding]\ncompleted = true\n\n{body}")
+    };
+    fs::write(config_path, content)?;
+    Ok(())
+}
+
 #[test]
 fn config_json_is_global_only_and_does_not_scaffold_repo_defaults() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -32,6 +43,7 @@ fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -61,6 +73,7 @@ fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dy
             .expect("template file should have a parent"),
     )?;
     fs::write(&conflicting_index, "# Local template change\n")?;
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -97,7 +110,7 @@ fn setup_updates_repo_defaults_with_flags_and_resolves_project_name() -> Result<
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -108,7 +121,8 @@ team = "MET"
 default_agent = "codex"
 default_model = "gpt-5.4"
 "#
-        ),
+        )
+        .as_str(),
     )?;
 
     let projects_mock = server.mock(|when, then| {
@@ -240,7 +254,7 @@ default_model = "gpt-5.4"
             "--listen-label",
             "agent",
             "--assignment-scope",
-            "viewer",
+            "viewer-only",
             "--instructions-path",
             "instructions/listen.md",
             "--listen-poll-interval",
@@ -251,6 +265,22 @@ default_model = "gpt-5.4"
             "planning",
             "--technical-label",
             "engineering",
+            "--default-assignee",
+            "viewer",
+            "--default-state",
+            "Todo",
+            "--default-priority",
+            "3",
+            "--default-label",
+            "platform",
+            "--default-label",
+            "cli",
+            "--velocity-project",
+            "MetaStack CLI",
+            "--velocity-state",
+            "Backlog",
+            "--velocity-auto-assign",
+            "viewer",
         ])
         .assert()
         .success()
@@ -278,12 +308,15 @@ default_model = "gpt-5.4"
     assert_eq!(planning_meta["agent"]["model"].as_str(), Some("opus"));
     assert_eq!(planning_meta["agent"]["reasoning"].as_str(), Some("medium"));
     assert_eq!(
-        planning_meta["listen"]["required_label"].as_str(),
+        planning_meta["listen"]["required_labels"]
+            .as_array()
+            .and_then(|labels| labels.first())
+            .and_then(|label| label.as_str()),
         Some("agent")
     );
     assert_eq!(
         planning_meta["listen"]["assignment_scope"].as_str(),
-        Some("viewer")
+        Some("viewer_only")
     );
     assert_eq!(
         planning_meta["listen"]["instructions_path"].as_str(),
@@ -304,6 +337,34 @@ default_model = "gpt-5.4"
     assert_eq!(
         planning_meta["issue_labels"]["technical"].as_str(),
         Some("engineering")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["default_assignee"].as_str(),
+        Some("viewer")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["default_state"].as_str(),
+        Some("Todo")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["default_priority"].as_u64(),
+        Some(3)
+    );
+    assert_eq!(
+        planning_meta["backlog"]["default_labels"],
+        json!(["platform", "cli"])
+    );
+    assert_eq!(
+        planning_meta["backlog"]["velocity_defaults"]["project"].as_str(),
+        Some("MetaStack CLI")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["velocity_defaults"]["state"].as_str(),
+        Some("Backlog")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["velocity_defaults"]["auto_assign"].as_str(),
+        Some("viewer")
     );
     projects_mock.assert();
     teams_mock.assert();
@@ -335,14 +396,112 @@ fn config_builtin_defaults_do_not_persist_builtin_command_override_entries()
             "gpt-5.4",
             "--default-reasoning",
             "medium",
+            "--default-assignee",
+            "viewer",
+            "--default-state",
+            "Backlog",
+            "--default-priority",
+            "2",
+            "--default-label",
+            "platform",
+            "--default-label",
+            "cli",
+            "--velocity-project",
+            "MetaStack CLI",
+            "--velocity-state",
+            "Todo",
+            "--velocity-auto-assign",
+            "viewer",
         ])
         .assert()
         .success();
 
     let saved = fs::read_to_string(config_path)?;
-    assert!(saved.contains("default_agent = \"codex\""));
-    assert!(saved.contains("default_reasoning = \"medium\""));
+    let parsed: toml::Value = toml::from_str(&saved)?;
+    assert_eq!(parsed["agents"]["default_agent"].as_str(), Some("codex"));
+    assert_eq!(
+        parsed["agents"]["default_reasoning"].as_str(),
+        Some("medium")
+    );
+    assert_eq!(
+        parsed["backlog"]["default_assignee"].as_str(),
+        Some("viewer")
+    );
+    assert_eq!(parsed["backlog"]["default_state"].as_str(), Some("Backlog"));
+    assert_eq!(parsed["backlog"]["default_priority"].as_integer(), Some(2));
+    assert_eq!(
+        parsed["backlog"]["default_labels"]
+            .as_array()
+            .map(|labels| labels
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>()),
+        Some(vec!["platform", "cli"])
+    );
+    assert_eq!(
+        parsed["backlog"]["velocity_defaults"]["project"].as_str(),
+        Some("MetaStack CLI")
+    );
+    assert_eq!(
+        parsed["backlog"]["velocity_defaults"]["state"].as_str(),
+        Some("Todo")
+    );
+    assert_eq!(
+        parsed["backlog"]["velocity_defaults"]["auto_assign"].as_str(),
+        Some("viewer")
+    );
     assert!(!saved.contains("[agents.commands.codex]"));
+
+    Ok(())
+}
+
+#[test]
+fn config_persists_merge_validation_repair_attempt_limit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--merge-validation-repair-attempts",
+            "8",
+        ])
+        .assert()
+        .success();
+
+    let saved = fs::read_to_string(config_path)?;
+    assert!(saved.contains("[merge]"));
+    assert!(saved.contains("validation_repair_attempts = 8"));
+
+    Ok(())
+}
+
+#[test]
+fn config_rejects_zero_merge_validation_repair_attempt_limit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--merge-validation-repair-attempts",
+            "0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "merge validation repair attempt limit must be at least 1; got 0",
+        ));
 
     Ok(())
 }
@@ -387,7 +546,7 @@ fn setup_rejects_ambiguous_project_names() -> Result<(), Box<dyn Error>> {
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -395,7 +554,8 @@ api_key = "linear-token"
 api_url = "{api_url}"
 team = "MET"
 "#
-        ),
+        )
+        .as_str(),
     )?;
 
     let projects_mock = server.mock(|when, then| {
@@ -457,7 +617,7 @@ fn setup_rejects_missing_project_names() -> Result<(), Box<dyn Error>> {
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -465,7 +625,8 @@ api_key = "linear-token"
 api_url = "{api_url}"
 team = "MET"
 "#
-        ),
+        )
+        .as_str(),
     )?;
 
     let projects_mock = server.mock(|when, then| {
@@ -511,7 +672,8 @@ team = "MET"
 }
 
 #[test]
-fn repo_dependent_commands_require_setup_when_meta_is_missing() -> Result<(), Box<dyn Error>> {
+fn repo_dependent_commands_redirect_into_onboarding_when_meta_is_missing()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     fs::create_dir_all(&repo_root)?;
@@ -526,24 +688,39 @@ fn repo_dependent_commands_require_setup_when_meta_is_missing() -> Result<(), Bo
             "Plan repo setup work",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "hint: `meta plan` is a compatibility alias; prefer `meta backlog plan`.",
-        ))
-        .stderr(predicate::str::contains(
-            "`meta plan` requires repo setup. Run `meta runtime setup --root",
-        ));
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("meta plan"));
 
     cli()
         .args(["sync", "--root", repo_root.to_string_lossy().as_ref()])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
-        ))
-        .stderr(predicate::str::contains(
-            "`meta sync` requires repo setup. Run `meta runtime setup --root",
-        ));
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta sync"))
+        .stderr(predicate::str::contains("requires repo setup").not());
+
+    cli()
+        .args(["technical", "--root", repo_root.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("meta technical"));
+
+    cli()
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--demo",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta listen"))
+        .stderr(predicate::str::contains("compatibility alias").not());
 
     Ok(())
 }
@@ -577,15 +754,98 @@ default_reasoning = "medium"
             "--width",
             "110",
             "--height",
-            "32",
+            "50",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Global configuration"))
         .stdout(predicate::str::contains("Default reasoning"))
         .stdout(predicate::str::contains("Meta Config"))
-        .stdout(predicate::str::contains("Listen label").not())
-        .stdout(predicate::str::contains("Default project").not());
+        .stdout(predicate::str::contains("Listen label"))
+        .stdout(predicate::str::contains("Project ID"))
+        .stdout(predicate::str::contains("Assignee scope"))
+        .stdout(predicate::str::contains("Refresh policy"))
+        .stdout(predicate::str::contains("Poll interval"))
+        .stdout(predicate::str::contains("Plan follow-ups"))
+        .stdout(predicate::str::contains("Plan label"))
+        .stdout(predicate::str::contains("Tech label"));
+
+    Ok(())
+}
+
+#[test]
+fn first_run_interception_redirects_normal_commands_into_onboarding() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--no-interactive",
+            "--request",
+            "plan something",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta plan"))
+        .stderr(predicate::str::contains("requires repo setup").not());
+
+    Ok(())
+}
+
+#[test]
+fn first_run_interception_redirects_setup_into_onboarding() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["setup", "--root", repo_root.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta setup"))
+        .stdout(predicate::str::contains("Repo setup").not());
+
+    Ok(())
+}
+
+#[test]
+fn config_replay_onboarding_renders_shared_wizard() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--replay-onboarding",
+            "--render-once",
+            "--width",
+            "110",
+            "--height",
+            "32",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding replay"))
+        .stdout(predicate::str::contains("Global configuration").not());
 
     Ok(())
 }
@@ -619,7 +879,7 @@ default_reasoning = "high"
             "--width",
             "92",
             "--height",
-            "34",
+            "70",
         ])
         .assert()
         .success()
@@ -638,7 +898,7 @@ fn setup_render_once_covers_long_summary_values() -> Result<(), Box<dyn Error>> 
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join(".metastack"))?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         r#"[linear]
 api_key = "linear-token"
@@ -713,7 +973,7 @@ fn setup_render_once_keeps_sidebar_content_readable_at_narrow_width() -> Result<
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join(".metastack"))?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         r#"[linear]
 api_key = "linear-token"

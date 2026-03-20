@@ -2,10 +2,25 @@
 
 include!("support/common.rs");
 
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
 #[test]
 fn issues_commands_require_auth_when_not_in_demo_mode() {
     let temp = tempdir().expect("tempdir should build");
-    let config_path = temp.path().join("missing-metastack.toml");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     cli()
         .current_dir(temp.path())
@@ -26,8 +41,10 @@ fn issues_commands_require_auth_when_not_in_demo_mode() {
 #[test]
 fn linear_list_commands_work_against_a_mock_server() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     fs::create_dir_all(temp.path().join(".metastack")).expect("planning dir should build");
     fs::write(
@@ -107,6 +124,7 @@ fn linear_list_commands_work_against_a_mock_server() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "projects",
             "--api-key",
@@ -123,6 +141,7 @@ fn linear_list_commands_work_against_a_mock_server() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "issues",
             "--api-key",
@@ -140,6 +159,7 @@ fn linear_list_commands_work_against_a_mock_server() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "linear",
             "--api-key",
@@ -164,7 +184,7 @@ fn linear_commands_can_read_auth_from_config_file() -> Result<(), Box<dyn Error>
     let api_url = server.url("/graphql");
     let config_path = temp.path().join("metastack.toml");
 
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -243,7 +263,7 @@ fn issues_command_uses_repo_scoped_api_key_over_global_auth() -> Result<(), Box<
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -338,7 +358,7 @@ fn projects_command_uses_repo_selected_profile_and_team_over_global_defaults()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -445,7 +465,7 @@ fn issues_command_uses_repo_selected_profile_and_project_over_global_defaults()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -573,8 +593,10 @@ team = "PER"
 #[test]
 fn linear_issue_list_render_once_launches_issue_browser_filters() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -666,6 +688,7 @@ fn linear_issue_list_render_once_launches_issue_browser_filters() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "issues",
             "--api-key",
@@ -690,9 +713,10 @@ fn linear_issue_list_render_once_launches_issue_browser_filters() {
 #[test]
 fn linear_issue_create_and_edit_work_against_a_mock_server() {
     let temp = tempdir().expect("tempdir should build");
-    let config_path = temp.path().join("missing-metastack.toml");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -973,8 +997,10 @@ fn linear_issue_create_and_edit_work_against_a_mock_server() {
 #[test]
 fn linear_issue_create_launches_interactive_form_by_default() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -1014,6 +1040,7 @@ fn linear_issue_create_launches_interactive_form_by_default() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "linear",
             "--api-key",
@@ -1043,8 +1070,10 @@ fn linear_issue_create_launches_interactive_form_by_default() {
 #[test]
 fn linear_issue_edit_launches_interactive_form_by_default() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
     let server = MockServer::start();
     let api_url = server.url("/graphql");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     server.mock(|when, then| {
         when.method(POST)
@@ -1119,6 +1148,7 @@ fn linear_issue_edit_launches_interactive_form_by_default() {
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "linear",
             "--api-key",
@@ -1144,9 +1174,12 @@ fn linear_issue_edit_launches_interactive_form_by_default() {
 #[test]
 fn linear_issue_create_requires_title_for_non_interactive_mode() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args(["issues", "--api-key", "token", "create", "--no-interactive"])
         .assert()
         .failure()
@@ -1156,9 +1189,12 @@ fn linear_issue_create_requires_title_for_non_interactive_mode() {
 #[test]
 fn dashboard_render_once_uses_ratatui_snapshot_output() {
     let temp = tempdir().expect("tempdir should build");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "").expect("config file should write");
 
     cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "dashboard",
             "--api-key",
@@ -1178,9 +1214,12 @@ fn dashboard_render_once_uses_ratatui_snapshot_output() {
 #[test]
 fn dashboard_linear_matches_legacy_dashboard_output() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
 
     let legacy = cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "dashboard",
             "--api-key",
@@ -1195,6 +1234,7 @@ fn dashboard_linear_matches_legacy_dashboard_output() -> Result<(), Box<dyn Erro
 
     let preferred = cli()
         .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "dashboard",
             "linear",
@@ -1233,7 +1273,7 @@ fn linear_issue_create_uses_repo_meta_defaults() -> Result<(), Box<dyn Error>> {
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]

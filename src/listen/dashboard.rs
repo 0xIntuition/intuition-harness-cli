@@ -69,6 +69,10 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
+            Line::from(vec![
+                Span::styled("Watching: ", label_style()),
+                Span::styled(data.watch_scope.clone(), value_style(Color::LightGreen)),
+            ]),
             Line::from(Span::styled(
                 data.cycle_summary.clone(),
                 Style::default().fg(Color::Gray),
@@ -126,6 +130,10 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(vec![
+            Span::styled("Watching: ", label_style()),
+            Span::styled(data.watch_scope.clone(), value_style(Color::LightGreen)),
+        ]),
         Line::from(Span::styled(
             data.cycle_summary.clone(),
             Style::default().fg(Color::Gray),
@@ -151,6 +159,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         runtime_line("Tokens", &data.runtime.tokens, Color::Magenta),
         runtime_line("Rate Limits", &data.runtime.rate_limits, Color::LightBlue),
         runtime_line("Project", &data.runtime.project, Color::White),
+        runtime_line("Watching", &data.watch_scope, Color::LightGreen),
         runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
         runtime_line(
             "Terminal refresh",

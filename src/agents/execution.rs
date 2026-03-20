@@ -18,10 +18,19 @@ use crate::tui::prompt_images::{PromptImageAttachment, encode_prompt_images_for_
 pub(crate) struct AgentExecutionOptions {
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) extra_env: Vec<(String, String)>,
+    pub(crate) capture_output: bool,
+    pub(crate) continuation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentContinuation {
+    pub(crate) provider: String,
+    pub(crate) session_id: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct AgentCaptureReport {
+    pub(crate) continuation: Option<AgentContinuation>,
     pub stdout: String,
 }
 
@@ -180,71 +189,47 @@ pub(crate) fn validate_invocation_command_surface(
     Ok(attempted)
 }
 
+/// Runs one non-interactive agent turn and returns the captured final assistant output.
+///
+/// Returns an error when config resolution fails, the configured command surface is invalid, the
+/// subprocess cannot be launched, or the agent exits unsuccessfully.
 pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
+    let mut continuation = None;
+    run_agent_capture_with_continuation(args, &mut continuation)
+}
+
+pub(crate) fn run_agent_capture_with_continuation(
+    args: &RunAgentArgs,
+    continuation: &mut Option<AgentContinuation>,
+) -> Result<AgentCaptureReport> {
     let config = AppConfig::load()?;
     let planning_meta = match args.root.as_deref() {
         Some(root) => PlanningMeta::load(root)?,
         None => PlanningMeta::default(),
     };
     let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, args)?;
-    let command_args = command_args_for_invocation(&invocation, None)?;
-    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
-
-    let mut command = Command::new(&invocation.command);
-    command.args(&command_args);
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    apply_noninteractive_agent_environment(&mut command);
-    apply_invocation_environment(
-        &mut command,
-        &invocation,
-        &args.prompt,
-        args.instructions.as_deref(),
-    );
-
-    let mut child = command.spawn().with_context(|| {
-        format!(
-            "failed to launch agent `{}` with command `{attempted_command}`",
-            invocation.agent
-        )
-    })?;
-
-    if invocation.transport == PromptTransport::Stdin {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("failed to open stdin for agent `{}`", invocation.agent))?;
-        stdin
-            .write_all(invocation.payload.as_bytes())
-            .with_context(|| {
-                format!(
-                    "failed to write prompt payload to agent `{}`",
-                    invocation.agent
-                )
-            })?;
+    let attempted_continuation = continuation
+        .as_ref()
+        .filter(|state| state.provider == invocation.agent);
+    match run_agent_capture_attempt(&invocation, args, attempted_continuation) {
+        Ok(report) => {
+            *continuation = report.continuation.clone();
+            Ok(report)
+        }
+        Err(error)
+            if attempted_continuation.is_some()
+                && invocation.builtin_provider
+                && builtin_provider_adapter(&invocation.agent).is_some_and(|provider| {
+                    provider.is_invalid_resume_error(&error.to_string())
+                }) =>
+        {
+            *continuation = None;
+            let retry = run_agent_capture_attempt(&invocation, args, None)?;
+            *continuation = retry.continuation.clone();
+            Ok(retry)
+        }
+        Err(error) => Err(error),
     }
-
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to wait for agent `{}`", invocation.agent))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        let code = output
-            .status
-            .code()
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "terminated by signal".to_string());
-        bail!(
-            "agent `{}` exited unsuccessfully ({code}) while running `{attempted_command}`: {}",
-            invocation.agent,
-            stderr.trim()
-        );
-    }
-
-    Ok(AgentCaptureReport { stdout })
 }
 
 pub(crate) fn resolve_agent_invocation_for_planning(
@@ -352,6 +337,8 @@ pub(crate) fn command_args_for_invocation(
         AgentExecutionOptions {
             working_dir: working_dir.map(Path::to_path_buf),
             extra_env: Vec::new(),
+            capture_output: false,
+            continuation: None,
         },
     )
 }
@@ -370,6 +357,9 @@ fn command_args_for_options(
             &invocation.args,
             options.working_dir.as_deref(),
             invocation.context,
+            invocation.transport,
+            options.capture_output,
+            options.continuation.as_deref(),
         )
 }
 
@@ -487,6 +477,97 @@ fn render_command_args(
             }
         })
         .collect()
+}
+
+fn run_agent_capture_attempt(
+    invocation: &ResolvedAgentInvocation,
+    args: &RunAgentArgs,
+    continuation: Option<&AgentContinuation>,
+) -> Result<AgentCaptureReport> {
+    let command_args = command_args_for_options(
+        invocation,
+        AgentExecutionOptions {
+            working_dir: None,
+            extra_env: Vec::new(),
+            capture_output: invocation.builtin_provider,
+            continuation: continuation.map(|state| state.session_id.clone()),
+        },
+    )?;
+    let attempted_command = validate_invocation_command_surface(invocation, &command_args)?;
+
+    let mut command = Command::new(&invocation.command);
+    command.args(&command_args);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    apply_noninteractive_agent_environment(&mut command);
+    apply_invocation_environment(
+        &mut command,
+        invocation,
+        &args.prompt,
+        args.instructions.as_deref(),
+    );
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
+        )
+    })?;
+
+    if invocation.transport == PromptTransport::Stdin {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to open stdin for agent `{}`", invocation.agent))?;
+        stdin
+            .write_all(invocation.payload.as_bytes())
+            .with_context(|| {
+                format!(
+                    "failed to write prompt payload to agent `{}`",
+                    invocation.agent
+                )
+            })?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("failed to wait for agent `{}`", invocation.agent))?;
+    let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "terminated by signal".to_string());
+        bail!(
+            "agent `{}` exited unsuccessfully ({code}) while running `{attempted_command}`: {}",
+            invocation.agent,
+            stderr.trim()
+        );
+    }
+
+    let (stdout, continuation) = if invocation.builtin_provider {
+        let provider = builtin_provider_adapter(&invocation.agent)
+            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?;
+        let (stdout, session_id) = provider.parse_capture_output(&raw_stdout)?;
+        (
+            stdout,
+            session_id.map(|session_id| AgentContinuation {
+                provider: invocation.agent.clone(),
+                session_id,
+            }),
+        )
+    } else {
+        (raw_stdout, None)
+    };
+
+    Ok(AgentCaptureReport {
+        continuation,
+        stdout,
+    })
 }
 
 pub(crate) fn format_agent_config_source(source: &AgentConfigSource) -> String {

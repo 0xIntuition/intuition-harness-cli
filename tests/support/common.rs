@@ -585,18 +585,30 @@ fn team_payload() -> serde_json::Value {
 
 #[cfg(unix)]
 fn wait_for_file_substring(path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
-    for _ in 0..600 {
+    wait_for_file_substring_with_timeout(path, expected, Duration::from_secs(60))
+}
+
+#[cfg(unix)]
+fn wait_for_file_substring_with_timeout(
+    path: &Path,
+    expected: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let poll_interval = Duration::from_millis(100);
+    let attempts = timeout.as_millis() / poll_interval.as_millis();
+    for _ in 0..attempts {
         if let Ok(contents) = fs::read_to_string(path)
             && contents.contains(expected)
         {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(poll_interval);
     }
 
     Err(format!(
-        "timed out waiting for `{}` to contain substring `{expected}`",
-        path.display()
+        "timed out waiting for `{}` to contain substring `{expected}` after {}s",
+        path.display(),
+        timeout.as_secs()
     )
     .into())
 }
@@ -626,7 +638,7 @@ fn listen_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("listen test lock should not be poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(unix)]
@@ -635,6 +647,7 @@ struct DynamicLinearState {
     claimed: bool,
     issue_refreshes_after_claim: usize,
     review_transition_applied: bool,
+    complete_after_claim_refreshes: usize,
 }
 
 #[cfg(unix)]
@@ -647,16 +660,26 @@ struct DynamicLinearServer {
 #[cfg(unix)]
 impl DynamicLinearServer {
     fn start() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_completion_after_refreshes(8)
+    }
+
+    fn start_with_completion_after_refreshes(
+        complete_after_claim_refreshes: usize,
+    ) -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(Mutex::new(DynamicLinearState::default()));
+        let state = Arc::new(Mutex::new(DynamicLinearState {
+            complete_after_claim_refreshes,
+            ..DynamicLinearState::default()
+        }));
         let thread_shutdown = shutdown.clone();
         let handle = thread::spawn(move || {
             while !thread_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
                         let _ = handle_dynamic_linear_connection(&mut stream, &state);
                         let _ = stream.shutdown(Shutdown::Both);
                     }
@@ -697,6 +720,9 @@ fn handle_dynamic_linear_connection(
     state: &Arc<Mutex<DynamicLinearState>>,
 ) -> Result<(), Box<dyn Error>> {
     let request = read_http_request(stream)?;
+    if request.trim().is_empty() {
+        return Ok(());
+    }
     let body = request
         .split("\r\n\r\n")
         .nth(1)
@@ -735,11 +761,49 @@ fn read_http_request(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
     let mut chunk = [0u8; 4096];
     let mut header_end = None;
     let mut content_length = 0usize;
+    let mut idle_reads_after_data = 0usize;
 
     loop {
-        let read = stream.read(&mut chunk)?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => {
+                idle_reads_after_data = 0;
+                read
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if buffer.is_empty() {
+                    return Ok(String::new());
+                }
+                idle_reads_after_data += 1;
+                if idle_reads_after_data >= 20 {
+                    return Err(format!(
+                        "timed out waiting for a complete HTTP request after receiving {} bytes",
+                        buffer.len()
+                    )
+                    .into());
+                }
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if read == 0 {
-            break;
+            if buffer.is_empty() {
+                return Ok(String::new());
+            }
+            if let Some(end) = header_end
+                && buffer.len() >= end + content_length
+            {
+                break;
+            }
+            return Err(format!(
+                "peer closed the HTTP request before the body completed (received {} bytes)",
+                buffer.len()
+            )
+            .into());
         }
         buffer.extend_from_slice(&chunk[..read]);
 
@@ -986,7 +1050,12 @@ fn dynamic_linear_response(
             ("state-3", "Human Review", "started")
         } else if state.claimed {
             state.issue_refreshes_after_claim += 1;
-            if state.issue_refreshes_after_claim >= 6 {
+            let threshold = if state.complete_after_claim_refreshes > 0 {
+                state.complete_after_claim_refreshes
+            } else {
+                6
+            };
+            if state.issue_refreshes_after_claim >= threshold {
                 state.review_transition_applied = true;
                 ("state-3", "Human Review", "started")
             } else {

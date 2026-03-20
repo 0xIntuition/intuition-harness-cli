@@ -4,8 +4,8 @@ use serde_json::json;
 
 use crate::config::LinearConfig;
 use crate::linear::{
-    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, LinearClient,
-    ReqwestLinearClient,
+    IssueAssigneeFilter, IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters,
+    LinearClient, ReqwestLinearClient,
 };
 
 #[tokio::test]
@@ -87,6 +87,9 @@ async fn reqwest_client_sends_server_side_issue_filters() {
             project: None,
             project_id: Some("project-1".to_string()),
             state: Some("Todo".to_string()),
+            assignee: IssueAssigneeFilter::ViewerOrUnassigned {
+                viewer_id: "viewer-1".to_string(),
+            },
             limit: 5,
         })
         .await
@@ -137,13 +140,14 @@ async fn reqwest_client_lists_issue_labels_for_team() {
 }
 
 #[tokio::test]
-async fn reqwest_client_sends_label_ids_when_creating_issue() {
+async fn reqwest_client_sends_assignee_and_label_ids_when_creating_issue() {
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     let create_mock = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .body_includes("mutation CreateIssue")
+            .body_includes("\"assigneeId\":\"user-1\"")
             .body_includes("\"labelIds\":[\"label-plan\"]");
         then.status(200).json_body(json!({
             "data": {
@@ -165,12 +169,52 @@ async fn reqwest_client_sends_label_ids_when_creating_issue() {
             parent_id: None,
             state_id: Some("state-1".to_string()),
             priority: Some(2),
+            assignee_id: Some("user-1".to_string()),
             label_ids: vec!["label-plan".to_string()],
         })
         .await
         .expect("issue creation should succeed");
 
     assert_eq!(issue.identifier, "MET-41");
+    create_mock.assert_calls(1);
+}
+
+#[tokio::test]
+async fn reqwest_client_allows_unassigned_issue_creation() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let create_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"labelIds\":[]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": issue_node("MET-42")
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let issue = client
+        .create_issue(IssueCreateRequest {
+            team_id: "team-1".to_string(),
+            title: "Create unassigned issue".to_string(),
+            description: Some("Description".to_string()),
+            project_id: Some("project-1".to_string()),
+            parent_id: None,
+            state_id: Some("state-1".to_string()),
+            priority: Some(2),
+            assignee_id: None,
+            label_ids: Vec::new(),
+        })
+        .await
+        .expect("issue creation should succeed");
+
+    assert_eq!(issue.identifier, "MET-42");
     create_mock.assert_calls(1);
 }
 
