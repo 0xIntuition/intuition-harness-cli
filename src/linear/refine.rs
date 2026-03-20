@@ -14,7 +14,8 @@ use crate::backlog::{
 use crate::cli::{IssueRefineArgs, LinearClientArgs, RunAgentArgs};
 use crate::config::AGENT_ROUTE_LINEAR_ISSUES_REFINE;
 use crate::fs::{
-    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
+    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, render_command,
+    write_text_file,
 };
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
@@ -104,7 +105,11 @@ pub(crate) async fn run_issue_refine_command(
     let root = canonicalize_existing_dir(&client_args.root)?;
     ensure_planning_layout(&root, false)?;
     if args.passes == 0 {
-        bail!("`meta issues refine` requires `--passes` to be at least 1");
+        bail!(
+            "`{}` requires `--passes` to be at least 1",
+            render_command(Some(&root), "issues refine")
+                .unwrap_or_else(|_| "meta issues refine".to_string())
+        );
     }
     let command_context = load_linear_command_context(client_args, cli_default_team)?;
     let mut reports = Vec::with_capacity(args.issues.len());
@@ -132,7 +137,7 @@ async fn refine_issue(
 ) -> Result<RefinementReport> {
     let started_at = now_rfc3339()?;
     let run_id = refinement_run_id()?;
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let issue_dir = paths.backlog_issue_dir(&issue.identifier);
     ensure_dir(&issue_dir)?;
     save_issue_metadata(&issue_dir, &build_issue_metadata(issue))?;
@@ -172,6 +177,8 @@ async fn refine_issue(
     let mut previous_pass = None;
 
     for pass_number in 1..=args.passes {
+        let issues_refine_command = render_command(Some(root), "issues refine")
+            .unwrap_or_else(|_| "meta issues refine".to_string());
         let prompt = render_refinement_prompt(
             root,
             issue,
@@ -192,7 +199,9 @@ async fn refine_issue(
             attachments: Vec::new(),
         })
         .with_context(|| {
-            "meta issues refine requires a configured local agent to critique and rewrite existing issues"
+            format!(
+                "{issues_refine_command} requires a configured local agent to critique and rewrite existing issues"
+            )
         })?;
         let parsed: RefinementPassOutput =
             parse_agent_json(&output.stdout, "issue refinement critique/rewrite")?;
@@ -419,8 +428,11 @@ fn guard_listen_issue_refine_apply(identifier: &str) -> Result<()> {
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case(identifier))
     {
+        let issues_refine_apply_command = render_command(None, "issues refine")
+            .map(|command| format!("{command} {identifier} --apply"))
+            .unwrap_or_else(|_| format!("meta issues refine {identifier} --apply"));
         bail!(
-            "`meta issues refine {identifier} --apply` is disabled during `meta listen` because it would overwrite the primary Linear issue description; update the workpad comment instead"
+            "`{issues_refine_apply_command}` is disabled during `meta listen` because it would overwrite the primary Linear issue description; update the workpad comment instead"
         );
     }
 
@@ -472,6 +484,7 @@ fn render_refinement_prompt(
     previous_pass: Option<&RefinementPassOutput>,
 ) -> Result<String> {
     let repo_target = RepoTarget::from_root(root);
+    let backlog_dir_label = PlanningPaths::for_root(root)?.backlog_dir_label(root);
     let planning_context = load_context_bundle(root)?;
     let current_description = issue
         .description
@@ -508,7 +521,7 @@ Repository planning context:\n{planning_context}\n\n\
 Instructions:\n\
 1. Critique the current issue quality for this repository only.\n\
 2. Produce structured findings in these exact categories: `missing_requirements`, `unclear_scope`, `validation_gaps`, `dependency_risks`, and `follow_up_ideas`.\n\
-3. Rewrite the full issue description as polished Markdown ready to save into `.metastack/backlog/<ISSUE>/index.md` and, when explicitly approved, back into Linear.\n\
+3. Rewrite the full issue description as polished Markdown ready to save into `{backlog_dir_label}/<ISSUE>/index.md` and, when explicitly approved, back into Linear.\n\
 4. Keep the rewrite consistent with the configured repository scope. Do not invent a second storage model or work outside this repository.\n\
 5. When the issue changes CLI behavior, include concrete validation commands or command-path checks in the rewrite.\n\
 6. Use the previous pass as critique input when present, but improve it if you find gaps or ambiguity.\n\
@@ -560,7 +573,9 @@ fn max_backtick_run(value: &str) -> usize {
 }
 
 fn load_context_bundle(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
+    let scan_command = render_command(Some(root), "context scan")
+        .unwrap_or_else(|_| "meta context scan".to_string());
     let sections = [
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),
@@ -573,18 +588,18 @@ fn load_context_bundle(root: &Path) -> Result<String> {
     for (title, path) in sections {
         lines.push(format!("## {title}"));
         lines.push(String::new());
-        lines.push(read_context(&path)?);
+        lines.push(read_context(&path, &scan_command)?);
         lines.push(String::new());
     }
 
     Ok(lines.join("\n"))
 }
 
-fn read_context(path: &Path) -> Result<String> {
+fn read_context(path: &Path, scan_command: &str) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta scan` to generate it._",
+            "_Missing `{}`. Run `{scan_command}` to generate it._",
             path.file_name()
                 .map(|value| value.to_string_lossy())
                 .unwrap_or_default()
@@ -712,7 +727,7 @@ mod tests {
     fn render_refinement_prompt_uses_safe_fences_for_existing_markdown_code_blocks() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path();
-        let paths = PlanningPaths::new(root);
+        let paths = PlanningPaths::for_root(root).expect("paths should resolve");
         write_text_file(&paths.scan_path(), "scan", true).expect("scan context");
         write_text_file(&paths.architecture_path(), "architecture", true).expect("architecture");
         write_text_file(&paths.conventions_path(), "conventions", true).expect("conventions");

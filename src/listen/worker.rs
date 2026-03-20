@@ -15,7 +15,7 @@ use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, effective_command_name};
 use crate::linear::{
     IssueListFilters, IssueSummary, LinearClient, LinearService, ReqwestLinearClient, WorkflowState,
 };
@@ -413,7 +413,7 @@ fn load_worker_backlog_issue(
     identifier: &str,
     parent_issue: &IssueSummary,
 ) -> Result<IssueSummary> {
-    let issue_dir = PlanningPaths::new(workspace_path).backlog_issue_dir(identifier);
+    let issue_dir = PlanningPaths::for_root(workspace_path)?.backlog_issue_dir(identifier);
     let metadata = load_issue_metadata(&issue_dir).ok();
     Ok(IssueSummary {
         id: metadata
@@ -585,11 +585,12 @@ fn execute_agent_turn(
         command.env("METASTACK_LINEAR_BACKLOG_ISSUE_URL", &backlog_issue.url);
         command.env(
             "METASTACK_LINEAR_BACKLOG_PATH",
-            PlanningPaths::new(context.workspace_path).backlog_issue_dir(&backlog_issue.identifier),
+            PlanningPaths::for_root(context.workspace_path)?
+                .backlog_issue_dir(&backlog_issue.identifier),
         );
     }
     let attachment_context_path =
-        PlanningPaths::new(context.workspace_path).agent_issue_context_dir(&issue.identifier);
+        PlanningPaths::for_root(context.workspace_path)?.agent_issue_context_dir(&issue.identifier);
     if attachment_context_path.is_dir() {
         command.env(
             "METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH",
@@ -658,9 +659,14 @@ fn build_agent_instructions(
 ) -> Result<String> {
     let repo_target = RepoTarget::with_workspace(context.source_root, context.workspace_path);
     let workflow_contract = render_workflow_contract(context.source_root, repo_target)?;
+    let command_name = effective_command_name(Some(context.workspace_path))?;
+    let paths = PlanningPaths::for_root(context.workspace_path)?;
+    let repo_state_label = display_path(&paths.metastack_dir, context.workspace_path);
     let mut sections = vec![
         workflow_contract,
-        "You are running inside `meta listen`, an unattended orchestration session.".to_string(),
+        format!(
+            "You are running inside `{command_name} agents listen`, an unattended orchestration session."
+        ),
         "Never ask a human to perform follow-up actions. Only stop early for a true blocker such as missing required auth, permissions, or secrets.".to_string(),
         "Work only in the provided workspace checkout and do not edit any other filesystem path.".to_string(),
         format!(
@@ -672,9 +678,13 @@ fn build_agent_instructions(
             "Reconcile the existing `## Codex Workpad` comment `{}` before doing new work and keep that single comment updated in place.",
             context.workpad_comment_id
         ),
-        "Never overwrite the primary Linear issue description during `meta listen`. Put planning, progress, validation, and status updates in the workpad comment instead.".to_string(),
+        format!(
+            "Never overwrite the primary Linear issue description during `{command_name} agents listen`. Put planning, progress, validation, and status updates in the workpad comment instead."
+        ),
         "Reproduce the issue before changing code, refine the workpad plan and acceptance criteria, then implement and validate the fix.".to_string(),
-        "Each turn must either leave meaningful non-`.metastack/` workspace updates or stop with a concrete blocker. Merely rewriting backlog files, briefs, or workpad notes is not enough.".to_string(),
+        format!(
+            "Each turn must either leave meaningful non-`{repo_state_label}/` workspace updates or stop with a concrete blocker. Merely rewriting backlog files, briefs, or workpad notes is not enough."
+        ),
         "If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks.".to_string(),
         "Do not consider the task complete until the code is committed, pushed, a PR is opened, and the PR is attached back to the Linear issue.".to_string(),
         format!(
@@ -687,14 +697,11 @@ fn build_agent_instructions(
         sections.push(format!(
             "A local backlog exists for `{}` in `{}`. Use those files as the task list source of truth, keep them current as you work, and keep the original Linear issue comment updated in place.",
             backlog_issue.identifier,
-            PlanningPaths::new(context.workspace_path)
-                .backlog_issue_dir(&backlog_issue.identifier)
-                .display()
+            paths.backlog_issue_dir(&backlog_issue.identifier).display()
         ));
     }
 
-    let manifest_path = PlanningPaths::new(context.workspace_path)
-        .agent_issue_context_manifest_path(&issue.identifier);
+    let manifest_path = paths.agent_issue_context_manifest_path(&issue.identifier);
     if manifest_path.is_file() {
         sections.push(format!(
             "Additional Linear attachment context has been downloaded to `{}`. Review `{}` and use the downloaded markdown files and attachments as supporting context before implementation.",
@@ -741,8 +748,9 @@ fn build_worker_session(
         phase,
         summary,
         brief_path: Some(
-            PlanningPaths::new(context.workspace_path)
-                .agent_briefs_dir
+            PlanningPaths::for_root(context.workspace_path)
+                .map(|paths| paths.agent_briefs_dir)
+                .unwrap_or_else(|_| PlanningPaths::new(context.workspace_path).agent_briefs_dir)
                 .join(format!("{}.md", issue.identifier))
                 .display()
                 .to_string(),
@@ -754,8 +762,12 @@ fn build_worker_session(
             .backlog_issue
             .map(|backlog_issue| backlog_issue.title.clone()),
         backlog_path: context.backlog_issue.map(|backlog_issue| {
-            PlanningPaths::new(context.workspace_path)
-                .backlog_issue_dir(&backlog_issue.identifier)
+            PlanningPaths::for_root(context.workspace_path)
+                .map(|paths| paths.backlog_issue_dir(&backlog_issue.identifier))
+                .unwrap_or_else(|_| {
+                    PlanningPaths::new(context.workspace_path)
+                        .backlog_issue_dir(&backlog_issue.identifier)
+                })
                 .display()
                 .to_string()
         }),

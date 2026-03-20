@@ -25,6 +25,8 @@ use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, 
 #[derive(Debug, Clone)]
 pub struct SyncDashboardData {
     pub title: String,
+    pub command_name: String,
+    pub backlog_dir_label: String,
     pub issues: Vec<SyncDashboardIssue>,
 }
 
@@ -99,7 +101,7 @@ pub fn run_sync_dashboard(
 
     if !io::stdout().is_terminal() {
         bail!(
-            "the interactive sync dashboard requires a TTY; use `meta backlog sync pull <ISSUE>` or `meta backlog sync push <ISSUE>` for scripted runs"
+            "the interactive sync dashboard requires a TTY; use a direct backlog sync pull or push command for scripted runs"
         );
     }
 
@@ -234,8 +236,14 @@ fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) 
     );
     let items = if app.data.issues.is_empty() {
         vec![ListItem::new(empty_state(
-            "No backlog entries were found under `.metastack/backlog/`.",
-            "Create or link a backlog entry, then rerun `meta backlog sync`.",
+            format!(
+                "No backlog entries were found under `{}`.",
+                app.data.backlog_dir_label
+            ),
+            format!(
+                "Create or link a backlog entry, then rerun `{}`.",
+                sync_command(&app.data.command_name, "")
+            ),
         ))]
     } else if results.is_empty() {
         vec![ListItem::new(empty_state(
@@ -402,11 +410,15 @@ impl SyncDashboardApp {
         match self.focus {
             Focus::Issues => {
                 if self.data.issues.is_empty() {
-                    "No backlog entries were discovered under `.metastack/backlog/`.".to_string()
+                    format!(
+                        "No backlog entries were discovered under `{}`.",
+                        self.data.backlog_dir_label
+                    )
                 } else {
                     format!(
-                        "{} backlog entries loaded from local `.metastack/backlog/`. Search narrows the list before you choose pull or push.",
-                        self.visible_issue_results().len()
+                        "{} backlog entries loaded from local `{}`. Search narrows the list before you choose pull or push.",
+                        self.visible_issue_results().len(),
+                        self.data.backlog_dir_label
                     )
                 }
             }
@@ -430,7 +442,11 @@ impl SyncDashboardApp {
             return Text::from("No backlog entry is available for the current search.");
         };
         let issue = &self.data.issues[result.issue_index];
-        issue.preview_text(Some(result))
+        issue.preview_text(
+            Some(result),
+            &self.data.command_name,
+            &self.data.backlog_dir_label,
+        )
     }
 
     fn status_text(&self) -> String {
@@ -445,18 +461,26 @@ impl SyncDashboardApp {
         match self.focus {
             Focus::Issues => {
                 if self.data.issues.is_empty() {
-                    "Create or link backlog entries under `.metastack/backlog/`, then rerun `meta backlog sync`."
-                        .to_string()
+                    format!(
+                        "Create or link backlog entries under `{}`, then rerun `{}`.",
+                        self.data.backlog_dir_label,
+                        sync_command(&self.data.command_name, "")
+                    )
                 } else {
-                    "Step 1 of 2: search or choose a backlog entry sourced from local `.metastack/backlog/`."
-                        .to_string()
+                    format!(
+                        "Step 1 of 2: search or choose a backlog entry sourced from local `{}`.",
+                        self.data.backlog_dir_label
+                    )
                 }
             }
             Focus::Actions => match self.selected_issue() {
                 Some(issue) if issue.is_linked() => "Step 2 of 2: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
                 Some(issue) => format!(
-                    "This backlog entry is unlinked. Run `meta backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
-                    issue.entry_slug
+                    "This backlog entry is unlinked. Run `{}` before pull or push becomes available.",
+                    sync_command(
+                        &self.data.command_name,
+                        &format!("link <ISSUE> --entry {}", issue.entry_slug)
+                    )
                 ),
                 None => "No backlog entry is selected.".to_string(),
             },
@@ -506,7 +530,12 @@ impl SyncDashboardIssue {
         issue
     }
 
-    fn preview_text(&self, result: Option<&IssueSearchResult>) -> Text<'static> {
+    fn preview_text(
+        &self,
+        result: Option<&IssueSearchResult>,
+        command_name: &str,
+        backlog_dir_label: &str,
+    ) -> Text<'static> {
         let mut lines = vec![
             Line::from(vec![
                 Span::raw("entry "),
@@ -542,14 +571,17 @@ impl SyncDashboardIssue {
                 self.local_status.as_str()
             ))]),
             Line::from(vec![Span::raw(format!(
-                "path .metastack/backlog/{}",
-                self.entry_slug
+                "path {}/{}",
+                backlog_dir_label, self.entry_slug
             ))]),
             Line::from(""),
             Line::from("This backlog entry is not linked to Linear yet."),
             Line::from(format!(
-                "Run `meta backlog sync link <ISSUE> --entry {}` to enable pull and push.",
-                self.entry_slug
+                "Run `{}` to enable pull and push.",
+                sync_command(
+                    command_name,
+                    &format!("link <ISSUE> --entry {}", self.entry_slug)
+                )
             )),
         ]);
         Text::from(lines)
@@ -566,9 +598,9 @@ impl SyncSelectionAction {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Pull => "Refresh `.metastack/backlog/<ISSUE>/` from the Linear issue.",
+            Self::Pull => "Refresh the local backlog entry from the Linear issue.",
             Self::Push => {
-                "Sync CLI-managed attachment files; `index.md` stays local unless you run `meta backlog sync push <ISSUE> --update-description`."
+                "Sync CLI-managed attachment files; `index.md` stays local unless you run backlog sync push with `--update-description`."
             }
         }
     }
@@ -578,6 +610,14 @@ impl SyncSelectionAction {
             Self::Pull => "pull",
             Self::Push => "push",
         }
+    }
+}
+
+fn sync_command(command_name: &str, suffix: &str) -> String {
+    if suffix.trim().is_empty() {
+        format!("{command_name} backlog sync")
+    } else {
+        format!("{command_name} backlog sync {suffix}")
     }
 }
 
@@ -668,6 +708,8 @@ mod tests {
         });
         SyncDashboardData {
             title: demo.title,
+            command_name: "intuition".to_string(),
+            backlog_dir_label: ".intuition/backlog".to_string(),
             issues: issues
                 .into_iter()
                 .enumerate()
@@ -760,9 +802,7 @@ mod tests {
         };
         assert!(snapshot.contains("link required"));
         assert!(snapshot.contains("This backlog entry is unlinked."));
-        assert!(
-            snapshot.contains("<ISSUE> --entry MET-13` before pull or push becomes available.")
-        );
+        assert!(snapshot.contains("link <ISSUE> --entry MET-13"));
         assert!(!snapshot.contains("Ready to push"));
     }
 }

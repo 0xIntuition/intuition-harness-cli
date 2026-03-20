@@ -230,6 +230,56 @@ fn context_doctor_succeeds_without_repo_overlay_files_when_required_inputs_exist
     Ok(())
 }
 
+#[test]
+fn context_doctor_uses_branded_repo_state_root_for_codebase_inputs() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(repo_root.join("README.md"), "# Context OK\n")?;
+    write_branded_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "branding": {
+    "command_name": "intuition",
+    "repo_state_root": ".intuition",
+    "backlog_root": ".intuition/backlog"
+  }
+}
+"#,
+        ".intuition",
+    )?;
+
+    let stub_path = bin_dir.join("codex");
+    fs::write(&stub_path, "#!/bin/sh\nexit 0\n")?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    let current_path = std::env::var("PATH")?;
+
+    cli()
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "context",
+            "doctor",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Status: ok"))
+        .stdout(predicate::str::contains(
+            "All expected `.intuition/codebase` files are present.",
+        ))
+        .stdout(predicate::str::contains(".metastack/codebase").not());
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn context_reload_refreshes_repository_context_files() -> Result<(), Box<dyn Error>> {

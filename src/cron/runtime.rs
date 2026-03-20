@@ -19,7 +19,7 @@ use crate::cli::{CronDaemonArgs, CronRunArgs, CronStartArgs, RunAgentArgs};
 use crate::config::{
     AGENT_ROUTE_RUNTIME_CRON_PROMPT, AppConfig, PlanningMeta, normalize_agent_name,
 };
-use crate::fs::{PlanningPaths, display_path, ensure_dir};
+use crate::fs::{PlanningPaths, display_path, ensure_dir, render_command};
 
 use super::{
     CommandPhaseOutcome, CronJob, JobExecutionOutcome, ScheduledJob, SchedulerState,
@@ -29,13 +29,17 @@ use super::{
 
 pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<String>> {
     super::ensure_cron_layout(root)?;
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_runtime_layout(&paths)?;
+    let cron_status_command = render_command(Some(root), "cron status")
+        .unwrap_or_else(|_| "meta cron status".to_string());
+    let cron_start_foreground_command = render_command(Some(root), "cron start --foreground")
+        .unwrap_or_else(|_| "meta cron start --foreground".to_string());
 
     if let Some(pid) = read_pid(&paths)? {
         if pid_is_running(pid) {
             return Ok(Some(format!(
-                "Cron scheduler is already running with pid {pid}. Use `meta cron status` for details."
+                "Cron scheduler is already running with pid {pid}. Use `{cron_status_command}` for details."
             )));
         }
 
@@ -50,7 +54,7 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
     #[cfg(not(unix))]
     {
         bail!(
-            "detached cron scheduling is only supported on Unix-like hosts today; rerun with `meta cron start --foreground`"
+            "detached cron scheduling is only supported on Unix-like hosts today; rerun with `{cron_start_foreground_command}`"
         );
     }
 
@@ -58,8 +62,12 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
     {
         use std::os::unix::process::CommandExt;
 
-        let current_exe =
-            env::current_exe().context("failed to resolve the current `meta` executable")?;
+        let current_exe = env::current_exe().with_context(|| {
+            format!(
+                "failed to resolve the current executable for `{}`",
+                render_command(Some(root), "").unwrap_or_else(|_| "meta".to_string())
+            )
+        })?;
         let log_path = paths.cron_scheduler_log_path();
         let stdout = OpenOptions::new()
             .create(true)
@@ -98,7 +106,7 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
 
         if !pid_is_running(child.id()) {
             bail!(
-                "detached cron scheduler exited immediately; inspect `{}` for details or rerun with `meta cron start --foreground`",
+                "detached cron scheduler exited immediately; inspect `{}` for details or rerun with `{cron_start_foreground_command}`",
                 display_path(&log_path, root)
             );
         }
@@ -121,7 +129,7 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
 }
 
 pub(super) fn run_stop(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let Some(pid) = read_pid(&paths)? else {
         return Ok("Cron scheduler is not running.".to_string());
     };
@@ -136,7 +144,9 @@ pub(super) fn run_stop(root: &Path) -> Result<String> {
 
     #[cfg(not(unix))]
     {
-        bail!("`meta cron stop` is only supported on Unix-like hosts today");
+        let cron_stop_command = render_command(Some(root), "cron stop")
+            .unwrap_or_else(|_| "meta cron stop".to_string());
+        bail!("`{cron_stop_command}` is only supported on Unix-like hosts today");
     }
 
     #[cfg(unix)]
@@ -181,7 +191,7 @@ pub(super) fn run_stop(root: &Path) -> Result<String> {
 }
 
 pub(super) fn run_status(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let state = load_scheduler_state(&paths)?;
     let running_pid = state.pid.filter(|pid| pid_is_running(*pid));
     let discovered = discover_jobs(root)?;
@@ -291,7 +301,7 @@ pub(super) fn run_status(root: &Path) -> Result<String> {
 
 pub(super) fn run_job_now(root: &Path, args: &CronRunArgs) -> Result<String> {
     super::ensure_cron_layout(root)?;
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_runtime_layout(&paths)?;
     let job = load_job(root, &paths.cron_job_path(&args.name))?;
     let mut state = load_scheduler_state(&paths)?;
@@ -333,7 +343,7 @@ fn run_scheduler_loop(
     poll_interval_seconds: u64,
     pid_override: Option<u32>,
 ) -> Result<()> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_runtime_layout(&paths)?;
 
     let mut state = load_scheduler_state(&paths)?;

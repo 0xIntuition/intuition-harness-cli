@@ -16,7 +16,8 @@ use crate::backlog::{
 use crate::cli::{LinearClientArgs, SyncLinkArgs, SyncPullArgs, SyncPushArgs, SyncStatusArgs};
 use crate::config::load_required_planning_meta;
 use crate::fs::{
-    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
+    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, render_command,
+    write_text_file,
 };
 use crate::linear::{
     AttachmentCreateRequest, IssueEditSpec, IssueListFilters, IssueSummary, LinearService,
@@ -98,18 +99,29 @@ pub async fn run_sync_dashboard_command(
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let paths = crate::fs::PlanningPaths::for_root(&root)?;
+    let command_name = crate::fs::effective_command_name(Some(&root))?;
+    let backlog_dir_label = paths.backlog_dir_label(&root);
     let entries = discover_backlog_entries(&root)?;
     let LinearCommandContext {
         service,
         default_project_id,
         ..
     } = load_linear_command_context(client_args, None)?;
-    let title = sync_dashboard_title(project_override, default_project_id.as_deref());
+    let title = sync_dashboard_title(Some(&root), project_override, default_project_id.as_deref());
 
     match run_sync_dashboard(
         SyncDashboardData {
             title,
-            issues: load_sync_dashboard_issues(&service, &entries).await?,
+            command_name: command_name.clone(),
+            backlog_dir_label: backlog_dir_label.clone(),
+            issues: load_sync_dashboard_issues(
+                &service,
+                &entries,
+                &backlog_dir_label,
+                &command_name,
+            )
+            .await?,
         },
         options,
     )? {
@@ -146,12 +158,18 @@ pub async fn run_sync_dashboard_command(
 async fn load_sync_dashboard_issues(
     service: &LinearService<ReqwestLinearClient>,
     entries: &[BacklogSyncEntry],
+    backlog_dir_label: &str,
+    command_name: &str,
 ) -> Result<Vec<SyncDashboardIssue>> {
     let mut dashboard_issues = Vec::with_capacity(entries.len());
     for entry in entries {
         let metadata = entry.metadata.as_ref();
         if metadata.is_none() {
-            dashboard_issues.push(build_unlinked_sync_dashboard_issue(entry));
+            dashboard_issues.push(build_unlinked_sync_dashboard_issue(
+                entry,
+                backlog_dir_label,
+                command_name,
+            ));
             continue;
         }
         let remote_issue = if let Some(metadata) = metadata {
@@ -181,7 +199,11 @@ async fn load_sync_dashboard_issues(
     Ok(dashboard_issues)
 }
 
-fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboardIssue {
+fn build_unlinked_sync_dashboard_issue(
+    entry: &BacklogSyncEntry,
+    backlog_dir_label: &str,
+    command_name: &str,
+) -> SyncDashboardIssue {
     let slug = entry.slug.clone();
     SyncDashboardIssue {
         entry_slug: slug.clone(),
@@ -190,9 +212,9 @@ fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboar
             identifier: slug.clone(),
             title: entry.title.clone(),
             description: Some(format!(
-                "Local backlog entry under `.metastack/backlog/{slug}`. Link it with `meta backlog sync link <ISSUE> --entry {slug}` to enable pull and push."
+                "Local backlog entry under `{backlog_dir_label}/{slug}`. Link it with `{command_name} backlog sync link <ISSUE> --entry {slug}` to enable pull and push."
             )),
-            url: format!(".metastack/backlog/{slug}"),
+            url: format!("{backlog_dir_label}/{slug}"),
             priority: None,
             estimate: None,
             updated_at: "local-only".to_string(),
@@ -297,8 +319,10 @@ pub async fn run_sync_link(
         Some(identifier) => service.load_issue(identifier).await?,
         None => {
             if no_interactive || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+                let backlog_sync_link_command = render_command(Some(&root), "backlog sync link")
+                    .unwrap_or_else(|_| "meta backlog sync link".to_string());
                 bail!(
-                    "`meta backlog sync link` requires <ISSUE> when `--no-interactive` is used or when the command runs without a TTY"
+                    "`{backlog_sync_link_command}` requires <ISSUE> when `--no-interactive` is used or when the command runs without a TTY"
                 );
             }
             let (_service, issues, _) =
@@ -375,17 +399,19 @@ pub async fn run_sync_link(
     Ok(())
 }
 
-/// Show the current sync state for every backlog entry under `.metastack/backlog/`.
+/// Show the current sync state for every backlog entry under the effective backlog root.
 ///
 /// Returns an error when planning metadata is missing, backlog entries cannot be scanned, or
 /// `--fetch` is used and Linear issue state cannot be loaded.
 pub async fn run_sync_status(client_args: &LinearClientArgs, args: &SyncStatusArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let paths = PlanningPaths::for_root(&root)?;
+    let backlog_dir_label = paths.backlog_dir_label(&root);
     let entries = discover_backlog_entries(&root)?;
 
     if entries.is_empty() {
-        println!("No backlog entries found under .metastack/backlog/.");
+        println!("No backlog entries found under {backlog_dir_label}/.");
         return Ok(());
     }
 
@@ -511,7 +537,7 @@ pub async fn run_sync_push(client_args: &LinearClientArgs, args: &SyncPushArgs) 
         .as_deref()
         .ok_or_else(|| anyhow!("missing required issue identifier for sync push"))?;
     if args.update_description {
-        guard_listen_issue_description_sync(issue_identifier)?;
+        guard_listen_issue_description_sync(&root, issue_identifier)?;
     }
     let issue = service.load_issue(issue_identifier).await?;
     let entries = discover_backlog_entries(&root)?;
@@ -542,7 +568,7 @@ pub(crate) async fn run_sync_push_for_issue(
     Ok(())
 }
 
-fn guard_listen_issue_description_sync(identifier: &str) -> Result<()> {
+fn guard_listen_issue_description_sync(root: &Path, identifier: &str) -> Result<()> {
     let unattended = std::env::var("METASTACK_LISTEN_UNATTENDED")
         .ok()
         .is_some_and(|value| value == "1");
@@ -553,8 +579,12 @@ fn guard_listen_issue_description_sync(identifier: &str) -> Result<()> {
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case(identifier))
     {
+        let backlog_sync_push_command = render_command(Some(root), "backlog sync push")
+            .unwrap_or_else(|_| "meta backlog sync push".to_string());
+        let agents_listen_command = render_command(Some(root), "agents listen")
+            .unwrap_or_else(|_| "meta agents listen".to_string());
         bail!(
-            "`meta backlog sync push {identifier}` is disabled during `meta agents listen` because it would overwrite the primary Linear issue description; update the workpad comment instead"
+            "`{backlog_sync_push_command} {identifier}` is disabled during `{agents_listen_command}` because it would overwrite the primary Linear issue description; update the workpad comment instead"
         );
     }
 
@@ -566,13 +596,14 @@ async fn run_sync_pull_all(
     service: &LinearService<ReqwestLinearClient>,
     discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<()> {
+    let backlog_dir_label = PlanningPaths::for_root(root)?.backlog_dir_label(root);
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
         .into_iter()
         .filter(|entry| entry.metadata.is_some())
         .collect::<Vec<_>>();
     if linked_entries.is_empty() {
-        println!("No linked backlog entries found under .metastack/backlog/.");
+        println!("No linked backlog entries found under {backlog_dir_label}/.");
         return Ok(());
     }
 
@@ -621,8 +652,10 @@ async fn run_sync_pull_all(
     );
 
     if summary.errors > 0 {
+        let backlog_sync_pull_command = render_command(Some(root), "backlog sync pull")
+            .unwrap_or_else(|_| "meta backlog sync pull".to_string());
         bail!(
-            "`meta backlog sync pull --all` completed with {} error{}",
+            "`{backlog_sync_pull_command} --all` completed with {} error{}",
             summary.errors,
             plural_suffix(summary.errors),
         );
@@ -636,13 +669,14 @@ async fn run_sync_push_all(
     service: &LinearService<ReqwestLinearClient>,
     update_description: bool,
 ) -> Result<()> {
+    let backlog_dir_label = PlanningPaths::for_root(root)?.backlog_dir_label(root);
     let entries = discover_backlog_entries(root)?;
     let linked_entries = entries
         .into_iter()
         .filter(|entry| entry.metadata.is_some())
         .collect::<Vec<_>>();
     if linked_entries.is_empty() {
-        println!("No linked backlog entries found under .metastack/backlog/.");
+        println!("No linked backlog entries found under {backlog_dir_label}/.");
         return Ok(());
     }
 
@@ -653,7 +687,7 @@ async fn run_sync_push_all(
             .as_ref()
             .ok_or_else(|| anyhow!("linked backlog entry metadata unexpectedly missing"))?;
         if update_description
-            && let Err(error) = guard_listen_issue_description_sync(&metadata.identifier)
+            && let Err(error) = guard_listen_issue_description_sync(root, &metadata.identifier)
         {
             summary.errors += 1;
             eprintln!(
@@ -705,8 +739,10 @@ async fn run_sync_push_all(
     );
 
     if summary.errors > 0 {
+        let backlog_sync_push_command = render_command(Some(root), "backlog sync push")
+            .unwrap_or_else(|_| "meta backlog sync push".to_string());
         bail!(
-            "`meta backlog sync push --all` completed with {} error{}",
+            "`{backlog_sync_push_command} --all` completed with {} error{}",
             summary.errors,
             plural_suffix(summary.errors),
         );
@@ -761,7 +797,7 @@ async fn sync_pull_issue(
         );
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
-            if !prompt_pull_overwrite(&issue.identifier, resolution.status, &diff)? {
+            if !prompt_pull_overwrite(root, &issue.identifier, resolution.status, &diff)? {
                 println!(
                     "Canceled pull for {}. Local backlog files and hash baselines were left unchanged.",
                     issue.identifier
@@ -769,8 +805,10 @@ async fn sync_pull_issue(
                 return Ok(SyncExecutionOutcome::Skipped);
             }
         } else {
+            let backlog_sync_pull_command = render_command(Some(root), "backlog sync pull")
+                .unwrap_or_else(|_| "meta backlog sync pull".to_string());
             bail!(
-                "`meta backlog sync pull {}` refused to overwrite local backlog content because the sync state is `{}`; rerun in a TTY to review the diff and confirm the overwrite",
+                "`{backlog_sync_pull_command} {}` refused to overwrite local backlog content because the sync state is `{}`; rerun in a TTY to review the diff and confirm the overwrite",
                 issue.identifier,
                 resolution.status.as_str(),
             );
@@ -868,8 +906,10 @@ async fn sync_push_issue(
     skip_if_synced: bool,
 ) -> Result<SyncExecutionOutcome> {
     if !issue_dir.is_dir() {
+        let backlog_sync_pull_command = render_command(Some(root), "backlog sync pull")
+            .unwrap_or_else(|_| "meta backlog sync pull".to_string());
         bail!(
-            "backlog item `{}` was not found at `{}`; run `meta backlog sync pull {}` first",
+            "backlog item `{}` was not found at `{}`; run `{backlog_sync_pull_command} {}` first",
             issue.identifier,
             issue_dir.display(),
             issue.identifier
@@ -878,8 +918,10 @@ async fn sync_push_issue(
 
     let index_path = issue_dir.join(INDEX_FILE_NAME);
     let description = fs::read_to_string(&index_path).with_context(|| {
+        let backlog_sync_push_command = render_command(Some(root), "backlog sync push")
+            .unwrap_or_else(|_| "meta backlog sync push".to_string());
         format!(
-            "failed to read `{}`; `meta backlog sync push` requires `{}`",
+            "failed to read `{}`; `{backlog_sync_push_command}` requires `{}`",
             index_path.display(),
             INDEX_FILE_NAME
         )
@@ -907,8 +949,10 @@ async fn sync_push_issue(
             BacklogSyncStatus::RemoteAhead | BacklogSyncStatus::Diverged
         )
     {
+        let backlog_sync_push_command = render_command(Some(root), "backlog sync push")
+            .unwrap_or_else(|_| "meta backlog sync push".to_string());
         bail!(
-            "`meta backlog sync push {}` refused to update the Linear description because the sync state is `{}`; pull first or reconcile the local backlog before retrying with `--update-description`",
+            "`{backlog_sync_push_command} {}` refused to update the Linear description because the sync state is `{}`; pull first or reconcile the local backlog before retrying with `--update-description`",
             issue.identifier,
             resolution.status.as_str(),
         );
@@ -1220,12 +1264,20 @@ async fn load_sync_project_issues(
                 limit: usize::MAX,
                 ..IssueListFilters::default()
             },
-            sync_dashboard_title(Some(project_name), default_project_id.as_deref()),
+            sync_dashboard_title(
+                Some(&client_args.root),
+                Some(project_name),
+                default_project_id.as_deref(),
+            ),
         )
     } else {
+        let backlog_sync_command = render_command(Some(&client_args.root), "backlog sync")
+            .unwrap_or_else(|_| "meta backlog sync".to_string());
+        let runtime_setup_command = render_command(Some(&client_args.root), "runtime setup")
+            .unwrap_or_else(|_| "meta runtime setup".to_string());
         let project_id = default_project_id.ok_or_else(|| {
             anyhow!(
-                "`meta backlog sync` requires a repo default project or `--project`. Run `meta runtime setup --root . --project <PROJECT>` or pass `--project \"Project Name\"`."
+                "`{backlog_sync_command}` requires a repo default project or `--project`. Run `{runtime_setup_command} --root . --project <PROJECT>` or pass `--project \"Project Name\"`."
             )
         })?;
         (
@@ -1235,7 +1287,7 @@ async fn load_sync_project_issues(
                 limit: usize::MAX,
                 ..IssueListFilters::default()
             },
-            sync_dashboard_title(None, Some(project_id.as_str())),
+            sync_dashboard_title(Some(&client_args.root), None, Some(project_id.as_str())),
         )
     };
 
@@ -1244,22 +1296,25 @@ async fn load_sync_project_issues(
 }
 
 fn sync_dashboard_title(
+    root: Option<&Path>,
     project_override: Option<&str>,
     default_project_id: Option<&str>,
 ) -> String {
+    let backlog_sync_command =
+        render_command(root, "backlog sync").unwrap_or_else(|_| "meta backlog sync".to_string());
     if let Some(project_name) = project_override {
-        return format!("meta backlog sync ({project_name})");
+        return format!("{backlog_sync_command} ({project_name})");
     }
 
     if let Some(project_id) = default_project_id {
-        format!("meta backlog sync ({project_id})")
+        format!("{backlog_sync_command} ({project_id})")
     } else {
-        "meta backlog sync".to_string()
+        backlog_sync_command
     }
 }
 
 fn discover_backlog_entries(root: &Path) -> Result<Vec<BacklogSyncEntry>> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     if !paths.backlog_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -1333,8 +1388,10 @@ fn resolve_link_issue_dir(
         resolve_entry_by_slug(root, entries, entry_slug)?
     } else {
         if no_interactive || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            let backlog_sync_link_command = render_command(Some(root), "backlog sync link")
+                .unwrap_or_else(|_| "meta backlog sync link".to_string());
             bail!(
-                "`meta backlog sync link {}` requires `--entry <SLUG>` when `--no-interactive` is used or when the command runs without a TTY",
+                "`{backlog_sync_link_command} {}` requires `--entry <SLUG>` when `--no-interactive` is used or when the command runs without a TTY",
                 issue.identifier,
             );
         }
@@ -1414,17 +1471,16 @@ fn linked_entry_for_issue<'a>(
 }
 
 fn resolve_entry_by_slug(root: &Path, entries: &[BacklogSyncEntry], slug: &str) -> Result<PathBuf> {
+    let paths = PlanningPaths::for_root(root)?;
+    let backlog_dir_label = paths.backlog_dir_label(root);
     let entry = entries
         .iter()
         .find(|entry| entry.slug == slug)
         .ok_or_else(|| {
-            anyhow!("backlog entry `{slug}` was not found under `.metastack/backlog/`")
+            anyhow!("backlog entry `{slug}` was not found under `{backlog_dir_label}/`")
         })?;
-    if !entry
-        .issue_dir
-        .starts_with(PlanningPaths::new(root).backlog_dir)
-    {
-        bail!("refusing to use backlog entry outside `.metastack/backlog/`");
+    if !entry.issue_dir.starts_with(&paths.backlog_dir) {
+        bail!("refusing to use backlog entry outside `{backlog_dir_label}/`");
     }
     Ok(entry.issue_dir.clone())
 }
@@ -1534,16 +1590,31 @@ fn needs_pull_overwrite_confirmation(status: BacklogSyncStatus) -> bool {
     )
 }
 
-fn prompt_pull_overwrite(identifier: &str, status: BacklogSyncStatus, diff: &str) -> Result<bool> {
+fn prompt_pull_overwrite(
+    root: &Path,
+    identifier: &str,
+    status: BacklogSyncStatus,
+    diff: &str,
+) -> Result<bool> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
-    prompt_pull_overwrite_with_io(identifier, status, diff, &mut reader, &mut writer)
+    let backlog_sync_pull_command = render_command(Some(root), "backlog sync pull")
+        .unwrap_or_else(|_| "meta backlog sync pull".to_string());
+    prompt_pull_overwrite_with_io(
+        identifier,
+        &backlog_sync_pull_command,
+        status,
+        diff,
+        &mut reader,
+        &mut writer,
+    )
 }
 
 fn prompt_pull_overwrite_with_io(
     identifier: &str,
+    backlog_sync_pull_command: &str,
     status: BacklogSyncStatus,
     diff: &str,
     reader: &mut impl BufRead,
@@ -1551,7 +1622,7 @@ fn prompt_pull_overwrite_with_io(
 ) -> Result<bool> {
     writeln!(
         writer,
-        "`meta backlog sync pull {identifier}` detected `{}`. Review the incoming description diff before overwriting local backlog files:",
+        "`{backlog_sync_pull_command} {identifier}` detected `{}`. Review the incoming description diff before overwriting local backlog files:",
         status.as_str(),
     )?;
     writeln!(writer, "{diff}")?;
@@ -1699,6 +1770,7 @@ mod tests {
 
         let accepted = prompt_pull_overwrite_with_io(
             "MET-35",
+            "intuition backlog sync pull",
             BacklogSyncStatus::RemoteAhead,
             "diff",
             &mut reader,

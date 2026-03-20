@@ -375,7 +375,7 @@ fn execute_merge_run(
     repository: &GithubRepository,
     selected_pull_requests: Vec<GithubPullRequest>,
 ) -> Result<MergeExecution> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_dir(&paths.merge_runs_dir)?;
 
     let (run_id, run_dir) = reserve_run_dir(&paths)?;

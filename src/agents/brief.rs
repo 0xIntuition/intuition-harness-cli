@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir, write_text_file};
+use crate::fs::{
+    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
+};
 use crate::scaffold::ensure_planning_layout;
 
 #[derive(Debug, Clone, Default)]
@@ -26,7 +28,7 @@ pub(crate) struct AgentBriefRequest {
 pub(crate) fn write_agent_brief(root: &Path, request: AgentBriefRequest) -> Result<PathBuf> {
     let root = canonicalize_existing_dir(root)?;
     ensure_planning_layout(&root, false)?;
-    let paths = PlanningPaths::new(&root);
+    let paths = PlanningPaths::for_root(&root)?;
     ensure_dir(&paths.agent_briefs_dir)?;
 
     let output_path = request.output.clone().unwrap_or_else(|| {
@@ -41,6 +43,10 @@ pub(crate) fn write_agent_brief(root: &Path, request: AgentBriefRequest) -> Resu
 }
 
 fn render_brief(request: &AgentBriefRequest, paths: &PlanningPaths) -> Result<String> {
+    let repo_root = paths
+        .metadata_dir
+        .parent()
+        .unwrap_or(paths.metadata_dir.as_path());
     let scan = read_context(&paths.scan_path())?;
     let architecture = read_context(&paths.architecture_path())?;
     let concerns = read_context(&paths.concerns_path())?;
@@ -82,7 +88,10 @@ fn render_brief(request: &AgentBriefRequest, paths: &PlanningPaths) -> Result<St
         "## Guidance".to_string(),
         String::new(),
         "- Reconfirm the issue scope and current repository state before editing.".to_string(),
-        "- Use `.metastack/codebase/*.md` as the reusable source of context for future agents.".to_string(),
+        format!(
+            "- Use `{}` as the reusable source of context for future agents.",
+            display_path(&paths.codebase_dir, repo_root)
+        ),
         "- Capture reproduction, implement the requested change, validate with focused command proofs, and update the workpad.".to_string(),
         String::new(),
         "## Scan".to_string(),

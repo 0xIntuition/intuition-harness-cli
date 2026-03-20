@@ -5,7 +5,9 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::config::ListenRefreshPolicy;
-use crate::fs::{ensure_workspace_path_is_safe, sibling_workspace_root};
+use crate::fs::{
+    PlanningPaths, display_path, ensure_workspace_path_is_safe, sibling_workspace_root,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketWorkspaceProvisioning {
@@ -145,7 +147,14 @@ fn refresh_workspace_clone(
     run_git(workspace_path, &["fetch", "origin", "main"])?;
     run_git(workspace_path, &["checkout", "-B", branch, base_ref])?;
     run_git(workspace_path, &["reset", "--hard", base_ref])?;
-    run_git(workspace_path, &["clean", "-fd", "--exclude=.metastack/"])?;
+    let repo_state_exclusion = format!(
+        "--exclude={}/",
+        display_path(
+            &PlanningPaths::for_root(workspace_path)?.metastack_dir,
+            workspace_path
+        )
+    );
+    run_git(workspace_path, &["clean", "-fd", &repo_state_exclusion])?;
     let head_sha = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
 
     // Keep the source repo pointed at the latest upstream main as well.

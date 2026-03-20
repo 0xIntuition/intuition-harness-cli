@@ -135,6 +135,14 @@ curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/mai
 meta --version
 ```
 
+Smoke test an optional branded alias install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh | sh -s -- --version v0.1.0 --alias intuition
+~/.local/bin/meta --version
+~/.local/bin/intuition --version
+```
+
 ## Rollback And Yanked Releases
 
 - If a release is still a draft, rerun the workflow or delete the draft release and rerun from the same tag.
@@ -143,6 +151,7 @@ meta --version
 
 ## Maintainer Notes
 
-- `make release-artifacts` reads the version from `Cargo.toml`, so archive names stay aligned with `meta --version`.
-- The script validates `meta --version` for binaries it can execute locally, and exits non-zero when a required dependency such as `cross` is missing.
+- `make release-artifacts` reads the version from `Cargo.toml`, so archive names stay aligned with the packaged executable's `--version` output.
+- The script validates `<binary> --version` for binaries it can execute locally, and exits non-zero when a required dependency such as `cross` is missing.
 - Override the output root with `./scripts/release-artifacts.sh --output-dir /tmp/meta-release-artifacts` when you do not want to write under `target/`.
+- Set `META_RELEASE_BINARY_NAME=intuition` when a release needs to package a branded executable name inside the standard archive layout.

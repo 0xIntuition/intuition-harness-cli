@@ -4,7 +4,7 @@
 
 ## Design Goals
 
-- Reuse the existing Linear client and `.metastack/` workspace instead of adding a one-off integration path.
+- Reuse the existing Linear client and repo-local state workspace instead of adding a one-off integration path.
 - Keep daemon state install-scoped and inspectable so a small team can understand what the
   orchestrator has done across projects.
 - Provide a deterministic dashboard render path that works in local development, tests, and CI.
@@ -18,9 +18,9 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 2. Repo-scoped listen config can further require a specific issue label and/or require the assignee to match the Linear viewer tied to the API key.
 3. Newly discovered eligible issues are moved to `In Progress`.
 4. The daemon creates or refreshes a sibling `<repo>-workspace/<TICKET>` standalone clone rooted at `origin/main`, then checks out a deterministic ticket branch inside that clone.
-5. The daemon downloads the issue's Linear attachments into `.metastack/agents/issue-context/<TICKET>/`, plus a generated `README.md` manifest describing downloaded files and any failures.
+5. The daemon downloads the issue's Linear attachments into `<repo-state-root>/agents/issue-context/<TICKET>/`, plus a generated `README.md` manifest describing downloaded files and any failures.
 6. The daemon bootstraps or updates a single `## Codex Workpad` comment on the Linear issue.
-7. The daemon writes an agent brief inside the workspace at `.metastack/agents/briefs/<TICKET>.md`.
+7. The daemon writes an agent brief inside the workspace at `<repo-state-root>/agents/briefs/<TICKET>.md`.
 8. The configured local agent is launched in the workspace with the issue context, attachment-context path, workpad comment id, and optional repo instructions file injected into its prompt/instructions.
 9. Session state is persisted to the install-scoped MetaStack data root under
    `listen/projects/<PROJECT_KEY>/session.json`, and agent stdout/stderr are appended to
@@ -31,7 +31,7 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 11. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
 12. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
 13. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
-14. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker attempts to move both the parent issue and backlog child into a review-style state.
+14. When the technical backlog is complete and meaningful non-generated workspace progress was observed, the worker attempts to move both the parent issue and backlog child into a review-style state.
 15. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
 16. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
     with stale/worker-died context preserved in its summary and log references instead of being
@@ -79,7 +79,7 @@ meta listen sessions clear --root . --project "MetaStack API"
 meta listen sessions resume --root . --project "MetaStack API" --once
 ```
 
-Repo-scoped listen settings in `.metastack/meta.json`:
+Repo-scoped listen settings live in the canonical metadata file at `.metastack/meta.json`, even when the operational repo-local state root is branded differently:
 
 - `listen.required_label`: only issues carrying this label are eligible.
 - `listen.assignment_scope`: `any` or `viewer`.
@@ -105,7 +105,7 @@ diagnostics and `METASTACK_AGENT_*` environment variables before the provider pr
 - `src/listen/dashboard.rs`: ratatui rendering for the live full-screen view and deterministic snapshots.
 - `src/listen/workspace.rs`: clone-backed ticket workspace path, refresh, and branch preparation helpers.
 - `src/listen/workpad.rs`: deterministic bootstrap workpad rendering.
-- `src/agents.rs`: reusable brief-generation and agent-launch helpers shared by `meta listen`, `meta scan`, and the planning flows.
+- `src/agents.rs`: reusable brief-generation and agent-launch helpers shared by `meta listen`, `meta context scan`, and the planning flows.
 - `src/agent_provider.rs`: built-in provider adapter catalog and launch behavior for `codex` and `claude`.
 - `src/workflow_contract.rs`: shared injected workflow contract composition plus optional repo overlay loading.
 - `src/listen/store.rs`: install-scoped project identity, metadata, lock, and session-store

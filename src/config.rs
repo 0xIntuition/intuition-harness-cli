@@ -39,6 +39,8 @@ pub struct AppConfig {
     pub linear: LinearSettings,
     #[serde(default)]
     pub agents: AgentSettings,
+    #[serde(default)]
+    pub branding: InstallBrandingSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -55,6 +57,22 @@ pub struct PlanningMeta {
     pub plan: PlanningPlanSettings,
     #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
+    #[serde(default)]
+    pub branding: RepoBrandingSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct InstallBrandingSettings {
+    pub command_name: Option<String>,
+    pub repo_state_root: Option<String>,
+    pub backlog_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RepoBrandingSettings {
+    pub command_name: Option<String>,
+    pub repo_state_root: Option<String>,
+    pub backlog_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +432,7 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.branding.validate()?;
         self.validate_global_agent_defaults()?;
         self.validate_agent_routes()?;
         Ok(())
@@ -499,7 +518,7 @@ impl AppConfig {
 
 impl PlanningMeta {
     pub fn load(root: &Path) -> Result<Self> {
-        let path = PlanningPaths::new(root).meta_path();
+        let path = PlanningPaths::metadata_path(root);
 
         match fs::read_to_string(&path) {
             Ok(contents) => {
@@ -519,7 +538,7 @@ impl PlanningMeta {
 
     pub fn save(&self, root: &Path) -> Result<PathBuf> {
         self.validate().context("planning metadata is invalid")?;
-        let path = PlanningPaths::new(root).meta_path();
+        let path = PlanningPaths::metadata_path(root);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create `{}`", parent.display()))?;
@@ -539,6 +558,7 @@ impl PlanningMeta {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.branding.validate()?;
         if let Some(provider) = normalize_optional_ref(self.agent.provider.as_deref()) {
             validate_agent_model(&provider, self.agent.model.as_deref())?;
             validate_agent_reasoning(
@@ -567,11 +587,13 @@ impl PlanningMeta {
 }
 
 pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<PlanningMeta> {
-    let meta_path = PlanningPaths::new(root).meta_path();
+    let meta_path = PlanningPaths::metadata_path(root);
     if !meta_path.is_file() {
+        let setup_command = crate::fs::render_command(Some(root), "runtime setup")?;
         return Err(anyhow!(
-            "`meta {command_name}` requires repo setup. Run `meta runtime setup --root {}` and rerun.",
-            root.display()
+            "`{command}` requires repo setup. Run `{setup_command} --root {root}` and rerun.",
+            command = crate::fs::render_command(Some(root), command_name)?,
+            root = root.display(),
         ));
     }
     PlanningMeta::load(root)
@@ -627,6 +649,18 @@ impl PlanningIssueLabels {
             .filter(|value| !value.is_empty())
             .unwrap_or("technical")
             .to_string()
+    }
+}
+
+impl InstallBrandingSettings {
+    pub fn validate(&self) -> Result<()> {
+        validate_command_name(self.command_name.as_deref(), "install command name")
+    }
+}
+
+impl RepoBrandingSettings {
+    pub fn validate(&self) -> Result<()> {
+        validate_command_name(self.command_name.as_deref(), "repo command name")
     }
 }
 
@@ -1235,6 +1269,23 @@ fn config_path_from_env_or_home() -> Option<PathBuf> {
 
 fn default_linear_api_url() -> String {
     DEFAULT_LINEAR_API_URL.to_string()
+}
+
+fn validate_command_name(value: Option<&str>, label: &str) -> Result<()> {
+    let Some(value) = normalize_optional_ref(value) else {
+        return Ok(());
+    };
+
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "{label} must contain only ASCII letters, numbers, `-`, or `_`"
+    ))
 }
 
 fn resolve_supported_model(

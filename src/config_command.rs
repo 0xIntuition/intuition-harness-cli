@@ -26,6 +26,7 @@ use crate::config::{
     supported_reasoning_options, validate_agent_model, validate_agent_name,
     validate_agent_reasoning,
 };
+use crate::fs::render_command;
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
 #[derive(Debug, Clone)]
@@ -57,13 +58,12 @@ struct SerializableConfigView<'a> {
 pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
     let mut view = load_view()?;
 
-    if args.json {
-        return Ok(ConfigCommandOutput::Json(render_json(&view)?));
-    }
-
     if has_direct_updates(args) {
         let changed = apply_direct_updates(&mut view, args)?;
         save_view(&view)?;
+        if args.json {
+            return Ok(ConfigCommandOutput::Json(render_json(&view)?));
+        }
         return Ok(ConfigCommandOutput::Text(
             ConfigReport {
                 config_path: view.config_path.clone(),
@@ -71,6 +71,10 @@ pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
             }
             .render(&view),
         ));
+    }
+
+    if args.json {
+        return Ok(ConfigCommandOutput::Json(render_json(&view)?));
     }
 
     if args.render_once {
@@ -181,6 +185,18 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         display_optional(view.app_config.agents.default_reasoning.as_deref())
     ));
     lines.push(format!(
+        "Effective command name: {}",
+        display_optional(view.app_config.branding.command_name.as_deref())
+    ));
+    lines.push(format!(
+        "Default repo state root: {}",
+        display_optional(view.app_config.branding.repo_state_root.as_deref())
+    ));
+    lines.push(format!(
+        "Default backlog root: {}",
+        display_optional(view.app_config.branding.backlog_root.as_deref())
+    ));
+    lines.push(format!(
         "Advanced route overrides: {}",
         render_route_override_summary(&view.app_config)
     ));
@@ -236,6 +252,9 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.default_agent.is_some()
         || args.default_model.is_some()
         || args.default_reasoning.is_some()
+        || args.command_name.is_some()
+        || args.repo_state_root.is_some()
+        || args.backlog_root.is_some()
         || args.route.is_some()
         || args.clear_route.is_some()
         || args.route_agent.is_some()
@@ -291,6 +310,15 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             normalized.as_deref(),
         )?;
         view.app_config.agents.default_reasoning = normalized;
+    }
+    if let Some(command_name) = &args.command_name {
+        view.app_config.branding.command_name = normalize_optional(command_name);
+    }
+    if let Some(repo_state_root) = &args.repo_state_root {
+        view.app_config.branding.repo_state_root = normalize_optional(repo_state_root);
+    }
+    if let Some(backlog_root) = &args.backlog_root {
+        view.app_config.branding.backlog_root = normalize_optional(backlog_root);
     }
     apply_route_updates(&mut view.app_config, args)?;
     view.app_config.validate()?;
@@ -1288,6 +1316,8 @@ fn route_agent_names(view: &ConfigViewData) -> Vec<String> {
 }
 
 fn render_advanced_routing_dashboard(frame: &mut Frame<'_>, app: &AdvancedRoutingApp) {
+    let advanced_routing_command = render_command(None, "runtime config --advanced-routing")
+        .unwrap_or_else(|_| "meta runtime config --advanced-routing".to_string());
     let area = frame.area();
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1307,7 +1337,7 @@ fn render_advanced_routing_dashboard(frame: &mut Frame<'_>, app: &AdvancedRoutin
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("meta runtime config --advanced-routing"),
+            .title(advanced_routing_command),
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);
@@ -1733,9 +1763,13 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
 }
 
 fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
+    let runtime_setup_command =
+        render_command(None, "runtime setup").unwrap_or_else(|_| "meta runtime setup".to_string());
     let paragraph = Paragraph::new(Text::from(vec![
         Line::from("Review the summary and press Enter to save the install-scoped configuration."),
-        Line::from("Repo defaults now live under `meta runtime setup`."),
+        Line::from(format!(
+            "Repo defaults now live under `{runtime_setup_command}`."
+        )),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Save"))
     .wrap(Wrap { trim: false });

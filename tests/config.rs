@@ -50,6 +50,86 @@ fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn config_json_applies_branding_updates_before_rendering() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--command-name",
+            "intuition",
+            "--repo-state-root",
+            ".intuition",
+            "--backlog-root",
+            ".intuition/backlog",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"command_name\": \"intuition\""))
+        .stdout(predicate::str::contains(
+            "\"repo_state_root\": \".intuition\"",
+        ))
+        .stdout(predicate::str::contains(
+            "\"backlog_root\": \".intuition/backlog\"",
+        ));
+
+    let saved = fs::read_to_string(config_path)?;
+    assert!(saved.contains("command_name = \"intuition\""));
+    assert!(saved.contains("repo_state_root = \".intuition\""));
+    assert!(saved.contains("backlog_root = \".intuition/backlog\""));
+    Ok(())
+}
+
+#[test]
+fn setup_json_applies_branding_updates_before_rendering() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "setup",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--command-name",
+            "intuition",
+            "--repo-state-root",
+            ".intuition",
+            "--backlog-root",
+            ".intuition/backlog",
+            "--migrate-layout",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"command_name\": \"intuition\""))
+        .stdout(predicate::str::contains(
+            "\"repo_state_root\": \".intuition\"",
+        ))
+        .stdout(predicate::str::contains(
+            "\"backlog_root\": \".intuition/backlog\"",
+        ));
+
+    let saved = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+    assert!(saved.contains("\"command_name\": \"intuition\""));
+    assert!(saved.contains("\"repo_state_root\": \".intuition\""));
+    assert!(saved.contains("\"backlog_root\": \".intuition/backlog\""));
+    assert!(repo_root.join(".intuition/README.md").is_file());
+    Ok(())
+}
+
+#[test]
 fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -78,7 +158,7 @@ fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dy
         .stderr(predicate::str::contains(
             ".metastack/backlog/_TEMPLATE/index.md",
         ))
-        .stderr(predicate::str::contains("rerun `meta setup --root"));
+        .stderr(predicate::str::contains("rerun `meta runtime setup --root"));
 
     assert_eq!(
         fs::read_to_string(conflicting_index)?,

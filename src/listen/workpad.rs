@@ -1,3 +1,4 @@
+use crate::fs::PlanningPaths;
 use crate::linear::IssueSummary;
 
 use super::workspace::{TicketWorkspace, TicketWorkspaceProvisioning};
@@ -7,6 +8,9 @@ pub fn render_bootstrap_workpad(
     workspace: &TicketWorkspace,
     timestamp: &str,
 ) -> String {
+    let paths = PlanningPaths::for_root(&workspace.workspace_path)
+        .unwrap_or_else(|_| PlanningPaths::new(&workspace.workspace_path));
+    let backlog_dir_label = paths.backlog_dir_label(&workspace.workspace_path);
     let plan_requirements = extract_requirements(issue.description.as_deref());
     let acceptance = if plan_requirements.is_empty() {
         vec![
@@ -81,7 +85,8 @@ pub fn render_bootstrap_workpad(
             workspace.workspace_path.display()
         ),
         format!(
-            "- [ ] Local backlog `.metastack/backlog/{}` stays in sync with the work completed for `{}`.",
+            "- [ ] Local backlog `{}/{}` stays in sync with the work completed for `{}`.",
+            backlog_dir_label,
             issue.identifier,
             issue.identifier
         ),
@@ -102,8 +107,9 @@ pub fn render_bootstrap_workpad(
             workspace.workspace_path.display()
         ),
         format!(
-            "- {timestamp} Local backlog for `{}` is tracked at `.metastack/backlog/{}`.",
+            "- {timestamp} Local backlog for `{}` is tracked at `{}/{}`.",
             issue.identifier,
+            backlog_dir_label,
             issue.identifier
         ),
         format!(

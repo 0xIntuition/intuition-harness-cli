@@ -243,6 +243,7 @@ pub(crate) fn build_scan_agent_prompt(
     repo_target: &RepoTarget,
     workflow_contract: &str,
     repo_summary: &str,
+    codebase_dir_label: &str,
 ) -> String {
     let mut lines = vec![
         format!(
@@ -252,16 +253,20 @@ pub(crate) fn build_scan_agent_prompt(
         "Injected workflow contract:".to_string(),
         workflow_contract.to_string(),
         "Scan only the target repository rooted above. Do not broaden the analysis to parent directories, sibling repositories, or unrelated workspaces.".to_string(),
-        "Refresh the planning context under `.metastack/codebase/`.".to_string(),
-        "Use `.metastack/codebase/SCAN.md` as the deterministic fact base, then inspect the repository as needed to improve accuracy.".to_string(),
+        format!("Refresh the planning context under `{codebase_dir_label}/`."),
+        format!(
+            "Use `{codebase_dir_label}/SCAN.md` as the deterministic fact base, then inspect the repository as needed to improve accuracy."
+        ),
         "Do not invent missing systems, frameworks, or integrations. If something is absent, say so briefly.".to_string(),
-        "Only edit the required codebase-context files below; leave `.metastack/codebase/SCAN.md` as the generated source-of-truth snapshot from the CLI.".to_string(),
+        format!(
+            "Only edit the required codebase-context files below; leave `{codebase_dir_label}/SCAN.md` as the generated source-of-truth snapshot from the CLI."
+        ),
         String::new(),
         "Required output files:".to_string(),
     ];
 
     for spec in SCAN_DOCUMENT_PROMPTS {
-        lines.push(format!("- `.metastack/codebase/{}`", spec.file_name));
+        lines.push(format!("- `{codebase_dir_label}/{}`", spec.file_name));
     }
 
     lines.extend([
@@ -277,7 +282,11 @@ pub(crate) fn build_scan_agent_prompt(
     ]);
 
     for spec in SCAN_DOCUMENT_PROMPTS {
-        lines.extend([String::new(), spec.instructions.to_string()]);
+        lines.extend([
+            String::new(),
+            spec.instructions
+                .replace(".metastack/codebase/", &format!("{codebase_dir_label}/")),
+        ]);
     }
 
     lines.join("\n")
@@ -304,6 +313,7 @@ mod tests {
             &repo_target,
             "## Built-in Workflow Contract\n\nUse local evidence.\n\n## Repository Scope\n\nTarget repository:\n- Backlog rule: create backlog issues only for work inside this repository directory.",
             "- Repository: `demo-cli`\n- Files scanned: `3`\n- Directories scanned: `1`",
+            ".intuition/codebase",
         );
 
         assert!(prompt.contains("Injected workflow contract:"));
@@ -313,9 +323,9 @@ mod tests {
         ));
         assert!(prompt.contains("Scan only the target repository rooted above."));
         assert!(prompt.contains("Required output files:"));
-        assert!(prompt.contains(".metastack/codebase/ARCHITECTURE.md"));
-        assert!(prompt.contains(".metastack/codebase/CONCERNS.md"));
-        assert!(prompt.contains(".metastack/codebase/INTEGRATIONS.md"));
+        assert!(prompt.contains(".intuition/codebase/ARCHITECTURE.md"));
+        assert!(prompt.contains(".intuition/codebase/CONCERNS.md"));
+        assert!(prompt.contains(".intuition/codebase/INTEGRATIONS.md"));
         assert!(prompt.contains("# Prompt Instructions: Generate ARCHITECTURE.md"));
         assert!(prompt.contains("# Prompt Instructions: Generate CONCERNS.md"));
         assert!(prompt.contains("# Prompt Instructions: Generate INTEGRATIONS.md"));

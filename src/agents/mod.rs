@@ -37,7 +37,7 @@ mod tests {
     fn write_agent_brief_renders_deterministic_sections() -> Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
-        let paths = PlanningPaths::new(root);
+        let paths = PlanningPaths::for_root(root)?;
         ensure_dir(&paths.codebase_dir)?;
         for (path, contents) in [
             (paths.scan_path(), "# Scan"),

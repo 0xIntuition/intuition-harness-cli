@@ -846,7 +846,7 @@ where
     ) -> Result<BacklogIssueContext> {
         let backlog_issue = parent_issue.clone();
         let issue_dir =
-            PlanningPaths::new(workspace_path).backlog_issue_dir(&parent_issue.identifier);
+            PlanningPaths::for_root(workspace_path)?.backlog_issue_dir(&parent_issue.identifier);
         let rendered_files = render_template_files(
             workspace_path,
             &TemplateContext {
@@ -1363,16 +1363,19 @@ fn capture_workspace_snapshot(
         &["status", "--short", "--untracked-files=all"],
     )?;
     let ignored_brief_path = display_path(
-        &PlanningPaths::new(workspace_path)
+        &PlanningPaths::for_root(workspace_path)
+            .unwrap_or_else(|_| PlanningPaths::new(workspace_path))
             .agent_briefs_dir
             .join(format!("{issue_identifier}.md")),
         workspace_path,
     );
+    let ignored_brief_suffix = format!("agents/briefs/{issue_identifier}.md");
     let status_entries = status
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| !line.contains(&ignored_brief_path))
+        .filter(|line| !line.ends_with(&ignored_brief_suffix))
         .map(str::to_string)
         .collect::<Vec<_>>();
 
@@ -1414,7 +1417,7 @@ fn compare_workspace_snapshots(
     let (_, implementation_entries): (Vec<_>, Vec<_>) = changed_entries
         .iter()
         .cloned()
-        .partition(|entry| workspace_entry_is_planning_artifact(entry));
+        .partition(|entry| workspace_entry_is_planning_artifact(workspace_path, entry));
 
     Ok(TurnProgress {
         implementation_entries,
@@ -1438,14 +1441,17 @@ fn committed_change_entries(
         .collect())
 }
 
-fn workspace_entry_is_planning_artifact(entry: &str) -> bool {
+fn workspace_entry_is_planning_artifact(workspace_path: &Path, entry: &str) -> bool {
     let path = if let Some((_, path)) = entry.split_once(' ') {
         path.trim()
     } else {
         entry.trim()
     };
     let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
-    path.starts_with(".metastack/")
+    PlanningPaths::for_root(workspace_path)
+        .map(|paths| display_path(&paths.metastack_dir, workspace_path))
+        .map(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+        .unwrap_or_else(|_| path.starts_with(".metastack/"))
 }
 
 fn workspace_has_meaningful_progress(workspace_path: &Path) -> Result<bool> {
@@ -1465,7 +1471,7 @@ fn workspace_has_meaningful_progress(workspace_path: &Path) -> Result<bool> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .any(|line| !workspace_entry_is_planning_artifact(line)))
+        .any(|line| !workspace_entry_is_planning_artifact(workspace_path, line)))
 }
 
 fn active_workpad_comment(issue: &IssueSummary) -> Option<IssueComment> {
@@ -1479,7 +1485,7 @@ fn backlog_progress_for_issue_dir(
     workspace_path: &Path,
     identifier: &str,
 ) -> Result<BacklogProgress> {
-    let issue_dir = PlanningPaths::new(workspace_path).backlog_issue_dir(identifier);
+    let issue_dir = PlanningPaths::for_root(workspace_path)?.backlog_issue_dir(identifier);
     if !issue_dir.is_dir() {
         bail!(
             "technical backlog directory `{}` is missing",
@@ -1685,7 +1691,10 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         format!("Project key: {}", metadata.metadata.project_key),
         format!("Project: {}", metadata.metadata.project_label),
         format!("Source root: {}", metadata.metadata.source_root),
-        format!("MetaStack root: {}", metadata.metadata.metastack_root),
+        format!(
+            "Repo-local state root: {}",
+            metadata.metadata.metastack_root
+        ),
         format!("State file: {}", metadata.state_path.display()),
         format!("Lock file: {}", metadata.lock_path.display()),
         format!("Logs dir: {}", metadata.logs_dir.display()),
@@ -2322,18 +2331,17 @@ fn render_agent_prompt(
         String::new()
     };
     let state = issue_state_label(issue);
+    let paths = PlanningPaths::for_root(workspace_path)
+        .unwrap_or_else(|_| PlanningPaths::new(workspace_path));
     let backlog_context = backlog_issue.map_or_else(String::new, |backlog_issue| {
         format!(
             "\nLocal backlog path: {}\nBacklog identifier: {}",
-            PlanningPaths::new(workspace_path)
-                .backlog_issue_dir(&backlog_issue.identifier)
-                .display(),
+            paths.backlog_issue_dir(&backlog_issue.identifier).display(),
             backlog_issue.identifier,
         )
     });
     let attachment_context = {
-        let manifest_path =
-            PlanningPaths::new(workspace_path).agent_issue_context_manifest_path(&issue.identifier);
+        let manifest_path = paths.agent_issue_context_manifest_path(&issue.identifier);
         if manifest_path.is_file() {
             format!(
                 "\nAttachment context: {}\nAttachment manifest: {}",
@@ -2346,7 +2354,7 @@ fn render_agent_prompt(
     };
     let discussion_context = backlog_issue
         .and_then(|backlog_issue| {
-            let discussion_path = PlanningPaths::new(workspace_path)
+            let discussion_path = paths
                 .backlog_issue_dir(&backlog_issue.identifier)
                 .join(TICKET_DISCUSSION_FILE_NAME);
             discussion_path.is_file().then_some(discussion_path)
@@ -2466,7 +2474,7 @@ async fn sync_issue_attachment_context<C>(
 where
     C: LinearClient,
 {
-    let paths = PlanningPaths::new(workspace_path);
+    let paths = PlanningPaths::for_root(workspace_path)?;
     let context_dir = paths.agent_issue_context_dir(&issue.identifier);
     if context_dir.exists() {
         fs::remove_dir_all(&context_dir)
@@ -2570,7 +2578,11 @@ fn render_issue_attachment_manifest(
     summary: &AttachmentContextSummary,
     workspace_path: &Path,
 ) -> String {
-    let context_dir = PlanningPaths::new(workspace_path).agent_issue_context_dir(&issue.identifier);
+    let context_dir = PlanningPaths::for_root(workspace_path)
+        .map(|paths| paths.agent_issue_context_dir(&issue.identifier))
+        .unwrap_or_else(|_| {
+            PlanningPaths::new(workspace_path).agent_issue_context_dir(&issue.identifier)
+        });
     let mut lines = vec![
         format!("# Attachment Context for {}", issue.identifier),
         String::new(),

@@ -16,6 +16,7 @@ use crate::cli::RunAgentArgs;
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta, no_agent_selected_route_key,
 };
+use crate::fs::PlanningPaths;
 use crate::linear::{LinearClient, LinearService, UserRef};
 
 pub(super) struct ListenPreflightRequest<'a> {
@@ -181,8 +182,8 @@ where
 }
 
 pub(super) fn verify_workspace_write_access(workspace_path: &Path) -> Result<()> {
-    let probe_path = workspace_path
-        .join(".metastack")
+    let probe_path = PlanningPaths::for_root(workspace_path)?
+        .metastack_dir
         .join(format!(".listen-preflight-{}", std::process::id()));
     if let Some(parent) = probe_path.parent() {
         fs::create_dir_all(parent)

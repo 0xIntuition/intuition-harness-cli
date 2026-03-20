@@ -33,7 +33,7 @@ mod workspace_dashboard;
 use std::ffi::OsString;
 
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
@@ -77,7 +77,31 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = Cli::parse_from(args);
+    let args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    let binary_name = args
+        .first()
+        .and_then(|value| value.to_str())
+        .and_then(|value| std::path::Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("meta")
+        .to_string();
+    let binary_name: &'static str = Box::leak(binary_name.into_boxed_str());
+    let mut command = Cli::command()
+        .name(binary_name)
+        .bin_name(binary_name)
+        .after_help(crate::cli::root_help_examples(binary_name));
+    let mut matches = match command.try_get_matches_from_mut(args) {
+        Ok(matches) => matches,
+        Err(error) => {
+            error.print()?;
+            if error.use_stderr() {
+                std::process::exit(2);
+            }
+            return Ok(());
+        }
+    };
+    let cli = Cli::from_arg_matches_mut(&mut matches)?;
     dispatch(cli).await
 }
 

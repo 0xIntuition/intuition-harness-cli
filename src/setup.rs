@@ -1,6 +1,7 @@
+use std::fs;
 use std::io::IsTerminal;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -28,9 +29,9 @@ use crate::config::{
     validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
     validate_listen_poll_interval_seconds,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, effective_command_name, render_command};
 use crate::linear::{LinearService, ReqwestLinearClient};
-use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
+use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout, sync_generated_readmes};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,7 @@ struct SetupReport {
 
 #[derive(Debug, Clone)]
 struct SetupApp {
+    command_name: String,
     step: SetupStep,
     profile: Option<String>,
     repo_auth_field: SelectFieldState,
@@ -260,18 +262,32 @@ pub async fn run_setup(args: &SetupArgs) -> Result<String> {
     }
     let mut view = load_view(&root)?;
 
-    if args.json {
-        return render_json(&view);
-    }
-
     if has_direct_updates(args) {
+        let before_paths = PlanningPaths::for_root(&root)?;
         let changed = apply_direct_updates(&mut view, args).await?;
         save_view(&mut view).await?;
+        if args.migrate_layout {
+            migrate_repo_layout(&before_paths, &PlanningPaths::for_root(&root)?)?;
+        }
+        if args.command_name.is_some()
+            || args.repo_state_root.is_some()
+            || args.backlog_root.is_some()
+            || args.migrate_layout
+        {
+            sync_generated_readmes(&root)?;
+        }
+        if args.json {
+            return render_json(&view);
+        }
         return Ok(SetupReport {
             metastack_meta_path: view.metastack_meta_path.clone(),
             changed,
         }
         .render());
+    }
+
+    if args.json {
+        return render_json(&view);
     }
 
     if args.render_once {
@@ -301,22 +317,25 @@ fn resolve_backlog_template_conflicts(
     args: &SetupArgs,
     can_launch_tui: bool,
 ) -> Result<BacklogTemplateConflictAction> {
-    let conflicts = template_seed_conflicts(&PlanningPaths::new(root).backlog_template_dir)?;
+    let paths = PlanningPaths::for_root(root).unwrap_or_else(|_| PlanningPaths::new(root));
+    let conflicts = template_seed_conflicts(&paths.backlog_template_dir)?;
     if conflicts.is_empty() {
         return Ok(BacklogTemplateConflictAction::Skip);
     }
 
     let can_prompt = can_launch_tui && !args.json && !args.render_once && !has_direct_updates(args);
     if can_prompt {
-        return prompt_backlog_template_conflicts(&conflicts);
+        return prompt_backlog_template_conflicts(root, &conflicts);
     }
 
+    let setup_command = render_command(Some(root), "runtime setup")
+        .unwrap_or_else(|_| "meta runtime setup".to_string());
     Err(anyhow!(
         "repo setup found existing canonical backlog template files with local changes:\n{}\n\
-rerun `meta setup --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
+rerun `{setup_command} --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
         conflicts
             .iter()
-            .map(|path| format!("- .metastack/backlog/_TEMPLATE/{path}"))
+            .map(|path| format!("- {}/{}", paths.backlog_template_dir_label(root), path))
             .collect::<Vec<_>>()
             .join("\n"),
         root.display()
@@ -324,13 +343,21 @@ rerun `meta setup --root {}` in an interactive terminal to choose overwrite, ski
 }
 
 fn prompt_backlog_template_conflicts(
+    root: &Path,
     conflicts: &[String],
 ) -> Result<BacklogTemplateConflictAction> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
-    prompt_backlog_template_conflicts_with_io(conflicts, &mut reader, &mut writer)
+    let backlog_template_dir_label =
+        PlanningPaths::for_root(root)?.backlog_template_dir_label(root);
+    prompt_backlog_template_conflicts_with_io(
+        conflicts,
+        &backlog_template_dir_label,
+        &mut reader,
+        &mut writer,
+    )
 }
 
 fn parse_backlog_template_conflict_action(input: &str) -> Option<BacklogTemplateConflictAction> {
@@ -344,6 +371,7 @@ fn parse_backlog_template_conflict_action(input: &str) -> Option<BacklogTemplate
 
 fn prompt_backlog_template_conflicts_with_io(
     conflicts: &[String],
+    backlog_template_dir_label: &str,
     reader: &mut impl BufRead,
     writer: &mut impl Write,
 ) -> Result<BacklogTemplateConflictAction> {
@@ -352,7 +380,7 @@ fn prompt_backlog_template_conflicts_with_io(
         "Canonical backlog template files already exist with local changes:"
     )?;
     for path in conflicts {
-        writeln!(writer, "  - .metastack/backlog/_TEMPLATE/{path}")?;
+        writeln!(writer, "  - {backlog_template_dir_label}/{path}")?;
     }
     writeln!(writer, "Choose [o]verwrite, [s]kip, or [c]ancel:")?;
     writer.flush()?;
@@ -376,7 +404,7 @@ impl SetupReport {
         format!(
             "Repo setup {verb}. Repo defaults: {}.\n{}",
             self.metastack_meta_path.display(),
-            listen_prerequisites_summary()
+            listen_prerequisites_summary(None)
         )
     }
 }
@@ -385,7 +413,7 @@ fn load_view(root: &std::path::Path) -> Result<SetupViewData> {
     Ok(SetupViewData {
         root: root.to_path_buf(),
         config_path: crate::config::resolve_config_path()?,
-        metastack_meta_path: PlanningPaths::new(root).meta_path(),
+        metastack_meta_path: PlanningPaths::metadata_path(root),
         app_config: AppConfig::load()?,
         app_config_changed: false,
         planning_meta: PlanningMeta::load(root)?,
@@ -399,6 +427,71 @@ async fn save_view(view: &mut SetupViewData) -> Result<()> {
         view.app_config.save()?;
     }
     view.planning_meta.save(&view.root)?;
+    Ok(())
+}
+
+fn migrate_repo_layout(before: &PlanningPaths, after: &PlanningPaths) -> Result<()> {
+    if before.metastack_dir == after.metastack_dir && before.backlog_dir == after.backlog_dir {
+        return Ok(());
+    }
+
+    for (source, destination) in [
+        (before.agent_dir.clone(), after.agent_dir.clone()),
+        (before.merge_runs_dir.clone(), after.merge_runs_dir.clone()),
+        (before.codebase_dir.clone(), after.codebase_dir.clone()),
+        (before.workflows_dir.clone(), after.workflows_dir.clone()),
+        (before.cron_dir.clone(), after.cron_dir.clone()),
+        (before.backlog_dir.clone(), after.backlog_dir.clone()),
+    ] {
+        move_path_if_present(&source, &destination)?;
+    }
+
+    let before_readme = before.metastack_dir.join("README.md");
+    let after_readme = after.metastack_dir.join("README.md");
+    move_path_if_present(&before_readme, &after_readme)?;
+    Ok(())
+}
+
+fn move_path_if_present(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    if source == destination || !source.exists() {
+        return Ok(());
+    }
+
+    if destination.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) if source.is_dir() => copy_dir_recursive(source, destination),
+        Err(_) => {
+            fs::copy(source, destination)?;
+            fs::remove_file(source)?;
+            Ok(())
+        }
+    }
+}
+
+fn copy_dir_recursive(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&source_path, &destination_path)?;
+        } else {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    fs::remove_dir_all(source)?;
     Ok(())
 }
 
@@ -482,14 +575,30 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         )
     ));
     lines.push(format!(
+        "Effective command name: {}",
+        display_optional(view.planning_meta.branding.command_name.as_deref())
+    ));
+    lines.push(format!(
+        "Repo state root: {}",
+        display_optional(view.planning_meta.branding.repo_state_root.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog root: {}",
+        display_optional(view.planning_meta.branding.backlog_root.as_deref())
+    ));
+    lines.push(format!(
         "Listen prerequisites: {}",
-        listen_prerequisites_summary()
+        listen_prerequisites_summary(Some(&view.root))
     ));
     lines.join("\n")
 }
 
-fn listen_prerequisites_summary() -> &'static str {
-    "Built-in Codex listen runs require `~/.codex/config.toml` with `approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus `[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require `claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `meta agents listen --check --root .` to verify."
+fn listen_prerequisites_summary(root: Option<&Path>) -> String {
+    let listen_check_command = render_command(root, "agents listen --check")
+        .unwrap_or_else(|_| "meta agents listen --check".to_string());
+    format!(
+        "Built-in Codex listen runs require `~/.codex/config.toml` with `approval_policy = \"never\"` and `sandbox_mode = \"danger-full-access\"`, plus `[mcp_servers.linear]` removed or disabled. Built-in Claude listen runs require `claude` on PATH and no `ANTHROPIC_API_KEY` override. Use `{listen_check_command} --root .` to verify."
+    )
 }
 
 fn has_direct_updates(args: &SetupArgs) -> bool {
@@ -509,6 +618,10 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.interactive_plan_follow_up_question_limit.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
+        || args.command_name.is_some()
+        || args.repo_state_root.is_some()
+        || args.backlog_root.is_some()
+        || args.migrate_layout
 }
 
 async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Result<bool> {
@@ -620,6 +733,15 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     if let Some(label) = &args.technical_label {
         view.planning_meta.issue_labels.technical = normalize_optional(label);
     }
+    if let Some(command_name) = &args.command_name {
+        view.planning_meta.branding.command_name = normalize_optional(command_name);
+    }
+    if let Some(repo_state_root) = &args.repo_state_root {
+        view.planning_meta.branding.repo_state_root = normalize_optional(repo_state_root);
+    }
+    if let Some(backlog_root) = &args.backlog_root {
+        view.planning_meta.branding.backlog_root = normalize_optional(backlog_root);
+    }
 
     let after_meta = serde_json::to_value(&view.planning_meta)?;
     let after_app = serde_json::to_value(&view.app_config)?;
@@ -695,6 +817,8 @@ impl SetupApp {
             .unwrap_or(0);
 
         let mut app = Self {
+            command_name: effective_command_name(Some(&view.root))
+                .unwrap_or_else(|_| "meta".to_string()),
             step: SetupStep::LinearAuth,
             profile: view.planning_meta.linear.profile.clone(),
             repo_auth_field: SelectFieldState::new(
@@ -1180,7 +1304,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` and keep repo onboarding rerunnable.",
+            "Configure repo-scoped defaults stored in the canonical repo metadata file and keep repo onboarding rerunnable.",
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",
@@ -1361,21 +1485,30 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             area,
             &title,
             &app.interactive_plan_limit,
-            "Optional `meta backlog plan` interactive follow-up limit between 1 and 10.",
+            &format!(
+                "Optional `{} backlog plan` interactive follow-up limit between 1 and 10.",
+                app.command_name
+            ),
         ),
         SetupStep::PlanLabel => render_input_panel(
             frame,
             area,
             &title,
             &app.plan_label,
-            "Optional repo default label for `meta backlog plan` issues. Leave blank for `plan`.",
+            &format!(
+                "Optional repo default label for `{} backlog plan` issues. Leave blank for `plan`.",
+                app.command_name
+            ),
         ),
         SetupStep::TechnicalLabel => render_input_panel(
             frame,
             area,
             &title,
             &app.technical_label,
-            "Optional repo default label for `meta backlog tech` issues. Leave blank for `technical`.",
+            &format!(
+                "Optional repo default label for `{} backlog tech` issues. Leave blank for `technical`.",
+                app.command_name
+            ),
         ),
         SetupStep::Save => render_save_panel(frame, area),
     }
@@ -1512,7 +1645,7 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
 
 fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
     let paragraph = Paragraph::new(Text::from(vec![
-        Line::from("Press Enter to save repo-scoped defaults to `.metastack/meta.json`."),
+        Line::from("Press Enter to save repo-scoped defaults to the canonical repo metadata file."),
         Line::from("Project names are resolved before setup is persisted."),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Save"))
@@ -1784,8 +1917,12 @@ mod tests {
         let mut reader = Cursor::new(b"later\noverwrite\n".to_vec());
         let mut writer = Vec::new();
 
-        let action =
-            prompt_backlog_template_conflicts_with_io(&conflicts, &mut reader, &mut writer)?;
+        let action = prompt_backlog_template_conflicts_with_io(
+            &conflicts,
+            ".metastack/backlog/_TEMPLATE",
+            &mut reader,
+            &mut writer,
+        )?;
 
         assert_eq!(action, BacklogTemplateConflictAction::Overwrite);
         let output = String::from_utf8(writer)?;

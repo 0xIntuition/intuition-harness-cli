@@ -505,7 +505,7 @@ impl WorkflowLibrary {
             workflows.insert(workflow.name.clone(), workflow);
         }
 
-        let workflows_dir = PlanningPaths::new(root).workflows_dir;
+        let workflows_dir = PlanningPaths::for_root(root)?.workflows_dir;
         if workflows_dir.is_dir() {
             for entry in WalkDir::new(&workflows_dir) {
                 let entry = entry?;

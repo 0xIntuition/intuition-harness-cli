@@ -10,7 +10,7 @@ fn write_listen_store_session(
 ) -> Result<PathBuf, Box<dyn Error>> {
     let store_dir = listen_project_store_dir(config_path, repo_root, None)?;
     let source_root = listen_source_root(repo_root)?;
-    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    let metastack_root = effective_repo_state_root(&source_root)?;
     fs::create_dir_all(store_dir.join("logs"))?;
     fs::write(
         store_dir.join("project.json"),
@@ -1854,6 +1854,79 @@ fn listen_uses_the_same_project_identity_for_repo_and_worktree_roots() -> Result
         .stdout(predicate::str::contains(format!(
             "Source root: {}",
             repo_root.canonicalize()?.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Lock file: {}",
+            repo_store_dir.join("active-listener.lock.json").display()
+        )));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_uses_the_same_project_identity_for_branded_repo_and_worktree_roots()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    fs::write(&config_path, "\n")?;
+    write_branded_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "branding": {
+    "command_name": "intuition",
+    "repo_state_root": ".intuition",
+    "backlog_root": ".intuition/backlog"
+  }
+}
+"#,
+        ".intuition",
+    )?;
+    init_repo_with_origin(&repo_root)?;
+    let worktree_root = create_worktree_checkout(&repo_root, "feature/intuition", "repo-worktree")?;
+
+    let repo_store_dir = listen_project_store_dir(&config_path, &repo_root, None)?;
+    let worktree_store_dir = listen_project_store_dir(&config_path, &worktree_root, None)?;
+    assert_eq!(repo_store_dir, worktree_store_dir);
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    meta()
+        .current_dir(&worktree_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            worktree_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Source root: {}",
+            repo_root.canonicalize()?.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Repo-local state root: {}",
+            repo_root.join(".intuition").canonicalize()?.display()
         )))
         .stdout(predicate::str::contains(format!(
             "Lock file: {}",
