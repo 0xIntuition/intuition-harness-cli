@@ -132,6 +132,9 @@ pub struct ProjectListFilters {
 pub enum IssueAssigneeFilter {
     #[default]
     Any,
+    Viewer {
+        viewer_id: String,
+    },
     ViewerOrUnassigned {
         viewer_id: String,
     },

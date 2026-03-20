@@ -482,6 +482,16 @@ fn render_issue_filter(filters: &IssueListFilters) -> Value {
     }
     match &filters.assignee {
         IssueAssigneeFilter::Any => {}
+        IssueAssigneeFilter::Viewer { viewer_id } => {
+            filter.insert(
+                "assignee".to_string(),
+                json!({
+                    "id": {
+                        "eq": viewer_id,
+                    }
+                }),
+            );
+        }
         IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
             filter.insert(
                 "or".to_string(),
@@ -512,6 +522,27 @@ mod tests {
 
     use super::render_issue_filter;
     use crate::linear::{IssueAssigneeFilter, IssueListFilters};
+
+    #[test]
+    fn render_issue_filter_includes_viewer_only_assignee_scope() {
+        let filter = render_issue_filter(&IssueListFilters {
+            assignee: IssueAssigneeFilter::Viewer {
+                viewer_id: "viewer-1".to_string(),
+            },
+            ..IssueListFilters::default()
+        });
+
+        assert_eq!(
+            filter,
+            json!({
+                "assignee": {
+                    "id": {
+                        "eq": "viewer-1"
+                    }
+                }
+            })
+        );
+    }
 
     #[test]
     fn render_issue_filter_includes_viewer_or_unassigned_assignee_scope() {

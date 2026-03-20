@@ -460,7 +460,10 @@ impl From<ListenAssignmentScopeArg> for ListenAssignmentScope {
     fn from(value: ListenAssignmentScopeArg) -> Self {
         match value {
             ListenAssignmentScopeArg::Any => ListenAssignmentScope::Any,
-            ListenAssignmentScopeArg::Viewer => ListenAssignmentScope::Viewer,
+            ListenAssignmentScopeArg::ViewerOnly => ListenAssignmentScope::ViewerOnly,
+            ListenAssignmentScopeArg::ViewerOrUnassigned => {
+                ListenAssignmentScope::ViewerOrUnassigned
+            }
         }
     }
 }

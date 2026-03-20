@@ -54,7 +54,55 @@ async fn list_issues_uses_filtered_query_and_applies_filters() {
 }
 
 #[tokio::test]
-async fn list_issues_keeps_viewer_assigned_and_unassigned_items_in_viewer_scope() {
+async fn list_issues_keeps_only_viewer_assigned_items_in_viewer_only_scope() {
+    let mut viewer_issue = issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI");
+    viewer_issue.assignee = Some(UserRef {
+        id: "viewer-1".to_string(),
+        name: "Viewer".to_string(),
+        email: Some("viewer@example.com".to_string()),
+    });
+    let mut foreign_issue = issue("MET-12", "Todo", Some("project-1"), "MetaStack CLI");
+    foreign_issue.assignee = Some(UserRef {
+        id: "viewer-2".to_string(),
+        name: "Someone Else".to_string(),
+        email: Some("else@example.com".to_string()),
+    });
+    let client = FakeLinearClient {
+        all_issues: vec![
+            viewer_issue,
+            issue("MET-13", "Todo", Some("project-1"), "MetaStack CLI"),
+            foreign_issue,
+        ],
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), Some("MET".to_string()));
+
+    let issues = service
+        .list_issues(IssueListFilters {
+            team: Some("MET".to_string()),
+            project_id: Some("project-1".to_string()),
+            state: Some("Todo".to_string()),
+            assignee: IssueAssigneeFilter::Viewer {
+                viewer_id: "viewer-1".to_string(),
+            },
+            limit: 10,
+            ..IssueListFilters::default()
+        })
+        .await
+        .expect("viewer-scoped issues should load");
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect::<Vec<_>>(),
+        vec!["MET-11"]
+    );
+    assert_eq!(client.list_filtered_issues_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn list_issues_keeps_viewer_assigned_and_unassigned_items_in_viewer_or_unassigned_scope() {
     let mut viewer_issue = issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI");
     viewer_issue.assignee = Some(UserRef {
         id: "viewer-1".to_string(),
