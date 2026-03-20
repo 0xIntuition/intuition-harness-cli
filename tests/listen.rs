@@ -572,7 +572,7 @@ fn listen_sessions_list_and_inspect_surface_latest_resume_metadata() -> Result<(
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
