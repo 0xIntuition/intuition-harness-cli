@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-use crate::agents::run_agent_capture;
+use crate::agents::{AgentContinuation, run_agent_capture_with_continuation};
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, RenderedTemplateFile,
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
@@ -165,12 +165,19 @@ enum PlanStageKind {
 
 struct PlanSessionApp {
     stage: PlanStage,
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
     pending: Option<PendingPlanJob>,
 }
 
 struct PendingPlanJob {
-    receiver: Receiver<Result<PlanWorkerOutcome>>,
+    receiver: Receiver<PlanWorkerReport>,
     previous_stage: PlanStage,
+}
+
+struct PlanWorkerReport {
+    continuation: Option<AgentContinuation>,
+    outcome: Result<PlanWorkerOutcome>,
 }
 
 enum PlanWorkerOutcome {
@@ -241,6 +248,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
                 "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
             )
         })?;
+        let mut continuation = None;
 
         let questions = generate_follow_up_questions(
             &root,
@@ -248,6 +256,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
             Vec::new(),
             NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS,
             &agent_overrides,
+            &mut continuation,
         )?;
         let answers = if questions.is_empty() {
             Vec::new()
@@ -272,7 +281,14 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
             })
             .collect::<Vec<_>>();
 
-        let plan = generate_issue_plan(&root, &request, &follow_ups, Vec::new(), &agent_overrides)?;
+        let plan = generate_issue_plan(
+            &root,
+            &request,
+            &follow_ups,
+            Vec::new(),
+            &agent_overrides,
+            &mut continuation,
+        )?;
         if plan.issues.is_empty() {
             bail!("planning agent returned no issues to create");
         }
@@ -282,6 +298,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
             &root,
             args.request.clone(),
             planning_meta.interactive_follow_up_question_limit(),
+            agent_overrides.clone(),
         )? {
             InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
             InteractivePlanExit::Confirmed(plan) => plan,
@@ -491,19 +508,23 @@ fn generate_follow_up_questions(
     attachments: Vec<PromptImageAttachment>,
     max_questions: usize,
     overrides: &PlanningAgentOverrides,
+    continuation: &mut Option<AgentContinuation>,
 ) -> Result<Vec<String>> {
     let prompt = render_question_prompt(root, request, max_questions)?;
-    let output = run_agent_capture(&RunAgentArgs {
-        root: Some(root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
-        agent: overrides.agent.clone(),
-        prompt,
-        instructions: None,
-        model: overrides.model.clone(),
-        reasoning: overrides.reasoning.clone(),
-        transport: None,
-        attachments,
-    })?;
+    let output = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
+            agent: overrides.agent.clone(),
+            prompt,
+            instructions: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
+            transport: None,
+            attachments,
+        },
+        continuation,
+    )?;
     let parsed: FollowUpQuestions =
         parse_agent_json(&output.stdout, "follow-up question generation")?;
 
@@ -522,19 +543,23 @@ fn generate_issue_plan(
     follow_ups: &[FollowUpResponse],
     attachments: Vec<PromptImageAttachment>,
     overrides: &PlanningAgentOverrides,
+    continuation: &mut Option<AgentContinuation>,
 ) -> Result<PlannedIssueSet> {
     let prompt = render_issue_plan_prompt(root, request, follow_ups)?;
-    let output = run_agent_capture(&RunAgentArgs {
-        root: Some(root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
-        agent: overrides.agent.clone(),
-        prompt,
-        instructions: None,
-        model: overrides.model.clone(),
-        reasoning: overrides.reasoning.clone(),
-        transport: None,
-        attachments,
-    })?;
+    let output = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
+            agent: overrides.agent.clone(),
+            prompt,
+            instructions: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
+            transport: None,
+            attachments,
+        },
+        continuation,
+    )?;
     let parsed: PlannedIssueSet = parse_agent_json(&output.stdout, "issue planning")?;
 
     Ok(PlannedIssueSet {
@@ -936,6 +961,7 @@ fn run_interactive_plan_session(
     root: &Path,
     prefill: Option<String>,
     follow_up_question_limit: usize,
+    agent_overrides: PlanningAgentOverrides,
 ) -> Result<InteractivePlanExit> {
     let mut app = PlanSessionApp {
         stage: PlanStage::Request(RequestApp {
@@ -944,6 +970,8 @@ fn run_interactive_plan_session(
             ),
             error: None,
         }),
+        agent_overrides,
+        continuation: None,
         pending: None,
     };
     let mut stdout = io::stdout();
@@ -1952,7 +1980,8 @@ fn process_pending_plan_job(
                 .pending
                 .take()
                 .ok_or_else(|| anyhow!("pending plan job disappeared unexpectedly"))?;
-            match result {
+            app.continuation = result.continuation;
+            match result.outcome {
                 Ok(PlanWorkerOutcome::Questions {
                     request,
                     request_attachments,
@@ -2022,6 +2051,8 @@ fn start_question_generation(
             request,
             request_attachments,
             follow_up_question_limit,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
         ),
         previous_stage,
     });
@@ -2053,6 +2084,8 @@ fn start_plan_generation(
             request_attachments,
             follow_ups,
             revision,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
         ),
         previous_stage,
     });
@@ -2072,7 +2105,13 @@ fn start_plan_revision(app: &mut PlanSessionApp, root: &Path, review: ReviewApp)
         spinner_index: 0,
     });
     app.pending = Some(PendingPlanJob {
-        receiver: spawn_plan_revision_job(root.to_path_buf(), review, next_revision),
+        receiver: spawn_plan_revision_job(
+            root.to_path_buf(),
+            review,
+            next_revision,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
+        ),
         previous_stage,
     });
 }
@@ -2082,22 +2121,29 @@ fn spawn_questions_job(
     request: String,
     request_attachments: Vec<PromptImageAttachment>,
     follow_up_question_limit: usize,
-) -> Receiver<Result<PlanWorkerOutcome>> {
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<PlanWorkerReport> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let result = generate_follow_up_questions(
+        let mut continuation = continuation;
+        let outcome = generate_follow_up_questions(
             &root,
             &request,
             request_attachments.clone(),
             follow_up_question_limit,
-            &PlanningAgentOverrides::default(),
+            &agent_overrides,
+            &mut continuation,
         )
         .map(|questions| PlanWorkerOutcome::Questions {
             request,
             request_attachments,
             questions,
         });
-        let _ = sender.send(result);
+        let _ = sender.send(PlanWorkerReport {
+            continuation,
+            outcome,
+        });
     });
     receiver
 }
@@ -2108,16 +2154,20 @@ fn spawn_plan_job(
     request_attachments: Vec<PromptImageAttachment>,
     follow_ups: Vec<FollowUpResponse>,
     revision: usize,
-) -> Receiver<Result<PlanWorkerOutcome>> {
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<PlanWorkerReport> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let attachments = collect_prompt_attachments(&request_attachments, &follow_ups);
-        let result = generate_issue_plan(
+        let mut continuation = continuation;
+        let outcome = generate_issue_plan(
             &root,
             &request,
             &follow_ups,
             attachments,
-            &PlanningAgentOverrides::default(),
+            &agent_overrides,
+            &mut continuation,
         )
         .and_then(|plan| {
             if plan.issues.is_empty() {
@@ -2131,7 +2181,10 @@ fn spawn_plan_job(
                 revision,
             )))
         });
-        let _ = sender.send(result);
+        let _ = sender.send(PlanWorkerReport {
+            continuation,
+            outcome,
+        });
     });
     receiver
 }
@@ -2140,10 +2193,13 @@ fn spawn_plan_revision_job(
     root: PathBuf,
     review: ReviewApp,
     revision: usize,
-) -> Receiver<Result<PlanWorkerOutcome>> {
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<PlanWorkerReport> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let result = revise_issue_plan(
+        let mut continuation = continuation;
+        let outcome = revise_issue_plan(
             &root,
             &review.request,
             &review.request_attachments,
@@ -2151,6 +2207,8 @@ fn spawn_plan_revision_job(
             &review.plan,
             &review_kept_indices(&review),
             &review_merge_groups(&review),
+            &agent_overrides,
+            &mut continuation,
         )
         .and_then(|plan| {
             if plan.issues.is_empty() {
@@ -2164,7 +2222,10 @@ fn spawn_plan_revision_job(
                 revision,
             )))
         });
-        let _ = sender.send(result);
+        let _ = sender.send(PlanWorkerReport {
+            continuation,
+            outcome,
+        });
     });
     receiver
 }
@@ -2178,6 +2239,7 @@ fn set_stage_error(stage: &mut PlanStage, error: String) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn revise_issue_plan(
     root: &Path,
     request: &str,
@@ -2186,20 +2248,25 @@ fn revise_issue_plan(
     plan: &PlannedIssueSet,
     kept_indices: &[usize],
     merge_groups: &BTreeMap<usize, Vec<usize>>,
+    overrides: &PlanningAgentOverrides,
+    continuation: &mut Option<AgentContinuation>,
 ) -> Result<PlannedIssueSet> {
     let prompt =
         render_issue_merge_prompt(root, request, follow_ups, plan, kept_indices, merge_groups)?;
-    let output = run_agent_capture(&RunAgentArgs {
-        root: Some(root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
-        agent: None,
-        prompt,
-        instructions: None,
-        model: None,
-        reasoning: None,
-        transport: None,
-        attachments: collect_prompt_attachments(request_attachments, follow_ups),
-    })?;
+    let output = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
+            agent: overrides.agent.clone(),
+            prompt,
+            instructions: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
+            transport: None,
+            attachments: collect_prompt_attachments(request_attachments, follow_ups),
+        },
+        continuation,
+    )?;
     let parsed: PlannedIssueSet = parse_agent_json(&output.stdout, "issue plan revision")?;
 
     Ok(PlannedIssueSet {
@@ -2252,15 +2319,16 @@ fn snapshot(backend: &TestBackend) -> String {
 mod tests {
     use super::{
         FollowUpAnswerState, FollowUpQuestions, FollowUpResponse, LoadingApp, PendingPlanJob,
-        PlanSessionApp, PlanStage, PlanWorkerOutcome, PlannedIssueDraft, PlannedIssueSet,
-        QuestionAnswer, QuestionsApp, RequestApp, ReviewApp, ReviewSubmissionAction,
-        SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app, handle_questions_step_key,
-        handle_questions_step_paste, handle_request_step_key, handle_request_step_paste,
-        next_incomplete_question, parse_agent_json, process_pending_plan_job,
-        render_issue_merge_prompt, render_loading_frame, render_plan_session,
-        render_question_prompt, render_questions_form_frame, render_request_form_frame,
-        render_review_form_frame, review_kept_indices, review_marker, review_merge_groups,
-        review_submission_action, selected_issue_plan, snapshot,
+        PlanSessionApp, PlanStage, PlanWorkerOutcome, PlanWorkerReport, PlannedIssueDraft,
+        PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
+        ReviewApp, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
+        build_review_app, handle_questions_step_key, handle_questions_step_paste,
+        handle_request_step_key, handle_request_step_paste, next_incomplete_question,
+        parse_agent_json, process_pending_plan_job, render_issue_merge_prompt,
+        render_loading_frame, render_plan_session, render_question_prompt,
+        render_questions_form_frame, render_request_form_frame, render_review_form_frame,
+        review_kept_indices, review_marker, review_merge_groups, review_submission_action,
+        selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
@@ -2918,6 +2986,8 @@ mod tests {
                             ),
                             error: None,
                         }),
+                        agent_overrides: PlanningAgentOverrides::default(),
+                        continuation: None,
                         pending: None,
                     },
                 )
@@ -2934,6 +3004,8 @@ mod tests {
                                 .to_string(),
                             spinner_index: 0,
                         }),
+                        agent_overrides: PlanningAgentOverrides::default(),
+                        continuation: None,
                         pending: None,
                     },
                 )
@@ -3143,11 +3215,14 @@ mod tests {
         let temp = tempdir().expect("tempdir should create");
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(Ok(PlanWorkerOutcome::Questions {
-                request: "Plan a dashboard flow".to_string(),
-                request_attachments: Vec::new(),
-                questions: Vec::new(),
-            }))
+            .send(PlanWorkerReport {
+                continuation: None,
+                outcome: Ok(PlanWorkerOutcome::Questions {
+                    request: "Plan a dashboard flow".to_string(),
+                    request_attachments: Vec::new(),
+                    questions: Vec::new(),
+                }),
+            })
             .expect("worker result should send");
         drop(sender);
 
@@ -3157,6 +3232,8 @@ mod tests {
                 detail: "Reviewing the request.".to_string(),
                 spinner_index: 0,
             }),
+            agent_overrides: PlanningAgentOverrides::default(),
+            continuation: None,
             pending: Some(PendingPlanJob {
                 receiver,
                 previous_stage: PlanStage::Request(RequestApp {

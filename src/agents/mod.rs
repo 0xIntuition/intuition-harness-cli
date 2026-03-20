@@ -1,7 +1,9 @@
 mod brief;
 mod execution;
 
-pub(crate) use execution::run_agent_capture;
+pub(crate) use execution::{
+    AgentContinuation, run_agent_capture, run_agent_capture_with_continuation,
+};
 
 pub(crate) use brief::{AgentBriefRequest, TicketMetadata, write_agent_brief};
 pub(crate) use execution::{
