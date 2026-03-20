@@ -30,7 +30,10 @@ clap = "4"
     fs::write(
         &config_path,
         format!(
-            r#"[agents]
+            r#"[onboarding]
+completed = true
+
+[agents]
 default_agent = "scan-stub"
 
 [agents.commands.scan-stub]
@@ -200,7 +203,10 @@ clap = "4"
     fs::write(
         &config_path,
         format!(
-            r#"[agents]
+            r#"[onboarding]
+completed = true
+
+[agents]
 default_agent = "scan-stub"
 
 [agents.commands.scan-stub]

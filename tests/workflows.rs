@@ -2,13 +2,62 @@
 
 include!("support/common.rs");
 
+fn ensure_workflow_test_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
+    let onboarding_block = "[onboarding]\ncompleted = true\n";
+    let updated = match fs::read_to_string(config_path) {
+        Ok(existing) => {
+            if existing.contains("[onboarding]") {
+                existing
+            } else if existing.trim().is_empty() {
+                onboarding_block.to_string()
+            } else {
+                format!("{onboarding_block}\n{existing}")
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => onboarding_block.to_string(),
+        Err(error) => return Err(Box::new(error)),
+    };
+
+    fs::write(config_path, updated)?;
+    Ok(())
+}
+
+fn workflow_test_command(
+    mut command: Command,
+    repo_root: &Path,
+    config_path: &Path,
+) -> Result<Command, Box<dyn Error>> {
+    ensure_workflow_test_config(config_path)?;
+    command.current_dir(repo_root);
+    command.env("METASTACK_CONFIG", config_path);
+    Ok(command)
+}
+
+trait WorkflowCommandExt {
+    fn workflow_repo(self, repo_root: &Path, config_path: &Path)
+    -> Result<Command, Box<dyn Error>>;
+}
+
+impl WorkflowCommandExt for Command {
+    fn workflow_repo(
+        self,
+        repo_root: &Path,
+        config_path: &Path,
+    ) -> Result<Command, Box<dyn Error>> {
+        workflow_test_command(self, repo_root, config_path)
+    }
+}
+
 #[test]
 fn workflows_list_shows_builtin_playbooks() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    ensure_workflow_test_config(&config_path)?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "workflows",
             "list",
@@ -30,9 +79,12 @@ fn workflows_list_shows_builtin_playbooks() -> Result<(), Box<dyn Error>> {
 fn workflows_explain_describes_ticket_implementation_contract() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    ensure_workflow_test_config(&config_path)?;
 
     cli()
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "workflows",
             "explain",
@@ -76,6 +128,7 @@ default_model = "gpt-5.4"
 default_reasoning = "low"
 "#,
     )?;
+    ensure_workflow_test_config(&config_path)?;
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -169,7 +222,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"c
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -268,7 +321,7 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude builtin ok","
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -359,7 +412,7 @@ printf 'unexpected launch'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
@@ -464,7 +517,7 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude override ok",
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -627,7 +680,7 @@ printf 'workflow stub ok'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -782,7 +835,7 @@ printf 'workflow route stub ok'
 
     let current_path = std::env::var("PATH")?;
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
@@ -816,7 +869,9 @@ printf 'workflow route stub ok'
 fn unsupported_provider_model_combination_returns_actionable_error() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join(".metastack/workflows"))?;
+    ensure_workflow_test_config(&config_path)?;
     fs::write(
         repo_root.join(".metastack/workflows/invalid-provider.md"),
         r#"---
@@ -830,7 +885,7 @@ Validate provider/model compatibility.
     )?;
 
     meta()
-        .current_dir(&repo_root)
+        .workflow_repo(&repo_root, &config_path)?
         .args([
             "workflows",
             "run",

@@ -3,6 +3,21 @@
 include!("support/common.rs");
 
 #[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &std::path::Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
     let current_path = std::env::var("PATH")?;
     Ok(format!("{}:{}", bin_dir.display(), current_path))
@@ -342,9 +357,11 @@ exit 1
 fn merge_json_discovers_repo_and_open_pull_requests_via_gh() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -356,6 +373,7 @@ fn merge_json_discovers_repo_and_open_pull_requests_via_gh() -> Result<(), Box<d
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge", "--json"])
         .assert()
@@ -374,9 +392,11 @@ fn merge_json_discovers_repo_and_open_pull_requests_via_gh() -> Result<(), Box<d
 fn merge_reports_repo_resolution_errors_from_gh() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -390,6 +410,7 @@ fn merge_reports_repo_resolution_errors_from_gh() -> Result<(), Box<dyn Error>> 
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge", "--json"])
         .assert()
@@ -405,9 +426,11 @@ fn merge_reports_repo_resolution_errors_from_gh() -> Result<(), Box<dyn Error>> 
 fn merge_rejects_conflicting_execution_modes() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -419,6 +442,7 @@ fn merge_rejects_conflicting_execution_modes() -> Result<(), Box<dyn Error>> {
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge", "--json", "--render-once"])
         .assert()
@@ -429,6 +453,7 @@ fn merge_rejects_conflicting_execution_modes() -> Result<(), Box<dyn Error>> {
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args([
             "merge",
@@ -451,9 +476,11 @@ fn merge_rejects_conflicting_execution_modes() -> Result<(), Box<dyn Error>> {
 fn merge_render_once_shows_selected_batch_summary() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -465,6 +492,7 @@ fn merge_render_once_shows_selected_batch_summary() -> Result<(), Box<dyn Error>
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args([
             "merge",
@@ -488,9 +516,11 @@ fn merge_render_once_shows_selected_batch_summary() -> Result<(), Box<dyn Error>
 fn merge_render_once_handles_empty_discovery_state() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -502,6 +532,7 @@ fn merge_render_once_handles_empty_discovery_state() -> Result<(), Box<dyn Error
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge", "--render-once"])
         .assert()
@@ -521,9 +552,11 @@ fn merge_render_once_handles_empty_discovery_state() -> Result<(), Box<dyn Error
 fn merge_requires_pull_request_selection_for_no_interactive_runs() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -535,6 +568,7 @@ fn merge_requires_pull_request_selection_for_no_interactive_runs() -> Result<(),
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge", "--no-interactive"])
         .assert()
@@ -551,9 +585,11 @@ fn merge_requires_pull_request_selection_for_no_interactive_runs() -> Result<(),
 fn merge_rejects_duplicate_pull_request_selection() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -565,6 +601,7 @@ fn merge_rejects_duplicate_pull_request_selection() -> Result<(), Box<dyn Error>
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args([
             "merge",
@@ -588,9 +625,11 @@ fn merge_rejects_duplicate_pull_request_selection() -> Result<(), Box<dyn Error>
 fn merge_requires_a_tty_for_interactive_dashboard_runs() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
@@ -602,6 +641,7 @@ fn merge_requires_a_tty_for_interactive_dashboard_runs() -> Result<(), Box<dyn E
 
     cli()
         .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .env("PATH", prepend_path(&bin_dir)?)
         .args(["merge"])
         .assert()
@@ -634,7 +674,7 @@ fn merge_executes_clean_batch_and_writes_artifacts() -> Result<(), Box<dyn Error
         "https://github.com/example/pull/999",
     )?;
     write_agent_stub(&agent_stub, &[11, 12])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -733,7 +773,7 @@ fn merge_persists_failed_progress_when_validation_repairs_are_exhausted()
         "https://github.com/example/pull/1001",
     )?;
     write_agent_stub(&agent_stub, &[21])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -826,7 +866,7 @@ fn merge_prefers_route_specific_agent_over_global_default() -> Result<(), Box<dy
         &[11, 12],
         "https://github.com/example/pull/999",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         r#"[agents]
 default_agent = "global-stub"
@@ -934,7 +974,7 @@ fn merge_infers_make_quality_validation_when_omitted() -> Result<(), Box<dyn Err
         "https://github.com/example/pull/2999",
     )?;
     write_agent_stub(&agent_stub, &[17, 18])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1027,7 +1067,7 @@ mod tests {
         "https://github.com/example/pull/3999",
     )?;
     write_agent_stub(&agent_stub, &[19, 20])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1095,7 +1135,7 @@ fn merge_repairs_validation_failures_and_publishes() -> Result<(), Box<dyn Error
         "https://github.com/example/pull/1999",
     )?;
     write_agent_stub(&agent_stub, &[13, 14])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1518,7 +1558,7 @@ fn merge_rejects_planner_output_that_omits_selected_pull_requests() -> Result<()
         "https://github.com/example/pull/1998",
     )?;
     write_agent_stub(&agent_stub, &[15])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1591,7 +1631,7 @@ fn merge_resolves_conflicts_with_agent_help() -> Result<(), Box<dyn Error>> {
         "https://github.com/example/pull/1000",
     )?;
     write_agent_stub(&agent_stub, &[21, 22])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1695,7 +1735,7 @@ fn merge_allows_repeat_runs_without_reusing_run_directories() -> Result<(), Box<
         "https://github.com/example/pull/1001",
     )?;
     write_agent_stub(&agent_stub, &[31, 32])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1778,7 +1818,7 @@ fn merge_updates_existing_aggregate_pull_request() -> Result<(), Box<dyn Error>>
         "https://github.com/example/pull/2000",
     )?;
     write_agent_stub(&agent_stub, &[41, 42])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]

@@ -2,6 +2,17 @@
 
 include!("support/common.rs");
 
+fn write_onboarded_config(config_path: &Path, body: &str) -> Result<(), Box<dyn Error>> {
+    let body = body.trim_start();
+    let content = if body.is_empty() {
+        "[onboarding]\ncompleted = true\n".to_string()
+    } else {
+        format!("[onboarding]\ncompleted = true\n\n{body}")
+    };
+    fs::write(config_path, content)?;
+    Ok(())
+}
+
 #[test]
 fn config_json_is_global_only_and_does_not_scaffold_repo_defaults() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -32,6 +43,7 @@ fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -61,6 +73,7 @@ fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dy
             .expect("template file should have a parent"),
     )?;
     fs::write(&conflicting_index, "# Local template change\n")?;
+    write_onboarded_config(&config_path, "")?;
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -97,7 +110,7 @@ fn setup_updates_repo_defaults_with_flags_and_resolves_project_name() -> Result<
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -108,7 +121,8 @@ team = "MET"
 default_agent = "codex"
 default_model = "gpt-5.4"
 "#
-        ),
+        )
+        .as_str(),
     )?;
 
     let projects_mock = server.mock(|when, then| {
@@ -532,7 +546,7 @@ fn setup_rejects_ambiguous_project_names() -> Result<(), Box<dyn Error>> {
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -540,7 +554,8 @@ api_key = "linear-token"
 api_url = "{api_url}"
 team = "MET"
 "#
-        ),
+        )
+        .as_str(),
     )?;
 
     let projects_mock = server.mock(|when, then| {
@@ -602,7 +617,7 @@ fn setup_rejects_missing_project_names() -> Result<(), Box<dyn Error>> {
     let server = MockServer::start();
     let api_url = server.url("/graphql");
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -610,7 +625,8 @@ api_key = "linear-token"
 api_url = "{api_url}"
 team = "MET"
 "#
-        ),
+        )
+        .as_str(),
     )?;
 
     let projects_mock = server.mock(|when, then| {
@@ -656,7 +672,8 @@ team = "MET"
 }
 
 #[test]
-fn repo_dependent_commands_require_setup_when_meta_is_missing() -> Result<(), Box<dyn Error>> {
+fn repo_dependent_commands_redirect_into_onboarding_when_meta_is_missing()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     fs::create_dir_all(&repo_root)?;
@@ -671,24 +688,39 @@ fn repo_dependent_commands_require_setup_when_meta_is_missing() -> Result<(), Bo
             "Plan repo setup work",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "hint: `meta plan` is a compatibility alias; prefer `meta backlog plan`.",
-        ))
-        .stderr(predicate::str::contains(
-            "`meta plan` requires repo setup. Run `meta runtime setup --root",
-        ));
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("meta plan"));
 
     cli()
         .args(["sync", "--root", repo_root.to_string_lossy().as_ref()])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "hint: `meta sync` is a compatibility alias; prefer `meta backlog sync`.",
-        ))
-        .stderr(predicate::str::contains(
-            "`meta sync` requires repo setup. Run `meta runtime setup --root",
-        ));
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta sync"))
+        .stderr(predicate::str::contains("requires repo setup").not());
+
+    cli()
+        .args(["technical", "--root", repo_root.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("meta technical"));
+
+    cli()
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--demo",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta listen"))
+        .stderr(predicate::str::contains("compatibility alias").not());
 
     Ok(())
 }
@@ -722,15 +754,98 @@ default_reasoning = "medium"
             "--width",
             "110",
             "--height",
-            "32",
+            "50",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Global configuration"))
         .stdout(predicate::str::contains("Default reasoning"))
         .stdout(predicate::str::contains("Meta Config"))
-        .stdout(predicate::str::contains("Listen label").not())
-        .stdout(predicate::str::contains("Default project").not());
+        .stdout(predicate::str::contains("Listen label"))
+        .stdout(predicate::str::contains("Project ID"))
+        .stdout(predicate::str::contains("Assignee scope"))
+        .stdout(predicate::str::contains("Refresh policy"))
+        .stdout(predicate::str::contains("Poll interval"))
+        .stdout(predicate::str::contains("Plan follow-ups"))
+        .stdout(predicate::str::contains("Plan label"))
+        .stdout(predicate::str::contains("Tech label"));
+
+    Ok(())
+}
+
+#[test]
+fn first_run_interception_redirects_normal_commands_into_onboarding() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--no-interactive",
+            "--request",
+            "plan something",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta plan"))
+        .stderr(predicate::str::contains("requires repo setup").not());
+
+    Ok(())
+}
+
+#[test]
+fn first_run_interception_redirects_setup_into_onboarding() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["setup", "--root", repo_root.to_string_lossy().as_ref()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding"))
+        .stdout(predicate::str::contains("meta setup"))
+        .stdout(predicate::str::contains("Repo setup").not());
+
+    Ok(())
+}
+
+#[test]
+fn config_replay_onboarding_renders_shared_wizard() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--replay-onboarding",
+            "--render-once",
+            "--width",
+            "110",
+            "--height",
+            "32",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MetaStack"))
+        .stdout(predicate::str::contains("onboarding replay"))
+        .stdout(predicate::str::contains("Global configuration").not());
 
     Ok(())
 }
@@ -764,7 +879,7 @@ default_reasoning = "high"
             "--width",
             "92",
             "--height",
-            "34",
+            "70",
         ])
         .assert()
         .success()
@@ -783,7 +898,7 @@ fn setup_render_once_covers_long_summary_values() -> Result<(), Box<dyn Error>> 
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join(".metastack"))?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         r#"[linear]
 api_key = "linear-token"
@@ -858,7 +973,7 @@ fn setup_render_once_keeps_sidebar_content_readable_at_narrow_width() -> Result<
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(repo_root.join(".metastack"))?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         r#"[linear]
 api_key = "linear-token"

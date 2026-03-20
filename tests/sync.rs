@@ -2,6 +2,44 @@
 
 include!("support/common.rs");
 
+fn sync_test_command(mut command: Command, repo_root: &Path) -> Result<Command, Box<dyn Error>> {
+    let config_path = repo_root.join("metastack.toml");
+    ensure_sync_test_config(&config_path)?;
+    command.current_dir(repo_root);
+    command.env("METASTACK_CONFIG", &config_path);
+    Ok(command)
+}
+
+fn ensure_sync_test_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
+    let onboarding_block = "[onboarding]\ncompleted = true\n";
+    let updated = match fs::read_to_string(config_path) {
+        Ok(existing) => {
+            if existing.contains("[onboarding]") {
+                existing
+            } else if existing.trim().is_empty() {
+                onboarding_block.to_string()
+            } else {
+                format!("{onboarding_block}\n{existing}")
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => onboarding_block.to_string(),
+        Err(error) => return Err(Box::new(error)),
+    };
+
+    fs::write(config_path, updated)?;
+    Ok(())
+}
+
+trait SyncCommandExt {
+    fn sync_repo(self, repo_root: &Path) -> Result<Command, Box<dyn Error>>;
+}
+
+impl SyncCommandExt for Command {
+    fn sync_repo(self, repo_root: &Path) -> Result<Command, Box<dyn Error>> {
+        sync_test_command(self, repo_root)
+    }
+}
+
 #[test]
 fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result<(), Box<dyn Error>>
 {
@@ -135,7 +173,7 @@ fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -273,7 +311,7 @@ fn sync_pull_rebuilds_discussion_context_downloads_images_with_auth_and_reuses_k
 
     for _ in 0..2 {
         cli()
-            .current_dir(temp.path())
+            .sync_repo(temp.path())?
             .args([
                 "sync",
                 "--api-key",
@@ -412,7 +450,7 @@ fn sync_pull_fetches_paginated_issue_comments() -> Result<(), Box<dyn Error>> {
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -688,7 +726,7 @@ fn sync_push_updates_a_single_harness_sync_comment_and_skips_generated_discussio
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -862,7 +900,7 @@ fn sync_push_groups_checklist_progress_by_nested_markdown_headings() -> Result<(
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1034,7 +1072,7 @@ fn sync_pull_logs_nonfatal_ticket_image_download_failures() -> Result<(), Box<dy
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1229,7 +1267,7 @@ fn sync_push_leaves_issue_description_unchanged_by_default_and_replaces_managed_
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1426,7 +1464,7 @@ fn sync_push_updates_the_issue_description_only_with_opt_in_flag() -> Result<(),
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1515,7 +1553,7 @@ fn sync_push_identifier_stays_linked_entry_driven_outside_dashboard() -> Result<
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1563,7 +1601,7 @@ fn sync_push_description_update_is_blocked_for_the_active_listen_issue()
     fs::write(issue_dir.join("index.md"), "# Local backlog\n")?;
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .env("METASTACK_LISTEN_UNATTENDED", "1")
         .env("METASTACK_LINEAR_ISSUE_IDENTIFIER", "MET-99")
         .args([
@@ -1641,7 +1679,7 @@ fn sync_pull_refuses_remote_ahead_overwrite_without_a_tty() -> Result<(), Box<dy
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1698,7 +1736,7 @@ fn sync_pull_refuses_remote_ahead_overwrite_without_a_tty() -> Result<(), Box<dy
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1781,7 +1819,7 @@ fn sync_pull_refuses_diverged_overwrite_without_a_tty() -> Result<(), Box<dyn Er
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1839,7 +1877,7 @@ fn sync_pull_refuses_diverged_overwrite_without_a_tty() -> Result<(), Box<dyn Er
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1923,7 +1961,7 @@ fn sync_push_with_update_description_refuses_remote_ahead_description_overwrite(
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -1999,7 +2037,7 @@ fn sync_push_with_update_description_refuses_remote_ahead_description_overwrite(
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2076,7 +2114,7 @@ fn sync_push_with_update_description_refuses_diverged_description_overwrite()
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2155,7 +2193,7 @@ fn sync_push_with_update_description_refuses_diverged_description_overwrite()
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2256,7 +2294,7 @@ fn sync_render_once_uses_local_backlog_entries_and_only_hydrates_linked_rows()
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2327,6 +2365,9 @@ api_url = "{wrong_api_url}"
 team = "PER"
 default_profile = "personal"
 
+[onboarding]
+completed = true
+
 [linear.profiles.work]
 api_key = "repo-token"
 api_url = "{right_api_url}"
@@ -2392,7 +2433,7 @@ team = "PER"
     });
 
     cli()
-        .current_dir(&repo_root)
+        .sync_repo(&repo_root)?
         .env_remove("LINEAR_API_KEY")
         .env_remove("LINEAR_API_URL")
         .env("METASTACK_CONFIG", &config_path)
@@ -2499,7 +2540,7 @@ fn sync_render_once_prefers_linked_backlog_children_over_project_rows() -> Resul
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2543,7 +2584,7 @@ fn sync_without_subcommand_renders_local_backlog_without_default_project_configu
     fs::write(issue_dir.join("index.md"), "# Manual entry\n")?;
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2657,7 +2698,7 @@ fn sync_link_in_no_interactive_mode_creates_metadata_without_hashes() -> Result<
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2749,7 +2790,7 @@ fn sync_link_with_pull_hydrates_the_selected_backlog_entry() -> Result<(), Box<d
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2816,7 +2857,7 @@ fn sync_link_does_not_write_metadata_when_the_issue_is_missing() -> Result<(), B
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -2876,7 +2917,7 @@ fn sync_status_reports_local_ahead_and_unlinked_entries_without_fetch() -> Resul
     )?;
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args(["sync", "status"])
         .assert()
         .success()
@@ -2948,7 +2989,7 @@ fn sync_status_fetch_reports_remote_ahead_with_live_linear_state() -> Result<(),
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -3003,7 +3044,7 @@ fn sync_status_fetch_reports_remote_ahead_with_live_linear_state() -> Result<(),
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -3106,7 +3147,7 @@ fn sync_pull_all_reports_synced_and_skipped_summary() -> Result<(), Box<dyn Erro
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -3131,7 +3172,7 @@ fn sync_pull_all_reports_synced_and_skipped_summary() -> Result<(), Box<dyn Erro
     )?;
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -3240,7 +3281,7 @@ fn sync_push_all_exits_non_zero_when_any_entry_errors() -> Result<(), Box<dyn Er
     });
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",
@@ -3258,7 +3299,7 @@ fn sync_push_all_exits_non_zero_when_any_entry_errors() -> Result<(), Box<dyn Er
     write_linked_metadata(&broken_dir, "MET-36", "Broken push entry", None, None, None)?;
 
     cli()
-        .current_dir(temp.path())
+        .sync_repo(temp.path())?
         .args([
             "sync",
             "--api-key",

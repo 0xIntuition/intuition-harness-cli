@@ -3,6 +3,21 @@
 include!("support/common.rs");
 
 #[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn write_listen_store_session(
     config_path: &Path,
     repo_root: &Path,
@@ -71,7 +86,8 @@ fn listen_session_json(
 fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir().expect("tempdir should build");
-    let config_path = temp.path().join("missing-metastack.toml");
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         temp.path(),
         r#"{
@@ -110,7 +126,7 @@ fn listen_sessions_clear_issue_identifier_removes_only_matching_session()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -191,7 +207,7 @@ fn listen_sessions_clear_refuses_live_pid_records() -> Result<(), Box<dyn Error>
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -248,7 +264,7 @@ fn agents_listen_sessions_clear_blocked_preserves_other_selector_states()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -328,7 +344,7 @@ fn listen_sessions_clear_completed_preserves_blocked_records() -> Result<(), Box
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -388,7 +404,7 @@ fn listen_sessions_clear_stale_removes_only_dead_pid_records() -> Result<(), Box
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -448,7 +464,7 @@ fn listen_sessions_list_prunes_expired_completed_sessions_on_load() -> Result<()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -499,7 +515,7 @@ fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -556,7 +572,7 @@ fn listen_once_demo_outputs_terminal_summary_without_browser_endpoints()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -596,7 +612,7 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -700,7 +716,7 @@ fn listen_check_reports_codex_config_status_and_linear_api_validation() -> Resul
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -921,11 +937,13 @@ fn listen_once_fails_fast_on_codex_preflight_before_linear_auth() -> Result<(), 
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
     let bin_dir = temp.path().join("bin");
     let home_dir = temp.path().join("home");
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&home_dir)?;
+    write_onboarded_config(&config_path, "")?;
 
     write_minimal_planning_context(
         &repo_root,
@@ -975,6 +993,7 @@ exit 0
     meta()
         .current_dir(&repo_root)
         .env_remove("LINEAR_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
         .env("HOME", &home_dir)
         .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
         .args([
@@ -1001,7 +1020,7 @@ fn agents_listen_matches_legacy_listen_output() -> Result<(), Box<dyn Error>> {
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1053,7 +1072,7 @@ fn agents_listen_matches_legacy_once_output() -> Result<(), Box<dyn Error>> {
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1105,7 +1124,7 @@ fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn 
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1144,7 +1163,7 @@ fn listen_cli_poll_interval_overrides_repo_default() -> Result<(), Box<dyn Error
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1191,7 +1210,7 @@ fn listen_once_uses_repo_selected_profile_and_project_over_conflicting_global_de
     let wrong_api_url = wrong_server.url("/graphql");
 
     fs::create_dir_all(&repo_root)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1366,7 +1385,7 @@ fn listen_rejects_duplicate_active_listener_lock_for_same_project() -> Result<()
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1425,7 +1444,7 @@ fn listen_allows_active_listener_lock_for_different_project() -> Result<(), Box<
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1490,7 +1509,7 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1553,7 +1572,7 @@ fn listen_omitted_project_uses_repo_default_project_identity() -> Result<(), Box
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -1594,6 +1613,57 @@ fn listen_omitted_project_uses_repo_default_project_identity() -> Result<(), Box
 
 #[cfg(unix)]
 #[test]
+fn listen_omitted_project_uses_install_default_project_identity() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(
+        &config_path,
+        r#"[defaults.linear]
+project_id = "project-install"
+"#,
+    )?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let install_project_dir =
+        listen_project_store_dir(&config_path, &repo_root, Some("project-install"))?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "State file: {}",
+            install_project_dir.join("session.json").display()
+        )));
+
+    let metadata = fs::read_to_string(install_project_dir.join("project.json"))?;
+    assert!(metadata.contains("\"project_selector\": \"project-install\""));
+    assert!(metadata.contains("\"project_label\": \"project-install\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_render_once_suppresses_pid_probe_output_across_refreshes() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
@@ -1614,7 +1684,7 @@ fn listen_render_once_suppresses_pid_probe_output_across_refreshes() -> Result<(
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1927,7 +1997,7 @@ fn listen_uses_the_same_project_identity_for_repo_and_worktree_roots() -> Result
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -2017,7 +2087,7 @@ fn listen_once_bootstraps_workspace_clone_workpad_and_agent_session() -> Result<
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -2367,6 +2437,8 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     assert!(brief.contains("Picked up automatically by `meta listen`."));
 
     wait_for_path(&stub_dir.join("payload.txt"))?;
+    wait_for_path(&stub_dir.join("workpad.txt"))?;
+    wait_for_path(&stub_dir.join("instructions.txt"))?;
     assert_eq!(
         fs::read_to_string(stub_dir.join("workpad.txt"))?,
         "comment-21"
@@ -2526,7 +2598,7 @@ fn listen_sessions_target_multiple_project_scopes_from_one_repo() -> Result<(), 
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
-    fs::write(&config_path, "\n")?;
+    write_onboarded_config(&config_path, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -2724,7 +2796,7 @@ fn listen_once_prefers_command_route_agent_over_global_default() -> Result<(), B
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -3042,7 +3114,7 @@ fn listen_once_downloads_issue_attachment_context_for_agent() -> Result<(), Box<
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -3339,7 +3411,7 @@ fn listen_once_refreshes_existing_workspace_clone_and_reuses_backlog_and_workpad
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -3706,7 +3778,7 @@ fn listen_once_executes_repo_selected_builtin_claude_provider() -> Result<(), Bo
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -4060,7 +4132,7 @@ fn listen_once_recreates_existing_workspace_clone_when_configured() -> Result<()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -4311,7 +4383,7 @@ fn listen_once_relaunches_agent_until_issue_leaves_active_states() -> Result<(),
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -4441,7 +4513,7 @@ fn listen_once_blocks_after_repeated_noop_turns() -> Result<(), Box<dyn Error>> 
         repo_root.join("instructions/listen.md"),
         "# Listener Instructions\nKeep the workpad current.\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -4551,7 +4623,7 @@ fn listen_once_skips_ineligible_issue_and_records_the_reason() -> Result<(), Box
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -5218,7 +5290,7 @@ fn listen_once_claims_unassigned_issue_in_viewer_scope() -> Result<(), Box<dyn E
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -5474,7 +5546,7 @@ fn listen_once_all_assignees_override_claims_foreign_assigned_issue_without_chan
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]

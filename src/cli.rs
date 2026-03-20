@@ -712,6 +712,30 @@ pub struct ConfigArgs {
     /// Update zero-prompt auto-assignment for backlog ticket creation. Supported values: `viewer`.
     #[arg(long)]
     pub velocity_auto_assign: Option<String>,
+    /// Update the install-scoped default Linear project ID.
+    #[arg(long)]
+    pub project_id: Option<String>,
+    /// Update the install-scoped default listen label.
+    #[arg(long)]
+    pub listen_label: Option<String>,
+    /// Update the install-scoped listen assignee scope.
+    #[arg(long, value_enum)]
+    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    /// Update the install-scoped listen refresh policy.
+    #[arg(long, value_enum)]
+    pub refresh_policy: Option<ListenRefreshPolicyArg>,
+    /// Update the install-scoped listen poll interval (seconds).
+    #[arg(long)]
+    pub poll_interval: Option<String>,
+    /// Update the install-scoped plan follow-up question limit.
+    #[arg(long)]
+    pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped default plan label.
+    #[arg(long)]
+    pub plan_label: Option<String>,
+    /// Update the install-scoped default technical label.
+    #[arg(long)]
+    pub technical_label: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
@@ -730,6 +754,9 @@ pub struct ConfigArgs {
     /// Launch the dedicated advanced agent-routing dashboard instead of the primary simple config flow.
     #[arg(long)]
     pub advanced_routing: bool,
+    /// Launch the shared first-run onboarding wizard instead of the manual config dashboard.
+    #[arg(long)]
+    pub replay_onboarding: bool,
     /// Emit the install-scoped config view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,

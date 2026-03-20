@@ -453,11 +453,11 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
     ));
     lines.push(format!(
         "Assignee filter: {}",
-        assignment_scope_label(view.planning_meta.listen.assignment_scope)
+        assignment_scope_label(view.planning_meta.listen.assignment_scope())
     ));
     lines.push(format!(
         "Workspace refresh: {}",
-        refresh_policy_label(view.planning_meta.listen.refresh_policy)
+        refresh_policy_label(view.planning_meta.listen.refresh_policy())
     ));
     lines.push(format!(
         "Instructions file: {}",
@@ -657,10 +657,10 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         view.planning_meta.listen.required_labels = parse_optional_listen_labels_input(label);
     }
     if let Some(scope) = args.assignment_scope {
-        view.planning_meta.listen.assignment_scope = scope.into();
+        view.planning_meta.listen.assignment_scope = Some(scope.into());
     }
     if let Some(policy) = args.refresh_policy {
-        view.planning_meta.listen.refresh_policy = policy.into();
+        view.planning_meta.listen.refresh_policy = Some(policy.into());
     }
     if let Some(path) = &args.instructions_path {
         view.planning_meta.listen.instructions_path = normalize_optional(path);
@@ -808,7 +808,7 @@ impl SetupApp {
                     "Only issues assigned to the authenticated viewer".to_string(),
                     "Viewer-assigned issues plus unassigned issues".to_string(),
                 ],
-                match view.planning_meta.listen.assignment_scope {
+                match view.planning_meta.listen.assignment_scope() {
                     ListenAssignmentScope::Any => 0,
                     ListenAssignmentScope::ViewerOnly => 1,
                     ListenAssignmentScope::ViewerOrUnassigned => 2,
@@ -819,7 +819,7 @@ impl SetupApp {
                     "Reuse the clone and hard-refresh it from origin/main".to_string(),
                     "Delete the clone and recreate it from origin/main".to_string(),
                 ],
-                match view.planning_meta.listen.refresh_policy {
+                match view.planning_meta.listen.refresh_policy() {
                     ListenRefreshPolicy::ReuseAndRefresh => 0,
                     ListenRefreshPolicy::RecreateFromOriginMain => 1,
                 },
@@ -1189,8 +1189,8 @@ impl SubmittedSetup {
         view.planning_meta.agent.model = self.model.clone();
         view.planning_meta.agent.reasoning = self.reasoning.clone();
         view.planning_meta.listen.required_labels = self.listen_labels.clone();
-        view.planning_meta.listen.assignment_scope = self.assignment_scope;
-        view.planning_meta.listen.refresh_policy = self.refresh_policy;
+        view.planning_meta.listen.assignment_scope = Some(self.assignment_scope);
+        view.planning_meta.listen.refresh_policy = Some(self.refresh_policy);
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
         view.planning_meta.listen.poll_interval_seconds = self.listen_poll_interval;
         view.planning_meta.plan.interactive_follow_up_questions = self.interactive_plan_limit;
@@ -1242,6 +1242,22 @@ fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
     }
 }
 
+/// Minimum column width to show every step label without wrapping (single-column mode).
+/// Accounts for `"> XX. Label"` prefix plus two border characters.
+fn setup_step_column_width() -> u16 {
+    let steps = SetupStep::all();
+    let max_label = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let digits = if i + 1 >= 10 { 2 } else { 1 };
+            2 + digits + 2 + s.label().len()
+        })
+        .max()
+        .unwrap_or(20);
+    (max_label + 2) as u16
+}
+
 fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let area = frame.area();
     let header_height = if area.width >= 110 { 5 } else { 6 };
@@ -1258,7 +1274,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` and keep repo onboarding rerunnable.",
+            "Configure repo-scoped defaults stored in `.metastack/meta.json` after install onboarding is complete.",
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",
@@ -1276,12 +1292,13 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);
 
+    let step_col = setup_step_column_width();
     let body_area = layout[1];
     if body_area.width >= 118 {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(28),
+                Constraint::Length(step_col),
                 Constraint::Min(38),
                 Constraint::Length(44),
             ])
@@ -1290,9 +1307,10 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
         render_step_panel(frame, app, body[1]);
         render_summary_panel(frame, app, body[2]);
     } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(40);
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(40), Constraint::Min(40)])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)

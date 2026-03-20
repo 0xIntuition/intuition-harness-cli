@@ -744,6 +744,107 @@ impl SelectFieldState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FilterableSelectFieldState {
+    all_options: Vec<String>,
+    filter: String,
+    filter_cursor: usize,
+    visible_indices: Vec<usize>,
+    cursor: usize,
+}
+
+impl FilterableSelectFieldState {
+    pub(crate) fn new(options: Vec<String>) -> Self {
+        let visible_indices: Vec<usize> = (0..options.len()).collect();
+        Self {
+            all_options: options,
+            filter: String::new(),
+            filter_cursor: 0,
+            visible_indices,
+            cursor: 0,
+        }
+    }
+
+    pub(crate) fn filter_value(&self) -> &str {
+        &self.filter
+    }
+
+    pub(crate) fn visible_options(&self) -> Vec<&str> {
+        self.visible_indices
+            .iter()
+            .map(|&i| self.all_options[i].as_str())
+            .collect()
+    }
+
+    pub(crate) fn cursor_index(&self) -> usize {
+        self.cursor
+    }
+
+    /// Returns the index into `all_options` for the currently highlighted item.
+    pub(crate) fn selected_original_index(&self) -> Option<usize> {
+        self.visible_indices.get(self.cursor).copied()
+    }
+
+    pub(crate) fn selected_label(&self) -> Option<&str> {
+        self.selected_original_index()
+            .map(|i| self.all_options[i].as_str())
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up => {
+                if !self.visible_indices.is_empty() {
+                    wrap_index(&mut self.cursor, self.visible_indices.len(), -1);
+                }
+                true
+            }
+            KeyCode::Down => {
+                if !self.visible_indices.is_empty() {
+                    wrap_index(&mut self.cursor, self.visible_indices.len(), 1);
+                }
+                true
+            }
+            KeyCode::Backspace => {
+                if self.filter_cursor > 0 {
+                    let start = previous_boundary(&self.filter, self.filter_cursor);
+                    self.filter.drain(start..self.filter_cursor);
+                    self.filter_cursor = start;
+                    self.refilter();
+                }
+                true
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.filter.clear();
+                self.filter_cursor = 0;
+                self.refilter();
+                true
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.filter.insert(self.filter_cursor, ch);
+                self.filter_cursor += ch.len_utf8();
+                self.refilter();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn refilter(&mut self) {
+        let query = self.filter.to_lowercase();
+        self.visible_indices = if query.is_empty() {
+            (0..self.all_options.len()).collect()
+        } else {
+            self.all_options
+                .iter()
+                .enumerate()
+                .filter(|(_, opt)| opt.to_lowercase().contains(&query))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        self.cursor = 0;
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MultiSelectFieldState {

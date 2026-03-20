@@ -108,7 +108,7 @@ pub(crate) fn resolve_plan_ticket_defaults(
                 if velocity_project.is_some() {
                     None
                 } else {
-                    normalized(planning_meta.linear.project_id.clone())
+                    planning_meta.effective_project_id(app_config)
                 }
             })
         },
@@ -181,7 +181,7 @@ pub(crate) fn resolve_technical_ticket_defaults(
             if velocity_project.is_some() {
                 None
             } else {
-                normalized(planning_meta.linear.project_id.clone())
+                planning_meta.effective_project_id(app_config)
             }
         }),
         state: normalized(input.overrides.state.clone())

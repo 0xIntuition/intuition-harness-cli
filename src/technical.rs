@@ -234,7 +234,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
                 labels: args.labels.clone(),
                 assignee: args.assignee.clone(),
             },
-            built_in_label: planning_meta.issue_labels.technical_label(),
+            built_in_label: planning_meta.effective_technical_label(&app_config),
         },
         &generated.parent,
     );

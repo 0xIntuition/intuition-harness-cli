@@ -47,6 +47,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## Default posture
 
+- Fresh installs may route normal `meta` commands into the shared install-scoped onboarding wizard before the requested command runs. `meta runtime config --replay-onboarding` and `meta config --replay-onboarding` rerun that same wizard, while plain `meta runtime config` / `meta config` stay available as the manual install-scoped editing flows after onboarding completes.
 - Agent-backed commands such as `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen` must derive their project/repository identity from the resolved command root for the current run.
 - `meta backlog plan` and `meta backlog tech` should resolve ticket defaults with the precedence `CLI override > repo override > global override > built-in behavior`, while zero-prompt runs may additionally reuse remembered repo-scoped project/team selections and `velocity_defaults` before the repo/global fallbacks.
 - Install-scoped agent defaults may be routed per command family or per command key via `meta runtime config`; agent-backed commands should resolve those route-aware defaults before falling back to repo-scoped or global defaults, while still honoring explicit CLI overrides for the active run.

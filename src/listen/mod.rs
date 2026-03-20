@@ -1010,7 +1010,7 @@ where
 
         let workspace = match ensure_ticket_workspace(
             &self.root,
-            self.listen_settings.refresh_policy,
+            self.listen_settings.refresh_policy(),
             &detailed_issue.identifier,
             &detailed_issue.title,
         ) {
@@ -1205,12 +1205,15 @@ where
     }
 
     fn watch_scope_label(&self) -> String {
-        render_watch_scope(self.listen_settings.assignment_scope, self.viewer.as_ref())
+        render_watch_scope(
+            self.listen_settings.assignment_scope(),
+            self.viewer.as_ref(),
+        )
     }
 
     fn assignee_scope_skip_reason(&self, issue: &IssueSummary) -> Option<String> {
         let viewer = self.viewer.as_ref()?;
-        match self.listen_settings.assignment_scope {
+        match self.listen_settings.assignment_scope() {
             ListenAssignmentScope::Any => None,
             ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
                 Some(assignee) if assignee.id == viewer.id => None,
@@ -1233,7 +1236,7 @@ where
 
     fn session_drop_reason(&self, issue: &IssueSummary) -> Option<String> {
         let viewer = self.viewer.as_ref()?;
-        match self.listen_settings.assignment_scope {
+        match self.listen_settings.assignment_scope() {
             ListenAssignmentScope::Any => None,
             ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
                 Some(assignee) if assignee.id == viewer.id => None,
@@ -1854,14 +1857,28 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let planning_meta = load_required_planning_meta(&root, "listen")?;
     ensure_planning_layout(&root, false)?;
     let app_config = AppConfig::load()?;
-    let poll_interval_seconds = resolve_listen_poll_interval_seconds(args, &planning_meta);
+    let poll_interval_seconds =
+        resolve_listen_poll_interval_seconds(args, &planning_meta, &app_config);
     let mut listen_settings = planning_meta.listen.clone();
+    if listen_settings.assignment_scope.is_none() {
+        listen_settings.assignment_scope =
+            Some(planning_meta.effective_listen_assignment_scope(&app_config));
+    }
+    if listen_settings.refresh_policy.is_none() {
+        listen_settings.refresh_policy =
+            Some(planning_meta.effective_listen_refresh_policy(&app_config));
+    }
     if args.all_assignees {
-        listen_settings.assignment_scope = ListenAssignmentScope::Any;
+        listen_settings.assignment_scope = Some(ListenAssignmentScope::Any);
     }
 
     if args.demo {
-        let store = resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta)?;
+        let store = resolve_project_store_for_run(
+            &root,
+            args.project.as_deref(),
+            &planning_meta,
+            &app_config,
+        )?;
         let _lock = store.acquire_listener_lock(std::process::id())?;
         let demo_now = now_epoch_seconds();
         let demo_state_file = display_path(&store.paths().state_path, &root);
@@ -1949,7 +1966,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             profile: args.profile.clone(),
         },
     )?;
-    let store = resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta)?;
+    let store =
+        resolve_project_store_for_run(&root, args.project.as_deref(), &planning_meta, &app_config)?;
     let _lock = store.acquire_listener_lock(std::process::id())?;
     let client = ReqwestLinearClient::new(config.clone())?;
     let service = LinearService::new(client, config.default_team.clone());
@@ -1964,12 +1982,9 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     println!(
                         "- Effective assignee filter: {}",
                         render_watch_scope(
-                            listen_settings.assignment_scope,
+                            listen_settings.assignment_scope(),
                             report.viewer().filter(|_| {
-                                !matches!(
-                                    listen_settings.assignment_scope,
-                                    ListenAssignmentScope::Any
-                                )
+                                !matches!(listen_settings.assignment_scope(), ListenAssignmentScope::Any)
                             }),
                         )
                     );
@@ -1991,7 +2006,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         unreachable!("`--check` exits on provider preflight failures before Linear validation");
     }
     let viewer = if matches!(
-        listen_settings.assignment_scope,
+        listen_settings.assignment_scope(),
         ListenAssignmentScope::ViewerOnly | ListenAssignmentScope::ViewerOrUnassigned
     ) {
         match preflight_viewer {
@@ -2010,10 +2025,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             project_id: if args.project.is_some() {
                 None
             } else {
-                planning_meta.linear.project_id.clone()
+                planning_meta.effective_project_id(&app_config)
             },
             state: Some(TODO_STATE.to_string()),
-            assignee: issue_assignee_filter(listen_settings.assignment_scope, viewer.as_ref()),
+            assignee: issue_assignee_filter(listen_settings.assignment_scope(), viewer.as_ref()),
             limit: args.limit.max(1),
         },
         max_pickups: args.max_pickups.max(1),
@@ -2108,29 +2123,32 @@ fn resolve_project_store(
     let requested_root = canonicalize_existing_dir(root)?;
     let source_root = resolve_source_project_root(&requested_root)?;
     let planning_meta = load_required_planning_meta(&source_root, "listen")?;
-    resolve_project_store_for_run(&source_root, explicit_project, &planning_meta)
+    let app_config = AppConfig::load()?;
+    resolve_project_store_for_run(&source_root, explicit_project, &planning_meta, &app_config)
 }
 
 fn resolve_project_store_for_run(
     root: &Path,
     explicit_project: Option<&str>,
     planning_meta: &PlanningMeta,
+    app_config: &AppConfig,
 ) -> Result<ListenProjectStore> {
     ListenProjectStore::resolve(
         root,
-        effective_listen_project_selector(explicit_project, planning_meta).as_deref(),
+        effective_listen_project_selector(explicit_project, planning_meta, app_config).as_deref(),
     )
 }
 
 fn effective_listen_project_selector(
     explicit_project: Option<&str>,
     planning_meta: &PlanningMeta,
+    app_config: &AppConfig,
 ) -> Option<String> {
     explicit_project
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| planning_meta.linear.project_id.clone())
+        .or_else(|| planning_meta.effective_project_id(app_config))
 }
 
 fn store_summary(store: &ListenProjectStore) -> Result<StoredListenProjectSummary> {
@@ -2266,9 +2284,13 @@ where
     Ok(())
 }
 
-fn resolve_listen_poll_interval_seconds(args: &ListenRunArgs, planning_meta: &PlanningMeta) -> u64 {
+fn resolve_listen_poll_interval_seconds(
+    args: &ListenRunArgs,
+    planning_meta: &PlanningMeta,
+    app_config: &AppConfig,
+) -> u64 {
     args.poll_interval
-        .unwrap_or_else(|| planning_meta.listen.poll_interval_seconds())
+        .unwrap_or_else(|| planning_meta.effective_listen_poll_interval_seconds(app_config))
         .max(1)
 }
 
@@ -3192,8 +3214,8 @@ mod tests {
             worker_reasoning: None,
             listen_settings: PlanningListenSettings {
                 required_labels: None,
-                assignment_scope: scope,
-                refresh_policy: ListenRefreshPolicy::ReuseAndRefresh,
+                assignment_scope: Some(scope),
+                refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
             },
@@ -3369,8 +3391,8 @@ mod tests {
             worker_reasoning: None,
             listen_settings: PlanningListenSettings {
                 required_labels: None,
-                assignment_scope: ListenAssignmentScope::ViewerOrUnassigned,
-                refresh_policy: ListenRefreshPolicy::ReuseAndRefresh,
+                assignment_scope: Some(ListenAssignmentScope::ViewerOrUnassigned),
+                refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
             },

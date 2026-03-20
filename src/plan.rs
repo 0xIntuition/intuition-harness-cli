@@ -301,7 +301,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         match run_interactive_plan_session(
             &root,
             args.request.clone(),
-            planning_meta.interactive_follow_up_question_limit(),
+            planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             agent_overrides.clone(),
         )? {
             InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
@@ -325,7 +325,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
                     labels: args.labels.clone(),
                     assignee: args.assignee.clone(),
                 },
-                built_in_label: planning_meta.issue_labels.plan_label(),
+                built_in_label: planning_meta.effective_plan_label(&app_config),
                 generated_priority: draft.priority,
             },
         );
