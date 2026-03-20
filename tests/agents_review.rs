@@ -173,6 +173,130 @@ fn agents_review_fails_when_linear_linkage_is_missing() -> Result<(), Box<dyn Er
 
 #[cfg(unix)]
 #[test]
+fn agents_review_fails_when_linear_linkage_is_ambiguous() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let agent_stub = temp.path().join("review-agent");
+    let gh_stub = temp.path().join("gh");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+
+    fs::create_dir_all(&repo_root)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{"linear":{"team":"ENG","project_id":"project-1"}}"#,
+    )?;
+    write_review_agent_config(&config_path, &api_url, &agent_stub, false)?;
+    write_executable(&agent_stub, "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{}'\n")?;
+    write_review_gh_stub(
+        &gh_stub,
+        "ENG-10251 and ENG-10252",
+        false,
+        "https://github.com/metastack-systems/metastack-cli/pull/12345",
+    )?;
+    mock_issue_lookup(
+        &server,
+        vec![
+            review_issue_node(
+                "issue-1",
+                "ENG-10251",
+                "First linked issue",
+                "# Acceptance Criteria\n\n- First issue\n",
+                "state-2",
+                "In Progress",
+            ),
+            review_issue_node(
+                "issue-2",
+                "ENG-10252",
+                "Second linked issue",
+                "# Acceptance Criteria\n\n- Second issue\n",
+                "state-2",
+                "In Progress",
+            ),
+        ],
+    );
+    mock_review_issue_detail(
+        &server,
+        "issue-1",
+        review_issue_detail_node(
+            "issue-1",
+            "ENG-10251",
+            "First linked issue",
+            "# Acceptance Criteria\n\n- First issue\n",
+            Vec::new(),
+        ),
+    );
+    mock_review_issue_detail(
+        &server,
+        "issue-2",
+        review_issue_detail_node(
+            "issue-2",
+            "ENG-10252",
+            "Second linked issue",
+            "# Acceptance Criteria\n\n- Second issue\n",
+            Vec::new(),
+        ),
+    );
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env(
+            "PATH",
+            format!("{}:{}", temp.path().display(), std::env::var("PATH")?),
+        )
+        .args([
+            "agents",
+            "review",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--dry-run",
+            "12345",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "resolved to multiple Linear issues (ENG-10251, ENG-10252)",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_review_rejects_zero_pull_request_numbers() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+
+    fs::create_dir_all(&repo_root)?;
+    fs::write(
+        &config_path,
+        r#"[onboarding]
+completed = true
+"#,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["agents", "review", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "pull request number must be greater than zero",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn agents_review_no_fix_path_does_not_create_follow_up_pr() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
