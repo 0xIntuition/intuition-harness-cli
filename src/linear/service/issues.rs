@@ -206,12 +206,42 @@ where
         let project_id = self
             .resolve_project_id(spec.project.as_deref(), None, Some(&issue.team.key))
             .await?;
+        let label_ids = match spec.labels.as_ref() {
+            Some(labels) => {
+                self.ensure_issue_labels_exist(Some(issue.team.key.clone()), labels)
+                    .await?;
+                Some(self.resolve_label_ids(labels, &issue.team.key).await?)
+            }
+            None => None,
+        };
+        let parent_id = match spec.parent_identifier.as_deref() {
+            Some(parent_identifier) => {
+                if issue.identifier.eq_ignore_ascii_case(parent_identifier) {
+                    bail!("issue `{}` cannot be its own parent", issue.identifier);
+                }
+                let parent = self.load_issue(parent_identifier).await?;
+                if !parent.team.key.eq_ignore_ascii_case(&issue.team.key) {
+                    bail!(
+                        "parent issue `{}` belongs to team `{}`, but `{}` belongs to `{}`",
+                        parent.identifier,
+                        parent.team.key,
+                        issue.identifier,
+                        issue.team.key
+                    );
+                }
+                Some(parent.id)
+            }
+            None => None,
+        };
 
         if spec.title.is_none()
             && spec.description.is_none()
             && spec.project.is_none()
             && spec.state.is_none()
             && spec.priority.is_none()
+            && spec.estimate.is_none()
+            && label_ids.is_none()
+            && parent_id.is_none()
         {
             bail!("no issue fields were provided to edit");
         }
@@ -225,6 +255,9 @@ where
                     project_id,
                     state_id,
                     priority: spec.priority,
+                    estimate: spec.estimate,
+                    label_ids,
+                    parent_id,
                 },
             )
             .await

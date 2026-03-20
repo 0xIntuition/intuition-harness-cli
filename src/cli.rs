@@ -24,6 +24,8 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog plan --root . ENG-10144
   meta backlog plan --root . ENG-10144 --velocity
+  meta backlog improve --root . --mode basic
+  meta backlog improve --root . ENG-10144 --mode advanced --apply
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
@@ -230,11 +232,49 @@ pub struct BacklogArgs {
 pub enum BacklogCommands {
     /// Plan a backlog request into one or more Linear backlog issues.
     Plan(PlanArgs),
+    /// Review repo-scoped backlog issues for hygiene gaps and optionally apply improvements.
+    Improve(BacklogImproveArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BacklogImproveModeArg {
+    Basic,
+    Advanced,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BacklogImproveArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Optional explicit issue identifiers to improve. When omitted, scans repo-scoped backlog issues.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issues: Vec<String>,
+    /// Improvement depth. `basic` focuses on safe metadata hygiene; `advanced` can rewrite more deeply and propose structure changes.
+    #[arg(long, value_enum, default_value_t = BacklogImproveModeArg::Basic)]
+    pub mode: BacklogImproveModeArg,
+    /// Backlog state to scan when no explicit issues are provided.
+    #[arg(long, default_value = "Backlog")]
+    pub state: String,
+    /// Maximum number of repo-scoped issues to scan when no explicit issues are provided.
+    #[arg(long, default_value_t = 25)]
+    pub limit: usize,
+    /// Apply the proposed updates after persisting the local artifact trail.
+    #[arg(long)]
+    pub apply: bool,
+    /// Override the configured default agent/provider for backlog improvement.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for backlog improvement.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for backlog improvement.
+    #[arg(long)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

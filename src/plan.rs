@@ -446,6 +446,9 @@ async fn run_reshape_plan(
             project: None,
             state: None,
             priority: None,
+            estimate: None,
+            labels: None,
+            parent_identifier: None,
         })
         .await?;
     service
