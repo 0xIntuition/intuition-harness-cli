@@ -2308,8 +2308,14 @@ fn build_dashboard_data(
         .map(|totals| {
             format!(
                 "in {} | out {} | total {}",
-                format_number(totals.input),
-                format_number(totals.output),
+                totals
+                    .input
+                    .map(format_number)
+                    .unwrap_or_else(|| "n/a".to_string()),
+                totals
+                    .output
+                    .map(format_number)
+                    .unwrap_or_else(|| "n/a".to_string()),
                 format_number(totals.total)
             )
         })
@@ -2359,25 +2365,22 @@ fn build_dashboard_data(
 }
 
 fn aggregate_token_usage(sessions: &[AgentSession]) -> Option<TokenTotals> {
-    let mut input = 0u64;
-    let mut output = 0u64;
-    let mut has_any = false;
+    let mut input = None;
+    let mut output = None;
 
     for session in sessions {
         if let Some(value) = session.tokens.input {
-            has_any = true;
-            input += value;
+            input = Some(input.unwrap_or(0) + value);
         }
         if let Some(value) = session.tokens.output {
-            has_any = true;
-            output += value;
+            output = Some(output.unwrap_or(0) + value);
         }
     }
 
-    has_any.then_some(TokenTotals {
+    (input.is_some() || output.is_some()).then_some(TokenTotals {
         input,
         output,
-        total: input + output,
+        total: input.unwrap_or(0) + output.unwrap_or(0),
     })
 }
 
@@ -2769,8 +2772,8 @@ fn compact_identifier(value: &str) -> String {
 
 #[derive(Debug, Clone, Copy)]
 struct TokenTotals {
-    input: u64,
-    output: u64,
+    input: Option<u64>,
+    output: Option<u64>,
     total: u64,
 }
 
@@ -2787,10 +2790,10 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDaemon, AgentSession, ListenCycleData, ListenState, SessionPhase, TODO_STATE,
-        TokenUsage, capture_workspace_snapshot, compact_identifier, format_duration, format_number,
-        listen_scope_label, mark_running_session_stale, render_agent_prompt,
-        required_label_skip_reason,
+        AgentDaemon, AgentSession, DashboardRuntimeContext, ListenCycleData, ListenState,
+        SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot, compact_identifier,
+        format_duration, format_number, listen_scope_label, mark_running_session_stale,
+        render_agent_prompt, required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -2929,9 +2932,94 @@ mod tests {
         ];
 
         let totals = super::aggregate_token_usage(&sessions).expect("usage totals should exist");
-        assert_eq!(totals.input, 100);
-        assert_eq!(totals.output, 25);
+        assert_eq!(totals.input, Some(100));
+        assert_eq!(totals.output, Some(25));
         assert_eq!(totals.total, 125);
+    }
+
+    #[test]
+    fn aggregate_token_usage_preserves_missing_output_counts() {
+        let sessions = vec![AgentSession {
+            issue_id: Some("issue-1".to_string()),
+            issue_identifier: "ENG-1".to_string(),
+            issue_title: "One".to_string(),
+            project_name: None,
+            team_key: "ENG".to_string(),
+            issue_url: "https://linear.app/issues/ENG-1".to_string(),
+            phase: SessionPhase::Running,
+            summary: "running".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1,
+            pid: None,
+            session_id: None,
+            turns: None,
+            tokens: TokenUsage {
+                input: Some(100),
+                output: None,
+            },
+            log_path: None,
+        }];
+
+        let totals = super::aggregate_token_usage(&sessions).expect("usage totals should exist");
+        assert_eq!(totals.input, Some(100));
+        assert_eq!(totals.output, None);
+        assert_eq!(totals.total, 100);
+    }
+
+    #[test]
+    fn dashboard_runtime_tokens_render_partial_counts_as_na() {
+        let cycle = ListenCycleData {
+            scope: "MET".to_string(),
+            watch_scope: "all assignees".to_string(),
+            pending_issues: Vec::new(),
+            sessions: vec![AgentSession {
+                issue_id: Some("issue-1".to_string()),
+                issue_identifier: "ENG-1".to_string(),
+                issue_title: "One".to_string(),
+                project_name: None,
+                team_key: "ENG".to_string(),
+                issue_url: "https://linear.app/issues/ENG-1".to_string(),
+                phase: SessionPhase::Running,
+                summary: "running".to_string(),
+                brief_path: None,
+                backlog_issue_identifier: None,
+                backlog_issue_title: None,
+                backlog_path: None,
+                workspace_path: None,
+                branch: None,
+                workpad_comment_id: None,
+                updated_at_epoch_seconds: 1,
+                pid: None,
+                session_id: None,
+                turns: None,
+                tokens: TokenUsage {
+                    input: Some(100),
+                    output: None,
+                },
+                log_path: None,
+            }],
+            notes: Vec::new(),
+            state_file: "/tmp/session.json".to_string(),
+            rate_limits: None,
+            claimed_this_cycle: 0,
+        };
+        let runtime = DashboardRuntimeContext {
+            started_at_epoch_seconds: 1,
+            now_epoch_seconds: 11,
+            poll_interval_seconds: 5,
+            dashboard_label: "terminal snapshot",
+            dashboard_refresh_seconds: 1,
+            linear_refresh_seconds: 5,
+        };
+
+        let dashboard = super::build_dashboard_data(&cycle, &runtime);
+        assert_eq!(dashboard.runtime.tokens, "in 100 | out n/a | total 100");
     }
 
     fn listen_settings(required_labels: Option<Vec<&str>>) -> PlanningListenSettings {
