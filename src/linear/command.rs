@@ -149,6 +149,7 @@ pub(crate) async fn run_issues_command(
                         parent_id: None,
                         state: create_args.state,
                         priority: create_args.priority,
+                        assignee_id: None,
                         labels: Vec::new(),
                     })
                     .await?;
@@ -202,6 +203,7 @@ pub(crate) async fn run_issues_command(
                                 parent_id: None,
                                 state: values.state,
                                 priority: values.priority,
+                                assignee_id: None,
                                 labels: Vec::new(),
                             })
                             .await?;

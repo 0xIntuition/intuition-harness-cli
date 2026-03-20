@@ -251,6 +251,22 @@ default_model = "gpt-5.4"
             "planning",
             "--technical-label",
             "engineering",
+            "--default-assignee",
+            "viewer",
+            "--default-state",
+            "Todo",
+            "--default-priority",
+            "3",
+            "--default-label",
+            "platform",
+            "--default-label",
+            "cli",
+            "--velocity-project",
+            "MetaStack CLI",
+            "--velocity-state",
+            "Backlog",
+            "--velocity-auto-assign",
+            "viewer",
         ])
         .assert()
         .success()
@@ -308,6 +324,34 @@ default_model = "gpt-5.4"
         planning_meta["issue_labels"]["technical"].as_str(),
         Some("engineering")
     );
+    assert_eq!(
+        planning_meta["backlog"]["default_assignee"].as_str(),
+        Some("viewer")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["default_state"].as_str(),
+        Some("Todo")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["default_priority"].as_u64(),
+        Some(3)
+    );
+    assert_eq!(
+        planning_meta["backlog"]["default_labels"],
+        json!(["platform", "cli"])
+    );
+    assert_eq!(
+        planning_meta["backlog"]["velocity_defaults"]["project"].as_str(),
+        Some("MetaStack CLI")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["velocity_defaults"]["state"].as_str(),
+        Some("Backlog")
+    );
+    assert_eq!(
+        planning_meta["backlog"]["velocity_defaults"]["auto_assign"].as_str(),
+        Some("viewer")
+    );
     projects_mock.assert();
     teams_mock.assert();
     labels_mock.assert();
@@ -338,13 +382,60 @@ fn config_builtin_defaults_do_not_persist_builtin_command_override_entries()
             "gpt-5.4",
             "--default-reasoning",
             "medium",
+            "--default-assignee",
+            "viewer",
+            "--default-state",
+            "Backlog",
+            "--default-priority",
+            "2",
+            "--default-label",
+            "platform",
+            "--default-label",
+            "cli",
+            "--velocity-project",
+            "MetaStack CLI",
+            "--velocity-state",
+            "Todo",
+            "--velocity-auto-assign",
+            "viewer",
         ])
         .assert()
         .success();
 
     let saved = fs::read_to_string(config_path)?;
-    assert!(saved.contains("default_agent = \"codex\""));
-    assert!(saved.contains("default_reasoning = \"medium\""));
+    let parsed: toml::Value = toml::from_str(&saved)?;
+    assert_eq!(parsed["agents"]["default_agent"].as_str(), Some("codex"));
+    assert_eq!(
+        parsed["agents"]["default_reasoning"].as_str(),
+        Some("medium")
+    );
+    assert_eq!(
+        parsed["backlog"]["default_assignee"].as_str(),
+        Some("viewer")
+    );
+    assert_eq!(parsed["backlog"]["default_state"].as_str(), Some("Backlog"));
+    assert_eq!(parsed["backlog"]["default_priority"].as_integer(), Some(2));
+    assert_eq!(
+        parsed["backlog"]["default_labels"]
+            .as_array()
+            .map(|labels| labels
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>()),
+        Some(vec!["platform", "cli"])
+    );
+    assert_eq!(
+        parsed["backlog"]["velocity_defaults"]["project"].as_str(),
+        Some("MetaStack CLI")
+    );
+    assert_eq!(
+        parsed["backlog"]["velocity_defaults"]["state"].as_str(),
+        Some("Todo")
+    );
+    assert_eq!(
+        parsed["backlog"]["velocity_defaults"]["auto_assign"].as_str(),
+        Some("viewer")
+    );
     assert!(!saved.contains("[agents.commands.codex]"));
 
     Ok(())

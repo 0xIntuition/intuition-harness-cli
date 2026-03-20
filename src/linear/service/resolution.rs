@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::linear::{IssueLabelCreateRequest, LinearClient, ProjectSummary, TeamSummary};
+use crate::linear::{IssueLabelCreateRequest, LinearClient, ProjectSummary, TeamSummary, UserRef};
 
 use super::LinearService;
 
@@ -106,6 +106,27 @@ where
                 team,
                 candidates,
             ))),
+        }
+    }
+
+    pub async fn resolve_assignee_id(&self, assignee: Option<&str>) -> Result<Option<String>> {
+        let Some(assignee) = normalize_user_selector(assignee) else {
+            return Ok(None);
+        };
+        if assignee.eq_ignore_ascii_case("viewer") {
+            return Ok(Some(self.client.viewer().await?.id));
+        }
+
+        let users = self.client.list_users(250).await?;
+        let matches = users
+            .into_iter()
+            .filter(|user| user_matches_selector(user, &assignee))
+            .collect::<Vec<_>>();
+
+        match matches.as_slice() {
+            [] => Err(anyhow!(render_missing_assignee_error(&assignee))),
+            [user] => Ok(Some(user.id.clone())),
+            users => Err(anyhow!(render_ambiguous_assignee_error(&assignee, users))),
         }
     }
 
@@ -246,11 +267,46 @@ pub(super) fn normalize_requested_labels(labels: &[String]) -> Vec<String> {
     requested
 }
 
+fn normalize_user_selector(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn user_matches_selector(user: &UserRef, selector: &str) -> bool {
+    user.id == selector
+        || user.name.eq_ignore_ascii_case(selector)
+        || user
+            .email
+            .as_deref()
+            .map(|email| email.eq_ignore_ascii_case(selector))
+            .unwrap_or(false)
+}
+
 fn is_duplicate_label_error(error: &anyhow::Error) -> bool {
     error
         .to_string()
         .to_ascii_lowercase()
         .contains("duplicate label name")
+}
+
+pub(super) fn render_missing_assignee_error(assignee: &str) -> String {
+    format!(
+        "assignee `{assignee}` was not found in Linear; use `viewer`, a user ID, exact name, or exact email"
+    )
+}
+
+pub(super) fn render_ambiguous_assignee_error(assignee: &str, users: &[UserRef]) -> String {
+    let matches = users
+        .iter()
+        .map(|user| match user.email.as_deref() {
+            Some(email) => format!("`{}` ({}, {})", user.name, user.id, email),
+            None => format!("`{}` ({})", user.name, user.id),
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("assignee `{assignee}` matched multiple Linear users: {matches}")
 }
 
 pub(super) fn render_missing_project_error(project_selector: &str, team: Option<&str>) -> String {

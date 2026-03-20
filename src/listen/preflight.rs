@@ -478,6 +478,10 @@ mod tests {
             unreachable!("unused in preflight tests")
         }
 
+        async fn list_users(&self, _: usize) -> Result<Vec<UserRef>> {
+            unreachable!("unused in preflight tests")
+        }
+
         async fn list_issues(&self, _: usize) -> Result<Vec<IssueSummary>> {
             unreachable!("unused in preflight tests")
         }

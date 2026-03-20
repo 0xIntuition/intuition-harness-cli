@@ -193,6 +193,7 @@ where
                 parent_id: spec.parent_id,
                 state_id,
                 priority: spec.priority,
+                assignee_id: spec.assignee_id,
                 label_ids,
             })
             .await

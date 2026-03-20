@@ -39,6 +39,11 @@ pub(super) struct ProjectsPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct UsersPayload {
+    pub(super) users: Connection<UserRef>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssuesPayload {
     pub(super) issues: Connection<IssueNode>,
 }

@@ -41,6 +41,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub linear: LinearSettings,
     #[serde(default)]
+    pub backlog: BacklogSettings,
+    #[serde(default)]
     pub agents: AgentSettings,
     #[serde(default)]
     pub merge: MergeSettings,
@@ -50,6 +52,8 @@ pub struct AppConfig {
 pub struct PlanningMeta {
     #[serde(default)]
     pub linear: PlanningLinearSettings,
+    #[serde(default)]
+    pub backlog: BacklogSettings,
     #[serde(default)]
     pub sync: PlanningSyncSettings,
     #[serde(default)]
@@ -139,6 +143,30 @@ pub struct PlanningPlanSettings {
 pub struct PlanningIssueLabels {
     pub plan: Option<String>,
     pub technical: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BacklogSettings {
+    pub default_assignee: Option<String>,
+    pub default_state: Option<String>,
+    pub default_priority: Option<u8>,
+    #[serde(default)]
+    pub default_labels: Vec<String>,
+    #[serde(default)]
+    pub velocity_defaults: VelocityDefaults,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VelocityDefaults {
+    pub project: Option<String>,
+    pub state: Option<String>,
+    pub auto_assign: Option<VelocityAutoAssign>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VelocityAutoAssign {
+    Viewer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -523,6 +551,7 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.backlog.validate("global backlog defaults")?;
         self.validate_global_agent_defaults()?;
         self.validate_agent_routes()?;
         self.merge.validate()?;
@@ -649,6 +678,7 @@ impl PlanningMeta {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.backlog.validate("repo backlog defaults")?;
         if let Some(provider) = normalize_optional_ref(self.agent.provider.as_deref()) {
             validate_agent_model(&provider, self.agent.model.as_deref())?;
             validate_agent_reasoning(
@@ -773,6 +803,55 @@ impl MergeSettings {
         }
         if let Some(limit) = self.publication_retry_attempts {
             validate_merge_publication_retry_attempts(limit)?;
+        }
+        Ok(())
+    }
+}
+
+impl BacklogSettings {
+    fn validate(&self, scope: &str) -> Result<()> {
+        if self
+            .default_assignee
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(anyhow!("{scope} assignee cannot be empty"));
+        }
+        if self
+            .default_state
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(anyhow!("{scope} state cannot be empty"));
+        }
+        if let Some(priority) = self.default_priority {
+            validate_backlog_default_priority(priority)
+                .with_context(|| format!("invalid {scope} priority"))?;
+        }
+        validate_backlog_labels(&self.default_labels)
+            .with_context(|| format!("invalid {scope} labels"))?;
+        self.velocity_defaults
+            .validate(scope)
+            .with_context(|| format!("invalid {scope} velocity defaults"))?;
+        Ok(())
+    }
+}
+
+impl VelocityDefaults {
+    fn validate(&self, _scope: &str) -> Result<()> {
+        if self
+            .project
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(anyhow!("velocity project cannot be empty"));
+        }
+        if self
+            .state
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(anyhow!("velocity state cannot be empty"));
         }
         Ok(())
     }
@@ -1589,6 +1668,16 @@ fn validate_merge_validation_repair_attempts(limit: usize) -> Result<()> {
     }
 }
 
+pub fn validate_backlog_default_priority(priority: u8) -> Result<()> {
+    if (1..=4).contains(&priority) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "backlog default priority must be between 1 and 4; got {priority}"
+        ))
+    }
+}
+
 fn validate_merge_validation_transient_retry_attempts(limit: usize) -> Result<()> {
     if limit <= 10 {
         Ok(())
@@ -1607,6 +1696,17 @@ fn validate_merge_publication_retry_attempts(limit: usize) -> Result<()> {
             "merge publication retry attempt limit must be at least 1; got {limit}"
         ))
     }
+}
+
+pub fn validate_backlog_labels(labels: &[String]) -> Result<()> {
+    for label in labels {
+        if label.trim().is_empty() {
+            return Err(anyhow!(
+                "backlog default labels cannot include empty values"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_named_profile<'a>(
@@ -1730,13 +1830,13 @@ mod tests {
     use super::{
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
-        AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
+        AppConfig, BacklogSettings, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
         DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, ListenAssignmentScope, MergeSettings,
         NoAgentSelectedError, PlanningAgentSettings, PlanningListenSettings, PlanningMeta,
-        PlanningPlanSettings, is_no_agent_selected_error, no_agent_selected_route_key,
-        normalize_agent_route_key, parse_listen_required_labels_csv,
+        PlanningPlanSettings, VelocityAutoAssign, VelocityDefaults, is_no_agent_selected_error,
+        no_agent_selected_route_key, normalize_agent_route_key, parse_listen_required_labels_csv,
         resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
@@ -1986,6 +2086,25 @@ mod tests {
     }
 
     #[test]
+    fn backlog_settings_validation_rejects_out_of_range_priorities() {
+        let config = AppConfig {
+            backlog: BacklogSettings {
+                default_priority: Some(5),
+                ..BacklogSettings::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid global backlog defaults priority")
+        );
+    }
+
+    #[test]
     fn app_config_validation_rejects_excessive_merge_transient_retry_attempts() {
         let config = AppConfig {
             merge: MergeSettings {
@@ -1998,6 +2117,24 @@ mod tests {
         assert_eq!(
             config.validate().unwrap_err().to_string(),
             "merge transient validation retry attempt limit must be between 0 and 10; got 11"
+        );
+    }
+
+    #[test]
+    fn backlog_settings_validation_rejects_empty_labels() {
+        let meta = PlanningMeta {
+            backlog: BacklogSettings {
+                default_labels: vec!["team-a".to_string(), " ".to_string()],
+                ..BacklogSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+
+        assert!(
+            meta.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid repo backlog defaults labels")
         );
     }
 
@@ -2015,6 +2152,23 @@ mod tests {
             config.validate().unwrap_err().to_string(),
             "merge publication retry attempt limit must be at least 1; got 0"
         );
+    }
+
+    #[test]
+    fn backlog_settings_validation_accepts_supported_velocity_auto_assign() {
+        let meta = PlanningMeta {
+            backlog: BacklogSettings {
+                velocity_defaults: VelocityDefaults {
+                    project: Some("MetaStack CLI".to_string()),
+                    state: Some("Backlog".to_string()),
+                    auto_assign: Some(VelocityAutoAssign::Viewer),
+                },
+                ..BacklogSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+
+        assert!(meta.validate().is_ok());
     }
 
     #[test]

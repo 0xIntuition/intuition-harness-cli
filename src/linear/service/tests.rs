@@ -174,6 +174,7 @@ async fn create_issue_resolves_team_state_and_project_for_team() {
             parent_id: None,
             state: Some("In Progress".to_string()),
             priority: Some(2),
+            assignee_id: None,
             labels: Vec::new(),
         })
         .await
@@ -208,6 +209,7 @@ async fn create_issue_keeps_explicit_project_id_when_lookup_misses() {
             parent_id: None,
             state: Some("Todo".to_string()),
             priority: None,
+            assignee_id: None,
             labels: Vec::new(),
         })
         .await
@@ -218,6 +220,107 @@ async fn create_issue_keeps_explicit_project_id_when_lookup_misses() {
         .first()
         .expect("a create request should be recorded");
     assert_eq!(request.project_id.as_deref(), Some("project-seeded"));
+}
+
+#[tokio::test]
+async fn create_issue_passes_resolved_assignee_id() {
+    let client = FakeLinearClient {
+        teams: vec![team("MET", &[("state-1", "Backlog")])],
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), None);
+
+    service
+        .create_issue(IssueCreateSpec {
+            team: Some("MET".to_string()),
+            title: "Assigned issue".to_string(),
+            description: None,
+            project: None,
+            project_id: None,
+            parent_id: None,
+            state: Some("Backlog".to_string()),
+            priority: Some(2),
+            assignee_id: Some("viewer-1".to_string()),
+            labels: Vec::new(),
+        })
+        .await
+        .expect("create issue should succeed");
+
+    let requests = client.create_requests.lock().expect("mutex poisoned");
+    assert_eq!(requests[0].assignee_id.as_deref(), Some("viewer-1"));
+}
+
+#[tokio::test]
+async fn resolve_assignee_id_supports_viewer_user_ids_names_and_emails() {
+    let client = FakeLinearClient::default();
+    let service = LinearService::new(client, Some("MET".to_string()));
+
+    assert_eq!(
+        service
+            .resolve_assignee_id(Some("viewer"))
+            .await
+            .expect("viewer should resolve"),
+        Some("viewer-1".to_string())
+    );
+    assert_eq!(
+        service
+            .resolve_assignee_id(Some("user-2"))
+            .await
+            .expect("user id should resolve"),
+        Some("user-2".to_string())
+    );
+    assert_eq!(
+        service
+            .resolve_assignee_id(Some("Someone Else"))
+            .await
+            .expect("user name should resolve"),
+        Some("user-2".to_string())
+    );
+    assert_eq!(
+        service
+            .resolve_assignee_id(Some("else@example.com"))
+            .await
+            .expect("user email should resolve"),
+        Some("user-2".to_string())
+    );
+}
+
+#[tokio::test]
+async fn resolve_assignee_id_rejects_missing_and_ambiguous_matches() {
+    let client = FakeLinearClient {
+        users: vec![
+            UserRef {
+                id: "user-1".to_string(),
+                name: "Taylor".to_string(),
+                email: Some("taylor@example.com".to_string()),
+            },
+            UserRef {
+                id: "user-2".to_string(),
+                name: "Taylor".to_string(),
+                email: Some("taylor+2@example.com".to_string()),
+            },
+        ],
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client, Some("MET".to_string()));
+
+    let missing = service
+        .resolve_assignee_id(Some("nobody@example.com"))
+        .await
+        .expect_err("missing user should fail");
+    assert!(missing.to_string().contains("was not found in Linear"));
+
+    let ambiguous = service
+        .resolve_assignee_id(Some("Taylor"))
+        .await
+        .expect_err("ambiguous user should fail");
+    assert!(
+        ambiguous
+            .to_string()
+            .contains("matched multiple Linear users")
+    );
+    assert!(ambiguous.to_string().contains("user-1"));
+    assert!(ambiguous.to_string().contains("user-2"));
 }
 
 #[tokio::test]
@@ -257,6 +360,10 @@ struct DuplicateThenVisibleLabelClient {
 impl LinearClient for DuplicateThenVisibleLabelClient {
     async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
         unreachable!("list_projects is not used in these tests")
+    }
+
+    async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+        unreachable!("list_users is not used in these tests")
     }
 
     async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
@@ -357,6 +464,10 @@ struct DuplicateLabelClient {
 impl LinearClient for DuplicateLabelClient {
     async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
         unreachable!("list_projects is not used in these tests")
+    }
+
+    async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+        unreachable!("list_users is not used in these tests")
     }
 
     async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {

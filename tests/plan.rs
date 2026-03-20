@@ -1767,6 +1767,299 @@ fi
 
 #[cfg(unix)]
 #[test]
+fn plan_no_interactive_uses_remembered_selection_velocity_defaults_and_additive_labels()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "REP",
+    "project_id": "project-repo"
+  },
+  "backlog": {
+    "default_priority": 3,
+    "default_labels": ["repo-default"],
+    "velocity_defaults": {
+      "state": "Todo",
+      "auto_assign": "viewer"
+    }
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+team = "OPS"
+
+[backlog]
+default_priority = 4
+default_labels = ["global-default"]
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "plan-agent-stub"
+transport = "stdin"
+"#,
+        ),
+    )?;
+
+    let canonical_repo_root = fs::canonicalize(&repo_root)?;
+    let remembered_path = config_path
+        .parent()
+        .expect("config path should have a parent")
+        .join("data")
+        .join("backlog")
+        .join("selections.json");
+    fs::create_dir_all(
+        remembered_path
+            .parent()
+            .expect("remembered selections path should have a parent"),
+    )?;
+    fs::write(
+        &remembered_path,
+        format!(
+            r#"{{
+  "version": 1,
+  "repositories": {{
+    "{}": {{
+      "team": "MET",
+      "project_id": "project-memory",
+      "project_name": "Remembered Project"
+    }}
+  }}
+}}
+"#,
+            canonical_repo_root.to_string_lossy()
+        ),
+    )?;
+
+    let stub_path = bin_dir.join("plan-agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"questions":[]}'
+else
+  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Remember velocity defaults","description":"Use remembered project/team defaults when running without prompts.","acceptance_criteria":["remembered defaults are reused in zero-prompt mode"]}]}'
+fi
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let teams_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack",
+                        "states": {
+                            "nodes": [{
+                                "id": "state-backlog",
+                                "name": "Backlog",
+                                "type": "backlog"
+                            }, {
+                                "id": "state-todo",
+                                "name": "Todo",
+                                "type": "unstarted"
+                            }]
+                        }
+                    }, {
+                        "id": "team-2",
+                        "key": "REP",
+                        "name": "Repo Team",
+                        "states": { "nodes": [] }
+                    }, {
+                        "id": "team-3",
+                        "key": "OPS",
+                        "name": "Ops",
+                        "states": { "nodes": [] }
+                    }]
+                }
+            }
+        }));
+    });
+    let projects_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-memory",
+                        "name": "Remembered Project",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-memory",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let labels_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueLabels")
+            .body_includes("\"key\":{\"eq\":\"MET\"}");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabels": {
+                    "nodes": [{
+                        "id": "label-plan",
+                        "name": "plan"
+                    }, {
+                        "id": "label-global",
+                        "name": "global-default"
+                    }, {
+                        "id": "label-repo",
+                        "name": "repo-default"
+                    }, {
+                        "id": "label-cli",
+                        "name": "cli-extra"
+                    }]
+                }
+            }
+        }));
+    });
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Viewer",
+                    "email": "viewer@example.com"
+                }
+            }
+        }));
+    });
+    let create_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"projectId\":\"project-memory\"")
+            .body_includes("\"stateId\":\"state-todo\"")
+            .body_includes("\"priority\":3")
+            .body_includes("\"assigneeId\":\"viewer-1\"")
+            .body_includes("\"labelIds\":[\"label-plan\",\"label-global\",\"label-repo\",\"label-cli\"]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-61",
+                        "identifier": "MET-61",
+                        "title": "Remember velocity defaults",
+                        "description": "Use remembered project/team defaults when running without prompts.",
+                        "url": "https://linear.app/issues/61",
+                        "priority": 3,
+                        "updatedAt": "2026-03-14T18:20:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-memory",
+                            "name": "Remembered Project"
+                        },
+                        "state": {
+                            "id": "state-todo",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--no-interactive",
+            "--request",
+            "Remember the last project and apply zero-prompt defaults",
+            "--label",
+            "cli-extra",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
+        .stdout(predicate::str::contains("MET-61"));
+
+    teams_mock.assert_calls(1);
+    projects_mock.assert_calls(1);
+    labels_mock.assert_calls(1);
+    viewer_mock.assert_calls(1);
+    create_issue_mock.assert_calls(1);
+
+    let remembered: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(remembered_path)?)?;
+    assert_eq!(
+        remembered["repositories"][canonical_repo_root.to_string_lossy().as_ref()]["team"].as_str(),
+        Some("MET")
+    );
+    assert_eq!(
+        remembered["repositories"][canonical_repo_root.to_string_lossy().as_ref()]["project_id"]
+            .as_str(),
+        Some("project-memory")
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn repo_agent_defaults_apply_when_cli_overrides_are_absent() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
