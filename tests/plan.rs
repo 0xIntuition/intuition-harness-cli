@@ -1502,7 +1502,10 @@ expect {{
   -re "Planning Request" {{}}
 }}
 send -- "Plan the interactive continuation flow\r"
-after 1200
+expect {{
+  -re "Generating suggested tickets" {{ exp_continue }}
+  -re "Combination Plan" {{}}
+}}
 send -- "\033"
 expect eof
 "#,
