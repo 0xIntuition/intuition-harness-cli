@@ -120,6 +120,17 @@ Examples:
   meta workspace clean --target-only --root .
   meta workspace prune --dry-run --root .";
 
+const UPGRADE_HELP_EXAMPLES: &str = "\
+Default latest-stable path:
+  meta upgrade --check
+  meta upgrade --dry-run
+  meta upgrade
+
+Advanced version-management path:
+  meta upgrade --version 0.2.0 --dry-run
+  meta upgrade --version 0.3.0-rc.1 --prerelease
+  meta upgrade --version 0.1.0 --allow-downgrade";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "meta",
@@ -151,6 +162,8 @@ pub enum Command {
     Merge(MergeArgs),
     /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
     Workspace(WorkspaceArgs),
+    /// Securely self-update a GitHub Release install of `meta` on macOS/Linux.
+    Upgrade(UpgradeArgs),
     /// Compatibility alias for `meta backlog plan`.
     Plan(PlanArgs),
     /// Compatibility alias for `meta backlog tech`.
@@ -279,6 +292,41 @@ pub struct WorkspacePruneArgs {
     /// Skip confirmation before removing workspace clones.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(after_help = UPGRADE_HELP_EXAMPLES)]
+pub struct UpgradeArgs {
+    /// Check the latest stable release and report whether this install is up to date.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub check: bool,
+    /// Resolve the selected release and print the replacement plan without modifying the install.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Install a specific release version instead of the latest stable release.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+    /// Allow prerelease versions for explicit version requests or latest-release resolution.
+    #[arg(long)]
+    pub prerelease: bool,
+    /// Allow replacing the current install with an older version.
+    #[arg(long)]
+    pub allow_downgrade: bool,
+    /// Testing override for the GitHub Releases API root.
+    #[arg(long, hide = true, default_value = "https://api.github.com")]
+    pub github_api_url: String,
+    /// Testing override for the GitHub repository used for release discovery.
+    #[arg(long, hide = true, default_value = "metastack-systems/metastack-cli")]
+    pub repository: String,
+    /// Testing override for the executable path that should be replaced.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub executable_path: Option<PathBuf>,
+    /// Testing override for the detected operating system slug.
+    #[arg(long, hide = true, value_name = "OS")]
+    pub os: Option<String>,
+    /// Testing override for the detected architecture slug.
+    #[arg(long, hide = true, value_name = "ARCH")]
+    pub arch: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
