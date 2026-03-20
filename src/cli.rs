@@ -33,6 +33,21 @@ Examples:
   meta backlog sync pull --all
   meta backlog sync push MET-35 --update-description";
 
+const BACKLOG_IMPROVE_HELP: &str = "\
+Use `meta backlog improve` for a repo-scoped backlog sweep across existing issues in one state.
+Choose `--mode basic` for conservative metadata hygiene and `--mode advanced` for deeper
+rewrites or parent-child structure proposals.
+
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
+the primary goal is improving that issue's description rather than scanning the backlog.";
+
+const ISSUES_REFINE_HELP: &str = "\
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and
+want a focused description-quality pass with auditable refinement artifacts.
+
+Use `meta backlog improve` when you want a repo-scoped backlog sweep for missing labels,
+acceptance criteria, priority/estimate, and parent-child structure opportunities.";
+
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
@@ -248,6 +263,7 @@ pub enum BacklogImproveModeArg {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = BACKLOG_IMPROVE_HELP)]
 pub struct BacklogImproveArgs {
     #[command(flatten)]
     pub client: LinearClientArgs,
@@ -1431,6 +1447,7 @@ pub struct IssueEditArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ISSUES_REFINE_HELP)]
 pub struct IssueRefineArgs {
     /// One or more existing issue identifiers, for example MET-35.
     #[arg(value_name = "IDENTIFIER", required = true)]

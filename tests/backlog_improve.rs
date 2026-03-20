@@ -104,7 +104,10 @@ JSON
         .stdout(predicate::str::contains("MET-511: basic proposal only"));
 
     let run_dir = latest_improvement_dir(&issue_dir)?;
-    assert_eq!(fs::read_to_string(run_dir.join("original.md"))?, "Current description");
+    assert_eq!(
+        fs::read_to_string(run_dir.join("original.md"))?,
+        "Current description"
+    );
     assert_eq!(
         fs::read_to_string(run_dir.join("local-index.md"))?,
         "# Existing local packet\n"
