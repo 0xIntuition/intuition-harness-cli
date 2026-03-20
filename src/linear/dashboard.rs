@@ -821,6 +821,8 @@ mod tests {
         assert_eq!(visible_issue_ids(&app), vec!["MET-11", "MET-12"]);
 
         app.apply(DashboardAction::Tab);
+        assert_eq!(app.focus, Focus::Preview);
+        app.apply(DashboardAction::Tab);
         assert_eq!(app.focus, Focus::Status);
         app.apply(DashboardAction::Down);
         app.apply(DashboardAction::Down);

@@ -109,30 +109,16 @@ impl ScrollState {
 /// Returns the wrapped row count for `value` rendered in `width`.
 pub(crate) fn wrapped_rows(value: &str, width: u16) -> usize {
     let width = usize::from(width.max(1));
-    let mut row = 0usize;
-    let mut column = 0usize;
-
-    for ch in value.chars() {
-        if ch == '\n' {
-            row += 1;
-            column = 0;
-            continue;
-        }
-
-        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if char_width > 0 && column + char_width > width {
-            row += 1;
-            column = 0;
-        }
-
-        column += char_width;
-        if column >= width {
-            row += column / width;
-            column %= width;
-        }
-    }
-
-    row + 1
+    value
+        .split('\n')
+        .map(|line| {
+            let columns = line
+                .chars()
+                .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+                .sum::<usize>();
+            columns.max(1).div_ceil(width)
+        })
+        .sum()
 }
 
 /// Returns a plain string representation of `text`, preserving line breaks.

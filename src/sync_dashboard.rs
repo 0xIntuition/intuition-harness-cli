@@ -849,6 +849,7 @@ mod tests {
                 actions: vec![
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
+                    SyncDashboardAction::Enter,
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                 ],
@@ -872,7 +873,11 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Issues);
         app.apply(SyncDashboardAction::Enter);
+        assert_eq!(app.focus, Focus::Preview);
+        app.apply(SyncDashboardAction::Enter);
         assert_eq!(app.focus, Focus::Actions);
+        app.apply(SyncDashboardAction::Back);
+        assert_eq!(app.focus, Focus::Preview);
         app.apply(SyncDashboardAction::Back);
         assert_eq!(app.focus, Focus::Issues);
     }
