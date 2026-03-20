@@ -35,7 +35,7 @@ use crate::backlog::{
 use crate::cli::{RunAgentArgs, TechnicalArgs};
 use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
 use crate::context::load_workflow_contract;
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, render_command};
 use crate::linear::browser::{
     IssueSearchResult, render_issue_preview, render_issue_row, search_issues,
 };
@@ -198,7 +198,11 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         }
     } else {
         let issue = args.issue.as_ref().ok_or_else(|| {
-            anyhow!("`meta backlog tech` requires an issue identifier when running without a TTY")
+            anyhow!(
+                "`{}` requires an issue identifier when running without a TTY",
+                render_command(Some(&root), "backlog tech")
+                    .unwrap_or_else(|_| "meta backlog tech".to_string())
+            )
         })?;
         let parent = service.load_issue(issue).await?;
         let selected_acceptance_criteria =
@@ -540,10 +544,13 @@ fn start_generation(
     request: TechnicalGenerationRequest,
     previous_stage: Option<TechnicalRecoveryStage>,
 ) {
+    let backlog_template_label = PlanningPaths::for_root(root)
+        .map(|paths| paths.backlog_template_dir_label(root))
+        .unwrap_or_else(|_| display_path(&PlanningPaths::new(root).backlog_template_dir, root));
     app.stage = TechnicalStage::Loading(LoadingApp {
         message: "Generating technical backlog".to_string(),
         detail: format!(
-            "Building `.metastack/backlog/_TEMPLATE` for {}.",
+            "Building `{backlog_template_label}` for {}.",
             request.parent.identifier
         ),
         spinner_index: 0,
@@ -686,6 +693,9 @@ fn generate_backlog_files(
     selected_acceptance_criteria: &[String],
     template_files: &[RenderedTemplateFile],
 ) -> Result<Vec<RenderedTemplateFile>> {
+    let backlog_template_label = PlanningPaths::for_root(root)?.backlog_template_dir_label(root);
+    let backlog_tech_command = render_command(Some(root), "backlog tech")
+        .unwrap_or_else(|_| "meta backlog tech".to_string());
     let prompt = render_technical_prompt(
         root,
         prepared_context,
@@ -707,7 +717,9 @@ fn generate_backlog_files(
         attachments: Vec::new(),
     })
     .with_context(|| {
-        "meta backlog tech requires a configured local agent to generate backlog content from `.metastack/backlog/_TEMPLATE`"
+        format!(
+            "{backlog_tech_command} requires a configured local agent to generate backlog content from `{backlog_template_label}`"
+        )
     })?;
     let draft: TechnicalBacklogDraft =
         parse_agent_json(&output.stdout, "technical backlog generation")?;
@@ -1253,6 +1265,8 @@ fn slugify(value: &str) -> String {
 
 fn load_context_bundle(root: &Path) -> Result<String> {
     let paths = PlanningPaths::for_root(root)?;
+    let scan_command = render_command(Some(root), "context scan")
+        .unwrap_or_else(|_| "meta context scan".to_string());
     let sections = [
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),
@@ -1268,7 +1282,7 @@ fn load_context_bundle(root: &Path) -> Result<String> {
     for (title, path) in sections {
         lines.push(format!("## {title}"));
         lines.push(String::new());
-        lines.push(read_context(&path)?);
+        lines.push(read_context(&path, &scan_command)?);
         lines.push(String::new());
     }
 
@@ -1348,11 +1362,11 @@ fn should_skip_snapshot_entry(name: &str) -> bool {
     )
 }
 
-fn read_context(path: &PathBuf) -> Result<String> {
+fn read_context(path: &PathBuf, scan_command: &str) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta scan` to generate it._",
+            "_Missing `{}`. Run `{scan_command}` to generate it._",
             path.file_name()
                 .map(|value| value.to_string_lossy())
                 .unwrap_or_default()
@@ -1765,7 +1779,7 @@ mod tests {
     fn loading_snapshot_matches_plan_style() {
         let snapshot = render_loading_snapshot(&LoadingApp {
             message: "Generating technical backlog".to_string(),
-            detail: "Building `.metastack/backlog/_TEMPLATE` for MET-35.".to_string(),
+            detail: "Building `.intuition/backlog/_TEMPLATE` for MET-35.".to_string(),
             spinner_index: 2,
         });
 

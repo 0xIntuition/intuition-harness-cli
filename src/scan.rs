@@ -21,7 +21,8 @@ use crate::config::{
 };
 use crate::context::load_workflow_contract;
 use crate::fs::{
-    FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, write_text_file,
+    FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, render_command,
+    write_text_file,
 };
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
@@ -126,6 +127,7 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
         &crate::fs::effective_command_name(Some(&root))?,
         &agent,
         log_path.clone(),
+        display_path(&paths.scan_path(), &root),
         tracked_scan_files(&paths, &root),
     );
     progress.set_step(
@@ -326,6 +328,7 @@ impl ScanProgress {
         command_name: &str,
         agent: &str,
         log_path: String,
+        fact_base_label: String,
         files: Vec<TrackedScanFile>,
     ) -> Self {
         Self {
@@ -340,7 +343,7 @@ impl ScanProgress {
                     state: ScanItemState::Running,
                 },
                 ScanProgressEntry {
-                    label: "Write `.metastack/codebase/SCAN.md`".to_string(),
+                    label: format!("Write `{fact_base_label}`"),
                     detail: "Preparing the deterministic scan snapshot".to_string(),
                     state: ScanItemState::Pending,
                 },
@@ -534,7 +537,11 @@ fn run_scan_agent_with_dashboard(
         .truncate(true)
         .open(&log_path)
         .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-    writeln!(log, "# meta scan agent log")?;
+    writeln!(
+        log,
+        "# {} agent log",
+        render_command(Some(root), "context scan")?
+    )?;
     writeln!(log, "agent: {}", invocation.agent)?;
     writeln!(
         log,
@@ -886,8 +893,14 @@ fn resolve_scan_agent_name(root: &Path, route_key: &str) -> Result<String> {
         .into_iter()
         .next()
         .ok_or_else(|| {
+            let scan_command =
+                render_command(Some(root), "context scan").unwrap_or_else(|_| "meta context scan".to_string());
+            let config_command =
+                render_command(Some(root), "runtime config").unwrap_or_else(|_| "meta runtime config".to_string());
+            let setup_command =
+                render_command(Some(root), "runtime setup").unwrap_or_else(|_| "meta runtime setup".to_string());
             anyhow!(
-                "`meta scan` requires a local agent. Run `meta config` or `meta setup` to configure one, or install a supported agent such as `codex` or `claude`."
+                "`{scan_command}` requires a local agent. Run `{config_command}` or `{setup_command}` to configure one, or install a supported agent such as `codex` or `claude`."
             )
         })
 }

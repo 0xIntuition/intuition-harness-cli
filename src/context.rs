@@ -238,9 +238,10 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
                 display_path(&instructions_path, root)
             ));
         } else {
+            let metadata_path = display_path(&PlanningPaths::metadata_path(root), root);
             issues.push(format!(
-                "Configured instructions file `{}` is missing. Update `.metastack/meta.json` or create the file.",
-                display_path(&instructions_path, root)
+                "Configured instructions file `{}` is missing. Update `{metadata_path}` or create the file.",
+                display_path(&instructions_path, root),
             ));
         }
     } else {
@@ -270,9 +271,12 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
     } else {
         let detected_agents = detect_supported_agents();
         if detected_agents.is_empty() {
+            let config_command = render_command(Some(root), "runtime config")
+                .unwrap_or_else(|_| "meta runtime config".to_string());
             issues.push(
-                "No default agent is configured and no supported built-in agents were found on `PATH`. Run `meta runtime config` before using agent-backed workflows."
-                    .to_string(),
+                format!(
+                    "No default agent is configured and no supported built-in agents were found on `PATH`. Run `{config_command}` before using agent-backed workflows."
+                ),
             );
         } else {
             notices.push(format!(
@@ -319,10 +323,19 @@ fn codebase_context_paths(root: &Path) -> Vec<(&'static str, PathBuf)> {
 }
 
 fn read_context_file(path: &Path) -> Result<String> {
+    let root = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let reload_command = render_command(root.as_deref(), "context reload")
+        .unwrap_or_else(|_| "meta context reload".to_string());
+    let scan_command = render_command(root.as_deref(), "context scan")
+        .unwrap_or_else(|_| "meta context scan".to_string());
     match fs::read_to_string(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta context reload --root {}` or `meta context scan --root {}` to generate it._",
+            "_Missing `{}`. Run `{reload_command} --root {}` or `{scan_command} --root {}` to generate it._",
             path.file_name()
                 .map(|value| value.to_string_lossy())
                 .unwrap_or_default(),

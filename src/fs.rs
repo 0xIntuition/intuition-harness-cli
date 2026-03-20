@@ -139,8 +139,16 @@ impl PlanningPaths {
         display_path(&self.backlog_dir, root)
     }
 
+    pub fn backlog_template_dir_label(&self, root: &Path) -> String {
+        display_path(&self.backlog_template_dir, root)
+    }
+
     pub fn codebase_dir_label(&self, root: &Path) -> String {
         display_path(&self.codebase_dir, root)
+    }
+
+    pub fn cron_dir_label(&self, root: &Path) -> String {
+        display_path(&self.cron_dir, root)
     }
 
     pub fn legacy_agent_dir(&self) -> PathBuf {

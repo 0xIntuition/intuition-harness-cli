@@ -21,18 +21,9 @@ use crate::cron_dashboard::{
     CronInitFormPrefill, CronInitFormValues, run_cron_init_form,
 };
 use crate::fs::{
-    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
+    PlanningPaths, canonicalize_existing_dir, display_path, effective_command_name, ensure_dir,
+    render_command, write_text_file,
 };
-
-const CRON_README: &str = r#"# Cron Jobs
-
-Use this directory for repository-local automation jobs managed by `meta cron`.
-
-- One Markdown file per job, such as `nightly.md`
-- YAML front matter stores the schedule and command metadata
-- Markdown body stores operator notes and future-agent context
-- `.runtime/` is created on demand for PID files, logs, and scheduler state
-"#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CronJobFrontMatter {
@@ -138,6 +129,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     ensure_cron_layout(root)?;
     let config = AppConfig::load()?;
     let planning_meta = PlanningMeta::load(root)?;
+    let command_name = effective_command_name(Some(root))?;
     let mut agent_options = available_agent_names(&config);
     if let Some(agent) = args
         .agent
@@ -152,7 +144,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     }
 
     let default_agent = resolve_default_agent_name(&config, &planning_meta, &agent_options);
-    let cron_dir_label = crate::fs::display_path(&PlanningPaths::for_root(root)?.cron_dir, root);
+    let cron_dir_label = PlanningPaths::for_root(root)?.cron_dir_label(root);
     let prefill = build_init_prefill(root, args, default_agent.clone())?;
     let options = CronInitFormOptions {
         render_once: args.render_once,
@@ -170,6 +162,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
         return match run_cron_init_form(
             CronInitFormContext {
                 agent_options,
+                command_name: command_name.clone(),
                 cron_dir_label,
             },
             prefill,
@@ -187,6 +180,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
         match run_cron_init_form(
             CronInitFormContext {
                 agent_options,
+                command_name,
                 cron_dir_label,
             },
             prefill,
@@ -197,24 +191,29 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
             CronInitFormExit::Snapshot(snapshot) => return Ok(snapshot),
         }
     } else {
-        run_init_non_interactive(args, default_agent)?
+        run_init_non_interactive(root, args, default_agent)?
     };
 
     write_cron_job(root, values, interactive || args.force)
 }
 
 fn run_init_non_interactive(
+    root: &Path,
     args: &CronInitArgs,
     default_agent: Option<String>,
 ) -> Result<CronInitFormValues> {
+    let cron_init_command =
+        render_command(Some(root), "cron init").unwrap_or_else(|_| "meta cron init".to_string());
+    let config_command = render_command(Some(root), "runtime config")
+        .unwrap_or_else(|_| "meta runtime config".to_string());
     let name = args.name.as_deref().ok_or_else(|| {
         anyhow!(
-            "`NAME` is required when `--no-interactive` is used or when `meta cron init` runs without a TTY"
+            "`NAME` is required when `--no-interactive` is used or when `{cron_init_command}` runs without a TTY"
         )
     })?;
     let schedule = args.schedule.as_deref().ok_or_else(|| {
         anyhow!(
-            "`--schedule` is required when `--no-interactive` is used or when `meta cron init` runs without a TTY"
+            "`--schedule` is required when `--no-interactive` is used or when `{cron_init_command}` runs without a TTY"
         )
     })?;
     validate_job_name(name)?;
@@ -247,7 +246,7 @@ fn run_init_non_interactive(
     let agent = if prompt.is_some() {
         explicit_agent.or(default_agent).ok_or_else(|| {
             anyhow!(
-                "an agent is required when `--prompt` is set; pass `--agent <NAME>` or run `meta runtime config`"
+                "an agent is required when `--prompt` is set; pass `--agent <NAME>` or run `{config_command}`"
             )
         })?
     } else {
@@ -654,8 +653,15 @@ fn ensure_cron_layout(root: &Path) -> Result<()> {
     let paths = PlanningPaths::for_root(root)?;
     ensure_dir(&paths.metastack_dir)?;
     ensure_dir(&paths.cron_dir)?;
-    write_text_file(&paths.cron_readme_path(), CRON_README, false)?;
+    write_text_file(&paths.cron_readme_path(), &cron_readme(root)?, false)?;
     Ok(())
+}
+
+fn cron_readme(root: &Path) -> Result<String> {
+    let cron_command = render_command(Some(root), "cron")?;
+    Ok(format!(
+        "# Cron Jobs\n\nUse this directory for repository-local automation jobs managed by `{cron_command}`.\n\n- One Markdown file per job, such as `nightly.md`\n- YAML front matter stores the schedule and command metadata\n- Markdown body stores operator notes and future-agent context\n- `.runtime/` is created on demand for PID files, logs, and scheduler state\n"
+    ))
 }
 
 impl From<CronInitEventArg> for CronInitAction {

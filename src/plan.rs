@@ -37,7 +37,7 @@ use crate::config::{
     AGENT_ROUTE_BACKLOG_PLAN, LinearConfig, LinearConfigOverrides, load_required_planning_meta,
 };
 use crate::context::load_workflow_contract;
-use crate::fs::{PlanningPaths, canonicalize_existing_dir};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, render_command};
 use crate::linear::{
     IssueCreateSpec, IssueEditSpec, IssueSummary, LinearService, ReqwestLinearClient,
 };
@@ -235,10 +235,12 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         }
     }
 
+    let backlog_plan_command =
+        render_command(Some(&root), "backlog plan").unwrap_or_else(|_| "meta backlog plan".to_string());
     let plan = if run_non_interactive {
         let request = args.request.clone().ok_or_else(|| {
             anyhow!(
-                "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
+                "`--request` is required when `--no-interactive` is used or when `{backlog_plan_command}` runs without a TTY"
             )
         })?;
 
@@ -375,19 +377,28 @@ async fn run_reshape_plan(
     args: &PlanArgs,
     overrides: &PlanningAgentOverrides,
 ) -> Result<PlanReport> {
+    let backlog_plan_command = render_command(Some(root), "backlog plan")
+        .unwrap_or_else(|_| "meta backlog plan".to_string());
+    let backlog_dir_label = PlanningPaths::for_root(root)?.backlog_dir_label(root);
     let issue = service.load_issue(identifier).await?;
     let draft = generate_issue_reshape(root, &issue, overrides)?;
     let proposed_description = render_reshaped_index_contents(&issue, &draft);
-    let preview = render_reshape_preview(&issue, &draft, &proposed_description);
+    let preview = render_reshape_preview(
+        &issue,
+        &draft,
+        &proposed_description,
+        &backlog_plan_command,
+        &backlog_dir_label,
+    );
 
     if !args.velocity {
         if args.no_interactive {
             bail!(
-                "`meta backlog plan {identifier}` requires diff confirmation unless `--velocity` is set; rerun without `--no-interactive` to review the preview or pass `--velocity` to auto-apply"
+                "`{backlog_plan_command} {identifier}` requires diff confirmation unless `--velocity` is set; rerun without `--no-interactive` to review the preview or pass `--velocity` to auto-apply"
             );
         }
 
-        if !prompt_reshape_apply(identifier, &preview)? {
+        if !prompt_reshape_apply(identifier, &preview, &backlog_plan_command)? {
             return Ok(PlanReport::Cancelled);
         }
     }
@@ -405,7 +416,14 @@ async fn run_reshape_plan(
     service
         .upsert_workpad_comment(
             &issue,
-            render_reshape_workpad_comment(&issue, &updated_issue, &draft, args.velocity),
+            render_reshape_workpad_comment(
+                &issue,
+                &updated_issue,
+                &draft,
+                args.velocity,
+                &backlog_plan_command,
+                &backlog_dir_label,
+            ),
         )
         .await?;
 
@@ -427,7 +445,9 @@ fn resolve_plan_mode(target: Option<&str>) -> Result<PlanMode> {
     }
 
     bail!(
-        "`meta backlog plan <IDENTIFIER>` only accepts existing issue identifiers like `ENG-10144`; use `--request` for new backlog planning"
+        "`{}` only accepts existing issue identifiers like `ENG-10144`; use `--request` for new backlog planning",
+        render_command(None, "backlog plan <IDENTIFIER>")
+            .unwrap_or_else(|_| "meta backlog plan <IDENTIFIER>".to_string())
     );
 }
 
@@ -694,6 +714,8 @@ fn collect_prompt_attachments(
 
 fn load_context_bundle(root: &Path) -> Result<String> {
     let paths = PlanningPaths::for_root(root)?;
+    let scan_command = render_command(Some(root), "context scan")
+        .unwrap_or_else(|_| "meta context scan".to_string());
     let sections = [
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),
@@ -707,18 +729,18 @@ fn load_context_bundle(root: &Path) -> Result<String> {
     for (title, path) in sections {
         lines.push(format!("## {title}"));
         lines.push(String::new());
-        lines.push(read_context(&path)?);
+        lines.push(read_context(&path, &scan_command)?);
         lines.push(String::new());
     }
 
     Ok(lines.join("\n"))
 }
 
-fn read_context(path: &Path) -> Result<String> {
+fn read_context(path: &Path, scan_command: &str) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `meta scan` to generate it._",
+            "_Missing `{}`. Run `{scan_command}` to generate it._",
             path.file_name()
                 .map(|value| value.to_string_lossy())
                 .unwrap_or_default()
@@ -833,6 +855,8 @@ fn render_reshape_preview(
     issue: &IssueSummary,
     draft: &ReshapedIssueDraft,
     proposed_description: &str,
+    backlog_plan_command: &str,
+    backlog_dir_label: &str,
 ) -> String {
     let title_status = if issue.title == draft.title {
         format!("  {}", issue.title)
@@ -847,29 +871,40 @@ fn render_reshape_preview(
     );
 
     format!(
-        "`meta backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `.metastack/backlog/` files are unchanged in reshape mode.",
+        "`{backlog_plan_command} {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `{backlog_dir_label}/` files are unchanged in reshape mode.",
         issue.identifier, title_status, description_diff
     )
 }
 
-fn prompt_reshape_apply(identifier: &str, preview: &str) -> Result<bool> {
+fn prompt_reshape_apply(
+    identifier: &str,
+    preview: &str,
+    backlog_plan_command: &str,
+) -> Result<bool> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
-    prompt_reshape_apply_with_io(identifier, preview, &mut reader, &mut writer)
+    prompt_reshape_apply_with_io(
+        identifier,
+        preview,
+        backlog_plan_command,
+        &mut reader,
+        &mut writer,
+    )
 }
 
 fn prompt_reshape_apply_with_io(
     identifier: &str,
     preview: &str,
+    backlog_plan_command: &str,
     reader: &mut impl BufRead,
     writer: &mut impl Write,
 ) -> Result<bool> {
     writeln!(writer, "{preview}")?;
     writeln!(
         writer,
-        "Choose [a]pply or [c]ancel for `meta backlog plan {identifier}`:"
+        "Choose [a]pply or [c]ancel for `{backlog_plan_command} {identifier}`:"
     )?;
     writer.flush()?;
 
@@ -893,13 +928,16 @@ fn render_reshape_workpad_comment(
     updated_issue: &IssueSummary,
     draft: &ReshapedIssueDraft,
     velocity: bool,
+    backlog_plan_command: &str,
+    backlog_dir_label: &str,
 ) -> String {
     let mut lines = vec![
         "## Codex Workpad".to_string(),
         String::new(),
         format!("- Reshape applied: {}", reshape_timestamp()),
         format!(
-            "- Command: `meta backlog plan {}{}`",
+            "- Command: `{} {}{}`",
+            backlog_plan_command,
             original_issue.identifier,
             if velocity { " --velocity" } else { "" }
         ),
@@ -918,9 +956,9 @@ fn render_reshape_workpad_comment(
         "- Metadata preserved: assignee, labels, project, state, priority, and cycle were left unchanged."
             .to_string(),
     );
-    lines.push(
-        "- Local `.metastack/backlog/` files were not modified by this reshape flow.".to_string(),
-    );
+    lines.push(format!(
+        "- Local `{backlog_dir_label}/` files were not modified by this reshape flow."
+    ));
 
     lines.join("\n")
 }

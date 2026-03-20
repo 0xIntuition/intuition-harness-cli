@@ -78,7 +78,7 @@ fn setup_json_fails_when_backlog_template_conflicts_exist() -> Result<(), Box<dy
         .stderr(predicate::str::contains(
             ".metastack/backlog/_TEMPLATE/index.md",
         ))
-        .stderr(predicate::str::contains("rerun `meta setup --root"));
+        .stderr(predicate::str::contains("rerun `meta runtime setup --root"));
 
     assert_eq!(
         fs::read_to_string(conflicting_index)?,

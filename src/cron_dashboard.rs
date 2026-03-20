@@ -25,6 +25,7 @@ const CRON_PROMPT_ATTACHMENT_REJECTION: &str = "image attachments are not suppor
 #[derive(Debug, Clone)]
 pub(crate) struct CronInitFormContext {
     pub(crate) agent_options: Vec<String>,
+    pub(crate) command_name: String,
     pub(crate) cron_dir_label: String,
 }
 
@@ -218,7 +219,7 @@ fn render_cron_init_form(frame: &mut Frame<'_>, app: &CronInitApp) {
                 ("Esc", "cancel"),
             ]),
         ]),
-        panel_title("meta cron init", false),
+        panel_title(format!("{} cron init", app.context.command_name), false),
     );
     frame.render_widget(header, layout[0]);
 
@@ -309,7 +310,7 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     frame.render_widget(preview, sections[0]);
 
     let active_help = paragraph(Text::from(vec![
-        Line::from(app.focus.help_text().to_string()),
+        Line::from(app.focus.help_text(&app.context)),
         Line::from(""),
         Line::from("Execution contract:"),
         Line::from(
@@ -809,45 +810,52 @@ impl CronField {
         }
     }
 
-    fn help_text(self) -> &'static str {
+    fn help_text(self, context: &CronInitFormContext) -> String {
         match self {
-            Self::Name => "Repository-local cron jobs are written to .metastack/cron/<NAME>.md.",
+            Self::Name => format!(
+                "Repository-local cron jobs are written to {}/<NAME>.md.",
+                context.cron_dir_label
+            ),
             Self::SchedulePreset => {
-                "Choose between a minute-based preset, an hour-based preset, a daily time, or a raw cron expression."
+                "Choose between a minute-based preset, an hour-based preset, a daily time, or a raw cron expression.".to_string()
             }
             Self::MinutesInterval => {
-                "Used when the schedule preset is Every N minutes. Valid values: 1-59."
+                "Used when the schedule preset is Every N minutes. Valid values: 1-59.".to_string()
             }
             Self::HourInterval => {
-                "Used when the schedule preset is Every N hours. Valid values: 1-23."
+                "Used when the schedule preset is Every N hours. Valid values: 1-23.".to_string()
             }
             Self::HourlyMinute => {
-                "Used with the hourly preset to pin the minute within each selected hour."
+                "Used with the hourly preset to pin the minute within each selected hour.".to_string()
             }
-            Self::DailyHour => "Used when the preset is Daily at HH:MM. Valid values: 0-23.",
-            Self::DailyMinute => "Used when the preset is Daily at HH:MM. Valid values: 0-59.",
+            Self::DailyHour => {
+                "Used when the preset is Daily at HH:MM. Valid values: 0-23.".to_string()
+            }
+            Self::DailyMinute => {
+                "Used when the preset is Daily at HH:MM. Valid values: 0-59.".to_string()
+            }
             Self::CustomSchedule => {
-                "Stores a raw 5-field cron expression when the preset is Custom cron."
+                "Stores a raw 5-field cron expression when the preset is Custom cron.".to_string()
             }
             Self::Command => {
-                "Optional shell command. Leave blank to run only the agent prompt on schedule."
+                "Optional shell command. Leave blank to run only the agent prompt on schedule.".to_string()
             }
             Self::Agent => {
-                "When combined with a prompt, the selected agent runs after the optional shell phase."
+                "When combined with a prompt, the selected agent runs after the optional shell phase.".to_string()
             }
             Self::Prompt => {
-                "This recurring prompt is stored as the Markdown body and sent to the agent on every cron run."
+                "This recurring prompt is stored as the Markdown body and sent to the agent on every cron run.".to_string()
             }
             Self::WorkingDirectory => {
-                "Both the optional shell command and the optional agent run from this repository-relative path."
+                "Both the optional shell command and the optional agent run from this repository-relative path.".to_string()
             }
-            Self::Shell => "Shell binary used to execute the cron command.",
+            Self::Shell => "Shell binary used to execute the cron command.".to_string(),
             Self::TimeoutSeconds => {
-                "Maximum number of seconds allowed for the optional shell command phase."
+                "Maximum number of seconds allowed for the optional shell command phase.".to_string()
             }
-            Self::Enabled => "Disabled jobs stay on disk but are skipped by the scheduler.",
+            Self::Enabled => "Disabled jobs stay on disk but are skipped by the scheduler.".to_string(),
             Self::Save => {
-                "Create or update the cron job Markdown file using the current form values."
+                "Create or update the cron job Markdown file using the current form values.".to_string()
             }
         }
     }
@@ -1081,6 +1089,7 @@ mod tests {
         let app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                command_name: "intuition".to_string(),
                 cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
@@ -1100,6 +1109,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                command_name: "intuition".to_string(),
                 cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill::default(),
@@ -1115,6 +1125,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                command_name: "intuition".to_string(),
                 cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
@@ -1141,6 +1152,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                command_name: "intuition".to_string(),
                 cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
@@ -1163,6 +1175,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                command_name: "intuition".to_string(),
                 cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
@@ -1191,6 +1204,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                command_name: "intuition".to_string(),
                 cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill::default(),
@@ -1217,6 +1231,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                command_name: "intuition".to_string(),
                 cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill::default(),

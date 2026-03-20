@@ -26,6 +26,7 @@ use crate::config::{
     supported_reasoning_options, validate_agent_model, validate_agent_name,
     validate_agent_reasoning,
 };
+use crate::fs::render_command;
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
 #[derive(Debug, Clone)]
@@ -1312,6 +1313,8 @@ fn route_agent_names(view: &ConfigViewData) -> Vec<String> {
 }
 
 fn render_advanced_routing_dashboard(frame: &mut Frame<'_>, app: &AdvancedRoutingApp) {
+    let advanced_routing_command = render_command(None, "runtime config --advanced-routing")
+        .unwrap_or_else(|_| "meta runtime config --advanced-routing".to_string());
     let area = frame.area();
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1331,7 +1334,7 @@ fn render_advanced_routing_dashboard(frame: &mut Frame<'_>, app: &AdvancedRoutin
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("meta runtime config --advanced-routing"),
+            .title(advanced_routing_command),
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);
@@ -1757,9 +1760,13 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
 }
 
 fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
+    let runtime_setup_command =
+        render_command(None, "runtime setup").unwrap_or_else(|_| "meta runtime setup".to_string());
     let paragraph = Paragraph::new(Text::from(vec![
         Line::from("Review the summary and press Enter to save the install-scoped configuration."),
-        Line::from("Repo defaults now live under `meta runtime setup`."),
+        Line::from(format!(
+            "Repo defaults now live under `{runtime_setup_command}`."
+        )),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Save"))
     .wrap(Wrap { trim: false });
