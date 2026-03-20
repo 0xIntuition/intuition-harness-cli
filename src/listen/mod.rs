@@ -1691,7 +1691,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         format!("Project key: {}", metadata.metadata.project_key),
         format!("Project: {}", metadata.metadata.project_label),
         format!("Source root: {}", metadata.metadata.source_root),
-        format!("MetaStack root: {}", metadata.metadata.metastack_root),
+        format!("Repo-local state root: {}", metadata.metadata.metastack_root),
         format!("State file: {}", metadata.state_path.display()),
         format!("Lock file: {}", metadata.lock_path.display()),
         format!("Logs dir: {}", metadata.logs_dir.display()),

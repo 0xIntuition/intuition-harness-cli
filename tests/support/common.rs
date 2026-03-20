@@ -105,13 +105,25 @@ fn meta() -> Command {
 }
 
 #[cfg(unix)]
+fn effective_repo_state_root(repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let meta = fs::read_to_string(repo_root.join(".metastack/meta.json"))?;
+    let metadata = serde_json::from_str::<serde_json::Value>(&meta)?;
+    let repo_state_root = metadata
+        .get("branding")
+        .and_then(|value| value.get("repo_state_root"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(".metastack");
+    Ok(repo_root.join(repo_state_root).canonicalize()?)
+}
+
+#[cfg(unix)]
 fn listen_project_store_dir(
     config_path: &Path,
     repo_root: &Path,
     project_selector: Option<&str>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     let source_root = listen_source_root(repo_root)?;
-    let metastack_root = source_root.join(".metastack").canonicalize()?;
+    let metastack_root = effective_repo_state_root(&source_root)?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metastack_root.display().to_string().hash(&mut hasher);
     listen_project_scope_key(project_selector, repo_root)?.hash(&mut hasher);
