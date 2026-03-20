@@ -1318,7 +1318,10 @@ fn prepare_review_workspace(
     Ok(())
 }
 
-fn configure_review_workspace_git_identity(source_root: &Path, workspace_path: &Path) -> Result<()> {
+fn configure_review_workspace_git_identity(
+    source_root: &Path,
+    workspace_path: &Path,
+) -> Result<()> {
     let email = git_config_value(source_root, "user.email")?
         .unwrap_or_else(|| "metastack-cli@example.com".to_string());
     let name =
