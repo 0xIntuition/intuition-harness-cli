@@ -149,6 +149,7 @@ EOF
 fi
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
+-j, --json
 -m, --model <MODEL>
 -c, --config <key=value>
 EOF
@@ -158,7 +159,8 @@ printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
-printf 'codex builtin ok'
+printf '%s\n' '{"type":"thread.started","thread_id":"workflow-thread"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"codex builtin ok"}}'
 "#,
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
@@ -189,6 +191,7 @@ printf 'codex builtin ok'
     assert!(args.contains("--ask-for-approval"));
     assert!(args.contains("never"));
     assert!(args.contains("exec"));
+    assert!(args.contains("--json"));
     assert!(args.contains("--model=gpt-5.4"));
     assert!(args.contains("-c"));
     assert!(args.contains("reasoning.effort=\"medium\""));
@@ -247,6 +250,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -255,7 +259,7 @@ printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/args.txt"
 printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
 printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
-printf 'claude builtin ok'
+printf '%s' '{"type":"result","subtype":"success","result":"claude builtin ok","session_id":"workflow-session"}'
 "#,
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
@@ -282,6 +286,7 @@ printf 'claude builtin ok'
 
     let args = fs::read_to_string(stub_dir.join("args.txt"))?;
     assert!(args.contains("-p"));
+    assert!(args.contains("--output-format=json"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
     assert!(!args.contains("--reasoning="));
@@ -438,6 +443,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -449,7 +455,7 @@ printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
 printf '%s' "$METASTACK_AGENT_MODEL_SOURCE" > "$TEST_OUTPUT_DIR/model-source.txt"
 printf '%s' "$METASTACK_AGENT_REASONING_SOURCE" > "$TEST_OUTPUT_DIR/reasoning-source.txt"
-printf 'claude override ok'
+printf '%s' '{"type":"result","subtype":"success","result":"claude override ok","session_id":"workflow-session"}'
 "#,
     )?;
     let mut permissions = fs::metadata(&stub_path)?.permissions();
@@ -478,6 +484,7 @@ printf 'claude override ok'
 
     let args = fs::read_to_string(stub_dir.join("args.txt"))?;
     assert!(args.contains("-p"));
+    assert!(args.contains("--output-format=json"));
     assert!(args.contains("--model=sonnet"));
     assert!(!args.contains("--model=gpt-5.4"));
     assert!(!args.contains("--reasoning="));

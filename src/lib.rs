@@ -25,6 +25,7 @@ mod sync_dashboard;
 mod technical;
 mod text_diff;
 mod tui;
+mod upgrade;
 mod workflow_contract;
 mod workflows;
 mod workspace;
@@ -65,6 +66,7 @@ use crate::sync_command::{
 };
 use crate::sync_dashboard::{SyncDashboardAction, SyncDashboardOptions};
 use crate::technical::run_technical;
+use crate::upgrade::run_upgrade;
 use crate::workflows::run_workflows;
 use crate::workspace::{run_workspace_clean, run_workspace_list, run_workspace_prune};
 
@@ -262,6 +264,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", run_workspace_prune(&args).await?);
             }
         },
+        Command::Upgrade(args) => {
+            run_upgrade(&args).await?;
+        }
         Command::Scaffold(args) => {
             let report = run_scaffold(&args)?;
             println!("{}", report.render());

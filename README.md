@@ -44,6 +44,9 @@ cargo install --path . --force
 
 This will install the `meta` command to your Cargo bin directory, which is typically `~/.cargo/bin`.
 
+Cargo installs are intentionally not self-updatable with `meta upgrade`. Use the GitHub Release
+installer below when you want secure in-place updates.
+
 ## Install `meta` From Source
 
 Install the latest GitHub Release into `~/.local/bin`:
@@ -75,6 +78,32 @@ After installation:
 
 ```bash
 meta --help
+```
+
+Check whether a newer stable GitHub Release is available for the installed binary:
+
+```bash
+meta upgrade --check
+```
+
+Preview the verified replacement plan without mutating the install:
+
+```bash
+meta upgrade --dry-run
+```
+
+Apply the latest stable GitHub Release in place:
+
+```bash
+meta upgrade
+```
+
+Advanced version-management path:
+
+```bash
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
 ```
 
 ## Quick Start
@@ -159,6 +188,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
 | `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
 | `meta workspace` | List, clean, and prune sibling listener workspace clones under the fixed workspace root |
+| `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
 
 ## Build From Source
 
@@ -339,6 +369,31 @@ meta runtime setup --api-key lin_api_repo --team MET --project "MetaStack CLI"
 meta runtime setup --provider codex --model gpt-5.4 --reasoning medium
 meta runtime setup --listen-label agent --assignment-scope viewer --refresh-policy reuse-and-refresh
 ```
+
+### `upgrade`
+
+Inspect or apply GitHub Release self-updates for supported macOS/Linux release installs:
+
+```bash
+meta upgrade --check
+meta upgrade --dry-run
+meta upgrade
+meta upgrade --version 0.2.0 --dry-run
+meta upgrade --version 0.3.0-rc.1 --prerelease
+meta upgrade --version 0.1.0 --allow-downgrade
+```
+
+Default behavior resolves the latest stable GitHub Release for the running platform, verifies the
+selected archive against the published `SHA256SUMS`, stages extraction outside the live install
+path, and replaces the installed `meta` binary only after verification succeeds.
+
+`meta upgrade` refuses Cargo installs and source-checkout builds because those origins are not safe
+to mutate in place. Reinstall from GitHub Releases when you want an install that can self-update.
+
+Use `--check` to inspect the latest stable release without mutating the current install. Use
+`--dry-run` to resolve the same release and print the planned replacement path without swapping the
+binary. The advanced path keeps the default UX strict while still allowing pinned versions,
+prerelease opt-in, and deliberate downgrades with explicit flags.
 
 Legacy alias: `meta setup`
 
@@ -536,6 +591,8 @@ meta backlog plan ENG-10144 --velocity
 Legacy alias: `meta plan`
 
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
+
+Within one `meta backlog plan` run, the shared agent runtime now reuses a built-in Codex or Claude session across follow-up generation, ticket generation, and interactive revisions when the provider returns a resume handle. That continuation is run-scoped only: the command does not persist planning sessions under `.metastack/` or share them with listen workers.
 
 Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow.
 
@@ -815,8 +872,7 @@ Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; for listen runs, `assignment_scope = "viewer"` means `viewer + unassigned`, and `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; for listen runs, `assignment_scope = "viewer"` means `viewer + unassigned`, and `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. For listen runs, `assignment_scope = "viewer"` means `viewer + unassigned`, and `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
 ## Agent Configuration
 
 Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
@@ -830,6 +886,8 @@ Agent-backed commands use stable route keys so different workflows can resolve d
 Workflow playbooks can still declare a built-in provider, but that value is now only used as the final fallback when the explicit, route, repo, and global config layers do not select one.
 
 The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
+
+For capture-oriented non-interactive runs such as `meta backlog plan`, the runtime requests machine-readable built-in output, unwraps the final assistant text before returning it to the caller, captures provider-native session IDs, and can resume the next phase inside the same command. If a resumed built-in launch fails with a narrow invalid-resume signal, the runtime clears that handle and retries the phase once as a fresh launch.
 
 Sandbox and permission handling depends on the command path:
 
@@ -894,6 +952,9 @@ make quality
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
 - `cargo test --test release_artifacts`
+
+The interactive planning integration proof in `tests/plan.rs` shells out to `expect`, so local
+`make quality` runs also require that binary on `PATH` in addition to Rust.
 
 The focused `release_artifacts` proof keeps the GitHub Release packaging contract explicit in the root gate by verifying the release-script archive names, `SHA256SUMS`, and extracted `meta --version` output.
 
