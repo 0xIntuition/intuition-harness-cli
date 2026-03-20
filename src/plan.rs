@@ -235,8 +235,8 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         }
     }
 
-    let backlog_plan_command =
-        render_command(Some(&root), "backlog plan").unwrap_or_else(|_| "meta backlog plan".to_string());
+    let backlog_plan_command = render_command(Some(&root), "backlog plan")
+        .unwrap_or_else(|_| "meta backlog plan".to_string());
     let plan = if run_non_interactive {
         let request = args.request.clone().ok_or_else(|| {
             anyhow!(

@@ -340,7 +340,8 @@ fn prompt_backlog_template_conflicts(
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
-    let backlog_template_dir_label = PlanningPaths::for_root(root)?.backlog_template_dir_label(root);
+    let backlog_template_dir_label =
+        PlanningPaths::for_root(root)?.backlog_template_dir_label(root);
     prompt_backlog_template_conflicts_with_io(
         conflicts,
         &backlog_template_dir_label,
@@ -1906,13 +1907,12 @@ mod tests {
         let mut reader = Cursor::new(b"later\noverwrite\n".to_vec());
         let mut writer = Vec::new();
 
-        let action =
-            prompt_backlog_template_conflicts_with_io(
-                &conflicts,
-                ".metastack/backlog/_TEMPLATE",
-                &mut reader,
-                &mut writer,
-            )?;
+        let action = prompt_backlog_template_conflicts_with_io(
+            &conflicts,
+            ".metastack/backlog/_TEMPLATE",
+            &mut reader,
+            &mut writer,
+        )?;
 
         assert_eq!(action, BacklogTemplateConflictAction::Overwrite);
         let output = String::from_utf8(writer)?;
