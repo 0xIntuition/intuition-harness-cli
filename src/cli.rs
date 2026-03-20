@@ -1516,6 +1516,11 @@ pub enum SyncDashboardEventArg {
 pub enum MergeDashboardEventArg {
     Up,
     Down,
+    Tab,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Space,
     Enter,
     Back,

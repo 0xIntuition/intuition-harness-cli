@@ -549,6 +549,11 @@ impl From<MergeDashboardEventArg> for MergeDashboardAction {
         match value {
             MergeDashboardEventArg::Up => MergeDashboardAction::Up,
             MergeDashboardEventArg::Down => MergeDashboardAction::Down,
+            MergeDashboardEventArg::Tab => MergeDashboardAction::Tab,
+            MergeDashboardEventArg::PageUp => MergeDashboardAction::PageUp,
+            MergeDashboardEventArg::PageDown => MergeDashboardAction::PageDown,
+            MergeDashboardEventArg::Home => MergeDashboardAction::Home,
+            MergeDashboardEventArg::End => MergeDashboardAction::End,
             MergeDashboardEventArg::Space => MergeDashboardAction::Toggle,
             MergeDashboardEventArg::Enter => MergeDashboardAction::Enter,
             MergeDashboardEventArg::Back => MergeDashboardAction::Back,

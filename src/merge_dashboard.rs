@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
     panel_title, paragraph,
@@ -50,6 +51,11 @@ pub struct MergeDashboardOptions {
 pub enum MergeDashboardAction {
     Up,
     Down,
+    Tab,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Toggle,
     Enter,
     Back,
@@ -65,6 +71,7 @@ pub enum MergeDashboardExit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     PullRequests,
+    Preview,
     Confirm,
 }
 
@@ -73,6 +80,7 @@ struct MergeDashboardApp {
     data: MergeDashboardData,
     focus: Focus,
     pr_index: usize,
+    preview_scroll: ScrollState,
     selected: BTreeSet<usize>,
     completed: Option<Vec<u64>>,
 }
@@ -107,10 +115,16 @@ pub fn run_merge_dashboard(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            let viewport = preview_viewport(terminal.size()?.into());
             let action = match key.code {
                 KeyCode::Char('q') => return Ok(MergeDashboardExit::Cancelled),
                 KeyCode::Up => Some(MergeDashboardAction::Up),
                 KeyCode::Down => Some(MergeDashboardAction::Down),
+                KeyCode::Tab => Some(MergeDashboardAction::Tab),
+                KeyCode::PageUp => Some(MergeDashboardAction::PageUp),
+                KeyCode::PageDown => Some(MergeDashboardAction::PageDown),
+                KeyCode::Home => Some(MergeDashboardAction::Home),
+                KeyCode::End => Some(MergeDashboardAction::End),
                 KeyCode::Char(' ') => Some(MergeDashboardAction::Toggle),
                 KeyCode::Enter => Some(MergeDashboardAction::Enter),
                 KeyCode::Esc | KeyCode::Backspace => Some(MergeDashboardAction::Back),
@@ -118,7 +132,7 @@ pub fn run_merge_dashboard(
             };
 
             if let Some(action) = action
-                && let Some(selection) = app.apply(action)
+                && let Some(selection) = app.apply_in_viewport(action, viewport)
             {
                 return Ok(MergeDashboardExit::Selected(selection));
             }
@@ -130,9 +144,10 @@ fn render_once(data: MergeDashboardData, options: MergeDashboardOptions) -> Resu
     let backend = TestBackend::new(options.width, options.height);
     let mut terminal = Terminal::new(backend)?;
     let mut app = MergeDashboardApp::new(data);
+    let viewport = preview_viewport(Rect::new(0, 0, options.width, options.height));
 
     for action in options.actions {
-        if let Some(selection) = app.apply(action) {
+        if let Some(selection) = app.apply_in_viewport(action, viewport) {
             app.completed = Some(selection);
             break;
         }
@@ -171,7 +186,9 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
                 Span::raw(app.data.base_branch.clone()),
             ]),
             key_hints(&[
-                ("Up/Down", "move"),
+                ("Up/Down", "move/scroll"),
+                ("Tab", "focus"),
+                ("PgUp/PgDn", "scroll preview"),
                 ("Space", "select"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
@@ -249,8 +266,12 @@ fn render_selection_summary(frame: &mut Frame<'_>, area: Rect, app: &MergeDashbo
 }
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
-    let details = paragraph(app.detail_text(), panel_title("Focused PR Preview", false))
-        .wrap(ratatui::widgets::Wrap { trim: false });
+    let details = scrollable_paragraph(
+        app.detail_text(),
+        panel_title("Focused PR Preview", app.focus == Focus::Preview),
+        &app.preview_scroll,
+    )
+    .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(details, area);
 }
 
@@ -260,23 +281,59 @@ impl MergeDashboardApp {
             data,
             focus: Focus::PullRequests,
             pr_index: 0,
+            preview_scroll: ScrollState::default(),
             selected: BTreeSet::new(),
             completed: None,
         }
     }
 
-    fn apply(&mut self, action: MergeDashboardAction) -> Option<Vec<u64>> {
+    fn apply_in_viewport(
+        &mut self,
+        action: MergeDashboardAction,
+        preview_viewport: Rect,
+    ) -> Option<Vec<u64>> {
         self.completed = None;
 
         match action {
             MergeDashboardAction::Up => {
-                if self.focus == Focus::PullRequests {
-                    shift_index(&mut self.pr_index, self.data.pull_requests.len(), -1);
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::Up, preview_viewport);
+                } else if self.focus == Focus::PullRequests {
+                    self.move_selection(-1);
                 }
             }
             MergeDashboardAction::Down => {
-                if self.focus == Focus::PullRequests {
-                    shift_index(&mut self.pr_index, self.data.pull_requests.len(), 1);
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::Down, preview_viewport);
+                } else if self.focus == Focus::PullRequests {
+                    self.move_selection(1);
+                }
+            }
+            MergeDashboardAction::Tab => {
+                self.focus = match self.focus {
+                    Focus::PullRequests => Focus::Preview,
+                    Focus::Preview => Focus::PullRequests,
+                    Focus::Confirm => Focus::Confirm,
+                };
+            }
+            MergeDashboardAction::PageUp => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::PageUp, preview_viewport);
+                }
+            }
+            MergeDashboardAction::PageDown => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::PageDown, preview_viewport);
+                }
+            }
+            MergeDashboardAction::Home => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::Home, preview_viewport);
+                }
+            }
+            MergeDashboardAction::End => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_key(KeyCode::End, preview_viewport);
                 }
             }
             MergeDashboardAction::Toggle => {
@@ -288,7 +345,7 @@ impl MergeDashboardApp {
                 }
             }
             MergeDashboardAction::Enter => match self.focus {
-                Focus::PullRequests => {
+                Focus::PullRequests | Focus::Preview => {
                     if !self.selected.is_empty() {
                         self.focus = Focus::Confirm;
                     }
@@ -301,6 +358,7 @@ impl MergeDashboardApp {
             },
             MergeDashboardAction::Back => match self.focus {
                 Focus::PullRequests => return Some(Vec::new()),
+                Focus::Preview => self.focus = Focus::PullRequests,
                 Focus::Confirm => self.focus = Focus::PullRequests,
             },
         }
@@ -337,7 +395,7 @@ impl MergeDashboardApp {
 
         match self.focus {
             Focus::PullRequests if self.selected.is_empty() => badge("select", Tone::Info),
-            Focus::PullRequests => badge("review", Tone::Accent),
+            Focus::PullRequests | Focus::Preview => badge("review", Tone::Accent),
             Focus::Confirm => badge("confirm", Tone::Success),
         }
     }
@@ -354,18 +412,18 @@ impl MergeDashboardApp {
         }
 
         match self.focus {
-            Focus::PullRequests => {
+            Focus::PullRequests | Focus::Preview => {
                 if self.data.pull_requests.is_empty() {
                     "The GitHub repository currently has no open pull requests.".to_string()
                 } else if self.selected.is_empty() {
                     format!(
-                        "{} open pull request(s) discovered for {}. Select one or more entries, then press Enter.",
+                        "{} open pull request(s) discovered for {}. Select one or more entries, then press Enter. Tab moves focus into the preview pane.",
                         self.data.pull_requests.len(),
                         self.data.repo_label
                     )
                 } else {
                     format!(
-                        "{} pull request(s) selected. Press Enter to review the one-shot batch summary.",
+                        "{} pull request(s) selected. Press Enter to review the one-shot batch summary, or Tab to inspect the focused PR preview.",
                         self.selected.len()
                     )
                 }
@@ -443,6 +501,26 @@ impl MergeDashboardApp {
             pr.url
         )
     }
+
+    fn move_selection(&mut self, delta: isize) {
+        let before = self.pr_index;
+        shift_index(&mut self.pr_index, self.data.pull_requests.len(), delta);
+        if self.pr_index != before {
+            self.preview_scroll.reset();
+        }
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&Text::from(self.detail_text())), width.max(1))
+    }
+
+    fn scroll_preview_key(&mut self, key: KeyCode, viewport: Rect) {
+        let _ = self.preview_scroll.apply_key(
+            crossterm::event::KeyEvent::from(key),
+            viewport.height.max(1),
+            self.preview_content_rows(viewport.width.max(1)),
+        );
+    }
 }
 
 fn shift_index(index: &mut usize, len: usize, delta: isize) {
@@ -458,6 +536,28 @@ fn shift_index(index: &mut usize, len: usize, delta: isize) {
         next = 0;
     }
     *index = next as usize;
+}
+
+fn preview_viewport(area: Rect) -> Rect {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(0)])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+        .split(outer[1]);
+    let sidebar = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(12), Constraint::Min(0)])
+        .split(body[1]);
+
+    Rect::new(
+        sidebar[1].x.saturating_add(1),
+        sidebar[1].y.saturating_add(1),
+        sidebar[1].width.saturating_sub(2).max(1),
+        sidebar[1].height.saturating_sub(2).max(1),
+    )
 }
 
 fn snapshot(backend: &TestBackend) -> String {
@@ -489,8 +589,9 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         Focus, MergeDashboardAction, MergeDashboardApp, MergeDashboardData, MergeDashboardExit,
-        MergeDashboardOptions, MergeDashboardPullRequest, run_merge_dashboard,
+        MergeDashboardOptions, MergeDashboardPullRequest, preview_viewport, run_merge_dashboard,
     };
+    use ratatui::layout::Rect;
 
     fn demo_data() -> MergeDashboardData {
         MergeDashboardData {
@@ -593,17 +694,50 @@ mod tests {
     fn back_from_confirm_returns_to_pr_list() {
         let mut app = MergeDashboardApp::new(demo_data());
         assert_eq!(app.focus, Focus::PullRequests);
-        app.apply(MergeDashboardAction::Toggle);
-        app.apply(MergeDashboardAction::Enter);
+        app.apply_in_viewport(
+            MergeDashboardAction::Toggle,
+            preview_viewport(Rect::new(0, 0, 120, 32)),
+        );
+        app.apply_in_viewport(
+            MergeDashboardAction::Enter,
+            preview_viewport(Rect::new(0, 0, 120, 32)),
+        );
         assert_eq!(app.focus, Focus::Confirm);
-        app.apply(MergeDashboardAction::Back);
+        app.apply_in_viewport(
+            MergeDashboardAction::Back,
+            preview_viewport(Rect::new(0, 0, 120, 32)),
+        );
         assert_eq!(app.focus, Focus::PullRequests);
     }
 
     #[test]
     fn back_from_pr_list_cancels_the_dashboard() {
         let mut app = MergeDashboardApp::new(demo_data());
-        let exit = app.apply(MergeDashboardAction::Back);
+        let exit = app.apply_in_viewport(
+            MergeDashboardAction::Back,
+            preview_viewport(Rect::new(0, 0, 120, 32)),
+        );
         assert_eq!(exit, Some(Vec::new()));
+    }
+
+    #[test]
+    fn preview_scrolls_to_bottom_for_long_pr_details() {
+        let mut data = demo_data();
+        data.pull_requests[0].title = (1..=18)
+            .map(|index| format!("overflow detail line {index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        data.pull_requests[0].url = (1..=18)
+            .map(|index| format!("https://example.com/long/path/segment/{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let viewport = preview_viewport(Rect::new(0, 0, 120, 20));
+        let mut app = MergeDashboardApp::new(data);
+        app.apply_in_viewport(MergeDashboardAction::Tab, viewport);
+        app.apply_in_viewport(MergeDashboardAction::End, viewport);
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert!(app.preview_scroll.offset() > 0);
     }
 }
