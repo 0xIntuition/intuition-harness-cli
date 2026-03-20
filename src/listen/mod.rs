@@ -555,7 +555,10 @@ fn mark_running_session_stale(
 fn render_watch_scope(assignment_scope: ListenAssignmentScope, viewer: Option<&UserRef>) -> String {
     match assignment_scope {
         ListenAssignmentScope::Any => "all assignees".to_string(),
-        ListenAssignmentScope::Viewer => viewer
+        ListenAssignmentScope::ViewerOnly => viewer
+            .map(|viewer| format!("only {}", viewer.name))
+            .unwrap_or_else(|| "viewer only".to_string()),
+        ListenAssignmentScope::ViewerOrUnassigned => viewer
             .map(|viewer| format!("{} + unassigned", viewer.name))
             .unwrap_or_else(|| "viewer + unassigned".to_string()),
     }
@@ -567,11 +570,18 @@ fn issue_assignee_filter(
 ) -> IssueAssigneeFilter {
     match assignment_scope {
         ListenAssignmentScope::Any => IssueAssigneeFilter::Any,
-        ListenAssignmentScope::Viewer => viewer.map_or(IssueAssigneeFilter::Any, |viewer| {
-            IssueAssigneeFilter::ViewerOrUnassigned {
+        ListenAssignmentScope::ViewerOnly => viewer.map_or(IssueAssigneeFilter::Any, |viewer| {
+            IssueAssigneeFilter::Viewer {
                 viewer_id: viewer.id.clone(),
             }
         }),
+        ListenAssignmentScope::ViewerOrUnassigned => {
+            viewer.map_or(IssueAssigneeFilter::Any, |viewer| {
+                IssueAssigneeFilter::ViewerOrUnassigned {
+                    viewer_id: viewer.id.clone(),
+                }
+            })
+        }
     }
 }
 fn render_listen_backlog_file(
@@ -1199,24 +1209,43 @@ where
     }
 
     fn assignee_scope_skip_reason(&self, issue: &IssueSummary) -> Option<String> {
-        if self.listen_settings.assignment_scope != ListenAssignmentScope::Viewer {
-            return None;
-        }
-
         let viewer = self.viewer.as_ref()?;
-        match issue.assignee.as_ref() {
-            Some(assignee) if assignee.id == viewer.id => None,
-            Some(assignee) => Some(format!(
-                "assigned to `{}` instead of `{}`",
-                assignee.name, viewer.name
-            )),
-            None => None,
+        match self.listen_settings.assignment_scope {
+            ListenAssignmentScope::Any => None,
+            ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(assignee) => Some(format!(
+                    "assigned to `{}` instead of `{}`",
+                    assignee.name, viewer.name
+                )),
+                None => Some(format!("unassigned; only `{}` is in scope", viewer.name)),
+            },
+            ListenAssignmentScope::ViewerOrUnassigned => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(assignee) => Some(format!(
+                    "assigned to `{}` instead of `{}`",
+                    assignee.name, viewer.name
+                )),
+                None => None,
+            },
         }
     }
 
     fn session_drop_reason(&self, issue: &IssueSummary) -> Option<String> {
-        self.assignee_scope_skip_reason(issue)
-            .map(|_| "session ended: ticket reassigned".to_string())
+        let viewer = self.viewer.as_ref()?;
+        match self.listen_settings.assignment_scope {
+            ListenAssignmentScope::Any => None,
+            ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(_) => Some("session ended: ticket reassigned".to_string()),
+                None => Some("session ended: ticket became unassigned".to_string()),
+            },
+            ListenAssignmentScope::ViewerOrUnassigned => match issue.assignee.as_ref() {
+                Some(assignee) if assignee.id == viewer.id => None,
+                Some(_) => Some("session ended: ticket reassigned".to_string()),
+                None => None,
+            },
+        }
     }
 
     fn build_session(
@@ -1937,7 +1966,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                         render_watch_scope(
                             listen_settings.assignment_scope,
                             report.viewer().filter(|_| {
-                                listen_settings.assignment_scope == ListenAssignmentScope::Viewer
+                                !matches!(
+                                    listen_settings.assignment_scope,
+                                    ListenAssignmentScope::Any
+                                )
                             }),
                         )
                     );
@@ -1958,7 +1990,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     } else if args.check {
         unreachable!("`--check` exits on provider preflight failures before Linear validation");
     }
-    let viewer = if listen_settings.assignment_scope == ListenAssignmentScope::Viewer {
+    let viewer = if matches!(
+        listen_settings.assignment_scope,
+        ListenAssignmentScope::ViewerOnly | ListenAssignmentScope::ViewerOrUnassigned
+    ) {
         match preflight_viewer {
             Some(viewer) => Some(viewer),
             None => Some(service.viewer().await?),
@@ -3117,6 +3152,182 @@ mod tests {
         }
     }
 
+    fn issue_with_assignee(identifier: &str, assignee: Option<(&str, &str)>) -> IssueSummary {
+        let mut issue = test_issue(identifier);
+        issue.assignee = assignee.map(|(id, name)| UserRef {
+            id: id.to_string(),
+            name: name.to_string(),
+            email: None,
+        });
+        issue
+    }
+
+    fn test_daemon(
+        scope: ListenAssignmentScope,
+        issue: IssueSummary,
+    ) -> Result<(tempfile::TempDir, AgentDaemon<ReassignmentClient>)> {
+        let temp = tempdir()?;
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".metastack"))?;
+        let store = ListenProjectStore::resolve(repo, None)?;
+        let service = LinearService::new(ReassignmentClient { issue }, Some("MET".to_string()));
+        let daemon = AgentDaemon {
+            root: repo.to_path_buf(),
+            store,
+            filters: IssueListFilters {
+                state: Some(TODO_STATE.to_string()),
+                limit: 25,
+                ..IssueListFilters::default()
+            },
+            max_pickups: 1,
+            linear_config: LinearConfig {
+                api_key: "token".to_string(),
+                api_url: "https://linear.example/graphql".to_string(),
+                default_team: Some("MET".to_string()),
+            },
+            app_config: AppConfig::default(),
+            planning_meta: PlanningMeta::default(),
+            worker_agent: None,
+            worker_model: None,
+            worker_reasoning: None,
+            listen_settings: PlanningListenSettings {
+                required_labels: None,
+                assignment_scope: scope,
+                refresh_policy: ListenRefreshPolicy::ReuseAndRefresh,
+                instructions_path: None,
+                poll_interval_seconds: None,
+            },
+            viewer: Some(UserRef {
+                id: "viewer-1".to_string(),
+                name: "Kames".to_string(),
+                email: Some("sudo@example.com".to_string()),
+            }),
+            service,
+        };
+        Ok((temp, daemon))
+    }
+
+    #[test]
+    fn viewer_only_scope_skips_unassigned_issues() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::ViewerOnly,
+            issue_with_assignee("MET-55", None),
+        )?;
+
+        assert_eq!(
+            daemon
+                .assignee_scope_skip_reason(&issue_with_assignee("MET-55", None))
+                .as_deref(),
+            Some("unassigned; only `Kames` is in scope")
+        );
+        assert_eq!(
+            daemon
+                .session_drop_reason(&issue_with_assignee("MET-55", None))
+                .as_deref(),
+            Some("session ended: ticket became unassigned")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn viewer_only_scope_skips_foreign_assignees_but_allows_viewer() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::ViewerOnly,
+            issue_with_assignee("MET-56", Some(("viewer-2", "Someone Else"))),
+        )?;
+
+        assert_eq!(
+            daemon
+                .assignee_scope_skip_reason(&issue_with_assignee(
+                    "MET-56",
+                    Some(("viewer-2", "Someone Else"))
+                ))
+                .as_deref(),
+            Some("assigned to `Someone Else` instead of `Kames`")
+        );
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee(
+                "MET-57",
+                Some(("viewer-1", "Kames"))
+            )),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn viewer_or_unassigned_scope_allows_unassigned_but_not_foreign_assignees() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::ViewerOrUnassigned,
+            issue_with_assignee("MET-58", None),
+        )?;
+
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee("MET-58", None)),
+            None
+        );
+        assert_eq!(
+            daemon
+                .assignee_scope_skip_reason(&issue_with_assignee(
+                    "MET-59",
+                    Some(("viewer-2", "Someone Else"))
+                ))
+                .as_deref(),
+            Some("assigned to `Someone Else` instead of `Kames`")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn any_scope_does_not_skip_foreign_or_unassigned_issues() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::Any,
+            issue_with_assignee("MET-60", None),
+        )?;
+
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee("MET-60", None)),
+            None
+        );
+        assert_eq!(
+            daemon.assignee_scope_skip_reason(&issue_with_assignee(
+                "MET-61",
+                Some(("viewer-2", "Someone Else"))
+            )),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn render_watch_scope_reports_effective_assignee_scope() {
+        let viewer = UserRef {
+            id: "viewer-1".to_string(),
+            name: "Kames".to_string(),
+            email: Some("sudo@example.com".to_string()),
+        };
+
+        assert_eq!(
+            crate::listen::render_watch_scope(ListenAssignmentScope::Any, Some(&viewer)),
+            "all assignees"
+        );
+        assert_eq!(
+            crate::listen::render_watch_scope(ListenAssignmentScope::ViewerOnly, Some(&viewer)),
+            "only Kames"
+        );
+        assert_eq!(
+            crate::listen::render_watch_scope(
+                ListenAssignmentScope::ViewerOrUnassigned,
+                Some(&viewer)
+            ),
+            "Kames + unassigned"
+        );
+    }
+
     #[tokio::test]
     async fn reconcile_sessions_marks_reassigned_issue_completed_after_turn_ends() -> Result<()> {
         let temp = tempdir()?;
@@ -3158,7 +3369,7 @@ mod tests {
             worker_reasoning: None,
             listen_settings: PlanningListenSettings {
                 required_labels: None,
-                assignment_scope: ListenAssignmentScope::Viewer,
+                assignment_scope: ListenAssignmentScope::ViewerOrUnassigned,
                 refresh_policy: ListenRefreshPolicy::ReuseAndRefresh,
                 instructions_path: None,
                 poll_interval_seconds: None,

@@ -726,11 +726,13 @@ impl SetupApp {
             assignment_field: SelectFieldState::new(
                 vec![
                     "Any eligible issue".to_string(),
+                    "Only issues assigned to the authenticated viewer".to_string(),
                     "Viewer-assigned issues plus unassigned issues".to_string(),
                 ],
                 match view.planning_meta.listen.assignment_scope {
                     ListenAssignmentScope::Any => 0,
-                    ListenAssignmentScope::Viewer => 1,
+                    ListenAssignmentScope::ViewerOnly => 1,
+                    ListenAssignmentScope::ViewerOrUnassigned => 2,
                 },
             ),
             refresh_policy_field: SelectFieldState::new(
@@ -1070,7 +1072,8 @@ impl SetupApp {
             reasoning,
             listen_labels: parse_optional_listen_labels_input(self.listen_label.value()),
             assignment_scope: match self.assignment_field.selected() {
-                1 => ListenAssignmentScope::Viewer,
+                1 => ListenAssignmentScope::ViewerOnly,
+                2 => ListenAssignmentScope::ViewerOrUnassigned,
                 _ => ListenAssignmentScope::Any,
             },
             refresh_policy: match self.refresh_policy_field.selected() {
@@ -1409,7 +1412,8 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             (
                 "Assignee filter",
                 assignment_scope_label(match app.assignment_field.selected() {
-                    1 => ListenAssignmentScope::Viewer,
+                    1 => ListenAssignmentScope::ViewerOnly,
+                    2 => ListenAssignmentScope::ViewerOrUnassigned,
                     _ => ListenAssignmentScope::Any,
                 })
                 .to_string(),
@@ -1519,7 +1523,10 @@ fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
 fn assignment_scope_label(scope: ListenAssignmentScope) -> &'static str {
     match scope {
         ListenAssignmentScope::Any => "Any eligible issue",
-        ListenAssignmentScope::Viewer => "Viewer-assigned issues plus unassigned issues",
+        ListenAssignmentScope::ViewerOnly => "Only issues assigned to the authenticated viewer",
+        ListenAssignmentScope::ViewerOrUnassigned => {
+            "Viewer-assigned issues plus unassigned issues"
+        }
     }
 }
 
@@ -1717,7 +1724,8 @@ mod tests {
         prompt_backlog_template_conflicts_with_io, render_summary,
     };
     use crate::config::{
-        AgentSettings, AppConfig, PlanningAgentSettings, PlanningListenSettings, PlanningMeta,
+        AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings,
+        PlanningListenSettings, PlanningMeta,
     };
     use anyhow::Result;
     use std::io::Cursor;
@@ -1847,5 +1855,21 @@ mod tests {
         assert!(output.contains("Enter `o`, `s`, or `c`"));
 
         Ok(())
+    }
+
+    #[test]
+    fn assignment_scope_labels_match_explicit_listen_semantics() {
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::Any),
+            "Any eligible issue"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOnly),
+            "Only issues assigned to the authenticated viewer"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOrUnassigned),
+            "Viewer-assigned issues plus unassigned issues"
+        );
     }
 }

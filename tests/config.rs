@@ -240,7 +240,7 @@ default_model = "gpt-5.4"
             "--listen-label",
             "agent",
             "--assignment-scope",
-            "viewer",
+            "viewer-only",
             "--instructions-path",
             "instructions/listen.md",
             "--listen-poll-interval",
@@ -286,7 +286,7 @@ default_model = "gpt-5.4"
     );
     assert_eq!(
         planning_meta["listen"]["assignment_scope"].as_str(),
-        Some("viewer")
+        Some("viewer_only")
     );
     assert_eq!(
         planning_meta["listen"]["instructions_path"].as_str(),

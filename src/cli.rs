@@ -1459,7 +1459,8 @@ pub enum PromptTransportArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ListenAssignmentScopeArg {
     Any,
-    Viewer,
+    ViewerOnly,
+    ViewerOrUnassigned,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

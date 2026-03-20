@@ -81,6 +81,15 @@ impl LinearClient for FakeLinearClient {
         }
         match &filters.assignee {
             IssueAssigneeFilter::Any => {}
+            IssueAssigneeFilter::Viewer { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(false)
+                });
+            }
             IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
                 issues.retain(|issue| {
                     issue

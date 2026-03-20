@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::agent_provider::{
     builtin_provider_adapter, builtin_provider_model_keys, builtin_provider_names,
@@ -191,12 +191,49 @@ pub enum PromptTransport {
     Stdin,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListenAssignmentScope {
     #[default]
     Any,
-    Viewer,
+    ViewerOnly,
+    ViewerOrUnassigned,
+}
+
+impl ListenAssignmentScope {
+    fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::ViewerOnly => "viewer_only",
+            Self::ViewerOrUnassigned => "viewer_or_unassigned",
+        }
+    }
+}
+
+impl Serialize for ListenAssignmentScope {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_config_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for ListenAssignmentScope {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "any" => Ok(Self::Any),
+            "viewer_only" => Ok(Self::ViewerOnly),
+            "viewer_or_unassigned" | "viewer" => Ok(Self::ViewerOrUnassigned),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["any", "viewer_only", "viewer_or_unassigned", "viewer"],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1688,19 +1725,60 @@ fn validate_agent_route_config(
 mod tests {
     use std::collections::BTreeMap;
 
+    use serde_json::json;
+
     use super::{
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
         AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
         DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
-        DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, MergeSettings, NoAgentSelectedError,
-        PlanningAgentSettings, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
-        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
-        parse_listen_required_labels_csv,
+        DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, ListenAssignmentScope, MergeSettings,
+        NoAgentSelectedError, PlanningAgentSettings, PlanningListenSettings, PlanningMeta,
+        PlanningPlanSettings, is_no_agent_selected_error, no_agent_selected_route_key,
+        normalize_agent_route_key, parse_listen_required_labels_csv,
         resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
+
+    #[test]
+    fn listen_assignment_scope_serializes_to_explicit_values() {
+        assert_eq!(
+            serde_json::to_value(ListenAssignmentScope::ViewerOnly).unwrap(),
+            json!("viewer_only")
+        );
+        assert_eq!(
+            serde_json::to_value(ListenAssignmentScope::ViewerOrUnassigned).unwrap(),
+            json!("viewer_or_unassigned")
+        );
+        assert_eq!(
+            serde_json::to_value(ListenAssignmentScope::Any).unwrap(),
+            json!("any")
+        );
+    }
+
+    #[test]
+    fn listen_assignment_scope_accepts_legacy_viewer_value() {
+        assert_eq!(
+            serde_json::from_value::<ListenAssignmentScope>(json!("viewer")).unwrap(),
+            ListenAssignmentScope::ViewerOrUnassigned
+        );
+    }
+
+    #[test]
+    fn planning_meta_loads_legacy_viewer_assignment_scope_deterministically() {
+        let meta: PlanningMeta = serde_json::from_value(json!({
+            "listen": {
+                "assignment_scope": "viewer"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            meta.listen.assignment_scope,
+            ListenAssignmentScope::ViewerOrUnassigned
+        );
+    }
 
     #[test]
     fn interactive_plan_follow_up_limit_defaults_to_ten() {
