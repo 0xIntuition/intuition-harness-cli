@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-use crate::agents::{AgentContinuation, run_agent_capture_with_continuation};
+use crate::agents::{AgentContinuation, run_agent_capture, run_agent_capture_with_continuation};
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, RenderedTemplateFile,
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
