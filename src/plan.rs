@@ -34,7 +34,8 @@ use crate::backlog::{
 };
 use crate::cli::{PlanArgs, RunAgentArgs};
 use crate::config::{
-    AGENT_ROUTE_BACKLOG_PLAN, LinearConfig, LinearConfigOverrides, load_required_planning_meta,
+    AGENT_ROUTE_BACKLOG_PLAN, AppConfig, LinearConfig, LinearConfigOverrides,
+    load_required_planning_meta,
 };
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
@@ -202,6 +203,7 @@ enum PlanMode {
 pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     let planning_meta = load_required_planning_meta(&root, "plan")?;
+    let app_config = AppConfig::load()?;
     ensure_planning_layout(&root, false)?;
     let config = LinearConfig::new_with_root(
         Some(&root),
@@ -218,7 +220,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
     let default_project_id = if requested_project.is_some() {
         None
     } else {
-        planning_meta.linear.project_id.clone()
+        planning_meta.effective_project_id(&app_config)
     };
     let can_launch_tui = io::stdin().is_terminal() && io::stdout().is_terminal();
     let run_non_interactive = args.no_interactive || !can_launch_tui;
@@ -281,7 +283,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         match run_interactive_plan_session(
             &root,
             args.request.clone(),
-            planning_meta.interactive_follow_up_question_limit(),
+            planning_meta.effective_interactive_follow_up_question_limit(&app_config),
         )? {
             InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
             InteractivePlanExit::Confirmed(plan) => plan,
@@ -309,7 +311,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
                 parent_id: None,
                 state: Some(BACKLOG_STATE.to_string()),
                 priority: draft.priority,
-                labels: vec![planning_meta.issue_labels.plan_label()],
+                labels: vec![planning_meta.effective_plan_label(&app_config)],
             })
             .await?;
         let rendered_files = render_planned_backlog_files(

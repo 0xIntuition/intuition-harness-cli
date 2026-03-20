@@ -239,6 +239,7 @@ meta runtime config --route backlog --route-agent claude --route-model opus
 meta runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
 meta runtime config --clear-route backlog.plan
 meta runtime config --advanced-routing
+meta runtime config --replay-onboarding
 ```
 
 Legacy alias: `meta config`
@@ -250,7 +251,9 @@ Legacy alias: `meta config`
 
 The persisted config can store:
 
-- install-scoped Linear API key/default team values
+- install-scoped onboarding completion state
+- install-scoped Linear API key/default team/default project values
+- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, and plan/technical issue labels
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
@@ -266,6 +269,13 @@ Agent-backed routes resolve install-scoped settings in this order:
 
 For an individual run, explicit CLI flags still win over the routed defaults:
 `--agent`/`--provider` first, then `--model`, then `--reasoning`.
+
+First-run behavior:
+
+- a fresh install routes normal `meta` commands into the shared onboarding wizard before the requested command runs
+- `meta runtime setup` / `meta setup` are also intercepted until install onboarding completes, then return to being the manual repo-scoped editing flows
+- `meta runtime config --replay-onboarding` and `meta config --replay-onboarding` rerun the same wizard for debugging or refreshes
+- plain `meta runtime config` / `meta config` remain the manual install-scoped editing dashboards after onboarding
 
 For the built-in providers, `--reasoning`, `default_reasoning`, and `route_reasoning` are validated
 against the selected provider/model catalog instead of being accepted as free text. The dashboards
@@ -343,6 +353,8 @@ meta runtime setup --listen-label agent --assignment-scope viewer --refresh-poli
 Legacy alias: `meta setup`
 
 `meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+
+Promoted repo-aware settings now resolve as `CLI override -> repo default -> install default` for the shared team/project, listen label/scope/refresh/poll interval, interactive plan follow-up limit, and plan/technical issue labels. Repo-scoped `.metastack/meta.json` still overrides the install-scoped defaults saved by onboarding.
 
 For listen setup, `assignment_scope = "viewer"` now means `viewer + unassigned` for unattended listen runs. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 
@@ -815,8 +827,7 @@ Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; for listen runs, `assignment_scope = "viewer"` means `viewer + unassigned`, and `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. `meta listen` also reads the optional required label, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; for listen runs, `assignment_scope = "viewer"` means `viewer + unassigned`, and `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves, metastack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden repo defaults are visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack now falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, and technical labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
 Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:

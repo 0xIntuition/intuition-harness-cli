@@ -9,11 +9,20 @@ fn prepend_path(bin_dir: &std::path::Path) -> Result<String, Box<dyn Error>> {
 }
 
 #[cfg(unix)]
+fn write_onboarded_config(config_path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    fs::write(config_path, "[onboarding]\ncompleted = true\n")?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn write_linear_config(config_path: &std::path::Path, api_url: &str) -> Result<(), Box<dyn Error>> {
     fs::write(
         config_path,
         format!(
-            r#"[linear]
+            r#"[onboarding]
+completed = true
+
+[linear]
 api_key = "token"
 api_url = "{api_url}"
 "#,
@@ -436,7 +445,7 @@ fn workspace_clean_force_removes_clone_and_ticket_scoped_store_artifacts()
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
-    fs::write(&config_path, "")?;
+    write_onboarded_config(&config_path)?;
 
     let workspace = create_workspace_ticket(&repo_root, "ENG-10175", "eng-10175-branch")?;
     let other = create_workspace_ticket(&repo_root, "ENG-10176", "eng-10176-branch")?;
@@ -485,7 +494,7 @@ fn workspace_clean_prompts_and_reports_dirty_and_ahead_warnings() -> Result<(), 
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
-    fs::write(&config_path, "")?;
+    write_onboarded_config(&config_path)?;
 
     let workspace = create_workspace_ticket(&repo_root, "ENG-10175", "eng-10175-branch")?;
     fs::write(workspace.join("committed.txt"), "committed\n")?;
@@ -531,7 +540,7 @@ fn workspace_clean_target_only_removes_target_directories() -> Result<(), Box<dy
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
-    fs::write(&config_path, "")?;
+    write_onboarded_config(&config_path)?;
 
     let workspace = create_workspace_ticket(&repo_root, "ENG-10175", "eng-10175-branch")?;
     let nested_target = workspace.join("nested/target");
@@ -579,7 +588,7 @@ fn workspace_clean_target_only_can_limit_cleanup_to_one_ticket() -> Result<(), B
     fs::write(repo_root.join("README.md"), "# repo\n")?;
     init_repo_with_origin(&repo_root)?;
     write_minimal_planning_context(&repo_root, "{}")?;
-    fs::write(&config_path, "")?;
+    write_onboarded_config(&config_path)?;
 
     let workspace = create_workspace_ticket(&repo_root, "ENG-10175", "eng-10175-branch")?;
     let selected_target = workspace.join("target");

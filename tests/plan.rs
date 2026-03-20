@@ -2,6 +2,21 @@
 
 include!("support/common.rs");
 
+#[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
 #[test]
 fn plan_help_lists_non_interactive_inputs() {
     cli()
@@ -76,8 +91,7 @@ api_url = "{api_url}"
 "#
         )
     };
-    fs::write(config_path, config)?;
-    Ok(())
+    write_onboarded_config(config_path, config)
 }
 
 #[cfg(unix)]
@@ -642,7 +656,7 @@ fn plan_no_interactive_creates_multiple_backlog_issues_from_agent_output()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -966,7 +980,7 @@ fn plan_no_interactive_resolves_repo_meta_project_name_to_project_id() -> Result
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1147,6 +1161,205 @@ fi
 
 #[cfg(unix)]
 #[test]
+fn plan_no_interactive_uses_install_default_project_and_label() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[defaults.linear]
+project_id = "project-install"
+
+[defaults.issue_labels]
+plan = "planning-install"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "plan-agent-stub"
+transport = "stdin"
+"#,
+        ),
+    )?;
+
+    let stub_path = bin_dir.join("plan-agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"questions":[]}'
+else
+  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Use install defaults","description":"Ensure install-scoped defaults apply when repo defaults are absent.","acceptance_criteria":["`meta plan` resolves install defaults"],"priority":2}]}'
+fi
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let teams_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack",
+                        "states": {
+                            "nodes": [{
+                                "id": "state-backlog",
+                                "name": "Backlog",
+                                "type": "backlog"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let projects_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-install",
+                        "name": "Install Project",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-install",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let issue_labels_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueLabels");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabels": {
+                    "nodes": [{
+                        "id": "label-plan-install",
+                        "name": "planning-install"
+                    }]
+                }
+            }
+        }));
+    });
+    let create_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"title\":\"Use install defaults\"")
+            .body_includes("\"projectId\":\"project-install\"")
+            .body_includes("\"labelIds\":[\"label-plan-install\"]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-52",
+                        "identifier": "MET-52",
+                        "title": "Use install defaults",
+                        "description": "Ensure install-scoped defaults apply when repo defaults are absent.",
+                        "url": "https://linear.app/issues/52",
+                        "priority": 2,
+                        "updatedAt": "2026-03-19T18:10:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-install",
+                            "name": "Install Project"
+                        },
+                        "state": {
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env(
+            "PATH",
+            format!("{}:{}", bin_dir.display(), std::env::var("PATH")?),
+        )
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--no-interactive",
+            "--request",
+            "Create an install-default proof",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
+        .stdout(predicate::str::contains("MET-52"));
+
+    teams_mock.assert();
+    projects_mock.assert();
+    issue_labels_mock.assert();
+    create_issue_mock.assert();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn repo_agent_defaults_apply_when_cli_overrides_are_absent() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -1174,7 +1387,7 @@ fn repo_agent_defaults_apply_when_cli_overrides_are_absent() -> Result<(), Box<d
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1393,7 +1606,7 @@ fn builtin_repo_provider_defaults_override_global_builtin_defaults() -> Result<(
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1633,7 +1846,7 @@ fn cli_agent_overrides_beat_repo_and_global_defaults() -> Result<(), Box<dyn Err
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1833,7 +2046,10 @@ fi
 fn plan_requires_linear_auth_for_non_interactive_runs() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
+    let config_dir = temp.path().join(".config/metastack");
     fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&config_dir)?;
+    write_onboarded_config(&config_dir.join("config.toml"), "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{

@@ -157,12 +157,36 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         lines.push(format!("Config path: {}", view.config_path.display()));
     }
     lines.push(format!(
+        "Onboarding complete: {}",
+        if view.app_config.onboarding.completed {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    lines.push(format!(
         "Linear API key: {}",
         mask_secret(view.app_config.linear.api_key.as_deref())
     ));
     lines.push(format!(
         "Default Linear team: {}",
         display_optional(view.app_config.linear.team.as_deref())
+    ));
+    lines.push(format!(
+        "Default Linear project ID: {}",
+        display_optional(view.app_config.defaults.linear.project_id.as_deref())
+    ));
+    lines.push(format!(
+        "Install listen label: {}",
+        display_optional(view.app_config.defaults.listen.required_label.as_deref())
+    ));
+    lines.push(format!(
+        "Install plan label: {}",
+        display_optional(view.app_config.defaults.issue_labels.plan.as_deref())
+    ));
+    lines.push(format!(
+        "Install technical label: {}",
+        display_optional(view.app_config.defaults.issue_labels.technical.as_deref())
     ));
     lines.push(format!(
         "Default Linear profile: {}",

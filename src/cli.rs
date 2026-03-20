@@ -637,6 +637,9 @@ pub struct ConfigArgs {
     /// Launch the dedicated advanced agent-routing dashboard instead of the primary simple config flow.
     #[arg(long)]
     pub advanced_routing: bool,
+    /// Launch the shared first-run onboarding wizard instead of the manual config dashboard.
+    #[arg(long)]
+    pub replay_onboarding: bool,
     /// Emit the install-scoped config view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,

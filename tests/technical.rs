@@ -3,6 +3,21 @@
 include!("support/common.rs");
 
 #[cfg(unix)]
+fn write_onboarded_config(
+    config_path: &Path,
+    config: impl AsRef<str>,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        config_path,
+        format!(
+            "{}\n[onboarding]\ncompleted = true\n",
+            config.as_ref().trim_end()
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -58,7 +73,7 @@ fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(
         repo_root.join(".metastack/backlog/_TEMPLATE/validation.md"),
         "# Validation\n\n- `meta backlog tech {{parent_identifier}}`\n- Generated on {{TODAY}}\n",
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -183,8 +198,45 @@ JSON
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [child_issue.clone()]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
             .body_includes("query Teams");
         then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-install",
+                        "name": "Install Project",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-install",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
     });
 
     server.mock(|when, then| {
@@ -514,6 +566,7 @@ fn technical_command_requires_an_agent_to_generate_backlog_content() -> Result<(
 
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(&empty_bin)?;
+    write_onboarded_config(&missing_config, "")?;
     write_minimal_planning_context(
         &repo_root,
         r#"{

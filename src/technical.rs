@@ -33,7 +33,7 @@ use crate::backlog::{
     write_rendered_backlog_item,
 };
 use crate::cli::{RunAgentArgs, TechnicalArgs};
-use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
+use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, AppConfig, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::browser::{
@@ -156,6 +156,7 @@ enum InteractiveTechnicalExit {
 pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.client.root)?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
+    let app_config = AppConfig::load()?;
     let discussion_budgets = resolve_ticket_discussion_budgets(&planning_meta);
     ensure_planning_layout(&root, false)?;
     ensure_backlog_templates(&root, false)?;
@@ -225,7 +226,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             parent_id: Some(generated.parent.id.clone()),
             state: None,
             priority: generated.parent.priority,
-            labels: vec![planning_meta.issue_labels.technical_label()],
+            labels: vec![planning_meta.effective_technical_label(&app_config)],
         })
         .await?;
 

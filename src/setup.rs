@@ -452,11 +452,11 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
     ));
     lines.push(format!(
         "Assignee filter: {}",
-        assignment_scope_label(view.planning_meta.listen.assignment_scope)
+        assignment_scope_label(view.planning_meta.listen.assignment_scope())
     ));
     lines.push(format!(
         "Workspace refresh: {}",
-        refresh_policy_label(view.planning_meta.listen.refresh_policy)
+        refresh_policy_label(view.planning_meta.listen.refresh_policy())
     ));
     lines.push(format!(
         "Instructions file: {}",
@@ -600,10 +600,10 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         view.planning_meta.listen.required_label = normalize_optional(label);
     }
     if let Some(scope) = args.assignment_scope {
-        view.planning_meta.listen.assignment_scope = scope.into();
+        view.planning_meta.listen.assignment_scope = Some(scope.into());
     }
     if let Some(policy) = args.refresh_policy {
-        view.planning_meta.listen.refresh_policy = policy.into();
+        view.planning_meta.listen.refresh_policy = Some(policy.into());
     }
     if let Some(path) = &args.instructions_path {
         view.planning_meta.listen.instructions_path = normalize_optional(path);
@@ -732,7 +732,7 @@ impl SetupApp {
                     "Any eligible issue".to_string(),
                     "Viewer-assigned issues plus unassigned issues".to_string(),
                 ],
-                match view.planning_meta.listen.assignment_scope {
+                match view.planning_meta.listen.assignment_scope() {
                     ListenAssignmentScope::Any => 0,
                     ListenAssignmentScope::Viewer => 1,
                 },
@@ -742,7 +742,7 @@ impl SetupApp {
                     "Reuse the clone and hard-refresh it from origin/main".to_string(),
                     "Delete the clone and recreate it from origin/main".to_string(),
                 ],
-                match view.planning_meta.listen.refresh_policy {
+                match view.planning_meta.listen.refresh_policy() {
                     ListenRefreshPolicy::ReuseAndRefresh => 0,
                     ListenRefreshPolicy::RecreateFromOriginMain => 1,
                 },
@@ -1111,8 +1111,8 @@ impl SubmittedSetup {
         view.planning_meta.agent.model = self.model.clone();
         view.planning_meta.agent.reasoning = self.reasoning.clone();
         view.planning_meta.listen.required_label = self.listen_label.clone();
-        view.planning_meta.listen.assignment_scope = self.assignment_scope;
-        view.planning_meta.listen.refresh_policy = self.refresh_policy;
+        view.planning_meta.listen.assignment_scope = Some(self.assignment_scope);
+        view.planning_meta.listen.refresh_policy = Some(self.refresh_policy);
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
         view.planning_meta.listen.poll_interval_seconds = self.listen_poll_interval;
         view.planning_meta.plan.interactive_follow_up_questions = self.interactive_plan_limit;
@@ -1180,7 +1180,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` and keep repo onboarding rerunnable.",
+            "Configure repo-scoped defaults stored in `.metastack/meta.json` after install onboarding is complete.",
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",

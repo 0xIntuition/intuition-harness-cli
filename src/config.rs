@@ -39,6 +39,10 @@ pub struct AppConfig {
     pub linear: LinearSettings,
     #[serde(default)]
     pub agents: AgentSettings,
+    #[serde(default)]
+    pub defaults: InstallDefaults,
+    #[serde(default)]
+    pub onboarding: OnboardingSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -55,6 +59,42 @@ pub struct PlanningMeta {
     pub plan: PlanningPlanSettings,
     #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallDefaults {
+    #[serde(default)]
+    pub linear: InstallLinearDefaults,
+    #[serde(default)]
+    pub listen: InstallListenSettings,
+    #[serde(default)]
+    pub plan: InstallPlanSettings,
+    #[serde(default)]
+    pub issue_labels: PlanningIssueLabels,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallLinearDefaults {
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallListenSettings {
+    pub required_label: Option<String>,
+    pub assignment_scope: Option<ListenAssignmentScope>,
+    pub refresh_policy: Option<ListenRefreshPolicy>,
+    pub poll_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallPlanSettings {
+    pub interactive_follow_up_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OnboardingSettings {
+    #[serde(default)]
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,10 +156,8 @@ pub struct PlanningAgentSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanningListenSettings {
     pub required_label: Option<String>,
-    #[serde(default)]
-    pub assignment_scope: ListenAssignmentScope,
-    #[serde(default)]
-    pub refresh_policy: ListenRefreshPolicy,
+    pub assignment_scope: Option<ListenAssignmentScope>,
+    pub refresh_policy: Option<ListenRefreshPolicy>,
     pub instructions_path: Option<String>,
     pub poll_interval_seconds: Option<u64>,
 }
@@ -413,10 +451,24 @@ impl AppConfig {
         }
     }
 
+    /// Validates the install-scoped config payload before it is persisted or consumed.
+    ///
+    /// Returns an error when install defaults or global agent settings contain invalid values.
     pub fn validate(&self) -> Result<()> {
+        self.defaults.validate()?;
         self.validate_global_agent_defaults()?;
         self.validate_agent_routes()?;
         Ok(())
+    }
+
+    /// Reports whether first-run onboarding has already completed for this install.
+    pub fn onboarding_complete(&self) -> bool {
+        self.onboarding.completed
+    }
+
+    /// Marks first-run onboarding as completed in the install-scoped config.
+    pub fn mark_onboarding_complete(&mut self) {
+        self.onboarding.completed = true;
     }
 
     pub fn upsert_agent_route(
@@ -532,12 +584,104 @@ impl PlanningMeta {
         Ok(path)
     }
 
+    /// Returns the repo-scoped interactive follow-up limit, falling back to the built-in default.
     pub fn interactive_follow_up_question_limit(&self) -> usize {
         self.plan
             .interactive_follow_up_questions
             .unwrap_or(DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT)
     }
 
+    /// Resolves the effective Linear project selector using repo defaults before install defaults.
+    pub fn effective_project_id(&self, app_config: &AppConfig) -> Option<String> {
+        normalize_optional_ref(self.linear.project_id.as_deref())
+            .or_else(|| normalize_optional_ref(app_config.defaults.linear.project_id.as_deref()))
+    }
+
+    /// Resolves the effective listen pickup label using repo defaults before install defaults.
+    pub fn effective_listen_required_label(&self, app_config: &AppConfig) -> Option<String> {
+        normalize_optional_ref(self.listen.required_label.as_deref()).or_else(|| {
+            normalize_optional_ref(app_config.defaults.listen.required_label.as_deref())
+        })
+    }
+
+    /// Resolves the effective listen assignee scope using repo defaults before install defaults.
+    pub fn effective_listen_assignment_scope(
+        &self,
+        app_config: &AppConfig,
+    ) -> ListenAssignmentScope {
+        self.listen
+            .assignment_scope
+            .or(app_config.defaults.listen.assignment_scope)
+            .unwrap_or_default()
+    }
+
+    /// Resolves the effective listen refresh policy using repo defaults before install defaults.
+    pub fn effective_listen_refresh_policy(&self, app_config: &AppConfig) -> ListenRefreshPolicy {
+        self.listen
+            .refresh_policy
+            .or(app_config.defaults.listen.refresh_policy)
+            .unwrap_or_default()
+    }
+
+    /// Resolves the effective listen poll interval using repo defaults before install defaults.
+    pub fn effective_listen_poll_interval_seconds(&self, app_config: &AppConfig) -> u64 {
+        self.listen
+            .poll_interval_seconds
+            .or(app_config.defaults.listen.poll_interval_seconds)
+            .unwrap_or_else(|| self.listen.poll_interval_seconds())
+    }
+
+    /// Resolves the effective interactive follow-up limit using repo defaults before install defaults.
+    pub fn effective_interactive_follow_up_question_limit(&self, app_config: &AppConfig) -> usize {
+        self.plan
+            .interactive_follow_up_questions
+            .or(app_config.defaults.plan.interactive_follow_up_questions)
+            .unwrap_or_else(|| self.interactive_follow_up_question_limit())
+    }
+
+    /// Resolves the effective planning label using repo defaults before install defaults.
+    pub fn effective_plan_label(&self, app_config: &AppConfig) -> String {
+        self.issue_labels
+            .plan
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                app_config
+                    .defaults
+                    .issue_labels
+                    .plan
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(str::to_string)
+            .unwrap_or_else(|| self.issue_labels.plan_label())
+    }
+
+    /// Resolves the effective technical label using repo defaults before install defaults.
+    pub fn effective_technical_label(&self, app_config: &AppConfig) -> String {
+        self.issue_labels
+            .technical
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                app_config
+                    .defaults
+                    .issue_labels
+                    .technical
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(str::to_string)
+            .unwrap_or_else(|| self.issue_labels.technical_label())
+    }
+
+    /// Validates repo-scoped planning metadata before command execution or persistence.
+    ///
+    /// Returns an error when agent settings or promoted workflow defaults are invalid.
     pub fn validate(&self) -> Result<()> {
         if let Some(provider) = normalize_optional_ref(self.agent.provider.as_deref()) {
             validate_agent_model(&provider, self.agent.model.as_deref())?;
@@ -578,9 +722,35 @@ pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<Pl
 }
 
 impl PlanningListenSettings {
+    /// Returns the repo-scoped listen poll interval, falling back to the built-in default.
     pub fn poll_interval_seconds(&self) -> u64 {
         self.poll_interval_seconds
             .unwrap_or(DEFAULT_LISTEN_POLL_INTERVAL_SECONDS)
+    }
+
+    /// Returns the repo-scoped assignee scope, falling back to the built-in default.
+    pub fn assignment_scope(&self) -> ListenAssignmentScope {
+        self.assignment_scope.unwrap_or_default()
+    }
+
+    /// Returns the repo-scoped refresh policy, falling back to the built-in default.
+    pub fn refresh_policy(&self) -> ListenRefreshPolicy {
+        self.refresh_policy.unwrap_or_default()
+    }
+}
+
+impl InstallDefaults {
+    /// Validates promoted install-scoped workflow defaults.
+    ///
+    /// Returns an error when persisted listen or planning defaults are outside supported ranges.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(interval) = self.listen.poll_interval_seconds {
+            validate_listen_poll_interval_seconds(interval)?;
+        }
+        if let Some(limit) = self.plan.interactive_follow_up_questions {
+            validate_interactive_plan_follow_up_question_limit(limit)?;
+        }
+        Ok(())
     }
 }
 
@@ -696,16 +866,10 @@ pub async fn ensure_saved_issue_labels(
     planning_meta: &PlanningMeta,
 ) -> Result<()> {
     let mut labels = vec![
-        planning_meta.issue_labels.plan_label(),
-        planning_meta.issue_labels.technical_label(),
+        planning_meta.effective_plan_label(app_config),
+        planning_meta.effective_technical_label(app_config),
     ];
-    if let Some(required_label) = planning_meta
-        .listen
-        .required_label
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(required_label) = planning_meta.effective_listen_required_label(app_config) {
         labels.push(required_label.to_string());
     }
     let config = match LinearConfig::from_sources(
@@ -1530,10 +1694,11 @@ mod tests {
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
         AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
-        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, NoAgentSelectedError, PlanningAgentSettings,
-        PlanningListenSettings, PlanningMeta, PlanningPlanSettings, is_no_agent_selected_error,
-        no_agent_selected_route_key, normalize_agent_route_key, resolve_agent_config,
-        resolve_agent_route, validate_agent_reasoning,
+        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, InstallDefaults, InstallLinearDefaults,
+        InstallListenSettings, InstallPlanSettings, NoAgentSelectedError, PlanningAgentSettings,
+        PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
+        resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
 
@@ -1594,6 +1759,142 @@ mod tests {
         };
 
         assert_eq!(settings.poll_interval_seconds(), 42);
+    }
+
+    #[test]
+    fn install_defaults_fill_missing_repo_defaults() {
+        let app_config = AppConfig {
+            defaults: InstallDefaults {
+                linear: InstallLinearDefaults {
+                    project_id: Some("project-install".to_string()),
+                },
+                listen: InstallListenSettings {
+                    required_label: Some("agent".to_string()),
+                    assignment_scope: Some(super::ListenAssignmentScope::Viewer),
+                    refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
+                    poll_interval_seconds: Some(42),
+                },
+                plan: InstallPlanSettings {
+                    interactive_follow_up_questions: Some(4),
+                },
+                issue_labels: PlanningIssueLabels {
+                    plan: Some("planning".to_string()),
+                    technical: Some("engineering".to_string()),
+                },
+            },
+            ..AppConfig::default()
+        };
+
+        let planning_meta = PlanningMeta::default();
+        assert_eq!(
+            planning_meta.effective_project_id(&app_config).as_deref(),
+            Some("project-install")
+        );
+        assert_eq!(
+            planning_meta
+                .effective_listen_required_label(&app_config)
+                .as_deref(),
+            Some("agent")
+        );
+        assert_eq!(
+            planning_meta.effective_listen_assignment_scope(&app_config),
+            super::ListenAssignmentScope::Viewer
+        );
+        assert_eq!(
+            planning_meta.effective_listen_refresh_policy(&app_config),
+            super::ListenRefreshPolicy::RecreateFromOriginMain
+        );
+        assert_eq!(
+            planning_meta.effective_listen_poll_interval_seconds(&app_config),
+            42
+        );
+        assert_eq!(
+            planning_meta.effective_interactive_follow_up_question_limit(&app_config),
+            4
+        );
+        assert_eq!(planning_meta.effective_plan_label(&app_config), "planning");
+        assert_eq!(
+            planning_meta.effective_technical_label(&app_config),
+            "engineering"
+        );
+    }
+
+    #[test]
+    fn repo_defaults_override_install_defaults() {
+        let app_config = AppConfig {
+            defaults: InstallDefaults {
+                linear: InstallLinearDefaults {
+                    project_id: Some("project-install".to_string()),
+                },
+                listen: InstallListenSettings {
+                    required_label: Some("agent".to_string()),
+                    assignment_scope: Some(super::ListenAssignmentScope::Viewer),
+                    refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
+                    poll_interval_seconds: Some(42),
+                },
+                plan: InstallPlanSettings {
+                    interactive_follow_up_questions: Some(4),
+                },
+                issue_labels: PlanningIssueLabels {
+                    plan: Some("planning".to_string()),
+                    technical: Some("engineering".to_string()),
+                },
+            },
+            ..AppConfig::default()
+        };
+        let planning_meta = PlanningMeta {
+            linear: super::PlanningLinearSettings {
+                project_id: Some("project-repo".to_string()),
+                ..super::PlanningLinearSettings::default()
+            },
+            listen: PlanningListenSettings {
+                required_label: Some("repo-agent".to_string()),
+                assignment_scope: Some(super::ListenAssignmentScope::Any),
+                refresh_policy: Some(super::ListenRefreshPolicy::ReuseAndRefresh),
+                poll_interval_seconds: Some(7),
+                ..PlanningListenSettings::default()
+            },
+            plan: PlanningPlanSettings {
+                interactive_follow_up_questions: Some(9),
+            },
+            issue_labels: PlanningIssueLabels {
+                plan: Some("repo-plan".to_string()),
+                technical: Some("repo-tech".to_string()),
+            },
+            ..PlanningMeta::default()
+        };
+
+        assert_eq!(
+            planning_meta.effective_project_id(&app_config).as_deref(),
+            Some("project-repo")
+        );
+        assert_eq!(
+            planning_meta
+                .effective_listen_required_label(&app_config)
+                .as_deref(),
+            Some("repo-agent")
+        );
+        assert_eq!(
+            planning_meta.effective_listen_assignment_scope(&app_config),
+            super::ListenAssignmentScope::Any
+        );
+        assert_eq!(
+            planning_meta.effective_listen_refresh_policy(&app_config),
+            super::ListenRefreshPolicy::ReuseAndRefresh
+        );
+        assert_eq!(
+            planning_meta.effective_listen_poll_interval_seconds(&app_config),
+            7
+        );
+        assert_eq!(
+            planning_meta.effective_interactive_follow_up_question_limit(&app_config),
+            9
+        );
+        assert_eq!(planning_meta.effective_plan_label(&app_config), "repo-plan");
+        assert_eq!(
+            planning_meta.effective_technical_label(&app_config),
+            "repo-tech"
+        );
     }
 
     #[test]

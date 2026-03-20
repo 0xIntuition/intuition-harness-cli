@@ -47,6 +47,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## Default posture
 
+- Fresh installs may route normal `meta` commands into the shared install-scoped onboarding wizard before the requested command runs. `meta runtime config --replay-onboarding` and `meta config --replay-onboarding` rerun that same wizard, while plain `meta runtime config` / `meta config` stay available as the manual install-scoped editing flows after onboarding completes.
 - Agent-backed commands such as `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen` must derive their project/repository identity from the resolved command root for the current run.
 - Install-scoped agent defaults may be routed per command family or per command key via `meta runtime config`; agent-backed commands should resolve those route-aware defaults before falling back to repo-scoped or global defaults, while still honoring explicit CLI overrides for the active run.
 - Built-in `codex` and `claude` runs use one shared provider adapter path and one precedence model for provider/model/reasoning resolution. Command output and dry-run paths should expose the resolved provider, model, reasoning, route key, and config source whenever that launch path is part of the ticket scope.
