@@ -4,6 +4,350 @@ include!("support/common.rs");
 
 #[cfg(unix)]
 #[test]
+fn technical_command_writes_child_backlog_into_branded_root() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let stub_path = temp.path().join("technical-agent-stub");
+    let output_dir = temp.path().join("agent-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let parent_issue = issue_node(
+        "parent-1",
+        "MET-35",
+        "Create branded backlog flows",
+        "Context\n\n## Acceptance Criteria\n- Write backlog files under the configured branded root",
+        "state-2",
+        "In Progress",
+    );
+    let child_issue = issue_node(
+        "child-1",
+        "MET-36",
+        "Technical: Create branded backlog flows",
+        "Technical child description",
+        "state-1",
+        "Todo",
+    );
+
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&output_dir)?;
+    write_branded_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "branding": {
+    "command_name": "intuition",
+    "repo_state_root": ".intuition",
+    "backlog_root": ".intuition/backlog"
+  }
+}
+"#,
+        ".intuition",
+    )?;
+    fs::create_dir_all(repo_root.join(".intuition/backlog/_TEMPLATE"))?;
+    fs::write(
+        repo_root.join(".intuition/backlog/_TEMPLATE/index.md"),
+        "# {{BACKLOG_TITLE}}\n\nParent: {{parent_identifier}}\n",
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "technical-stub"
+
+[agents.commands.technical-stub]
+command = "{}"
+transport = "stdin"
+"#,
+            stub_path.display()
+        ),
+    )?;
+    fs::write(
+        &stub_path,
+        r##"#!/bin/sh
+cat > "$TEST_OUTPUT_DIR/payload.txt"
+cat <<'JSON'
+{"files":[
+  {"path":"index.md","contents":"# Technical: Create branded backlog flows\n\nGenerated under the branded backlog root.\n"},
+  {"path":"README.md","contents":"# Backlog Item Template\n"},
+  {"path":"checklist.md","contents":"# Checklist\n\n- [ ] Proof branded backlog root\n"},
+  {"path":"contacts.md","contents":"# Contacts\n"},
+  {"path":"decisions.md","contents":"# Decisions\n"},
+  {"path":"implementation.md","contents":"# Implementation\n"},
+  {"path":"proposed-prs.md","contents":"# Proposed PRs\n"},
+  {"path":"risks.md","contents":"# Risks\n"},
+  {"path":"specification.md","contents":"# Specification\n"},
+  {"path":"validation.md","contents":"# Validation\n\n- `intuition backlog tech MET-35`\n"},
+  {"path":"context/README.md","contents":"# Context\n"},
+  {"path":"context/context-note-template.md","contents":"# Context Note\n"},
+  {"path":"tasks/README.md","contents":"# Tasks\n"},
+  {"path":"tasks/workstream-template.md","contents":"# Workstream\n"},
+  {"path":"artifacts/README.md","contents":"# Artifacts\n"},
+  {"path":"artifacts/artifact-template.md","contents":"# Artifact\n"}
+]}
+JSON
+"##,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [parent_issue.clone(), child_issue.clone()]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"parent-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "parent-1",
+                    "identifier": "MET-35",
+                    "title": "Create branded backlog flows",
+                    "description": "Context\n\n## Acceptance Criteria\n- Write backlog files under the configured branded root",
+                    "url": "https://linear.app/issues/MET-35",
+                    "priority": 2,
+                    "updatedAt": "2026-03-20T10:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "labels": { "nodes": [] },
+                    "comments": { "nodes": [] },
+                    "state": {
+                        "id": "state-2",
+                        "name": "In Progress",
+                        "type": "started"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": "CLI platform work",
+                        "url": "https://linear.app/projects/1",
+                        "progress": 0.42,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueLabels");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabels": {
+                    "nodes": [{
+                        "id": "label-technical",
+                        "name": "technical"
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"parentId\":\"parent-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": child_issue
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("\"issueId\":\"child-1\"")
+            .body_includes("[harness-sync]");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-sync-1",
+                        "body": "[harness-sync]\nupdated progress",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+    for (index, file_name) in [
+        "README.md",
+        "checklist.md",
+        "contacts.md",
+        "decisions.md",
+        "implementation.md",
+        "proposed-prs.md",
+        "risks.md",
+        "specification.md",
+        "validation.md",
+        "context/README.md",
+        "context/context-note-template.md",
+        "tasks/README.md",
+        "tasks/workstream-template.md",
+        "artifacts/README.md",
+        "artifacts/artifact-template.md",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let upload_name = std::path::Path::new(file_name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("attachment path should have a file name")
+            .to_string();
+        let upload_path = format!("/uploads/{}", upload_name.replace('/', "__"));
+        let attachment_id = format!("attachment-{}", index + 1);
+        let upload_url = server.url(&upload_path);
+        let asset_url = server.url(format!("/assets/{}", upload_name.replace('/', "__")));
+        let upload_asset_url = asset_url.clone();
+
+        server.mock(move |when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .body_includes("mutation UploadFile")
+                .body_includes(format!("\"filename\":\"{upload_name}\""));
+            then.status(200).json_body(json!({
+                "data": {
+                    "fileUpload": {
+                        "success": true,
+                        "uploadFile": {
+                            "uploadUrl": upload_url,
+                            "assetUrl": upload_asset_url,
+                            "headers": [{
+                                "key": "x-goog-content-length-range",
+                                "value": "1,100000"
+                            }]
+                        }
+                    }
+                }
+            }));
+        });
+        server.mock(move |when, then| {
+            when.method(httpmock::Method::PUT).path(upload_path);
+            then.status(200);
+        });
+        server.mock(move |when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .body_includes("mutation CreateAttachment")
+                .body_includes(format!("\"relativePath\":\"{file_name}\""));
+            then.status(200).json_body(json!({
+                "data": {
+                    "attachmentCreate": {
+                        "success": true,
+                        "attachment": {
+                            "id": attachment_id,
+                            "title": file_name,
+                            "url": asset_url,
+                            "sourceType": "upload",
+                            "metadata": {
+                                "managedBy": "metastack-cli",
+                                "relativePath": file_name
+                            }
+                        }
+                    }
+                }
+            }));
+        });
+    }
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "backlog",
+            "tech",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "MET-35",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created technical sub-issue MET-36 under MET-35 at .intuition/backlog/MET-36.",
+        ))
+        .stdout(predicate::str::contains(".metastack/backlog/MET-36").not());
+
+    assert!(
+        repo_root
+            .join(".intuition/backlog/MET-36/index.md")
+            .is_file()
+    );
+    assert!(
+        !repo_root
+            .join(".metastack/backlog/MET-36/index.md")
+            .exists()
+    );
+    let payload = fs::read_to_string(output_dir.join("payload.txt"))?;
+    assert!(payload.contains("Create branded backlog flows"));
+    assert!(payload.contains("## Built-in Workflow Contract"));
+    assert!(
+        fs::read_to_string(repo_root.join(".intuition/backlog/MET-36/validation.md"))?
+            .contains("intuition backlog tech MET-35")
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

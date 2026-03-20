@@ -211,6 +211,33 @@ fn write_minimal_planning_context(
 }
 
 #[cfg(unix)]
+fn write_branded_planning_context(
+    repo_root: &Path,
+    planning_meta: &str,
+    repo_state_root: &str,
+) -> Result<(), Box<dyn Error>> {
+    write_minimal_planning_context(repo_root, planning_meta)?;
+    fs::remove_dir_all(repo_root.join(".metastack/codebase"))?;
+    fs::create_dir_all(repo_root.join(repo_state_root).join("codebase"))?;
+    for file in [
+        "SCAN.md",
+        "ARCHITECTURE.md",
+        "CONCERNS.md",
+        "CONVENTIONS.md",
+        "INTEGRATIONS.md",
+        "STACK.md",
+        "STRUCTURE.md",
+        "TESTING.md",
+    ] {
+        fs::write(
+            repo_root.join(repo_state_root).join("codebase").join(file),
+            format!("{file}\n"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn init_repo_with_origin(repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let remote = repo_root
         .parent()

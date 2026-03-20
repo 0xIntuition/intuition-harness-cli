@@ -3,6 +3,46 @@
 include!("support/common.rs");
 
 #[test]
+fn sync_status_reads_entries_from_branded_backlog_root() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(&repo_root)?;
+    write_branded_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "branding": {
+    "command_name": "intuition",
+    "repo_state_root": ".intuition",
+    "backlog_root": ".intuition/backlog"
+  }
+}
+"#,
+        ".intuition",
+    )?;
+    fs::create_dir_all(repo_root.join(".intuition/backlog/ENG-10234"))?;
+    fs::write(
+        repo_root.join(".intuition/backlog/ENG-10234/index.md"),
+        "# Branded backlog entry\n",
+    )?;
+
+    cli()
+        .current_dir(&repo_root)
+        .args(["backlog", "sync", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10234"))
+        .stdout(predicate::str::contains("Branded backlog entry"))
+        .stdout(predicate::str::contains("unlinked"))
+        .stdout(predicate::str::contains(".metastack/backlog").not());
+
+    Ok(())
+}
+
+#[test]
 fn sync_pull_restores_issue_description_and_managed_attachment_files() -> Result<(), Box<dyn Error>>
 {
     let temp = tempdir()?;
