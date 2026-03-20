@@ -71,6 +71,35 @@ fn bare_meta_renders_the_same_cleaned_top_level_help() {
 }
 
 #[test]
+fn explicit_meta_help_renders_the_same_cleaned_top_level_help() {
+    cli()
+        .arg("help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\n  backlog "))
+        .stdout(predicate::str::contains("\n  agents "))
+        .stdout(predicate::str::contains("\n  linear "))
+        .stdout(predicate::str::contains("\n  context "))
+        .stdout(predicate::str::contains("\n  runtime "))
+        .stdout(predicate::str::contains("\n  dashboard "))
+        .stdout(predicate::str::contains("\n  merge "))
+        .stdout(predicate::str::contains("\n  workspace "))
+        .stdout(predicate::str::contains("\n  upgrade "))
+        .stdout(predicate::str::contains("\n  help "))
+        .stdout(predicate::str::contains("\n  plan ").not())
+        .stdout(predicate::str::contains("\n  technical ").not())
+        .stdout(predicate::str::contains("\n  listen ").not())
+        .stdout(predicate::str::contains("\n  issues ").not())
+        .stdout(predicate::str::contains("\n  projects ").not())
+        .stdout(predicate::str::contains("\n  cron ").not())
+        .stdout(predicate::str::contains("\n  scan ").not())
+        .stdout(predicate::str::contains("\n  workflows ").not())
+        .stdout(predicate::str::contains("\n  config ").not())
+        .stdout(predicate::str::contains("\n  setup ").not())
+        .stdout(predicate::str::contains("\n  sync ").not());
+}
+
+#[test]
 fn workspace_help_lists_lifecycle_commands() {
     cli()
         .args(["workspace", "--help"])
