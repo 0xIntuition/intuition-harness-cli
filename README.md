@@ -16,7 +16,7 @@ The MetaStack CLI is a Rust terminal tool for engineers who want repository plan
 
 It is built for teams that want to:
 
-- manage repo-scoped planning state under `.metastack/`
+- manage repo-scoped planning state under a configurable repo-local root such as `.metastack/` or `.intuition/`
 - move between Linear and local backlog files without context switching
 - run local agents such as Codex or Claude with repository-aware prompts
 - supervise unattended issue execution with `meta agents listen`
@@ -26,7 +26,7 @@ It is built for teams that want to:
 Most planning tools split work across issue trackers, docs, scripts, and ad hoc prompts. MetaStack pulls those workflows back into one place:
 
 - `meta runtime config` saves install-scoped Linear and agent defaults, plus optional branding/layout defaults such as `--command-name intuition --repo-state-root .intuition`.
-- `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
+- `meta runtime setup` bootstraps the repo and saves canonical repo-scoped defaults under `.metastack/meta.json`, with operational state living under the effective repo-local root.
 - `meta context scan` turns the codebase into reusable planning context.
 - `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
@@ -112,7 +112,7 @@ sandbox_mode = "danger-full-access"
 - Built-in Claude listen runs should not inherit `ANTHROPIC_API_KEY`; headless listen is expected to use the local Claude subscription instead of an API-key override.
 - Run `meta agents listen --check` to validate the active listen provider prerequisites plus Linear reachability/auth without starting the daemon.
 
-`meta runtime setup` bootstraps the repo-local `.metastack/` workspace:
+`meta runtime setup` bootstraps the canonical metadata directory plus the effective repo-local state root:
 
 ```text
 .metastack/
@@ -180,8 +180,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 A typical end-to-end loop looks like this:
 
 1. Run `meta runtime config` once to save install-scoped Linear auth and agent defaults.
-2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
-3. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
+2. Run `meta runtime setup` once per repository to scaffold the effective repo-local state root and save repo defaults in `.metastack/meta.json`.
+3. Run `meta context scan` to refresh the repo context under the configured codebase directory, such as `.metastack/codebase/` or `.intuition/codebase/`.
 4. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
 5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
@@ -330,7 +330,7 @@ model = "gpt-5.3-codex"
 
 ### `runtime setup`
 
-Scaffold repo-local `.metastack/` state and inspect or update repo-scoped defaults:
+Scaffold the effective repo-local state root and inspect or update repo-scoped defaults:
 
 ```bash
 meta runtime setup
