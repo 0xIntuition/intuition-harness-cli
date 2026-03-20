@@ -2464,6 +2464,14 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     let backlog_index = fs::read_to_string(&backlog_index_path)?;
     assert!(backlog_index.contains("## Requirements"));
     assert!(backlog_index.contains("Claim Todo work and create agent briefs"));
+    let backlog_readme =
+        fs::read_to_string(workspace_root.join(".metastack/backlog/MET-21/README.md"))?;
+    assert!(backlog_readme.contains("# Backlog: Daemon pickup flow"));
+    assert!(!backlog_readme.contains("Backlog Item Template"));
+    let backlog_specification =
+        fs::read_to_string(workspace_root.join(".metastack/backlog/MET-21/specification.md"))?;
+    assert!(backlog_specification.contains("Claim Todo work and create agent briefs"));
+    assert!(!backlog_specification.contains("Requirement 1"));
     let validation_plan =
         fs::read_to_string(workspace_root.join(".metastack/backlog/MET-21/validation.md"))?;
     assert!(validation_plan.contains("must not overwrite the primary Linear issue description"));

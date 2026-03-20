@@ -589,13 +589,268 @@ fn render_listen_backlog_file(
     contents: String,
     parent_issue: &IssueSummary,
 ) -> String {
-    if relative_path != "validation.md" {
-        return contents;
+    match relative_path {
+        "validation.md" => render_listen_validation_plan(parent_issue),
+        "README.md" if should_replace_generic_listen_template(relative_path, &contents) => {
+            render_listen_backlog_readme(parent_issue)
+        }
+        "checklist.md" if should_replace_generic_listen_template(relative_path, &contents) => {
+            render_listen_backlog_checklist(parent_issue)
+        }
+        "implementation.md" if should_replace_generic_listen_template(relative_path, &contents) => {
+            render_listen_backlog_implementation(parent_issue)
+        }
+        "proposed-prs.md" if should_replace_generic_listen_template(relative_path, &contents) => {
+            render_listen_backlog_pr_plan(parent_issue)
+        }
+        "risks.md" if should_replace_generic_listen_template(relative_path, &contents) => {
+            render_listen_backlog_risks(parent_issue)
+        }
+        "specification.md" if should_replace_generic_listen_template(relative_path, &contents) => {
+            render_listen_backlog_specification(parent_issue)
+        }
+        _ => contents,
     }
+}
 
+fn render_listen_validation_plan(parent_issue: &IssueSummary) -> String {
     format!(
         "# Validation Plan\n\n## Command Proofs\n\n- Run the changed CLI flow against a deterministic local or mocked setup\n- Verify the original Linear issue description for `{}` remains unchanged\n- Update the existing `## Codex Workpad` comment with validation notes instead of running `meta sync push`\n\n## Notes\n\n- `meta listen` must not overwrite the primary Linear issue description.\n",
         parent_issue.identifier
+    )
+}
+
+fn should_replace_generic_listen_template(relative_path: &str, contents: &str) -> bool {
+    match relative_path {
+        "README.md" => contents.contains("# Backlog Item Template"),
+        "checklist.md" => contents.contains("## 2. Implementation Tasks by Area"),
+        "implementation.md" => {
+            contents.contains("Define the CLI, Linear, and local file-system changes.")
+        }
+        "proposed-prs.md" => contents.contains("Lock contract surface"),
+        "risks.md" => contents.contains("| Example risk |"),
+        "specification.md" => {
+            contents.contains("Describe the capability being delivered")
+                || contents.contains("1. Requirement 1")
+        }
+        _ => false,
+    }
+}
+
+fn render_listen_backlog_readme(parent_issue: &IssueSummary) -> String {
+    format!(
+        "# Backlog: {title}\n\nThis directory tracks execution for Linear issue `{identifier}` while `meta listen` is working inside the dedicated workspace clone.\n\n## Working Files\n\n- `index.md`: source issue context, copied requirements, and execution notes\n- `specification.md`: confirmed scope, acceptance criteria, and command-path expectations\n- `checklist.md`: execution checklist for reproduction, implementation, and publish steps\n- `implementation.md`: current touchpoints and rollout plan\n- `validation.md`: command proofs and quality-gate evidence\n\n## Current Ticket\n\n- Identifier: `{identifier}`\n- Title: {title}\n- URL: {url}\n\n## Bootstrap Notes\n\n1. Start from deterministic reproduction and record the affected repo paths before editing.\n2. Keep the single Linear workpad comment and these local backlog files aligned as the work changes.\n3. Treat this directory as issue-local execution context for `{identifier}`, not as the reusable repo template.\n",
+        identifier = parent_issue.identifier,
+        title = parent_issue.title,
+        url = parent_issue.url,
+    )
+}
+
+fn render_listen_backlog_checklist(parent_issue: &IssueSummary) -> String {
+    let today = listen_backlog_date();
+    let requirement_items = listen_issue_requirements(parent_issue);
+    let mut lines = vec![
+        format!("# Checklist: {}", parent_issue.title),
+        String::new(),
+        format!("Last updated: {today}"),
+        String::new(),
+        "## 1. Baseline and Decisions".to_string(),
+        String::new(),
+        format!(
+            "- [ ] Capture a deterministic reproduction signal for `{}` in the workspace clone.",
+            parent_issue.identifier
+        ),
+        "- [ ] Confirm the affected repo paths and record them in `implementation.md`."
+            .to_string(),
+        "- [ ] Record scope gaps, assumptions, or reviewer-visible tradeoffs in `decisions.md` or `risks.md`."
+            .to_string(),
+        String::new(),
+        "## 2. Implementation Tasks".to_string(),
+        String::new(),
+    ];
+
+    if requirement_items.is_empty() {
+        lines.extend([
+            format!(
+                "- [ ] Capture the missing scope for `{}` before editing code.",
+                parent_issue.identifier
+            ),
+            format!(
+                "- [ ] Implement the smallest safe change required for `{}` once reproduction is confirmed.",
+                parent_issue.title
+            ),
+        ]);
+    } else {
+        lines.extend(
+            requirement_items
+                .iter()
+                .take(4)
+                .map(|requirement| format!("- [ ] {requirement}")),
+        );
+    }
+
+    lines.extend([
+        "- [ ] Add or update targeted tests for the changed behavior and key failure path."
+            .to_string(),
+        "- [ ] Update docs only where the changed command path or workflow becomes user-visible."
+            .to_string(),
+        String::new(),
+        "## 3. Quality Gates".to_string(),
+        String::new(),
+        "- [ ] `cargo fmt --check`".to_string(),
+        "- [ ] `cargo clippy --all-targets --all-features -- -D warnings`".to_string(),
+        "- [ ] `cargo test` or narrower targeted proofs that directly exercise the changed path."
+            .to_string(),
+        "- [ ] Record command-path validation evidence in `validation.md`.".to_string(),
+        String::new(),
+        "## 4. Exit Criteria".to_string(),
+        String::new(),
+        "- [ ] The workpad comment and local backlog reflect the same completed work.".to_string(),
+        "- [ ] Changes are committed, pushed, and attached to the Linear issue through a PR."
+            .to_string(),
+        "- [ ] Remaining risks and open questions are explicit for reviewers.".to_string(),
+    ]);
+
+    lines.join("\n")
+}
+
+fn render_listen_backlog_implementation(parent_issue: &IssueSummary) -> String {
+    format!(
+        "# Implementation Plan\n\n## Workstreams\n\n1. Reproduce the current behavior for `{identifier}` and isolate the affected repo paths.\n2. Implement the narrowest safe change required for `{title}`.\n3. Validate, commit, push, and attach the PR while keeping the workpad and backlog current.\n\n## Current Scope Signal\n\n- {scope_signal}\n\n## Touchpoints\n\n- Candidate CLI entrypoints: determine during reproduction and record the concrete paths here.\n- Linear mutations/queries: keep the current workpad-only update flow unless this issue explicitly changes it.\n- `.metastack/backlog` files: keep `index.md`, `checklist.md`, and `validation.md` aligned with execution evidence.\n",
+        identifier = parent_issue.identifier,
+        title = parent_issue.title,
+        scope_signal = listen_issue_scope_signal(parent_issue),
+    )
+}
+
+fn render_listen_backlog_pr_plan(parent_issue: &IssueSummary) -> String {
+    let today = listen_backlog_date();
+    let pr_id = listen_pr_id(parent_issue);
+    format!(
+        "# Proposed PRs: {title}\n\nLast updated: {today}\n\n## PR Strategy\n\n- Prefer one focused PR for `{identifier}` unless reproduction uncovers an independent prerequisite.\n- Keep behavior, tests, and required docs in the same review slice when practical.\n- Avoid broad refactors while the issue scope is still being confirmed.\n\n## Planned PRs\n\n| PR ID | Goal | Files/Areas | Depends On | Risk | Owner | Status |\n|---|---|---|---|---|---|---|\n| {pr_id} | Implement `{identifier}`: {title} | `TBD after reproduction` | None | Medium | `@tbd` | planned |\n\n## Merge Order\n\n1. `{pr_id}`\n",
+        title = parent_issue.title,
+        today = today,
+        identifier = parent_issue.identifier,
+        pr_id = pr_id,
+    )
+}
+
+fn render_listen_backlog_risks(parent_issue: &IssueSummary) -> String {
+    let today = listen_backlog_date();
+    let scope_risk = if parent_issue
+        .description
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        "Linear issue is missing concrete description or acceptance criteria"
+    } else {
+        "Requirements extracted from the Linear issue may still hide edge cases"
+    };
+
+    format!(
+        "# Risks: {title}\n\nLast updated: {today}\n\n## Active Risks\n\n| Risk | Impact | Likelihood | Mitigation | Owner | Status |\n|---|---|---|---|---|---|\n| {scope_risk} | Medium | Medium | Capture reproduction first and convert findings into concrete acceptance criteria in the workpad and backlog. | `@tbd` | open |\n| Validation misses the real command path | High | Medium | Record direct command proofs in `validation.md` and keep tests scoped to the touched modules. | `@tbd` | open |\n| Workspace execution drifts from published issue state | Medium | Medium | Update the single workpad comment and local backlog immediately after each milestone. | `@tbd` | open |\n\n## Open Questions\n\n1. Which repo path reproduces `{identifier}`?\n2. Does `{identifier}` require user-facing CLI, config, or documentation changes?\n",
+        title = parent_issue.title,
+        today = today,
+        scope_risk = scope_risk,
+        identifier = parent_issue.identifier,
+    )
+}
+
+fn render_listen_backlog_specification(parent_issue: &IssueSummary) -> String {
+    let today = listen_backlog_date();
+    let requirements = listen_issue_requirements(parent_issue);
+    let functional_requirements = if requirements.is_empty() {
+        vec![
+            format!(
+                "1. Capture the missing scope for `{}` before editing code.",
+                parent_issue.identifier
+            ),
+            format!(
+                "2. Identify the affected command or module through deterministic reproduction for `{}`.",
+                parent_issue.identifier
+            ),
+            format!(
+                "3. Implement the smallest safe change that satisfies `{}` once the scope is confirmed.",
+                parent_issue.title
+            ),
+        ]
+    } else {
+        requirements
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(index, requirement)| format!("{}. {}", index + 1, requirement))
+            .collect()
+    };
+    let mut acceptance = if requirements.is_empty() {
+        vec![
+            format!(
+                "- [ ] A deterministic reproduction for `{}` is documented before implementation.",
+                parent_issue.identifier
+            ),
+            "- [ ] The affected repo paths are identified and updated narrowly.".to_string(),
+            "- [ ] Validation proves the changed behavior with direct command-path evidence."
+                .to_string(),
+        ]
+    } else {
+        requirements
+            .iter()
+            .take(4)
+            .map(|requirement| format!("- [ ] {requirement}"))
+            .collect::<Vec<_>>()
+    };
+    acceptance.extend([
+        "- [ ] Validation evidence is recorded in `validation.md`.".to_string(),
+        "- [ ] The published PR is attached back to the Linear issue.".to_string(),
+    ]);
+
+    format!(
+        "# Specification: {title}\n\nVersion: 0.1  \nLast updated: {today}\n\nParent index: [`./index.md`](./index.md)\n\n## 1. Executive Summary\n\nImplement the work tracked by Linear issue `{identifier}` in the dedicated workspace clone. Current scope signal: {scope_signal}\n\n## 2. Problem Statement\n\n- Problem: {scope_signal}\n- Why now: `{identifier}` is already active under `meta listen` and needs an issue-scoped execution plan.\n- Non-goals: Unrelated refactors outside the code path required to satisfy `{identifier}`.\n\n## 3. Functional Requirements\n\n{functional_requirements}\n\n## 4. Non-Functional Requirements\n\n- Performance: Preserve existing command latency unless this ticket explicitly changes it.\n- Reliability: Keep retries, cleanup, and workspace-safety behavior intact.\n- Security: Do not expand filesystem writes outside the dedicated workspace clone.\n- Observability: Keep logs and validation evidence specific enough for reviewers to replay the change.\n\n## 5. Contracts and Interfaces\n\n### 5.1 Inputs\n\n- Input shape: the existing CLI command path, config, or service call reproduced for `{identifier}`.\n- Validation rules: reject invalid inputs through the established error-handling path with contextual errors.\n\n### 5.2 Outputs\n\n- Output shape: preserve the current user-facing contract except for the behavior explicitly required by this issue.\n- Error shape: keep failures descriptive and deterministic enough for local command proofs.\n\n### 5.3 Compatibility\n\n- Backward-compat constraints: avoid breaking existing repo workflows outside the confirmed scope for `{identifier}`.\n- Migration plan: document any required docs or config updates in the same PR when behavior changes become user-visible.\n\n## 6. Architecture and Data Flow\n\n- High-level flow: reproduce the failing or missing behavior, patch the narrowest affected path, then validate the exact command flow.\n- Key components: the touched CLI entrypoint, supporting service/helpers, and validation coverage.\n- Boundaries: keep the work scoped to the provided workspace checkout and the target repository only.\n\n## 7. Acceptance Criteria\n\n{acceptance}\n\n## 8. Test Plan\n\n- Unit tests: cover the touched helper or command behavior when practical.\n- Integration tests: run the changed CLI flow against a deterministic local or mocked setup.\n- Contract tests: preserve the existing CLI/output/workspace contract outside the requested change.\n- Negative-path tests: confirm failure handling and `meta listen` workpad safety still behave correctly.\n\n## 9. Open Questions\n\n1. Which exact repo path reproduces `{identifier}`?\n2. What extra docs or rollout notes become necessary once reproduction is complete?\n\n## 10. Linked Workstreams\n\n- Primary execution thread: [`./implementation.md`](./implementation.md)\n",
+        title = parent_issue.title,
+        today = today,
+        identifier = parent_issue.identifier,
+        scope_signal = listen_issue_scope_signal(parent_issue),
+        functional_requirements = functional_requirements.join("\n"),
+        acceptance = acceptance.join("\n"),
+    )
+}
+
+fn listen_issue_requirements(parent_issue: &IssueSummary) -> Vec<String> {
+    let mut requirements = extract_requirements(parent_issue.description.as_deref());
+    if requirements.is_empty()
+        && let Some(description) = parent_issue.description.as_deref().map(str::trim)
+        && !description.is_empty()
+    {
+        requirements.push(description.to_string());
+    }
+    requirements
+}
+
+fn listen_issue_scope_signal(parent_issue: &IssueSummary) -> String {
+    listen_issue_requirements(parent_issue)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            format!(
+                "Linear issue `{}` currently has no description. Reproduction and code-path discovery are required before implementation can start.",
+                parent_issue.identifier
+            )
+        })
+}
+
+fn listen_backlog_date() -> String {
+    let timestamp = now_timestamp();
+    timestamp
+        .split_once('T')
+        .map(|(date, _)| date.to_string())
+        .unwrap_or(timestamp)
+}
+
+fn listen_pr_id(parent_issue: &IssueSummary) -> String {
+    format!(
+        "{}-implementation",
+        parent_issue.identifier.to_ascii_lowercase()
     )
 }
 
@@ -2402,10 +2657,7 @@ fn render_agent_prompt(
         .as_ref()
         .map(|assignee| assignee.name.clone())
         .unwrap_or_else(|| "unassigned".to_string());
-    let description = issue
-        .description
-        .clone()
-        .unwrap_or_else(|| "No description provided.".to_string());
+    let description = issue_description_text(issue).unwrap_or("No description provided.");
     let continuation = if turn_number > 1 {
         format!(
             "Continuation context:\n\n- This is continuation turn #{turn_number} of {max_turns} because the ticket is still in an active state.\n- Resume from the current workspace and workpad state instead of restarting from scratch.\n- Do not repeat completed investigation or validation unless the new code changes require it.\n- Do not end the turn while the issue remains active unless you are blocked by missing required auth, permissions, or secrets.\n\n"
@@ -2475,6 +2727,15 @@ fn render_agent_prompt(
     )
 }
 
+/// Returns the trimmed issue description when Linear provided meaningful text.
+pub(super) fn issue_description_text(issue: &IssueSummary) -> Option<&str> {
+    issue
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn truncate_discussion_excerpt(contents: &str, char_limit: usize) -> String {
     if contents.len() <= char_limit {
         return contents.to_string();
@@ -2521,13 +2782,7 @@ fn render_listen_backlog_description(
         format!("- URL: {}", parent_issue.url),
     ]);
 
-    let mut requirements = extract_requirements(parent_issue.description.as_deref());
-    if requirements.is_empty()
-        && let Some(description) = parent_issue.description.as_deref().map(str::trim)
-        && !description.is_empty()
-    {
-        requirements.push(description.to_string());
-    }
+    let requirements = listen_issue_requirements(parent_issue);
     if !requirements.is_empty() {
         lines.extend([String::new(), "## Requirements".to_string(), String::new()]);
         lines.extend(
@@ -2788,7 +3043,7 @@ mod tests {
         AgentDaemon, AgentSession, ListenCycleData, ListenState, SessionPhase, TODO_STATE,
         TokenUsage, capture_workspace_snapshot, compact_identifier, format_duration, format_number,
         listen_scope_label, mark_running_session_stale, render_agent_prompt,
-        required_label_skip_reason,
+        render_listen_backlog_file, required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -2836,6 +3091,81 @@ mod tests {
         assert_eq!(
             compact_identifier("019cedb4-2293-7651-b0b4-dfac4af6a640"),
             "019c...f6a640"
+        );
+    }
+
+    #[test]
+    fn render_listen_backlog_file_replaces_generic_templates_with_issue_scaffolds() {
+        let issue = listen_test_issue(
+            "MET-21",
+            "Daemon pickup flow",
+            Some("Claim Todo work and create agent briefs"),
+        );
+
+        let readme = render_listen_backlog_file(
+            "README.md",
+            include_str!("../artifacts/BACKLOG_TEMPLATE/README.md").to_string(),
+            &issue,
+        );
+        assert!(readme.contains("# Backlog: Daemon pickup flow"));
+        assert!(readme.contains("tracks execution for Linear issue `MET-21`"));
+        assert!(!readme.contains("Backlog Item Template"));
+
+        let specification = render_listen_backlog_file(
+            "specification.md",
+            include_str!("../artifacts/BACKLOG_TEMPLATE/specification.md").to_string(),
+            &issue,
+        );
+        assert!(specification.contains("Claim Todo work and create agent briefs"));
+        assert!(specification.contains("- [ ] Claim Todo work and create agent briefs"));
+        assert!(!specification.contains("Requirement 1"));
+
+        let proposed_prs = render_listen_backlog_file(
+            "proposed-prs.md",
+            include_str!("../artifacts/BACKLOG_TEMPLATE/proposed-prs.md").to_string(),
+            &issue,
+        );
+        assert!(proposed_prs.contains("met-21-implementation"));
+        assert!(!proposed_prs.contains("Lock contract surface"));
+    }
+
+    #[test]
+    fn render_listen_backlog_file_preserves_repo_custom_templates() {
+        let issue = listen_test_issue(
+            "MET-21",
+            "Daemon pickup flow",
+            Some("Claim Todo work and create agent briefs"),
+        );
+        let custom_contents = "# Team-specific spec\n\nDo not replace this file.\n".to_string();
+
+        assert_eq!(
+            render_listen_backlog_file("specification.md", custom_contents.clone(), &issue),
+            custom_contents
+        );
+    }
+
+    #[test]
+    fn render_listen_backlog_file_marks_missing_issue_description() {
+        let issue = listen_test_issue("ENG-10252", "TEST BACKLOG ISSUE 2", None);
+
+        let specification = render_listen_backlog_file(
+            "specification.md",
+            include_str!("../artifacts/BACKLOG_TEMPLATE/specification.md").to_string(),
+            &issue,
+        );
+        assert!(specification.contains("Linear issue `ENG-10252` currently has no description."));
+        assert!(
+            specification
+                .contains("Capture the missing scope for `ENG-10252` before editing code.")
+        );
+
+        let risks = render_listen_backlog_file(
+            "risks.md",
+            include_str!("../artifacts/BACKLOG_TEMPLATE/risks.md").to_string(),
+            &issue,
+        );
+        assert!(
+            risks.contains("Linear issue is missing concrete description or acceptance criteria")
         );
     }
 
@@ -3149,6 +3479,17 @@ mod tests {
         assert!(prompt.contains("[truncated to most recent excerpt]"));
         assert!(prompt.contains("Newest discussion tail."));
         assert!(!prompt.contains("Old details that should be truncated away."));
+    }
+
+    #[test]
+    fn render_agent_prompt_uses_fallback_for_blank_description() {
+        let temp = tempdir().expect("temp dir should build");
+        let mut issue = test_issue("MET-25");
+        issue.description = Some(" \n\t ".to_string());
+
+        let prompt = render_agent_prompt(&issue, temp.path(), "comment-25", None, 1, 20);
+
+        assert!(prompt.contains("Description:\n\nNo description provided."));
     }
 
     fn test_issue(identifier: &str) -> IssueSummary {
@@ -3584,5 +3925,31 @@ mod tests {
             .status()?;
         anyhow::ensure!(status.success(), "git {} failed", args.join(" "));
         Ok(())
+    }
+
+    fn listen_test_issue(identifier: &str, title: &str, description: Option<&str>) -> IssueSummary {
+        IssueSummary {
+            id: format!("issue-{identifier}"),
+            identifier: identifier.to_string(),
+            title: title.to_string(),
+            description: description.map(str::to_string),
+            url: format!("https://linear.app/issues/{identifier}"),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
     }
 }
