@@ -799,6 +799,124 @@ exit 0
 
 #[cfg(unix)]
 #[test]
+fn listen_check_reports_viewer_only_scope_in_preflight_summary() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(home_dir.join(".codex"))?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "reasoning": "high"
+  },
+  "listen": {
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    fs::write(
+        home_dir.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.linear]
+enabled = true
+"#,
+    )?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+EOF
+  exit 0
+fi
+exit 0
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("HOME", &home_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "agents",
+            "listen",
+            "--check",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Effective assignee filter: only Kames",
+        ));
+    assert!(viewer_mock.calls() >= 1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_once_fails_fast_on_codex_preflight_before_linear_auth() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
@@ -4540,6 +4658,533 @@ api_url = "{api_url}"
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(!state.contains("MET-31"));
     assert!(!temp.path().join("repo-workspace/MET-31").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_claims_viewer_assigned_issue_in_viewer_only_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+        ),
+    )?;
+    let stub_path = bin_dir.join("agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-54",
+                        "identifier": "MET-54",
+                        "title": "Claim viewer assigned work",
+                        "description": "Viewer-only scope should still claim viewer work",
+                        "url": "https://linear.app/issues/54",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-54\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": {
+                    "id": "issue-54",
+                    "identifier": "MET-54",
+                    "title": "Claim viewer assigned work",
+                    "description": "Viewer-only scope should still claim viewer work",
+                    "url": "https://linear.app/issues/MET-54",
+                    "priority": 2,
+                    "updatedAt": "2026-03-14T16:00:00Z",
+                    "team": {
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack"
+                    },
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI"
+                    },
+                    "assignee": {
+                        "id": "viewer-1",
+                        "name": "Kames",
+                        "email": "sudo@example.com"
+                    },
+                    "labels": {
+                        "nodes": [{
+                            "id": "label-1",
+                            "name": "agent"
+                        }]
+                    },
+                    "comments": { "nodes": [] },
+                    "state": {
+                        "id": "state-2",
+                        "name": "In Progress",
+                        "type": "started"
+                    },
+                    "attachments": { "nodes": [] },
+                    "parent": null,
+                    "children": { "nodes": [] }
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-54",
+                        "identifier": "MET-54",
+                        "title": "Claim viewer assigned work",
+                        "description": "Viewer-only scope should still claim viewer work",
+                        "url": "https://linear.app/issues/54",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-54",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: only Kames"))
+        .stdout(predicate::str::contains("1 claimed this cycle"))
+        .stdout(predicate::str::contains("MET-54"));
+
+    assert!(viewer_mock.calls() >= 1);
+    assert!(issues_mock.calls() >= 3);
+    update_mock.assert_calls(1);
+    assert!(temp.path().join("repo-workspace/MET-54").is_dir());
+    let state = fs::read_to_string(state_path)?;
+    assert!(state.contains("\"issue_identifier\": \"MET-54\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_skips_unassigned_issue_in_viewer_only_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-55",
+                        "identifier": "MET-55",
+                        "title": "Ignore unassigned strict-mode work",
+                        "description": "Viewer-only scope should skip unassigned work",
+                        "url": "https://linear.app/issues/55",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": null,
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: only Kames"))
+        .stdout(predicate::str::contains("MET-55").not());
+
+    assert!(viewer_mock.calls() >= 1);
+    update_mock.assert_calls(0);
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(!state.contains("MET-55"));
+    assert!(!temp.path().join("repo-workspace/MET-55").exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_skips_foreign_assigned_issue_in_viewer_only_scope() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer_only"
+  }
+}
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-56",
+                        "identifier": "MET-56",
+                        "title": "Ignore foreign strict-mode work",
+                        "description": "Viewer-only scope should skip someone else's work",
+                        "url": "https://linear.app/issues/56",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-2",
+                            "name": "Someone Else",
+                            "email": "else@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Watching: only Kames"))
+        .stdout(predicate::str::contains("MET-56").not());
+
+    assert!(viewer_mock.calls() >= 1);
+    update_mock.assert_calls(0);
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(!state.contains("MET-56"));
+    assert!(!temp.path().join("repo-workspace/MET-56").exists());
 
     Ok(())
 }
