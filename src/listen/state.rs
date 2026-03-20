@@ -55,7 +55,9 @@ impl TokenUsage {
             (None, None, _) => "n/a".to_string(),
             (input, output, Some(total)) => format!(
                 "in {} | out {} | total {}",
-                input.map(format_number).unwrap_or_else(|| "n/a".to_string()),
+                input
+                    .map(format_number)
+                    .unwrap_or_else(|| "n/a".to_string()),
                 output
                     .map(format_number)
                     .unwrap_or_else(|| "n/a".to_string()),

@@ -529,7 +529,11 @@ impl BuiltinProviderAdapter for ClaudeProviderAdapter {
         let mut usage = None;
         let mut parsed_any = false;
 
-        for line in trimmed.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             let value = match serde_json::from_str::<Value>(line) {
                 Ok(value) => value,
                 Err(_) => continue,
@@ -592,14 +596,24 @@ fn extract_usage_from_value(value: &Value) -> Option<AgentTokenUsage> {
     fn parse_u64(value: &Value) -> Option<u64> {
         value
             .as_u64()
-            .or_else(|| value.as_i64().filter(|number| *number >= 0).map(|number| number as u64))
+            .or_else(|| {
+                value
+                    .as_i64()
+                    .filter(|number| *number >= 0)
+                    .map(|number| number as u64)
+            })
             .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
     }
 
     fn extract_direct_usage(value: &Value) -> Option<AgentTokenUsage> {
-        let input = ["inputTokens", "input_tokens", "promptTokens", "prompt_tokens"]
-            .into_iter()
-            .find_map(|key| value.get(key).and_then(parse_u64));
+        let input = [
+            "inputTokens",
+            "input_tokens",
+            "promptTokens",
+            "prompt_tokens",
+        ]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(parse_u64));
         let output = [
             "outputTokens",
             "output_tokens",

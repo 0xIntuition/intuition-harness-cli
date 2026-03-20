@@ -5,13 +5,13 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::agent_provider::builtin_provider_adapter;
 use crate::agents::{
     AgentExecutionOptions, AgentTokenUsage, apply_invocation_environment,
     apply_noninteractive_agent_environment, command_args_for_invocation,
     command_args_for_invocation_with_options, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
-use crate::agent_provider::builtin_provider_adapter;
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
@@ -90,7 +90,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         backlog_issue: backlog_issue.as_ref(),
         pid: Some(worker_pid),
     };
-    let mut session_tokens = load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
+    let mut session_tokens =
+        load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
@@ -206,23 +207,23 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         let turn_result = match execute_agent_turn(&issue, turn_number, &turn_context) {
             Ok(result) => result,
             Err(error) => {
-            write_listen_session(
-                &source_root,
-                project_selector,
-                build_worker_session(
-                    &issue,
-                    SessionPhase::Blocked,
-                    compact_blocked_summary(
-                        &format!("Blocked | turn {turn_number}/{} failed", args.max_turns),
-                        backlog_progress_before.as_ref(),
-                        &log_path,
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Blocked,
+                        compact_blocked_summary(
+                            &format!("Blocked | turn {turn_number}/{} failed", args.max_turns),
+                            backlog_progress_before.as_ref(),
+                            &log_path,
+                        ),
+                        &session_context,
+                        turns_completed,
+                        &session_tokens,
                     ),
-                    &session_context,
-                    turns_completed,
-                    &session_tokens,
-                ),
-            )?;
-            return Err(error);
+                )?;
+                return Err(error);
             }
         };
         if let Some(usage) = turn_result.usage {
