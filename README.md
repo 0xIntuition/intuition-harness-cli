@@ -257,6 +257,7 @@ The persisted config can store:
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
 - advanced family-level agent routing under `[agents.routing.families.<family>]`
 - advanced command-level agent routing under `[agents.routing.commands."<route>"]`
+- optional branding/layout defaults under `[app.branding]` for `command_name`, `repo_state_root`, and `backlog_root`
 
 Agent-backed routes resolve install-scoped settings in this order:
 
@@ -267,6 +268,17 @@ Agent-backed routes resolve install-scoped settings in this order:
 
 For an individual run, explicit CLI flags still win over the routed defaults:
 `--agent`/`--provider` first, then `--model`, then `--reasoning`.
+
+Branding/layout resolution is separate from agent routing:
+
+1. repo-scoped branding in `.metastack/meta.json`
+2. install-scoped `[app.branding]` defaults
+3. for `command_name` only, the invoked executable name
+4. built-in defaults: `meta` for the command name, `.metastack` for the repo-local state root, and `<repo_state_root>/backlog` for the backlog root
+
+Configured `repo_state_root` and `backlog_root` values must stay inside the repository root. The
+resolver rejects absolute paths or parent-directory escapes that would place operational state
+outside the checkout.
 
 For the built-in providers, `--reasoning`, `default_reasoning`, and `route_reasoning` are validated
 against the selected provider/model catalog instead of being accepted as free text. The dashboards
@@ -346,6 +358,10 @@ Legacy alias: `meta setup`
 `meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
 
 Repo setup also accepts branding/layout overrides such as `--command-name intuition --repo-state-root .intuition --backlog-root .intuition/backlog`; add `--migrate-layout` to move the operational repo-local state into the configured destination while keeping canonical metadata discoverable at `.metastack/meta.json`.
+
+Those repo-scoped branding values take precedence over install-scoped `[app.branding]` defaults
+for that checkout. Repositories that do not opt in keep the legacy `meta` command identity and
+`.metastack/` operational layout unchanged.
 
 For listen setup, `assignment_scope = "viewer"` now means `viewer + unassigned` for unattended listen runs. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 
