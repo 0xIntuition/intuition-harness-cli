@@ -23,6 +23,9 @@ pub const MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 1;
 pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
 pub const DEFAULT_SYNC_DISCUSSION_FILE_CHAR_LIMIT: usize = 20_000;
 pub const DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT: usize = 6_000;
+pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
+pub const DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS: usize = 3;
+pub const DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS: usize = 5;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
 pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
@@ -39,6 +42,8 @@ pub struct AppConfig {
     pub linear: LinearSettings,
     #[serde(default)]
     pub agents: AgentSettings,
+    #[serde(default)]
+    pub merge: MergeSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -144,6 +149,13 @@ pub struct AgentSettings {
     pub routing: AgentRoutingSettings,
     #[serde(default)]
     pub commands: BTreeMap<String, AgentCommandConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MergeSettings {
+    pub validation_repair_attempts: Option<usize>,
+    pub validation_transient_retry_attempts: Option<usize>,
+    pub publication_retry_attempts: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -416,6 +428,7 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         self.validate_global_agent_defaults()?;
         self.validate_agent_routes()?;
+        self.merge.validate()?;
         Ok(())
     }
 
@@ -627,6 +640,30 @@ impl PlanningIssueLabels {
             .filter(|value| !value.is_empty())
             .unwrap_or("technical")
             .to_string()
+    }
+}
+
+impl MergeSettings {
+    pub fn validation_repair_attempts(&self) -> usize {
+        self.validation_repair_attempts
+            .unwrap_or(DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS)
+    }
+
+    pub fn validation_transient_retry_attempts(&self) -> usize {
+        self.validation_transient_retry_attempts
+            .unwrap_or(DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS)
+    }
+
+    pub fn publication_retry_attempts(&self) -> usize {
+        self.publication_retry_attempts
+            .unwrap_or(DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(limit) = self.validation_repair_attempts {
+            validate_merge_validation_repair_attempts(limit)?;
+        }
+        Ok(())
     }
 }
 
@@ -1410,6 +1447,16 @@ pub fn validate_listen_poll_interval_seconds(interval: u64) -> Result<()> {
     }
 }
 
+fn validate_merge_validation_repair_attempts(limit: usize) -> Result<()> {
+    if limit >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "merge validation repair attempt limit must be at least 1; got {limit}"
+        ))
+    }
+}
+
 fn resolve_named_profile<'a>(
     settings: &'a LinearSettings,
     name: &str,
@@ -1530,10 +1577,12 @@ mod tests {
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
         AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
-        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, NoAgentSelectedError, PlanningAgentSettings,
-        PlanningListenSettings, PlanningMeta, PlanningPlanSettings, is_no_agent_selected_error,
-        no_agent_selected_route_key, normalize_agent_route_key, resolve_agent_config,
-        resolve_agent_route, validate_agent_reasoning,
+        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
+        DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
+        DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, MergeSettings, NoAgentSelectedError,
+        PlanningAgentSettings, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
+        resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
 
@@ -1550,6 +1599,30 @@ mod tests {
         assert_eq!(
             PlanningListenSettings::default().poll_interval_seconds(),
             DEFAULT_LISTEN_POLL_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn merge_validation_repair_attempts_default_to_six() {
+        assert_eq!(
+            MergeSettings::default().validation_repair_attempts(),
+            DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn merge_transient_validation_retries_default_to_three() {
+        assert_eq!(
+            MergeSettings::default().validation_transient_retry_attempts(),
+            DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn merge_publication_retries_default_to_five() {
+        assert_eq!(
+            MergeSettings::default().publication_retry_attempts(),
+            DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS
         );
     }
 
@@ -1616,6 +1689,22 @@ mod tests {
     fn listen_poll_interval_validation_accepts_positive_values() {
         assert!(validate_listen_poll_interval_seconds(1).is_ok());
         assert!(validate_listen_poll_interval_seconds(60).is_ok());
+    }
+
+    #[test]
+    fn app_config_validation_rejects_zero_merge_validation_repair_attempts() {
+        let config = AppConfig {
+            merge: MergeSettings {
+                validation_repair_attempts: Some(0),
+                ..MergeSettings::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "merge validation repair attempt limit must be at least 1; got 0"
+        );
     }
 
     #[test]

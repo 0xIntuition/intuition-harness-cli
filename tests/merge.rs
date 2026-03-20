@@ -115,6 +115,70 @@ exit 1
 }
 
 #[cfg(unix)]
+fn write_github_retry_create_stub(
+    path: &std::path::Path,
+    pr_numbers: &[u64],
+    create_url: &str,
+) -> Result<(), Box<dyn Error>> {
+    let pr_entries = pr_numbers
+        .iter()
+        .map(|number| {
+            format!(
+                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    fs::write(
+        path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+count_file="${{TEST_OUTPUT_DIR}}/gh-create-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  printf '%s' '{{"nameWithOwner":"metastack-systems/metastack-cli","url":"https://github.com/metastack-systems/metastack-cli","defaultBranchRef":{{"name":"main"}}}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  case " $* " in
+    *" --head meta-merge/"*)
+      printf '%s' '[]'
+      ;;
+    *)
+      printf '%s' '[{pr_entries}]'
+      ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' 'temporary github failure' >&2
+    exit 1
+  fi
+  printf '%s' '{{"url":"{create_url}"}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#
+        ),
+    )?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn write_agent_stub(path: &std::path::Path, planner_order: &[u64]) -> Result<(), Box<dyn Error>> {
     let order = planner_order
         .iter()
@@ -145,6 +209,33 @@ case "$METASTACK_AGENT_PROMPT" in
 esac
 "#
         ),
+    )?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_flaky_validation_stub(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        path,
+        r#"#!/bin/sh
+set -eu
+count_file="${TEST_OUTPUT_DIR}/validation-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' 'test result: FAILED. 12 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out' >&2
+  printf '%s\n' 'error: test failed, to rerun pass `--test flaky`' >&2
+  exit 1
+fi
+exit 0
+"#,
     )?;
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_mode(0o755);
@@ -554,6 +645,9 @@ fn merge_persists_failed_progress_when_validation_repairs_are_exhausted()
             r#"[agents]
 default_agent = "stub"
 
+[merge]
+validation_repair_attempts = 2
+
 [agents.commands.stub]
 command = "{}"
 transport = "arg"
@@ -582,7 +676,7 @@ transport = "arg"
         .stderr(predicate::str::contains(
             "validation failed for aggregate branch",
         ))
-        .stderr(predicate::str::contains("after 3 repair attempt(s)"));
+        .stderr(predicate::str::contains("after 2 repair attempt(s)"));
 
     let run_root = repo_root.join(".metastack/merge-runs");
     let mut run_dirs = fs::read_dir(&run_root)?
@@ -598,7 +692,7 @@ transport = "arg"
     let progress = fs::read_to_string(run_dir.join("progress.json"))?;
     assert!(progress.contains("\"status\": \"failed\""));
     assert!(progress.contains("\"current_phase_key\": \"validation\""));
-    assert!(progress.contains("after 3 repair attempt(s)"));
+    assert!(progress.contains("after 2 repair attempt(s)"));
     let merge_progress = fs::read_to_string(run_dir.join("merge-progress.json"))?;
     assert!(merge_progress.contains("\"status\": \"failed\""));
     assert!(merge_progress.contains("\"current_phase_key\": \"validation\""));
@@ -606,7 +700,7 @@ transport = "arg"
     assert!(merge_progress.contains("\"status\": \"merged\""));
     let validation = fs::read_to_string(run_dir.join("validation.json"))?;
     assert!(validation.contains("\"success\": false"));
-    assert!(validation.contains("\"repair_attempts\": 3"));
+    assert!(validation.contains("\"repair_attempts\": 2"));
     assert!(
         run_dir
             .join("validation-repair-prompt-attempt-1.md")
@@ -614,7 +708,7 @@ transport = "arg"
     );
     assert!(
         run_dir
-            .join("validation-repair-output-attempt-3.md")
+            .join("validation-repair-output-attempt-2.md")
             .is_file()
     );
 
@@ -977,6 +1071,162 @@ transport = "arg"
     assert!(validation.contains("\"command\": \"test -f repaired.txt\""));
     assert!(validation.contains("\"exit_code\": 1"));
     assert!(validation.contains("\"exit_code\": 0"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_retries_transient_validation_failures_without_consuming_repair_budget()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let agent_stub = temp.path().join("merge-agent-stub");
+    let flaky_validation = temp.path().join("flaky-validation");
+    let output_dir = temp.path().join("output");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&output_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_stub(
+        &bin_dir.join("gh"),
+        &[23, 24],
+        "https://github.com/example/pull/2001",
+    )?;
+    write_agent_stub(&agent_stub, &[23, 24])?;
+    write_flaky_validation_stub(&flaky_validation)?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "{}"
+transport = "arg"
+"#,
+            agent_stub.display()
+        ),
+    )?;
+
+    commit_and_push_pull_ref(&repo_root, "feature/23", "one.txt", "one\n", 23)?;
+    commit_and_push_pull_ref(&repo_root, "feature/24", "two.txt", "two\n", 24)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "merge",
+            "--no-interactive",
+            "--pull-request",
+            "23",
+            "--pull-request",
+            "24",
+            "--validate",
+            flaky_validation
+                .to_str()
+                .expect("validation path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created aggregate PR https://github.com/example/pull/2001",
+        ));
+
+    let run_root = repo_root.join(".metastack/merge-runs");
+    let mut run_dirs = fs::read_dir(&run_root)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    run_dirs.sort();
+    let run_dir = run_dirs.pop().expect("merge run should exist");
+    let validation = fs::read_to_string(run_dir.join("validation.json"))?;
+    assert!(validation.contains("\"success\": true"));
+    assert!(validation.contains("\"repair_attempts\": 0"));
+    assert!(validation.contains("\"attempt\": 2"));
+    assert!(
+        !run_dir
+            .join("validation-repair-output-attempt-1.md")
+            .exists()
+    );
+    assert_eq!(
+        fs::read_to_string(output_dir.join("validation-count.txt"))?,
+        "2"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_retries_aggregate_publication_after_transient_gh_failure() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let agent_stub = temp.path().join("merge-agent-stub");
+    let output_dir = temp.path().join("output");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&output_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_retry_create_stub(
+        &bin_dir.join("gh"),
+        &[25, 26],
+        "https://github.com/example/pull/2002",
+    )?;
+    write_agent_stub(&agent_stub, &[25, 26])?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "{}"
+transport = "arg"
+"#,
+            agent_stub.display()
+        ),
+    )?;
+
+    commit_and_push_pull_ref(&repo_root, "feature/25", "one.txt", "one\n", 25)?;
+    commit_and_push_pull_ref(&repo_root, "feature/26", "two.txt", "two\n", 26)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "merge",
+            "--no-interactive",
+            "--pull-request",
+            "25",
+            "--pull-request",
+            "26",
+            "--validate",
+            "test -f one.txt",
+            "--validate",
+            "test -f two.txt",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created aggregate PR https://github.com/example/pull/2002",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(output_dir.join("gh-create-count.txt"))?,
+        "3"
+    );
 
     Ok(())
 }

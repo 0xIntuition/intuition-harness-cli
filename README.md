@@ -235,6 +235,7 @@ meta runtime config --json
 meta runtime config --api-key lin_api_work
 meta runtime config --default-profile work
 meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
+meta runtime config --merge-validation-repair-attempts 8
 meta runtime config --route backlog --route-agent claude --route-model opus
 meta runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
 meta runtime config --clear-route backlog.plan
@@ -254,6 +255,7 @@ The persisted config can store:
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
+- install-scoped merge defaults under `[merge]`, including the validation repair attempt cap for `meta merge`
 - advanced family-level agent routing under `[agents.routing.families.<family>]`
 - advanced command-level agent routing under `[agents.routing.commands."<route>"]`
 
@@ -316,6 +318,9 @@ team = "MET"
 default_agent = "codex"
 default_model = "gpt-5.4"
 default_reasoning = "medium"
+
+[merge]
+validation_repair_attempts = 6
 
 [agents.routing.families.backlog]
 provider = "claude"
@@ -410,7 +415,7 @@ Behavior summary:
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
-- Publication is gated on those validation commands succeeding. When validation fails, `meta merge` invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed.
+- Publication is gated on those validation commands succeeding. When validation fails, `meta merge` first retries transient-looking test failures a few times without consuming the repair budget, then invokes the configured merge agent inside the isolated workspace, commits any repair edits onto the aggregate branch, and reruns validation. Push and aggregate PR publication also retry on transient remote errors so a batch does not stop early for a one-off network or GitHub CLI failure. The run only stops without publication after the bounded repair loop is exhausted or validation execution itself cannot proceed. The default repair cap is 6 attempts, and you can override it globally with `meta runtime config --merge-validation-repair-attempts <N>` or by setting `[merge].validation_repair_attempts` in the install-scoped config.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:

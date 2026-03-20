@@ -36,7 +36,11 @@ const STEP_APPLY: &str = "merge_application";
 const STEP_VALIDATE: &str = "validation";
 const STEP_PUSH: &str = "push";
 const STEP_PUBLISH: &str = "publish_pr";
-const MAX_VALIDATION_REPAIR_ATTEMPTS: usize = 3;
+const VALIDATION_TEST_FAILURE_MARKERS: &[&str] = &[
+    "test result: FAILED",
+    "error: test failed, to rerun pass",
+    "timed out waiting for",
+];
 
 #[derive(Debug, Clone, Serialize)]
 struct MergeDiscovery {
@@ -536,6 +540,10 @@ fn execute_merge_run(
             validation_commands.join(" && ")
         ),
     )?;
+    let merge_settings = AppConfig::load()?.merge;
+    let max_validation_repair_attempts = merge_settings.validation_repair_attempts();
+    let max_validation_transient_retry_attempts =
+        merge_settings.validation_transient_retry_attempts();
     let validation = match run_validation_until_passes(
         root,
         &workspace_path,
@@ -547,6 +555,8 @@ fn execute_merge_run(
         &run_dir,
         &mut tracker,
         validation_commands,
+        max_validation_repair_attempts,
+        max_validation_transient_retry_attempts,
     ) {
         Ok(validation) => validation,
         Err(error) => {
@@ -581,14 +591,11 @@ fn execute_merge_run(
         STEP_PUSH,
         format!("Pushing aggregate branch `{aggregate_branch}` to origin."),
     )?;
-    if let Err(error) = run_git(
+    if let Err(error) = push_aggregate_branch_until_published(
         &workspace_path,
-        &[
-            "push",
-            "--set-upstream",
-            "origin",
-            aggregate_branch.as_str(),
-        ],
+        &aggregate_branch,
+        merge_settings.publication_retry_attempts(),
+        &mut tracker,
     ) {
         tracker.fail_step(
             STEP_PUSH,
@@ -614,13 +621,16 @@ fn execute_merge_run(
             repository.default_branch
         ),
     )?;
-    let publication = match gh.publish_aggregate_pull_request(
+    let publication = match publish_aggregate_pull_request_until_published(
+        gh,
         &workspace_path,
         repository,
         &aggregate_branch,
         &repository.default_branch,
         &pr_title,
         &pr_body_path,
+        merge_settings.publication_retry_attempts(),
+        &mut tracker,
     ) {
         Ok(publication) => publication,
         Err(error) => {
@@ -1136,10 +1146,15 @@ fn run_validation_until_passes(
     run_dir: &Path,
     tracker: &mut ProgressTracker,
     validation_commands: Vec<String>,
+    max_validation_repair_attempts: usize,
+    max_validation_transient_retry_attempts: usize,
 ) -> Result<ValidationArtifact> {
     let mut attempts = Vec::new();
+    let mut repair_attempts_used = 0usize;
+    let mut transient_retry_streak = 0usize;
 
-    for attempt in 1..=(MAX_VALIDATION_REPAIR_ATTEMPTS + 1) {
+    loop {
+        let attempt = attempts.len() + 1;
         let commands = run_validation_commands(workspace_path, validation_commands.clone())?;
         let failing_command = commands
             .iter()
@@ -1156,32 +1171,60 @@ fn run_validation_until_passes(
             let artifact = ValidationArtifact {
                 attempts,
                 success: true,
-                repair_attempts: attempt.saturating_sub(1),
+                repair_attempts: repair_attempts_used,
             };
             write_json_artifact(&run_dir.join("validation.json"), &artifact)?;
             return Ok(artifact);
         }
 
-        if attempt > MAX_VALIDATION_REPAIR_ATTEMPTS {
+        if validation_failure_looks_transient(&attempt_record.commands)
+            && transient_retry_streak < max_validation_transient_retry_attempts
+        {
+            transient_retry_streak += 1;
+            attempts.push(attempt_record);
+            write_json_artifact(
+                &run_dir.join("validation.json"),
+                &ValidationArtifact {
+                    attempts: attempts.clone(),
+                    success: false,
+                    repair_attempts: repair_attempts_used,
+                },
+            )?;
+            tracker.update_detail(
+                STEP_VALIDATE,
+                format!(
+                    "Validation attempt {attempt} failed on {}. Retrying without repair to rule out a transient test failure ({transient_retry_streak}/{max_validation_transient_retry_attempts}).",
+                    failing_command
+                        .clone()
+                        .unwrap_or_else(|| "a validation command failed".to_string())
+                ),
+                None,
+            )?;
+            continue;
+        }
+
+        transient_retry_streak = 0;
+
+        if repair_attempts_used >= max_validation_repair_attempts {
             attempts.push(attempt_record);
             let artifact = ValidationArtifact {
                 attempts,
                 success: false,
-                repair_attempts: MAX_VALIDATION_REPAIR_ATTEMPTS,
+                repair_attempts: repair_attempts_used,
             };
             write_json_artifact(&run_dir.join("validation.json"), &artifact)?;
             bail!(
                 "validation failed for aggregate branch `{aggregate_branch}` after {} repair attempt(s); last failure: {}",
-                MAX_VALIDATION_REPAIR_ATTEMPTS,
+                repair_attempts_used,
                 failing_command.unwrap_or_else(|| "a validation command failed".to_string())
             );
         }
 
-        let repair_attempt = attempt;
+        let repair_attempt = repair_attempts_used + 1;
         tracker.update_detail(
             STEP_VALIDATE,
             format!(
-                "Validation attempt {attempt} failed on {}. Invoking repair assistance ({repair_attempt}/{MAX_VALIDATION_REPAIR_ATTEMPTS}).",
+                "Validation attempt {attempt} failed on {}. Invoking repair assistance ({repair_attempt}/{max_validation_repair_attempts}).",
                 failing_command
                     .clone()
                     .unwrap_or_else(|| "a validation command failed".to_string())
@@ -1197,6 +1240,7 @@ fn run_validation_until_passes(
             workspace_path,
             repair_attempt,
             &attempt_record.commands,
+            max_validation_repair_attempts,
         )?;
         write_text_file(
             &run_dir.join(format!(
@@ -1244,18 +1288,29 @@ fn run_validation_until_passes(
             attempt: repair_attempt,
             commit: repair_commit,
         });
+        repair_attempts_used += 1;
         attempts.push(attempt_record);
         write_json_artifact(
             &run_dir.join("validation.json"),
             &ValidationArtifact {
                 attempts: attempts.clone(),
                 success: false,
-                repair_attempts: repair_attempt,
+                repair_attempts: repair_attempts_used,
             },
         )?;
     }
+}
 
-    bail!("validation retry loop terminated unexpectedly for aggregate branch `{aggregate_branch}`")
+fn validation_failure_looks_transient(commands: &[ValidationCommandRecord]) -> bool {
+    commands
+        .iter()
+        .filter(|record| record.exit_code != 0)
+        .any(|record| {
+            let combined = format!("{}\n{}", record.stdout, record.stderr);
+            VALIDATION_TEST_FAILURE_MARKERS
+                .iter()
+                .any(|marker| combined.contains(marker))
+        })
 }
 
 fn commit_validation_repair(
@@ -1286,6 +1341,73 @@ fn workspace_has_tracked_changes(workspace_path: &Path) -> Result<bool> {
         .is_empty())
 }
 
+fn push_aggregate_branch_until_published(
+    workspace_path: &Path,
+    aggregate_branch: &str,
+    max_attempts: usize,
+    tracker: &mut ProgressTracker,
+) -> Result<()> {
+    for attempt in 1..=max_attempts {
+        match run_git(
+            workspace_path,
+            &["push", "--set-upstream", "origin", aggregate_branch],
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < max_attempts => {
+                tracker.update_detail(
+                    STEP_PUSH,
+                    format!(
+                        "Push attempt {attempt}/{max_attempts} for `{aggregate_branch}` failed: {error:#}. Retrying."
+                    ),
+                    None,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    bail!("push retry loop terminated unexpectedly for `{aggregate_branch}`")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_aggregate_pull_request_until_published(
+    gh: &GhCli,
+    workspace_path: &Path,
+    repository: &GithubRepository,
+    aggregate_branch: &str,
+    base_branch: &str,
+    title: &str,
+    body_path: &Path,
+    max_attempts: usize,
+    tracker: &mut ProgressTracker,
+) -> Result<AggregatePublication> {
+    for attempt in 1..=max_attempts {
+        match gh.publish_aggregate_pull_request(
+            workspace_path,
+            repository,
+            aggregate_branch,
+            base_branch,
+            title,
+            body_path,
+        ) {
+            Ok(publication) => return Ok(publication),
+            Err(error) if attempt < max_attempts => {
+                tracker.update_detail(
+                    STEP_PUBLISH,
+                    format!(
+                        "Aggregate PR publication attempt {attempt}/{max_attempts} failed: {error:#}. Retrying."
+                    ),
+                    None,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    bail!("aggregate PR publication retry loop terminated unexpectedly")
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_validation_repair_prompt(
     repository: &GithubRepository,
     aggregate_branch: &str,
@@ -1294,6 +1416,7 @@ fn build_validation_repair_prompt(
     workspace_path: &Path,
     repair_attempt: usize,
     commands: &[ValidationCommandRecord],
+    max_validation_repair_attempts: usize,
 ) -> Result<String> {
     let head = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
     let mut lines = vec![
@@ -1304,7 +1427,7 @@ fn build_validation_repair_prompt(
         ),
         format!("Aggregate branch: `{aggregate_branch}`"),
         format!("Current aggregate HEAD: `{head}`"),
-        format!("Validation repair attempt: {repair_attempt}/{MAX_VALIDATION_REPAIR_ATTEMPTS}"),
+        format!("Validation repair attempt: {repair_attempt}/{max_validation_repair_attempts}"),
         format!(
             "Selected pull requests: {}",
             selected_pull_requests

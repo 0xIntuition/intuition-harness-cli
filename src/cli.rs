@@ -619,6 +619,9 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Update how many times `meta merge` will ask the agent to repair failed validation by default.
+    #[arg(long)]
+    pub merge_validation_repair_attempts: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
