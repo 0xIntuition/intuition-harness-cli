@@ -28,10 +28,18 @@ pub(crate) struct AgentContinuation {
     pub(crate) session_id: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentTokenUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentCaptureReport {
     pub(crate) continuation: Option<AgentContinuation>,
     pub stdout: String,
+    #[allow(dead_code)]
+    pub usage: Option<AgentTokenUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -332,7 +340,7 @@ pub(crate) fn command_args_for_invocation(
     invocation: &ResolvedAgentInvocation,
     working_dir: Option<&Path>,
 ) -> Result<Vec<String>> {
-    command_args_for_options(
+    command_args_for_invocation_with_options(
         invocation,
         AgentExecutionOptions {
             working_dir: working_dir.map(Path::to_path_buf),
@@ -343,7 +351,7 @@ pub(crate) fn command_args_for_invocation(
     )
 }
 
-fn command_args_for_options(
+pub(crate) fn command_args_for_invocation_with_options(
     invocation: &ResolvedAgentInvocation,
     options: AgentExecutionOptions,
 ) -> Result<Vec<String>> {
@@ -484,7 +492,7 @@ fn run_agent_capture_attempt(
     args: &RunAgentArgs,
     continuation: Option<&AgentContinuation>,
 ) -> Result<AgentCaptureReport> {
-    let command_args = command_args_for_options(
+    let command_args = command_args_for_invocation_with_options(
         invocation,
         AgentExecutionOptions {
             working_dir: None,
@@ -549,24 +557,32 @@ fn run_agent_capture_attempt(
         );
     }
 
-    let (stdout, continuation) = if invocation.builtin_provider {
+    let (stdout, continuation, usage) = if invocation.builtin_provider {
         let provider = builtin_provider_adapter(&invocation.agent)
             .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?;
-        let (stdout, session_id) = provider.parse_capture_output(&raw_stdout)?;
+        let parsed = provider.parse_capture_output(&raw_stdout)?;
+        let stdout = parsed.response_text.ok_or_else(|| {
+            anyhow!(
+                "builtin provider `{}` did not emit a final assistant response while running in capture mode",
+                invocation.agent
+            )
+        })?;
         (
             stdout,
-            session_id.map(|session_id| AgentContinuation {
+            parsed.continuation.map(|session_id| AgentContinuation {
                 provider: invocation.agent.clone(),
                 session_id,
             }),
+            parsed.usage,
         )
     } else {
-        (raw_stdout, None)
+        (raw_stdout, None, None)
     };
 
     Ok(AgentCaptureReport {
         continuation,
         stdout,
+        usage,
     })
 }
 

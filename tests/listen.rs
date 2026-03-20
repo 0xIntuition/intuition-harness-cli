@@ -3802,6 +3802,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--output-format <format>
 --permission-mode <mode>
 EOF
   exit 0
@@ -3812,7 +3813,7 @@ printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
 printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
 printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
 printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
-printf 'claude listen ok'
+printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","session_id":"listen-session-1"}'
 "#,
     )?;
     let mut permissions = fs::metadata(&claude_path)?.permissions();
@@ -4080,6 +4081,7 @@ exit 99
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
+    assert!(args.contains("--output-format=json"));
     assert!(!args.contains("--reasoning="));
     assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
     assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");

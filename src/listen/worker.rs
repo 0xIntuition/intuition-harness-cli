@@ -6,10 +6,12 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::agents::{
-    apply_invocation_environment, apply_noninteractive_agent_environment,
-    command_args_for_invocation, render_invocation_diagnostics,
+    AgentExecutionOptions, AgentTokenUsage, apply_invocation_environment,
+    apply_noninteractive_agent_environment, command_args_for_invocation,
+    command_args_for_invocation_with_options, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
+use crate::agent_provider::builtin_provider_adapter;
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
@@ -88,6 +90,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         backlog_issue: backlog_issue.as_ref(),
         pid: Some(worker_pid),
     };
+    let mut session_tokens = load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
@@ -126,6 +129,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
+                &session_tokens,
             ),
         )?;
         return Err(error);
@@ -141,6 +145,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_completed_summary(None, turns_completed, &issue_state_label(&issue)),
                     &session_context,
                     turns_completed,
+                    &session_tokens,
                 ),
             )?;
             return Ok(());
@@ -166,6 +171,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
+                    &session_tokens,
                 ),
             )?;
             return Ok(());
@@ -193,10 +199,13 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
+                &session_tokens,
             ),
         )?;
 
-        if let Err(error) = execute_agent_turn(&issue, turn_number, &turn_context) {
+        let turn_result = match execute_agent_turn(&issue, turn_number, &turn_context) {
+            Ok(result) => result,
+            Err(error) => {
             write_listen_session(
                 &source_root,
                 project_selector,
@@ -210,9 +219,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
+                    &session_tokens,
                 ),
             )?;
             return Err(error);
+            }
+        };
+        if let Some(usage) = turn_result.usage {
+            session_tokens.accumulate(&TokenUsage {
+                input: usage.input,
+                output: usage.output,
+            });
         }
 
         turns_completed = turn_number;
@@ -254,6 +271,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             ),
                             &session_context,
                             turns_completed,
+                            &session_tokens,
                         ),
                     )?;
                     return Ok(());
@@ -295,6 +313,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             summary,
                             &session_context,
                             turns_completed,
+                            &session_tokens,
                         ),
                     )?;
                     return Ok(());
@@ -313,6 +332,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
+                        &session_tokens,
                     ),
                 )?;
                 return Ok(());
@@ -332,6 +352,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
+                        &session_tokens,
                     ),
                 )?;
                 return Ok(());
@@ -351,6 +372,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
+                    &session_tokens,
                 ),
             )?;
         } else {
@@ -363,6 +385,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_running_summary(None, turns_completed, args.max_turns, stalled_turns),
                     &session_context,
                     turns_completed,
+                    &session_tokens,
                 ),
             )?;
         }
@@ -389,6 +412,11 @@ struct WorkerSessionContext<'a> {
     workpad_comment_id: &'a str,
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
+}
+
+#[derive(Debug, Default)]
+struct TurnExecutionResult {
+    usage: Option<AgentTokenUsage>,
 }
 
 async fn load_worker_issue<C>(service: &LinearService<C>, identifier: &str) -> Result<IssueSummary>
@@ -498,14 +526,27 @@ fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
-) -> Result<()> {
+) -> Result<TurnExecutionResult> {
     let run_args = build_listen_run_args(issue, turn_number, context)?;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
         context.planning_meta,
         &run_args,
     )?;
-    let command_args = command_args_for_invocation(&invocation, Some(context.workspace_path))?;
+    let capture_output = invocation.builtin_provider;
+    let command_args = if capture_output {
+        command_args_for_invocation_with_options(
+            &invocation,
+            AgentExecutionOptions {
+                working_dir: Some(context.workspace_path.to_path_buf()),
+                extra_env: Vec::new(),
+                capture_output: true,
+                continuation: None,
+            },
+        )?
+    } else {
+        command_args_for_invocation(&invocation, Some(context.workspace_path))?
+    };
     let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
     let log_path = agent_log_path(
         context.source_root,
@@ -542,22 +583,26 @@ fn execute_agent_turn(
                 .with_context(|| format!("failed to write `{}`", log_path.display()))?;
         }
     }
-    let stdout = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-    let stderr = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-
     let mut command = Command::new(&invocation.command);
     command.current_dir(context.workspace_path);
     command.args(&command_args);
-    command.stdout(Stdio::from(stdout));
-    command.stderr(Stdio::from(stderr));
+    if capture_output {
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+    } else {
+        let stdout = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+        command.stdout(Stdio::from(stdout));
+        command.stderr(Stdio::from(stderr));
+    }
     apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
@@ -634,6 +679,32 @@ fn execute_agent_turn(
             .context("failed to write prompt payload to the launched agent")?;
     }
 
+    if capture_output {
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
+        let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        append_turn_output(&log_path, &raw_stdout, &raw_stderr)?;
+        if !output.status.success() {
+            let code = output
+                .status
+                .code()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string());
+            bail!(
+                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code})",
+                invocation.agent
+            );
+        }
+
+        let usage = builtin_provider_adapter(&invocation.agent)
+            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
+            .parse_capture_output(&raw_stdout)?
+            .usage;
+        return Ok(TurnExecutionResult { usage });
+    }
+
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
@@ -648,7 +719,7 @@ fn execute_agent_turn(
         );
     }
 
-    Ok(())
+    Ok(TurnExecutionResult::default())
 }
 
 fn build_agent_instructions(
@@ -730,6 +801,7 @@ fn build_worker_session(
     summary: String,
     context: &WorkerSessionContext<'_>,
     turns: u32,
+    tokens: &TokenUsage,
 ) -> super::AgentSession {
     super::AgentSession {
         issue_id: Some(issue.id.clone()),
@@ -766,7 +838,7 @@ fn build_worker_session(
         pid: context.pid.filter(|value| *value > 0),
         session_id: Some(issue.id.clone()),
         turns: Some(turns),
-        tokens: TokenUsage::default(),
+        tokens: tokens.clone(),
         log_path: Some(
             agent_log_path(
                 context.source_root,
@@ -776,5 +848,128 @@ fn build_worker_session(
             .display()
             .to_string(),
         ),
+    }
+}
+
+fn append_turn_output(log_path: &Path, stdout: &str, stderr: &str) -> Result<()> {
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    if !stdout.is_empty() {
+        writeln!(log, "{stdout}")
+            .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+    }
+    if !stderr.is_empty() {
+        writeln!(log, "{stderr}")
+            .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+    }
+    Ok(())
+}
+
+fn load_existing_session_tokens(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<TokenUsage> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.tokens)
+        .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkerSessionContext, build_worker_session};
+    use crate::linear::{IssueSummary, TeamRef};
+    use crate::listen::{SessionPhase, TokenUsage};
+    use std::path::Path;
+
+    fn issue() -> IssueSummary {
+        IssueSummary {
+            id: "issue-1".to_string(),
+            identifier: "ENG-10181".to_string(),
+            title: "Track listen tokens".to_string(),
+            description: None,
+            url: "https://linear.app/issues/ENG-10181".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn worker_session_updates_keep_cumulative_tokens() {
+        let issue = issue();
+        let context = WorkerSessionContext {
+            source_root: Path::new("/tmp/source"),
+            project_selector: None,
+            workspace_path: Path::new("/tmp/workspace"),
+            branch: Some("eng-10181"),
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            pid: Some(1234),
+        };
+        let mut tokens = TokenUsage::default();
+
+        let first = build_worker_session(
+            &issue,
+            SessionPhase::Running,
+            "turn 1".to_string(),
+            &context,
+            0,
+            &tokens,
+        );
+        assert_eq!(first.tokens.input, None);
+        assert_eq!(first.tokens.output, None);
+
+        tokens.accumulate(&TokenUsage {
+            input: Some(120),
+            output: None,
+        });
+        let second = build_worker_session(
+            &issue,
+            SessionPhase::Running,
+            "turn 2".to_string(),
+            &context,
+            1,
+            &tokens,
+        );
+        assert_eq!(second.tokens.input, Some(120));
+        assert_eq!(second.tokens.output, None);
+
+        tokens.accumulate(&TokenUsage {
+            input: None,
+            output: Some(45),
+        });
+        let third = build_worker_session(
+            &issue,
+            SessionPhase::Completed,
+            "done".to_string(),
+            &context,
+            2,
+            &tokens,
+        );
+        assert_eq!(third.tokens.input, Some(120));
+        assert_eq!(third.tokens.output, Some(45));
+        assert_eq!(third.tokens.total(), Some(165));
     }
 }

@@ -1776,6 +1776,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!("  - Title: {}", session.issue_title));
         lines.push(format!("  - Phase: {}", session.phase.display_label()));
         lines.push(format!("  - Summary: {}", session.summary));
+        lines.push(format!("  - Tokens: {}", session.tokens.display_compact()));
         lines.push(format!(
             "  - Updated: {}",
             now_timestamp_for_epoch(session.updated_at_epoch_seconds)
@@ -1794,10 +1795,11 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push("Tracked sessions:".to_string());
         for session in state.sorted_sessions() {
             lines.push(format!(
-                "  - {} [{}] {}",
+                "  - {} [{}] {} | tokens {}",
                 session.issue_identifier,
                 session.phase.display_label(),
-                session.summary
+                session.summary,
+                session.tokens.display_compact()
             ));
         }
     }
@@ -2840,13 +2842,96 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_compact_display_uses_total() {
+    fn token_usage_compact_display_shows_in_out_and_total() {
         let usage = TokenUsage {
             input: Some(12_300),
             output: Some(40),
         };
 
-        assert_eq!(usage.display_compact(), "12,340");
+        assert_eq!(usage.display_compact(), "in 12,300 | out 40 | total 12,340");
+    }
+
+    #[test]
+    fn token_usage_accumulate_preserves_partial_counts() {
+        let mut usage = TokenUsage {
+            input: Some(10),
+            output: None,
+        };
+        usage.accumulate(&TokenUsage {
+            input: None,
+            output: Some(5),
+        });
+        usage.accumulate(&TokenUsage {
+            input: Some(7),
+            output: None,
+        });
+
+        assert_eq!(usage.input, Some(17));
+        assert_eq!(usage.output, Some(5));
+        assert_eq!(usage.display_compact(), "in 17 | out 5 | total 22");
+    }
+
+    #[test]
+    fn aggregate_token_usage_sums_mixed_partial_session_counts() {
+        let sessions = vec![
+            AgentSession {
+                issue_id: Some("issue-1".to_string()),
+                issue_identifier: "ENG-1".to_string(),
+                issue_title: "One".to_string(),
+                project_name: None,
+                team_key: "ENG".to_string(),
+                issue_url: "https://linear.app/issues/ENG-1".to_string(),
+                phase: SessionPhase::Running,
+                summary: "running".to_string(),
+                brief_path: None,
+                backlog_issue_identifier: None,
+                backlog_issue_title: None,
+                backlog_path: None,
+                workspace_path: None,
+                branch: None,
+                workpad_comment_id: None,
+                updated_at_epoch_seconds: 1,
+                pid: None,
+                session_id: None,
+                turns: None,
+                tokens: TokenUsage {
+                    input: Some(100),
+                    output: None,
+                },
+                log_path: None,
+            },
+            AgentSession {
+                issue_id: Some("issue-2".to_string()),
+                issue_identifier: "ENG-2".to_string(),
+                issue_title: "Two".to_string(),
+                project_name: None,
+                team_key: "ENG".to_string(),
+                issue_url: "https://linear.app/issues/ENG-2".to_string(),
+                phase: SessionPhase::Completed,
+                summary: "done".to_string(),
+                brief_path: None,
+                backlog_issue_identifier: None,
+                backlog_issue_title: None,
+                backlog_path: None,
+                workspace_path: None,
+                branch: None,
+                workpad_comment_id: None,
+                updated_at_epoch_seconds: 2,
+                pid: None,
+                session_id: None,
+                turns: None,
+                tokens: TokenUsage {
+                    input: None,
+                    output: Some(25),
+                },
+                log_path: None,
+            },
+        ];
+
+        let totals = super::aggregate_token_usage(&sessions).expect("usage totals should exist");
+        assert_eq!(totals.input, 100);
+        assert_eq!(totals.output, 25);
+        assert_eq!(totals.total, 125);
     }
 
     fn listen_settings(required_labels: Option<Vec<&str>>) -> PlanningListenSettings {
