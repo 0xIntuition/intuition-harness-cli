@@ -278,7 +278,10 @@ default_model = "gpt-5.4"
     assert_eq!(planning_meta["agent"]["model"].as_str(), Some("opus"));
     assert_eq!(planning_meta["agent"]["reasoning"].as_str(), Some("medium"));
     assert_eq!(
-        planning_meta["listen"]["required_label"].as_str(),
+        planning_meta["listen"]["required_labels"]
+            .as_array()
+            .and_then(|labels| labels.first())
+            .and_then(|label| label.as_str()),
         Some("agent")
     );
     assert_eq!(

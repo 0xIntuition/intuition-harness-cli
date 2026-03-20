@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::agent_provider::{
     builtin_provider_adapter, builtin_provider_model_keys, builtin_provider_names,
@@ -118,9 +118,10 @@ pub struct PlanningAgentSettings {
     pub reasoning: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct PlanningListenSettings {
-    pub required_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_labels: Option<Vec<String>>,
     #[serde(default)]
     pub assignment_scope: ListenAssignmentScope,
     #[serde(default)]
@@ -235,6 +236,28 @@ struct AgentValueCandidate {
     provider: Option<String>,
 }
 
+#[derive(Debug, Default)]
+enum RequiredLabelsField {
+    #[default]
+    Missing,
+    ExplicitNone,
+    Labels(Vec<String>),
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PlanningListenSettingsWire {
+    #[serde(default)]
+    required_labels: RequiredLabelsField,
+    #[serde(default)]
+    required_label: Option<String>,
+    #[serde(default)]
+    assignment_scope: ListenAssignmentScope,
+    #[serde(default)]
+    refresh_policy: ListenRefreshPolicy,
+    instructions_path: Option<String>,
+    poll_interval_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentRouteScope {
     Family,
@@ -343,6 +366,43 @@ impl Default for LinearSettings {
             repo_auth: BTreeMap::new(),
             profiles: BTreeMap::new(),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for RequiredLabelsField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let labels = Option::<Vec<String>>::deserialize(deserializer)?;
+        Ok(match labels.and_then(normalize_required_labels) {
+            Some(labels) => Self::Labels(labels),
+            None => Self::ExplicitNone,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for PlanningListenSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PlanningListenSettingsWire::deserialize(deserializer)?;
+        let required_labels = match wire.required_labels {
+            RequiredLabelsField::Missing => {
+                normalize_required_labels(wire.required_label.iter().map(String::as_str))
+            }
+            RequiredLabelsField::ExplicitNone => None,
+            RequiredLabelsField::Labels(labels) => Some(labels),
+        };
+
+        Ok(Self {
+            required_labels,
+            assignment_scope: wire.assignment_scope,
+            refresh_policy: wire.refresh_policy,
+            instructions_path: wire.instructions_path,
+            poll_interval_seconds: wire.poll_interval_seconds,
+        })
     }
 }
 
@@ -591,6 +651,14 @@ pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<Pl
 }
 
 impl PlanningListenSettings {
+    /// Returns configured listen labels, treating `None` and `[]` as no filter.
+    pub(crate) fn required_label_names(&self) -> &[String] {
+        self.required_labels
+            .as_deref()
+            .filter(|labels| !labels.is_empty())
+            .unwrap_or(&[])
+    }
+
     pub fn poll_interval_seconds(&self) -> u64 {
         self.poll_interval_seconds
             .unwrap_or(DEFAULT_LISTEN_POLL_INTERVAL_SECONDS)
@@ -738,19 +806,11 @@ pub async fn ensure_saved_issue_labels(
     app_config: &AppConfig,
     planning_meta: &PlanningMeta,
 ) -> Result<()> {
-    let mut labels = vec![
+    let mut labels = BTreeSet::from([
         planning_meta.issue_labels.plan_label(),
         planning_meta.issue_labels.technical_label(),
-    ];
-    if let Some(required_label) = planning_meta
-        .listen
-        .required_label
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        labels.push(required_label.to_string());
-    }
+    ]);
+    labels.extend(planning_meta.listen.required_label_names().iter().cloned());
     let config = match LinearConfig::from_sources(
         app_config,
         planning_meta,
@@ -768,7 +828,9 @@ pub async fn ensure_saved_issue_labels(
     };
 
     let service = LinearService::new(ReqwestLinearClient::new(config)?, Some(default_team));
-    service.ensure_issue_labels_exist(None, &labels).await
+    service
+        .ensure_issue_labels_exist(None, &labels.into_iter().collect::<Vec<_>>())
+        .await
 }
 
 pub fn resolve_agent_config(
@@ -1280,6 +1342,33 @@ fn default_linear_api_url() -> String {
     DEFAULT_LINEAR_API_URL.to_string()
 }
 
+fn normalize_required_labels<I, S>(values: I) -> Option<Vec<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+
+    for value in values {
+        let trimmed = value.as_ref().trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if seen.insert(trimmed.to_ascii_lowercase()) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+/// Parses comma-separated listen labels and removes empty or duplicate values.
+pub(crate) fn parse_listen_required_labels_csv(value: &str) -> Option<Vec<String>> {
+    normalize_required_labels(value.split(','))
+}
+
 fn resolve_supported_model(
     provider: &str,
     explicit: Option<AgentValueCandidate>,
@@ -1608,6 +1697,7 @@ mod tests {
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, MergeSettings, NoAgentSelectedError,
         PlanningAgentSettings, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
         is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
+        parse_listen_required_labels_csv,
         resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
         validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
@@ -1693,6 +1783,90 @@ mod tests {
         };
 
         assert_eq!(settings.poll_interval_seconds(), 42);
+    }
+
+    #[test]
+    fn planning_meta_deserializes_required_labels_list() {
+        let meta: PlanningMeta = serde_json::from_str(
+            r#"{
+                "listen": {
+                    "required_labels": ["Plan", "Urgent", "plan"]
+                }
+            }"#,
+        )
+        .expect("required_labels should deserialize");
+
+        assert_eq!(
+            meta.listen.required_labels,
+            Some(vec!["Plan".to_string(), "Urgent".to_string()])
+        );
+    }
+
+    #[test]
+    fn planning_meta_treats_null_required_labels_as_unset() {
+        let meta: PlanningMeta = serde_json::from_str(
+            r#"{
+                "listen": {
+                    "required_labels": null
+                }
+            }"#,
+        )
+        .expect("null required_labels should deserialize");
+
+        assert_eq!(meta.listen.required_labels, None);
+        assert!(meta.listen.required_label_names().is_empty());
+    }
+
+    #[test]
+    fn planning_meta_treats_empty_required_labels_as_unset() {
+        let meta: PlanningMeta = serde_json::from_str(
+            r#"{
+                "listen": {
+                    "required_labels": []
+                }
+            }"#,
+        )
+        .expect("empty required_labels should deserialize");
+
+        assert_eq!(meta.listen.required_labels, None);
+        assert!(meta.listen.required_label_names().is_empty());
+    }
+
+    #[test]
+    fn planning_meta_deserializes_legacy_required_label_into_list() {
+        let meta: PlanningMeta = serde_json::from_str(
+            r#"{
+                "listen": {
+                    "required_label": "plan"
+                }
+            }"#,
+        )
+        .expect("legacy required_label should deserialize");
+
+        assert_eq!(meta.listen.required_labels, Some(vec!["plan".to_string()]));
+    }
+
+    #[test]
+    fn explicit_required_labels_override_legacy_required_label() {
+        let meta: PlanningMeta = serde_json::from_str(
+            r#"{
+                "listen": {
+                    "required_labels": [],
+                    "required_label": "plan"
+                }
+            }"#,
+        )
+        .expect("required_labels should take precedence");
+
+        assert_eq!(meta.listen.required_labels, None);
+    }
+
+    #[test]
+    fn parse_listen_required_labels_csv_trims_and_deduplicates() {
+        assert_eq!(
+            parse_listen_required_labels_csv(" plan, urgent ,Plan,,"),
+            Some(vec!["plan".to_string(), "urgent".to_string()])
+        );
     }
 
     #[test]
