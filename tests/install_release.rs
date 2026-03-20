@@ -210,6 +210,65 @@ fn installer_accepts_pinned_versions_and_custom_bin_dir() -> Result<(), Box<dyn 
 
 #[cfg(unix)]
 #[test]
+fn installer_can_install_branded_alias_alongside_meta() -> Result<(), Box<dyn Error>> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp = tempdir()?;
+    let home = temp.path().join("home");
+    let releases = temp.path().join("mock-github");
+    let custom_bin = temp.path().join("bin");
+
+    fs::create_dir_all(&home)?;
+    create_mock_release(&releases, "0.1.0", "linux", "x64", false)?;
+
+    let output = installer_command(
+        &repo_root.join("scripts/install-meta.sh"),
+        &home,
+        &releases,
+        "linux",
+        "x64",
+    )
+    .arg("--version")
+    .arg("0.1.0")
+    .arg("--bin-dir")
+    .arg(&custom_bin)
+    .arg("--alias")
+    .arg("intuition")
+    .output()?;
+
+    assert!(
+        output.status.success(),
+        "expected installer to succeed, stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let meta_installed = custom_bin.join("meta");
+    let alias_installed = custom_bin.join("intuition");
+    assert!(
+        meta_installed.exists(),
+        "expected {}",
+        meta_installed.display()
+    );
+    assert!(
+        alias_installed.exists(),
+        "expected {}",
+        alias_installed.display()
+    );
+
+    let meta_version = ProcessCommand::new(&meta_installed)
+        .arg("--version")
+        .output()?;
+    let alias_version = ProcessCommand::new(&alias_installed)
+        .arg("--version")
+        .output()?;
+    assert!(meta_version.status.success());
+    assert!(alias_version.status.success());
+    assert_eq!(meta_version.stdout, alias_version.stdout);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn installer_fails_on_checksum_mismatch() -> Result<(), Box<dyn Error>> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = tempdir()?;

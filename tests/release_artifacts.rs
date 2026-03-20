@@ -67,11 +67,12 @@ done
 
 output_dir=$target_dir/$target/release
 mkdir -p "$output_dir"
-cat > "$output_dir/meta" <<EOF
+binary_name=${META_RELEASE_STUB_BINARY_NAME:-meta}
+cat > "$output_dir/$binary_name" <<EOF
 #!/bin/sh
-printf 'meta %s\n' "${META_RELEASE_STUB_VERSION:?}"
+printf '%s %s\n' "$binary_name" "${META_RELEASE_STUB_VERSION:?}"
 EOF
-chmod +x "$output_dir/meta"
+chmod +x "$output_dir/$binary_name"
 "#,
     )?;
 
@@ -84,6 +85,75 @@ chmod +x "$output_dir/meta"
         permissions.set_mode(0o755);
     }
     fs::set_permissions(path, permissions)?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn release_script_can_package_branded_binary_name() -> Result<(), Box<dyn Error>> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp = tempdir()?;
+    let stub_dir = temp.path().join("stub-bin");
+    let target_dir = temp.path().join("target");
+    let output_root = temp.path().join("artifacts");
+
+    fs::create_dir_all(&stub_dir)?;
+
+    let cargo_stub = stub_dir.join("cargo");
+    write_build_stub(&cargo_stub)?;
+
+    let output = ProcessCommand::new(repo_root.join("scripts/release-artifacts.sh"))
+        .current_dir(&repo_root)
+        .arg("--output-dir")
+        .arg(&output_root)
+        .arg("--target")
+        .arg("x86_64-apple-darwin")
+        .env("META_RELEASE_TARGET_DIR", &target_dir)
+        .env("META_RELEASE_CARGO", &cargo_stub)
+        .env("META_RELEASE_BINARY_NAME", "intuition")
+        .env("META_RELEASE_STUB_BINARY_NAME", "intuition")
+        .env("META_RELEASE_STUB_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("META_RELEASE_VERIFY_ALL_TARGETS", "1")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "expected release script to succeed, stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let version_dir = output_root.join(env!("CARGO_PKG_VERSION"));
+    let archive = version_dir.join(format!(
+        "metastack-cli-{}-darwin-x64.tar.gz",
+        env!("CARGO_PKG_VERSION")
+    ));
+    assert!(archive.exists(), "expected {}", archive.display());
+
+    let extract_dir = temp.path().join("extract-intuition");
+    fs::create_dir_all(&extract_dir)?;
+    let status = ProcessCommand::new("tar")
+        .current_dir(&extract_dir)
+        .arg("-xzf")
+        .arg(&archive)
+        .status()?;
+    assert!(status.success(), "expected tar extract to succeed");
+
+    let branded_binary = extract_dir.join("intuition");
+    assert!(
+        branded_binary.exists(),
+        "expected {}",
+        branded_binary.display()
+    );
+
+    let version_output = ProcessCommand::new(&branded_binary)
+        .arg("--version")
+        .output()?;
+    assert!(version_output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&version_output.stdout),
+        format!("intuition {}\n", env!("CARGO_PKG_VERSION"))
+    );
 
     Ok(())
 }
