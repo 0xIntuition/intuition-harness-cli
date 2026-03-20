@@ -34,6 +34,7 @@ Examples:
 const AGENTS_HELP_EXAMPLES: &str = "\
 Examples:
   meta agents listen --team MET --project \"MetaStack CLI\"
+  meta agents review 123 --root . --dry-run
   meta agents workflows list --root .
   meta agents workflows run ticket-implementation --root . --dry-run";
 
@@ -333,8 +334,34 @@ pub struct UpgradeArgs {
 pub enum AgentsCommands {
     /// Listen to Linear for new backlog requests and run agents.
     Listen(ListenArgs),
+    /// Audit one GitHub pull request against its linked Linear ticket and open a remediation PR when needed.
+    Review(AgentsReviewArgs),
     /// List, explain, and run reusable workflow playbooks.
     Workflows(WorkflowsArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AgentsReviewArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// GitHub pull request number to audit.
+    #[arg(value_name = "NUMBER")]
+    pub pull_request: u64,
+    /// Render the planned audit invocation and resolved diagnostics without mutating GitHub or Linear.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Explicit automation flag for non-interactive callers. The review flow is already non-interactive.
+    #[arg(long)]
+    pub no_interactive: bool,
+    /// Override the configured default agent/provider for PR audit and remediation.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for PR audit and remediation.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for PR audit and remediation.
+    #[arg(long)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

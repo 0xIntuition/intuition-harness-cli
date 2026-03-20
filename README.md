@@ -182,7 +182,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | --- | --- |
 | `meta backlog` | Plan, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
-| `meta agents` | Run the unattended listener and reusable workflow playbooks |
+| `meta agents` | Run the unattended listener, audit GitHub PRs against Linear tickets, and launch reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
@@ -566,6 +566,24 @@ Legacy alias: `meta workflows`
 
 Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `.metastack/workflows/README.md` for the repo-local scaffold.
 
+### `agents review`
+
+Audit an existing GitHub pull request against its linked Linear ticket, local repo context, and broader repository impact. The command is GitHub-only for now and shells out through `gh` for PR inspection and follow-up PR publication.
+
+```bash
+meta agents review 123 --root . --dry-run
+meta agents review 123 --root . --no-interactive
+```
+
+Behavior:
+
+- `meta agents review <PR_NUMBER>` resolves the linked Linear issue from the PR title, body, or head branch and fails clearly when the linkage is missing or ambiguous.
+- The audit context includes PR metadata, changed files, diff scope, GitHub review feedback, Linear ticket details, acceptance criteria, active workpad/comment context when available, local backlog files when present, and the standard repo-local planning context bundle.
+- `--dry-run` renders the planned agent invocation, resolved provider/model/reasoning diagnostics, and the full prompt without mutating GitHub or Linear.
+- When the audit returns `requires_follow_up_changes = false`, the command exits after reporting the no-fix outcome.
+- When the audit returns `requires_follow_up_changes = true`, the command creates a sibling remediation workspace from the original PR head branch, runs the remediation agent there, pushes a follow-up branch, opens a companion PR with `gh`, and updates the linked Linear issue with a review comment explaining why the remediation PR was opened.
+- Mutation failures such as `git push`, `gh pr create`, or Linear comment errors are surfaced as explicit command failures; no mutation path is treated as silent success.
+
 ### `context`
 
 Inspect and refresh the effective context that agent-backed runs consume:
@@ -926,7 +944,7 @@ Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents review`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
@@ -951,7 +969,7 @@ This is intentionally stricter than Codex `--full-auto`: in `codex-cli 0.115.0`,
 
 Agent launches receive:
 
-For `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen`, the rendered agent prompt also includes a shared repo-target contract derived from the resolved command root:
+For `meta plan`, `meta backlog tech`, `meta issues refine`, `meta agents review`, `meta scan`, and `meta listen`, the rendered agent prompt also includes a shared repo-target contract derived from the resolved command root:
 
 - the built-in workflow contract shipped in `src/artifacts/injected-agent-workflow-contract.md`
 - the resolved `RepoTarget` scope block, including repo identity and root path

@@ -1,5 +1,6 @@
 mod agent_provider;
 mod agents;
+mod agents_review;
 mod backlog;
 mod backlog_defaults;
 mod cli;
@@ -38,6 +39,7 @@ use std::ffi::OsString;
 use anyhow::{Result, bail};
 use clap::Parser;
 
+use crate::agents_review::run_agents_review;
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
     DashboardEventArg, IssueCreateEventArg, IssueEditEventArg, LinearCommands,
@@ -176,6 +178,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     run_listen(&args.run).await?;
                 }
             },
+            AgentsCommands::Review(args) => {
+                println!("{}", run_agents_review(&args).await?);
+            }
             AgentsCommands::Workflows(args) => {
                 println!("{}", run_workflows(&args).await?);
             }
