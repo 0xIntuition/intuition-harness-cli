@@ -9,6 +9,7 @@ mod context;
 mod cron;
 mod cron_dashboard;
 mod fs;
+mod github_pr;
 mod linear;
 mod listen;
 mod merge;

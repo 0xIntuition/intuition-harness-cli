@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde_json::json;
 
 use crate::agents::{
     apply_invocation_environment, apply_noninteractive_agent_environment,
@@ -15,9 +16,14 @@ use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
+use crate::github_pr::{
+    GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
+    PullRequestPublishRequest,
+};
 use crate::linear::{
-    IssueListFilters, IssueSummary, LinearClient, LinearService, ReqwestLinearClient, WorkflowState,
+    AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
+    ReqwestLinearClient, WorkflowState,
 };
 use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
@@ -33,6 +39,9 @@ use super::{
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
 const LEGACY_LISTEN_PR_LABEL: &str = "symphony";
+const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
+const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
+const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
 
 pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let source_root = canonicalize_existing_dir(&args.source_root)?;
@@ -259,6 +268,16 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     return Ok(());
                 }
 
+                let branch = branch.as_deref().ok_or_else(|| {
+                    anyhow!("failed to inspect the workspace branch before promoting the review PR")
+                })?;
+                let _ = prepare_listener_pull_request_for_review(
+                    &service,
+                    &issue,
+                    &workspace_path,
+                    branch,
+                )
+                .await?;
                 let transitioned_issue =
                     try_transition_issue_to_review_state(&service, &issue).await?;
                 if let Some(backlog_issue) = backlog_issue.as_ref()
@@ -316,6 +335,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                 )?;
                 return Ok(());
+            }
+
+            if let Some(branch) = branch.as_deref() {
+                let _ = publish_listener_pull_request(
+                    &service,
+                    &issue,
+                    &workspace_path,
+                    branch,
+                    PullRequestPublishMode::Draft,
+                )
+                .await?;
             }
 
             if stalled_turns >= MAX_STALLED_TURNS {
@@ -446,6 +476,191 @@ fn load_worker_backlog_issue(
         attachments: Vec::new(),
         parent: None,
         children: Vec::new(),
+    })
+}
+
+fn listener_pull_request_title(issue: &IssueSummary) -> String {
+    format!("{}: {}", issue.identifier, issue.title)
+}
+
+fn listener_pull_request_body(issue: &IssueSummary) -> String {
+    let mut lines = vec![
+        format!("# {}", listener_pull_request_title(issue)),
+        String::new(),
+        "## Summary".to_string(),
+        format!("- Linear issue: {}", issue.url),
+        format!(
+            "- Published automatically by `meta agents listen` for `{}`",
+            issue.identifier
+        ),
+        String::new(),
+        "## Lifecycle".to_string(),
+        "- Initial publication uses a draft PR for unattended work in progress.".to_string(),
+        "- The same PR is promoted to ready for review during the existing review handoff."
+            .to_string(),
+    ];
+
+    if let Some(description) = issue.description.as_deref()
+        && !description.trim().is_empty()
+    {
+        lines.push(String::new());
+        lines.push("## Issue Context".to_string());
+        lines.push(description.trim().to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn write_listener_pull_request_body(
+    workspace_path: &Path,
+    issue: &IssueSummary,
+) -> Result<std::path::PathBuf> {
+    let path = PlanningPaths::new(workspace_path)
+        .agent_dir
+        .join(format!("{}-pull-request.md", issue.identifier));
+    write_text_file(&path, &listener_pull_request_body(issue), true)?;
+    Ok(path)
+}
+
+fn workspace_branch_is_published(workspace_path: &Path, branch: &str) -> Result<bool> {
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_path)
+        .args(["show-ref", "--verify", "--quiet", &remote_ref])
+        .output()
+        .with_context(|| format!("failed to run `git show-ref --verify --quiet {remote_ref}`"))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    bail!(
+        "git show-ref --verify --quiet {} failed: {}",
+        remote_ref,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn ensure_listener_pull_request_label(
+    gh: &GhCli,
+    workspace_path: &Path,
+    pull_request: &PullRequestLifecycleResult,
+) -> Result<()> {
+    gh.ensure_label_exists(
+        workspace_path,
+        REQUIRED_LISTEN_PR_LABEL,
+        REQUIRED_LISTEN_PR_LABEL_COLOR,
+        REQUIRED_LISTEN_PR_LABEL_DESCRIPTION,
+    )?;
+    gh.add_label_to_pull_request(
+        workspace_path,
+        pull_request.number,
+        REQUIRED_LISTEN_PR_LABEL,
+    )
+}
+
+async fn ensure_listener_pull_request_attachment<C>(
+    service: &LinearService<C>,
+    issue: &IssueSummary,
+    pull_request: &PullRequestLifecycleResult,
+) -> Result<()>
+where
+    C: LinearClient,
+{
+    if issue
+        .attachments
+        .iter()
+        .any(|attachment| attachment.url == pull_request.url)
+    {
+        return Ok(());
+    }
+
+    service
+        .create_attachment(AttachmentCreateRequest {
+            issue_id: issue.id.clone(),
+            title: format!("GitHub PR #{}", pull_request.number),
+            url: pull_request.url.clone(),
+            metadata: json!({
+                "provider": "github",
+                "type": "pull_request"
+            }),
+        })
+        .await?;
+    Ok(())
+}
+
+async fn publish_listener_pull_request<C>(
+    service: &LinearService<C>,
+    issue: &IssueSummary,
+    workspace_path: &Path,
+    branch: &str,
+    mode: PullRequestPublishMode,
+) -> Result<Option<PullRequestLifecycleResult>>
+where
+    C: LinearClient,
+{
+    if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
+        return Ok(None);
+    }
+    if !workspace_branch_is_published(workspace_path, branch)? {
+        return Ok(None);
+    }
+
+    let gh = GhCli;
+    let body_path = write_listener_pull_request_body(workspace_path, issue)?;
+    let title = listener_pull_request_title(issue);
+    let pull_request = gh.publish_branch_pull_request(
+        workspace_path,
+        PullRequestPublishRequest {
+            head_branch: branch,
+            base_branch: LISTEN_PULL_REQUEST_BASE_BRANCH,
+            title: &title,
+            body_path: &body_path,
+            mode,
+        },
+    )?;
+    ensure_listener_pull_request_label(&gh, workspace_path, &pull_request)?;
+    ensure_listener_pull_request_attachment(service, issue, &pull_request).await?;
+    Ok(Some(pull_request))
+}
+
+async fn prepare_listener_pull_request_for_review<C>(
+    service: &LinearService<C>,
+    issue: &IssueSummary,
+    workspace_path: &Path,
+    branch: &str,
+) -> Result<PullRequestLifecycleResult>
+where
+    C: LinearClient,
+{
+    let pull_request = publish_listener_pull_request(
+        service,
+        issue,
+        workspace_path,
+        branch,
+        PullRequestPublishMode::Draft,
+    )
+    .await?
+    .ok_or_else(|| {
+        anyhow!(
+            "branch `{branch}` has not been pushed to origin, so the review handoff has no PR to promote"
+        )
+    })?;
+    let gh = GhCli;
+    let ready = gh.promote_branch_pull_request_to_ready(
+        workspace_path,
+        branch,
+        LISTEN_PULL_REQUEST_BASE_BRANCH,
+    )?;
+    ensure_listener_pull_request_label(&gh, workspace_path, &ready)?;
+    ensure_listener_pull_request_attachment(service, issue, &ready).await?;
+    Ok(match ready.action {
+        PullRequestLifecycleAction::PromotedToReady | PullRequestLifecycleAction::AlreadyReady => {
+            ready
+        }
+        _ => pull_request,
     })
 }
 
@@ -676,9 +891,9 @@ fn build_agent_instructions(
         "Reproduce the issue before changing code, refine the workpad plan and acceptance criteria, then implement and validate the fix.".to_string(),
         "Each turn must either leave meaningful non-`.metastack/` workspace updates or stop with a concrete blocker. Merely rewriting backlog files, briefs, or workpad notes is not enough.".to_string(),
         "If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks.".to_string(),
-        "Do not consider the task complete until the code is committed, pushed, a PR is opened, and the PR is attached back to the Linear issue.".to_string(),
+        "Do not consider the task complete until the code is committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
         format!(
-            "When publishing or updating the GitHub PR for this ticket, ensure the `{}` label is attached. If the repository does not have that label yet, create it and then attach it. Do not use the legacy `{}` label.",
+            "Shared automation keeps the `{}` label attached when it publishes or updates the GitHub PR for this ticket. If you touch PR metadata directly, preserve that label and do not use the legacy `{}` label.",
             REQUIRED_LISTEN_PR_LABEL, LEGACY_LISTEN_PR_LABEL
         ),
     ];
