@@ -240,3 +240,52 @@ fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn E
 
     Ok(())
 }
+
+#[test]
+fn setup_scaffolds_branded_readmes_with_effective_command_name() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "setup",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--command-name",
+            "intuition",
+            "--repo-state-root",
+            ".intuition",
+            "--backlog-root",
+            ".intuition/backlog",
+            "--migrate-layout",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"metastack_meta_path\""));
+
+    for relative_path in [
+        ".intuition/README.md",
+        ".intuition/agents/README.md",
+        ".intuition/backlog/README.md",
+        ".intuition/codebase/README.md",
+        ".intuition/workflows/README.md",
+        ".intuition/cron/README.md",
+    ] {
+        let contents = fs::read_to_string(repo_root.join(relative_path))?;
+        assert!(
+            contents.contains("intuition"),
+            "expected branded command in {relative_path}"
+        );
+        assert!(
+            !contents.contains("{command_name}"),
+            "unexpected placeholder leak in {relative_path}"
+        );
+    }
+
+    Ok(())
+}

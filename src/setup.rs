@@ -31,7 +31,7 @@ use crate::config::{
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, effective_command_name, render_command};
 use crate::linear::{LinearService, ReqwestLinearClient};
-use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
+use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout, sync_generated_readmes};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
 #[derive(Debug, Clone)]
@@ -262,10 +262,6 @@ pub async fn run_setup(args: &SetupArgs) -> Result<String> {
     }
     let mut view = load_view(&root)?;
 
-    if args.json {
-        return render_json(&view);
-    }
-
     if has_direct_updates(args) {
         let before_paths = PlanningPaths::for_root(&root)?;
         let changed = apply_direct_updates(&mut view, args).await?;
@@ -273,11 +269,25 @@ pub async fn run_setup(args: &SetupArgs) -> Result<String> {
         if args.migrate_layout {
             migrate_repo_layout(&before_paths, &PlanningPaths::for_root(&root)?)?;
         }
+        if args.command_name.is_some()
+            || args.repo_state_root.is_some()
+            || args.backlog_root.is_some()
+            || args.migrate_layout
+        {
+            sync_generated_readmes(&root)?;
+        }
+        if args.json {
+            return render_json(&view);
+        }
         return Ok(SetupReport {
             metastack_meta_path: view.metastack_meta_path.clone(),
             changed,
         }
         .render());
+    }
+
+    if args.json {
+        return render_json(&view);
     }
 
     if args.render_once {
