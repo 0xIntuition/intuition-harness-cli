@@ -46,6 +46,7 @@ pub struct AppConfig {
     pub agents: AgentSettings,
     #[serde(default)]
     pub merge: MergeSettings,
+    #[serde(default)]
     pub defaults: InstallDefaults,
     #[serde(default)]
     pub onboarding: OnboardingSettings,
@@ -741,7 +742,9 @@ impl PlanningMeta {
             .required_label_names()
             .first()
             .cloned()
-            .or_else(|| normalize_optional_ref(app_config.defaults.listen.required_label.as_deref()))
+            .or_else(|| {
+                normalize_optional_ref(app_config.defaults.listen.required_label.as_deref())
+            })
     }
 
     /// Resolves the effective listen assignee scope using repo defaults before install defaults.
@@ -2008,14 +2011,14 @@ mod tests {
         AppConfig, BacklogSettings, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
         DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
-        DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults,
-        InstallLinearDefaults, InstallListenSettings, InstallPlanSettings,
-        ListenAssignmentScope, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
-        PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
-        VelocityAutoAssign, VelocityDefaults, is_no_agent_selected_error,
-        no_agent_selected_route_key, normalize_agent_route_key, parse_listen_required_labels_csv,
-        resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
-        validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+        DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
+        InstallListenSettings, InstallPlanSettings, ListenAssignmentScope, MergeSettings,
+        NoAgentSelectedError, PlanningAgentSettings, PlanningIssueLabels, PlanningListenSettings,
+        PlanningMeta, PlanningPlanSettings, VelocityAutoAssign, VelocityDefaults,
+        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
+        parse_listen_required_labels_csv, resolve_agent_config, resolve_agent_route,
+        validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
+        validate_listen_poll_interval_seconds,
     };
 
     #[test]
@@ -2213,6 +2216,30 @@ mod tests {
             planning_meta.effective_technical_label(&app_config),
             "engineering"
         );
+    }
+
+    #[test]
+    fn app_config_deserializes_without_install_defaults() {
+        let app_config: AppConfig = toml::from_str(
+            r#"
+            [onboarding]
+            completed = true
+            "#,
+        )
+        .expect("minimal legacy config should deserialize");
+
+        assert!(app_config.onboarding.completed);
+        assert_eq!(app_config.defaults.linear.project_id, None);
+        assert_eq!(app_config.defaults.listen.required_label, None);
+        assert_eq!(app_config.defaults.listen.assignment_scope, None);
+        assert_eq!(app_config.defaults.listen.refresh_policy, None);
+        assert_eq!(app_config.defaults.listen.poll_interval_seconds, None);
+        assert_eq!(
+            app_config.defaults.plan.interactive_follow_up_questions,
+            None
+        );
+        assert_eq!(app_config.defaults.issue_labels.plan, None);
+        assert_eq!(app_config.defaults.issue_labels.technical, None);
     }
 
     #[test]

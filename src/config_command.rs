@@ -22,10 +22,10 @@ use crate::cli::ConfigArgs;
 use crate::config::{
     AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
     ListenRefreshPolicy, VelocityAutoAssign, detect_supported_agents, normalize_agent_name,
-    normalize_agent_route_key, resolve_agent_route, supported_agent_models,
-    supported_agent_names, supported_agent_route_definitions, supported_agent_route_families,
-    supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
+    normalize_agent_route_key, resolve_agent_route, supported_agent_models, supported_agent_names,
+    supported_agent_route_definitions, supported_agent_route_families, supported_reasoning_options,
+    validate_agent_model, validate_agent_name, validate_agent_reasoning,
+    validate_backlog_default_priority, validate_backlog_labels,
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};

@@ -845,7 +845,7 @@ fn listen_check_reports_viewer_only_scope_in_preflight_summary() -> Result<(), B
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -4763,7 +4763,7 @@ fn listen_once_claims_viewer_assigned_issue_in_viewer_only_scope() -> Result<(),
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -5022,7 +5022,7 @@ fn listen_once_skips_unassigned_issue_in_viewer_only_scope() -> Result<(), Box<d
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -5152,7 +5152,7 @@ fn listen_once_skips_foreign_assigned_issue_in_viewer_only_scope() -> Result<(),
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]

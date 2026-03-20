@@ -1984,7 +1984,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                         render_watch_scope(
                             listen_settings.assignment_scope(),
                             report.viewer().filter(|_| {
-                                !matches!(listen_settings.assignment_scope(), ListenAssignmentScope::Any)
+                                !matches!(
+                                    listen_settings.assignment_scope(),
+                                    ListenAssignmentScope::Any
+                                )
                             }),
                         )
                     );

@@ -7,13 +7,16 @@ fn write_onboarded_config(
     config_path: &std::path::Path,
     config: impl AsRef<str>,
 ) -> Result<(), Box<dyn Error>> {
-    fs::write(
-        config_path,
-        format!(
-            "{}\n[onboarding]\ncompleted = true\n",
-            config.as_ref().trim_end()
-        ),
-    )?;
+    let contents = format!(
+        "{}\n[onboarding]\ncompleted = true\n",
+        config.as_ref().trim_end()
+    );
+    fs::write(config_path, &contents)?;
+    let home_config = isolated_home_dir().join(".config/metastack/config.toml");
+    if let Some(parent) = home_config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(home_config, contents)?;
     Ok(())
 }
 
@@ -1231,7 +1234,7 @@ fn merge_retries_transient_validation_failures_without_consuming_repair_budget()
     )?;
     write_agent_stub(&agent_stub, &[23, 24])?;
     write_flaky_validation_stub(&flaky_validation)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1315,7 +1318,7 @@ fn merge_retries_aggregate_publication_after_transient_gh_failure() -> Result<()
         "https://github.com/example/pull/2002",
     )?;
     write_agent_stub(&agent_stub, &[25, 26])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1384,7 +1387,7 @@ fn merge_resume_run_revalidates_and_updates_existing_aggregate_pr() -> Result<()
         "https://github.com/example/pull/2004",
     )?;
     write_agent_stub(&agent_stub, &[28])?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]
@@ -1484,7 +1487,7 @@ fn merge_does_not_repeat_transient_retries_for_same_failure_signature() -> Resul
     )?;
     write_agent_stub(&agent_stub, &[27])?;
     write_stuck_validation_stub(&stuck_validation)?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[agents]

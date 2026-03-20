@@ -7,13 +7,16 @@ fn write_onboarded_config(
     config_path: &Path,
     config: impl AsRef<str>,
 ) -> Result<(), Box<dyn Error>> {
-    fs::write(
-        config_path,
-        format!(
-            "{}\n[onboarding]\ncompleted = true\n",
-            config.as_ref().trim_end()
-        ),
-    )?;
+    let contents = format!(
+        "{}\n[onboarding]\ncompleted = true\n",
+        config.as_ref().trim_end()
+    );
+    fs::write(config_path, &contents)?;
+    let home_config = isolated_home_dir().join(".config/metastack/config.toml");
+    if let Some(parent) = home_config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(home_config, contents)?;
     Ok(())
 }
 
@@ -979,7 +982,7 @@ fn plan_builtin_codex_reuses_session_across_non_interactive_phases() -> Result<(
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1197,7 +1200,7 @@ fn plan_builtin_claude_retries_fresh_after_invalid_resume() -> Result<(), Box<dy
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         format!(
             r#"[linear]
@@ -1409,7 +1412,7 @@ fn plan_interactive_preserves_explicit_builtin_overrides_across_resumed_phases()
 }
 "#,
     )?;
-    fs::write(
+    write_onboarded_config(
         &config_path,
         r#"[linear]
 api_key = "token"
@@ -1878,7 +1881,6 @@ cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
 if [ "$count" -eq 1 ]; then
   printf '%s' '{"questions":[]}'
 else
-  printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Remember velocity defaults","description":"Use remembered project/team defaults when running without prompts.","acceptance_criteria":["remembered defaults are reused in zero-prompt mode"]}]}'
   printf '%s' '{"summary":"Create one ticket.","issues":[{"title":"Remember velocity defaults","description":"Use remembered project/team defaults when running without prompts.","acceptance_criteria":["remembered defaults are reused in zero-prompt mode"]}]}'
 fi
 "#,
