@@ -81,7 +81,8 @@ meta listen sessions resume --root . --project "MetaStack API" --once
 
 Repo-scoped listen settings in `.metastack/meta.json`:
 
-- `listen.required_label`: only issues carrying this label are eligible.
+- `listen.required_labels`: optional string list of labels; issues are eligible when any listed label matches case-insensitively.
+- `listen.required_label`: legacy single-label compatibility input. New saves persist `required_labels`.
 - `listen.assignment_scope`: `any` or `viewer`.
 - `listen.refresh_policy`: `reuse_and_refresh` (default) or `recreate_from_origin_main`.
 - `listen.instructions_path`: optional markdown file merged into the shared injected workflow contract for launched-agent instructions.

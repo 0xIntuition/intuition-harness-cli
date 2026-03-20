@@ -684,7 +684,7 @@ pub struct SetupArgs {
     /// Update the repo-scoped default built-in reasoning option.
     #[arg(long)]
     pub reasoning: Option<String>,
-    /// Update the label required for `meta listen` pickup.
+    /// Update the labels required for `meta listen` pickup. Provide a comma-separated list.
     #[arg(long)]
     pub listen_label: Option<String>,
     /// Update the assignee filter used by `meta listen`.
