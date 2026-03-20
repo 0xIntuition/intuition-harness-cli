@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -1141,34 +1141,14 @@ fn run_interactive_plan_session(
                     match &mut app.stage {
                         PlanStage::Request(request_app) => {
                             let viewport = request_input_viewport(frame_size.into());
-                            if matches!(
-                                mouse.kind,
-                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                            ) {
-                                let _ = request_app.request.handle_mouse_scroll(
-                                    mouse,
-                                    viewport,
-                                    viewport.width,
-                                    viewport.height,
-                                );
-                            }
+                            let _ = handle_request_step_mouse(request_app, mouse, viewport);
                         }
                         PlanStage::Questions(questions_app) => {
                             if let Some(question) =
                                 questions_app.questions.get_mut(questions_app.selected)
                             {
                                 let viewport = questions_answer_input_viewport(frame_size.into());
-                                if matches!(
-                                    mouse.kind,
-                                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                                ) {
-                                    let _ = question.answer.handle_mouse_scroll(
-                                        mouse,
-                                        viewport,
-                                        viewport.width,
-                                        viewport.height,
-                                    );
-                                }
+                                let _ = handle_questions_step_mouse(question, mouse, viewport);
                             }
                         }
                         PlanStage::Review(_) | PlanStage::Loading(_) => {}
@@ -1315,6 +1295,26 @@ fn handle_request_step_paste(app: &mut RequestApp, text: &str) {
     }
 }
 
+fn handle_request_step_mouse(
+    app: &mut RequestApp,
+    mouse: MouseEvent,
+    input_viewport: Rect,
+) -> bool {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        return false;
+    }
+
+    app.request.handle_mouse_scroll(
+        mouse,
+        input_viewport,
+        input_viewport.width,
+        input_viewport.height,
+    )
+}
+
 #[cfg(test)]
 fn handle_questions_step_key(
     app: &mut QuestionsApp,
@@ -1442,6 +1442,26 @@ fn handle_questions_step_paste(app: &mut QuestionsApp, text: &str) {
             Err(error) => app.error = Some(error.to_string()),
         }
     }
+}
+
+fn handle_questions_step_mouse(
+    question: &mut QuestionAnswer,
+    mouse: MouseEvent,
+    input_viewport: Rect,
+) -> bool {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        return false;
+    }
+
+    question.answer.handle_mouse_scroll(
+        mouse,
+        input_viewport,
+        input_viewport.width,
+        input_viewport.height,
+    )
 }
 
 fn handle_review_step_key(app: &mut ReviewApp, key: crossterm::event::KeyEvent) -> SessionAction {
@@ -1622,7 +1642,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type the planning request. Up/Down moves between wrapped lines. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        "Type the planning request. Up/Down and PgUp/PgDn/Home/End move through wrapped lines, and the mouse wheel scrolls while the editor is focused. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
     );
 }
 
@@ -1646,7 +1666,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         Line::from(selected.question.clone()),
         Line::from(""),
         Line::styled(
-            "Enter records the current answer. Shift+Enter inserts a newline. Ctrl+S also moves to the next unanswered question, or generates the ticket plan once every answer is complete. Ctrl+V checks for clipboard images first, otherwise pastes text.",
+            "Enter records the current answer. Up/Down and PgUp/PgDn/Home/End move through wrapped content, and the mouse wheel scrolls while the answer pane is focused. Shift+Enter inserts a newline. Ctrl+S also moves to the next unanswered question, or generates the ticket plan once every answer is complete. Ctrl+V checks for clipboard images first, otherwise pastes text.",
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]))
@@ -2441,16 +2461,18 @@ mod tests {
         PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
         ReviewApp, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
         build_review_app, handle_questions_step_key, handle_questions_step_key_with_viewport,
-        handle_questions_step_paste, handle_request_step_key,
-        handle_request_step_key_with_viewport, handle_request_step_paste, next_incomplete_question,
-        parse_agent_json, process_pending_plan_job, questions_answer_input_viewport,
-        render_issue_merge_prompt, render_loading_frame, render_plan_session,
-        render_question_prompt, render_questions_form_frame, render_request_form_frame,
-        render_review_form_frame, request_input_viewport, review_kept_indices, review_marker,
-        review_merge_groups, review_submission_action, selected_issue_plan, snapshot,
+        handle_questions_step_mouse, handle_questions_step_paste, handle_request_step_key,
+        handle_request_step_key_with_viewport, handle_request_step_mouse,
+        handle_request_step_paste, next_incomplete_question, parse_agent_json,
+        process_pending_plan_job, questions_answer_input_viewport, render_issue_merge_prompt,
+        render_loading_frame, render_plan_session, render_question_prompt,
+        render_questions_form_frame, render_request_form_frame, render_review_form_frame,
+        request_input_viewport, review_kept_indices, review_marker, review_merge_groups,
+        review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -2735,6 +2757,34 @@ mod tests {
     }
 
     #[test]
+    fn request_step_mouse_wheel_scrolls_the_request_editor() {
+        let mut app = RequestApp {
+            request: InputFieldState::multiline(
+                (1..=20)
+                    .map(|index| format!("REQ-{index:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            error: None,
+        };
+        let viewport = request_input_viewport(Rect::new(0, 0, 120, 16));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x + 1,
+            row: viewport.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_request_step_mouse(&mut app, mouse, viewport));
+        assert!(
+            app.request
+                .render_with_viewport("", true, viewport.width, viewport.height)
+                .scroll_offset
+                > 0
+        );
+    }
+
+    #[test]
     fn questions_step_paste_updates_only_the_active_answer() {
         let mut app = QuestionsApp {
             request: "Plan a new command".to_string(),
@@ -2956,6 +3006,49 @@ mod tests {
         let snapshot = render_questions_snapshot_with_size(&app, 120, 18);
         assert!(snapshot.contains("ANS-20"));
         assert!(!snapshot.contains("ANS-01"));
+    }
+
+    #[test]
+    fn questions_step_mouse_wheel_scrolls_only_the_active_answer() {
+        let mut app = QuestionsApp {
+            request: "Plan a new command".to_string(),
+            request_attachments: Vec::new(),
+            questions: vec![
+                answered_question("Who owns it?", "owner"),
+                QuestionAnswer {
+                    question: "How should it be validated?".to_string(),
+                    answer: InputFieldState::multiline(
+                        (1..=20)
+                            .map(|index| format!("ANS-{index:02}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    state: FollowUpAnswerState::Pending,
+                },
+            ],
+            selected: 1,
+            error: None,
+        };
+        let viewport = questions_answer_input_viewport(Rect::new(0, 0, 120, 18));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x + 1,
+            row: viewport.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_questions_step_mouse(
+            &mut app.questions[1],
+            mouse,
+            viewport
+        ));
+        assert!(
+            app.questions[1]
+                .answer
+                .render_with_viewport("", true, viewport.width, viewport.height)
+                .scroll_offset
+                > 0
+        );
     }
 
     #[test]

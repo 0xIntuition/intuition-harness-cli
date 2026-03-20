@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -159,20 +159,8 @@ pub fn run_issue_edit_form(
                 }
                 Event::Paste(text) => app.handle_paste(&text),
                 Event::Mouse(mouse) => {
-                    if app.step == EditStep::Description
-                        && matches!(
-                            mouse.kind,
-                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                        )
-                    {
-                        let viewport = step_input_viewport(terminal.size()?.into());
-                        let _ = app.description.handle_mouse_scroll(
-                            mouse,
-                            viewport,
-                            viewport.width,
-                            viewport.height,
-                        );
-                    }
+                    let viewport = step_input_viewport(terminal.size()?.into());
+                    let _ = app.handle_mouse_in_viewport(mouse, viewport);
                 }
                 _ => {}
             }
@@ -387,7 +375,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layou
             "Type the title. Tab/Shift+Tab or Up/Down switches fields. Enter moves to Description."
         }
         EditStep::Description => {
-            "Type the description. Enter advances. Shift+Enter inserts a newline. Tab/Shift+Tab or Up/Down switches fields."
+            "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the pane is focused. Enter advances. Tab/Shift+Tab switches fields."
         }
         EditStep::StatusPriority => {
             "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Esc cancels."
@@ -441,6 +429,10 @@ impl IssueEditApp {
         key: KeyEvent,
         viewport: ratatui::layout::Rect,
     ) -> Option<IssueEditFormExit> {
+        if self.handle_text_navigation_key(key, viewport) {
+            return None;
+        }
+
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(IssueEditFormExit::Cancelled)
@@ -450,12 +442,6 @@ impl IssueEditApp {
                 None
             }
             KeyCode::Char(_) | KeyCode::Backspace => {
-                self.apply_text_key(key, viewport);
-                None
-            }
-            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
-                if self.step != EditStep::StatusPriority =>
-            {
                 self.apply_text_key(key, viewport);
                 None
             }
@@ -469,6 +455,45 @@ impl IssueEditApp {
             KeyCode::Esc => self.apply_action(IssueEditAction::Esc),
             _ => None,
         }
+    }
+
+    fn handle_text_navigation_key(
+        &mut self,
+        key: KeyEvent,
+        viewport: ratatui::layout::Rect,
+    ) -> bool {
+        match key.code {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+                if self.step != EditStep::StatusPriority =>
+            {
+                self.apply_text_key(key, viewport);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_mouse_in_viewport(
+        &mut self,
+        mouse: MouseEvent,
+        viewport: ratatui::layout::Rect,
+    ) -> bool {
+        if self.step != EditStep::Description
+            || !matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+        {
+            return false;
+        }
+
+        self.description
+            .handle_mouse_scroll(mouse, viewport, viewport.width, viewport.height)
     }
 
     fn apply_action(&mut self, action: IssueEditAction) -> Option<IssueEditFormExit> {
@@ -773,8 +798,8 @@ mod tests {
         IssueEditFormPrefill, IssueEditValues, render_issue_edit_form,
     };
     use crate::linear::WorkflowState;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     fn context() -> IssueEditFormContext {
         IssueEditFormContext {
@@ -1009,6 +1034,69 @@ mod tests {
         let snapshot = render_editor_viewport_snapshot(&app, 140, 16);
         assert!(snapshot.contains("EDIT-20"));
         assert!(!snapshot.contains("EDIT-01"));
+    }
+
+    #[test]
+    fn issue_edit_description_up_down_stay_in_editor() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.step = EditStep::Description;
+        let start_cursor = app.description.cursor();
+
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(exit.is_none());
+        assert_eq!(app.step, EditStep::Description);
+        assert!(app.description.cursor() < start_cursor);
+    }
+
+    #[test]
+    fn issue_edit_description_mouse_wheel_scrolls_only_when_description_is_active() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: Some(
+                    (1..=20)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        let viewport = Rect::new(0, 0, 120, 8);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(!app.handle_mouse_in_viewport(mouse, viewport));
+        app.step = EditStep::Description;
+        assert!(app.handle_mouse_in_viewport(mouse, viewport));
+        assert!(
+            app.description
+                .render_with_viewport("", true, viewport.width, viewport.height)
+                .scroll_offset
+                > 0
+        );
     }
 
     #[test]
