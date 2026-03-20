@@ -289,9 +289,7 @@ impl OnboardingApp {
                 },
             ),
             team: SelectFieldState::new(vec!["Validate Linear auth first".to_string()], 0),
-            project: FilterableSelectFieldState::new(vec![
-                "Choose a team first".to_string(),
-            ]),
+            project: FilterableSelectFieldState::new(vec!["Choose a team first".to_string()]),
             team_ids: Vec::new(),
             project_ids: Vec::new(),
             all_projects: Vec::new(),
@@ -323,9 +321,7 @@ impl OnboardingApp {
 
     fn sync_project_options(&mut self) {
         let Some(team_id) = self.team_ids.get(self.team.selected()).cloned() else {
-            self.project = FilterableSelectFieldState::new(vec![
-                "Choose a team first".to_string(),
-            ]);
+            self.project = FilterableSelectFieldState::new(vec!["Choose a team first".to_string()]);
             self.project_ids.clear();
             return;
         };
@@ -885,9 +881,7 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
 
 fn render_footer(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
     let controls = match app.step {
-        OnboardingStep::Team
-        | OnboardingStep::AssignmentScope
-        | OnboardingStep::RefreshPolicy => {
+        OnboardingStep::Team | OnboardingStep::AssignmentScope | OnboardingStep::RefreshPolicy => {
             "Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels"
         }
         OnboardingStep::Project => {
@@ -1040,10 +1034,7 @@ fn render_filterable_select_panel(
             } else {
                 Style::default()
             };
-            lines.push(Line::from(Span::styled(
-                format!("{marker}{option}"),
-                style,
-            )));
+            lines.push(Line::from(Span::styled(format!("{marker}{option}"), style)));
         }
     }
 

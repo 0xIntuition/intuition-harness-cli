@@ -23,10 +23,9 @@ use crate::config::{
     AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
     ListenRefreshPolicy, detect_supported_agents, normalize_agent_name, normalize_agent_route_key,
     resolve_agent_route, supported_agent_models, supported_agent_names,
-    supported_agent_route_definitions, supported_agent_route_families,
-    supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-    validate_listen_poll_interval_seconds,
+    supported_agent_route_definitions, supported_agent_route_families, supported_reasoning_options,
+    validate_agent_model, validate_agent_name, validate_agent_reasoning,
+    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
@@ -333,8 +332,7 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             Some(ListenAssignmentScope::from(*scope));
     }
     if let Some(policy) = &args.refresh_policy {
-        view.app_config.defaults.listen.refresh_policy =
-            Some(ListenRefreshPolicy::from(*policy));
+        view.app_config.defaults.listen.refresh_policy = Some(ListenRefreshPolicy::from(*policy));
     }
     if let Some(interval) = &args.poll_interval {
         view.app_config.defaults.listen.poll_interval_seconds = parse_optional_u64(
@@ -344,7 +342,10 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
         )?;
     }
     if let Some(limit) = &args.plan_follow_up_limit {
-        view.app_config.defaults.plan.interactive_follow_up_questions = parse_optional_usize(
+        view.app_config
+            .defaults
+            .plan
+            .interactive_follow_up_questions = parse_optional_usize(
             limit,
             "plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
@@ -1114,8 +1115,10 @@ impl SubmittedConfig {
         view.app_config.defaults.listen.assignment_scope = Some(self.assignment_scope);
         view.app_config.defaults.listen.refresh_policy = Some(self.refresh_policy);
         view.app_config.defaults.listen.poll_interval_seconds = self.poll_interval_seconds;
-        view.app_config.defaults.plan.interactive_follow_up_questions =
-            self.interactive_follow_up_questions;
+        view.app_config
+            .defaults
+            .plan
+            .interactive_follow_up_questions = self.interactive_follow_up_questions;
         view.app_config.defaults.issue_labels.plan = self.plan_label.clone();
         view.app_config.defaults.issue_labels.technical = self.technical_label.clone();
         view.app_config.linear.default_profile = self.default_profile.clone();
@@ -1998,9 +2001,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         ConfigStep::AssignmentScope => {
             render_select_panel(frame, area, &title, &app.assignment_scope)
         }
-        ConfigStep::RefreshPolicy => {
-            render_select_panel(frame, area, &title, &app.refresh_policy)
-        }
+        ConfigStep::RefreshPolicy => render_select_panel(frame, area, &title, &app.refresh_policy),
         ConfigStep::PollInterval => render_input_panel(
             frame,
             area,
@@ -2070,10 +2071,7 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
                 summarize_optional_value(&app.plan_follow_up_limit),
             ),
             ("Plan label", summarize_optional_value(&app.plan_label)),
-            (
-                "Tech label",
-                summarize_optional_value(&app.technical_label),
-            ),
+            ("Tech label", summarize_optional_value(&app.technical_label)),
             (
                 "Default profile",
                 summarize_optional_value(&app.default_profile),
