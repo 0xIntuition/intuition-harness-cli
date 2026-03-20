@@ -1301,6 +1301,7 @@ fn prepare_review_workspace(
         ],
     )?;
     ensure_workspace_path_is_safe(root, workspace_root, workspace_path)?;
+    configure_review_workspace_git_identity(root, workspace_path)?;
     run_git(
         workspace_path,
         &["remote", "set-url", "origin", &raw_remote_url],
@@ -1314,6 +1315,17 @@ fn prepare_review_workspace(
             &format!("origin/{head_ref}"),
         ],
     )?;
+    Ok(())
+}
+
+fn configure_review_workspace_git_identity(source_root: &Path, workspace_path: &Path) -> Result<()> {
+    let email = git_config_value(source_root, "user.email")?
+        .unwrap_or_else(|| "metastack-cli@example.com".to_string());
+    let name =
+        git_config_value(source_root, "user.name")?.unwrap_or_else(|| "MetaStack CLI".to_string());
+
+    run_git(workspace_path, &["config", "user.email", email.as_str()])?;
+    run_git(workspace_path, &["config", "user.name", name.as_str()])?;
     Ok(())
 }
 
@@ -1337,6 +1349,25 @@ fn parse_repo_slug(remote: &str) -> Option<String> {
         return Some(trimmed[index + "github.com/".len()..].to_string());
     }
     None
+}
+
+fn git_config_value(root: &Path, key: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--get", key])
+        .output()
+        .with_context(|| format!("failed to read git config key `{key}`"))?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        )),
+        Some(1) => Ok(None),
+        _ => bail!(
+            "git config --get {key} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
