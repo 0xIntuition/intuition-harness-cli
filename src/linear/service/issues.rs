@@ -96,6 +96,15 @@ where
         }
         match &selection.assignee {
             IssueAssigneeFilter::Any => {}
+            IssueAssigneeFilter::Viewer { viewer_id } => {
+                issues.retain(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .map(|assignee| assignee.id == *viewer_id)
+                        .unwrap_or(false)
+                });
+            }
             IssueAssigneeFilter::ViewerOrUnassigned { viewer_id } => {
                 issues.retain(|issue| {
                     issue
@@ -184,6 +193,7 @@ where
                 parent_id: spec.parent_id,
                 state_id,
                 priority: spec.priority,
+                assignee_id: spec.assignee_id,
                 label_ids,
             })
             .await

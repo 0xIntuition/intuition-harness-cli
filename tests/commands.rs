@@ -3,6 +3,11 @@
 include!("support/common.rs");
 use walkdir::WalkDir;
 
+fn write_onboarded_config(config_path: &Path) -> Result<(), Box<dyn Error>> {
+    fs::write(config_path, "[onboarding]\ncompleted = true\n")?;
+    Ok(())
+}
+
 #[test]
 fn top_level_help_lists_domain_families_aliases_and_examples() {
     cli()
@@ -120,6 +125,7 @@ fn runtime_config_help_describes_precedence_catalog_and_dry_run_diagnostics() {
         ))
         .stdout(predicate::str::contains("codex: gpt-5.4"))
         .stdout(predicate::str::contains("claude: sonnet, opus"))
+        .stdout(predicate::str::contains("--replay-onboarding"))
         .stdout(predicate::str::contains(
             "meta agents workflows run ticket-implementation --root . --dry-run",
         ));
@@ -165,6 +171,7 @@ fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn E
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
     fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
 
     cli()
         .env("METASTACK_CONFIG", &config_path)

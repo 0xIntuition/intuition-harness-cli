@@ -20,11 +20,13 @@ use serde::Serialize;
 
 use crate::cli::ConfigArgs;
 use crate::config::{
-    AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, detect_supported_agents,
-    normalize_agent_name, normalize_agent_route_key, resolve_agent_route, supported_agent_models,
-    supported_agent_names, supported_agent_route_definitions, supported_agent_route_families,
-    supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning,
+    AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
+    ListenRefreshPolicy, VelocityAutoAssign, detect_supported_agents, normalize_agent_name,
+    normalize_agent_route_key, resolve_agent_route, supported_agent_models, supported_agent_names,
+    supported_agent_route_definitions, supported_agent_route_families, supported_reasoning_options,
+    validate_agent_model, validate_agent_name, validate_agent_reasoning,
+    validate_backlog_default_priority, validate_backlog_labels,
+    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 
@@ -157,12 +159,72 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         lines.push(format!("Config path: {}", view.config_path.display()));
     }
     lines.push(format!(
+        "Onboarding complete: {}",
+        if view.app_config.onboarding.completed {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    lines.push(format!(
         "Linear API key: {}",
         mask_secret(view.app_config.linear.api_key.as_deref())
     ));
     lines.push(format!(
         "Default Linear team: {}",
         display_optional(view.app_config.linear.team.as_deref())
+    ));
+    lines.push(format!(
+        "Default Linear project ID: {}",
+        display_optional(view.app_config.defaults.linear.project_id.as_deref())
+    ));
+    lines.push(format!(
+        "Install listen label: {}",
+        display_optional(view.app_config.defaults.listen.required_label.as_deref())
+    ));
+    lines.push(format!(
+        "Install assignee scope: {}",
+        view.app_config
+            .defaults
+            .listen
+            .assignment_scope
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install refresh policy: {}",
+        view.app_config
+            .defaults
+            .listen
+            .refresh_policy
+            .map(|p| format!("{p:?}"))
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install poll interval: {}",
+        view.app_config
+            .defaults
+            .listen
+            .poll_interval_seconds
+            .map(|v| format!("{v}s"))
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install plan follow-up limit: {}",
+        view.app_config
+            .defaults
+            .plan
+            .interactive_follow_up_questions
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install plan label: {}",
+        display_optional(view.app_config.defaults.issue_labels.plan.as_deref())
+    ));
+    lines.push(format!(
+        "Install technical label: {}",
+        display_optional(view.app_config.defaults.issue_labels.technical.as_deref())
     ));
     lines.push(format!(
         "Default Linear profile: {}",
@@ -179,6 +241,43 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
     lines.push(format!(
         "Default reasoning: {}",
         display_optional(view.app_config.agents.default_reasoning.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default assignee: {}",
+        display_optional(view.app_config.backlog.default_assignee.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default state: {}",
+        display_optional(view.app_config.backlog.default_state.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default priority: {}",
+        view.app_config
+            .backlog
+            .default_priority
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Backlog default labels: {}",
+        render_label_summary(&view.app_config.backlog.default_labels)
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity project: {}",
+        display_optional(view.app_config.backlog.velocity_defaults.project.as_deref())
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity state: {}",
+        display_optional(view.app_config.backlog.velocity_defaults.state.as_deref())
+    ));
+    lines.push(format!(
+        "Zero-prompt auto-assign: {}",
+        view.app_config
+            .backlog
+            .velocity_defaults
+            .auto_assign
+            .map(render_velocity_auto_assign)
+            .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
         "Merge validation repair attempts: {}",
@@ -229,6 +328,20 @@ fn display_optional(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn render_label_summary(labels: &[String]) -> String {
+    if labels.is_empty() {
+        "unset".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn render_velocity_auto_assign(value: VelocityAutoAssign) -> String {
+    match value {
+        VelocityAutoAssign::Viewer => "viewer".to_string(),
+    }
+}
+
 fn mask_secret(value: Option<&str>) -> String {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) if value.len() <= 6 => "*".repeat(value.len()),
@@ -244,6 +357,14 @@ fn mask_secret(value: Option<&str>) -> String {
 fn has_direct_updates(args: &ConfigArgs) -> bool {
     args.api_key.is_some()
         || args.team.is_some()
+        || args.project_id.is_some()
+        || args.listen_label.is_some()
+        || args.assignment_scope.is_some()
+        || args.refresh_policy.is_some()
+        || args.poll_interval.is_some()
+        || args.plan_follow_up_limit.is_some()
+        || args.plan_label.is_some()
+        || args.technical_label.is_some()
         || args.default_profile.is_some()
         || args.default_agent.is_some()
         || args.default_model.is_some()
@@ -251,6 +372,13 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.merge_validation_repair_attempts.is_some()
         || args.merge_validation_transient_retry_attempts.is_some()
         || args.merge_publication_retry_attempts.is_some()
+        || args.default_assignee.is_some()
+        || args.default_state.is_some()
+        || args.default_priority.is_some()
+        || !args.default_labels.is_empty()
+        || args.velocity_project.is_some()
+        || args.velocity_state.is_some()
+        || args.velocity_auto_assign.is_some()
         || args.route.is_some()
         || args.clear_route.is_some()
         || args.route_agent.is_some()
@@ -266,6 +394,42 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
     }
     if let Some(team) = &args.team {
         view.app_config.linear.team = normalize_optional(team);
+    }
+    if let Some(project_id) = &args.project_id {
+        view.app_config.defaults.linear.project_id = normalize_optional(project_id);
+    }
+    if let Some(listen_label) = &args.listen_label {
+        view.app_config.defaults.listen.required_label = normalize_optional(listen_label);
+    }
+    if let Some(scope) = &args.assignment_scope {
+        view.app_config.defaults.listen.assignment_scope =
+            Some(ListenAssignmentScope::from(*scope));
+    }
+    if let Some(policy) = &args.refresh_policy {
+        view.app_config.defaults.listen.refresh_policy = Some(ListenRefreshPolicy::from(*policy));
+    }
+    if let Some(interval) = &args.poll_interval {
+        view.app_config.defaults.listen.poll_interval_seconds = parse_optional_u64(
+            interval,
+            "listen poll interval",
+            validate_listen_poll_interval_seconds,
+        )?;
+    }
+    if let Some(limit) = &args.plan_follow_up_limit {
+        view.app_config
+            .defaults
+            .plan
+            .interactive_follow_up_questions = parse_optional_usize(
+            limit,
+            "plan follow-up question limit",
+            validate_interactive_plan_follow_up_question_limit,
+        )?;
+    }
+    if let Some(plan_label) = &args.plan_label {
+        view.app_config.defaults.issue_labels.plan = normalize_optional(plan_label);
+    }
+    if let Some(technical_label) = &args.technical_label {
+        view.app_config.defaults.issue_labels.technical = normalize_optional(technical_label);
     }
     if let Some(default_profile) = &args.default_profile {
         let normalized = normalize_optional(default_profile);
@@ -338,6 +502,28 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             })
             .transpose()?;
     }
+    if let Some(default_assignee) = &args.default_assignee {
+        view.app_config.backlog.default_assignee = normalize_optional(default_assignee);
+    }
+    if let Some(default_state) = &args.default_state {
+        view.app_config.backlog.default_state = normalize_optional(default_state);
+    }
+    if let Some(default_priority) = &args.default_priority {
+        view.app_config.backlog.default_priority = parse_optional_priority(default_priority)?;
+    }
+    if !args.default_labels.is_empty() {
+        view.app_config.backlog.default_labels = parse_default_labels(&args.default_labels)?;
+    }
+    if let Some(project) = &args.velocity_project {
+        view.app_config.backlog.velocity_defaults.project = normalize_optional(project);
+    }
+    if let Some(state) = &args.velocity_state {
+        view.app_config.backlog.velocity_defaults.state = normalize_optional(state);
+    }
+    if let Some(auto_assign) = &args.velocity_auto_assign {
+        view.app_config.backlog.velocity_defaults.auto_assign =
+            parse_velocity_auto_assign(auto_assign)?;
+    }
     apply_route_updates(&mut view.app_config, args)?;
     view.app_config.validate()?;
 
@@ -371,6 +557,42 @@ fn normalize_optional(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_optional_priority(value: &str) -> Result<Option<u8>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let priority = value
+        .parse::<u8>()
+        .map_err(|_| anyhow!("backlog default priority must be an integer between 1 and 4"))?;
+    validate_backlog_default_priority(priority)?;
+    Ok(Some(priority))
+}
+
+fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
+    if values.len() == 1 && values[0].trim().eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+
+    let labels = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    validate_backlog_labels(&labels)?;
+    Ok(labels)
+}
+
+fn parse_velocity_auto_assign(value: &str) -> Result<Option<VelocityAutoAssign>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "viewer" => Ok(Some(VelocityAutoAssign::Viewer)),
+        _ => Err(anyhow!(
+            "velocity auto-assign must be `viewer` or empty to clear it"
+        )),
     }
 }
 
@@ -501,6 +723,14 @@ fn route_scope_for_key(key: &str) -> Result<AgentRouteScope> {
 enum ConfigStep {
     ApiKey,
     Team,
+    ProjectId,
+    ListenLabel,
+    AssignmentScope,
+    RefreshPolicy,
+    PollInterval,
+    PlanFollowUpLimit,
+    PlanLabel,
+    TechnicalLabel,
     DefaultProfile,
     Agent,
     Model,
@@ -509,10 +739,18 @@ enum ConfigStep {
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 7] {
+    fn all() -> [Self; 15] {
         [
             Self::ApiKey,
             Self::Team,
+            Self::ProjectId,
+            Self::ListenLabel,
+            Self::AssignmentScope,
+            Self::RefreshPolicy,
+            Self::PollInterval,
+            Self::PlanFollowUpLimit,
+            Self::PlanLabel,
+            Self::TechnicalLabel,
             Self::DefaultProfile,
             Self::Agent,
             Self::Model,
@@ -542,6 +780,14 @@ impl ConfigStep {
         match self {
             Self::ApiKey => "Linear API key",
             Self::Team => "Default team",
+            Self::ProjectId => "Project ID",
+            Self::ListenLabel => "Listen label",
+            Self::AssignmentScope => "Assignee scope",
+            Self::RefreshPolicy => "Refresh policy",
+            Self::PollInterval => "Poll interval",
+            Self::PlanFollowUpLimit => "Plan follow-ups",
+            Self::PlanLabel => "Plan label",
+            Self::TechnicalLabel => "Tech label",
             Self::DefaultProfile => "Default profile",
             Self::Agent => "Default agent",
             Self::Model => "Default model",
@@ -554,6 +800,14 @@ impl ConfigStep {
         match self {
             Self::ApiKey => "Linear API key",
             Self::Team => "Default Linear team",
+            Self::ProjectId => "Default Linear project ID",
+            Self::ListenLabel => "Default listen label",
+            Self::AssignmentScope => "Listen assignee scope",
+            Self::RefreshPolicy => "Workspace refresh policy",
+            Self::PollInterval => "Listen poll interval",
+            Self::PlanFollowUpLimit => "Plan follow-up limit",
+            Self::PlanLabel => "Default plan label",
+            Self::TechnicalLabel => "Default technical label",
             Self::DefaultProfile => "Default Linear profile",
             Self::Agent => "Default agent",
             Self::Model => "Default model",
@@ -578,6 +832,14 @@ struct ConfigApp {
     step: ConfigStep,
     api_key: InputFieldState,
     team: InputFieldState,
+    project_id: InputFieldState,
+    listen_label: InputFieldState,
+    poll_interval: InputFieldState,
+    plan_follow_up_limit: InputFieldState,
+    plan_label: InputFieldState,
+    technical_label: InputFieldState,
+    assignment_scope: SelectFieldState,
+    refresh_policy: SelectFieldState,
     default_profile: InputFieldState,
     default_reasoning: SelectFieldState,
     agent_field: SelectFieldState,
@@ -590,6 +852,14 @@ struct ConfigApp {
 struct SubmittedConfig {
     api_key: Option<String>,
     team: Option<String>,
+    project_id: Option<String>,
+    listen_label: Option<String>,
+    assignment_scope: ListenAssignmentScope,
+    refresh_policy: ListenRefreshPolicy,
+    poll_interval_seconds: Option<u64>,
+    interactive_follow_up_questions: Option<usize>,
+    plan_label: Option<String>,
+    technical_label: Option<String>,
     default_profile: Option<String>,
     default_agent: String,
     default_model: Option<String>,
@@ -615,12 +885,97 @@ impl ConfigApp {
             .iter()
             .position(|candidate| candidate.eq_ignore_ascii_case(&selected_agent))
             .unwrap_or(0);
+
+        let assignment_scope_options = vec![
+            "Any eligible issue".to_string(),
+            "Viewer-assigned plus unassigned".to_string(),
+        ];
+        let refresh_options = vec![
+            "Reuse workspace and refresh from origin/main".to_string(),
+            "Recreate workspace from origin/main".to_string(),
+        ];
+
         let mut app = Self {
             step: ConfigStep::ApiKey,
             api_key: InputFieldState::new(
                 view.app_config.linear.api_key.clone().unwrap_or_default(),
             ),
             team: InputFieldState::new(view.app_config.linear.team.clone().unwrap_or_default()),
+            project_id: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .linear
+                    .project_id
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            listen_label: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .listen
+                    .required_label
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            poll_interval: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .listen
+                    .poll_interval_seconds
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            plan_follow_up_limit: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .plan
+                    .interactive_follow_up_questions
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            plan_label: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .issue_labels
+                    .plan
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            technical_label: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .issue_labels
+                    .technical
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            assignment_scope: SelectFieldState::new(
+                assignment_scope_options,
+                match view
+                    .app_config
+                    .defaults
+                    .listen
+                    .assignment_scope
+                    .unwrap_or_default()
+                {
+                    ListenAssignmentScope::Any => 0,
+                    ListenAssignmentScope::ViewerOnly => 1,
+                    ListenAssignmentScope::ViewerOrUnassigned => 1,
+                },
+            ),
+            refresh_policy: SelectFieldState::new(
+                refresh_options,
+                match view
+                    .app_config
+                    .defaults
+                    .listen
+                    .refresh_policy
+                    .unwrap_or_default()
+                {
+                    ListenRefreshPolicy::ReuseAndRefresh => 0,
+                    ListenRefreshPolicy::RecreateFromOriginMain => 1,
+                },
+            ),
             default_profile: InputFieldState::new(
                 view.app_config
                     .linear
@@ -723,31 +1078,37 @@ impl ConfigApp {
             ConfigAction::Esc => Some(ConfigDashboardExit::Cancelled),
             ConfigAction::Up => {
                 self.error = None;
-                if self.step == ConfigStep::Agent {
-                    self.agent_field.move_by(-1);
-                    self.sync_models(None);
-                } else if self.step == ConfigStep::Model {
-                    self.model_field.move_by(-1);
-                    self.sync_reasoning(None);
-                } else if self.step == ConfigStep::DefaultReasoning {
-                    self.default_reasoning.move_by(-1);
-                } else {
-                    self.step = self.step.previous();
+                match self.step {
+                    ConfigStep::Agent => {
+                        self.agent_field.move_by(-1);
+                        self.sync_models(None);
+                    }
+                    ConfigStep::Model => {
+                        self.model_field.move_by(-1);
+                        self.sync_reasoning(None);
+                    }
+                    ConfigStep::DefaultReasoning => self.default_reasoning.move_by(-1),
+                    ConfigStep::AssignmentScope => self.assignment_scope.move_by(-1),
+                    ConfigStep::RefreshPolicy => self.refresh_policy.move_by(-1),
+                    _ => self.step = self.step.previous(),
                 }
                 None
             }
             ConfigAction::Down => {
                 self.error = None;
-                if self.step == ConfigStep::Agent {
-                    self.agent_field.move_by(1);
-                    self.sync_models(None);
-                } else if self.step == ConfigStep::Model {
-                    self.model_field.move_by(1);
-                    self.sync_reasoning(None);
-                } else if self.step == ConfigStep::DefaultReasoning {
-                    self.default_reasoning.move_by(1);
-                } else {
-                    self.step = self.step.next();
+                match self.step {
+                    ConfigStep::Agent => {
+                        self.agent_field.move_by(1);
+                        self.sync_models(None);
+                    }
+                    ConfigStep::Model => {
+                        self.model_field.move_by(1);
+                        self.sync_reasoning(None);
+                    }
+                    ConfigStep::DefaultReasoning => self.default_reasoning.move_by(1),
+                    ConfigStep::AssignmentScope => self.assignment_scope.move_by(1),
+                    ConfigStep::RefreshPolicy => self.refresh_policy.move_by(1),
+                    _ => self.step = self.step.next(),
                 }
                 None
             }
@@ -765,10 +1126,30 @@ impl ConfigApp {
                     ConfigStep::Team => {
                         let _ = self.team.handle_key(key);
                     }
+                    ConfigStep::ProjectId => {
+                        let _ = self.project_id.handle_key(key);
+                    }
+                    ConfigStep::ListenLabel => {
+                        let _ = self.listen_label.handle_key(key);
+                    }
+                    ConfigStep::PollInterval => {
+                        let _ = self.poll_interval.handle_key(key);
+                    }
+                    ConfigStep::PlanFollowUpLimit => {
+                        let _ = self.plan_follow_up_limit.handle_key(key);
+                    }
+                    ConfigStep::PlanLabel => {
+                        let _ = self.plan_label.handle_key(key);
+                    }
+                    ConfigStep::TechnicalLabel => {
+                        let _ = self.technical_label.handle_key(key);
+                    }
                     ConfigStep::DefaultProfile => {
                         let _ = self.default_profile.handle_key(key);
                     }
-                    ConfigStep::DefaultReasoning
+                    ConfigStep::AssignmentScope
+                    | ConfigStep::RefreshPolicy
+                    | ConfigStep::DefaultReasoning
                     | ConfigStep::Agent
                     | ConfigStep::Model
                     | ConfigStep::Save => {}
@@ -794,11 +1175,33 @@ impl ConfigApp {
             ConfigStep::Team => {
                 let _ = self.team.paste(text);
             }
+            ConfigStep::ProjectId => {
+                let _ = self.project_id.paste(text);
+            }
+            ConfigStep::ListenLabel => {
+                let _ = self.listen_label.paste(text);
+            }
+            ConfigStep::PollInterval => {
+                let _ = self.poll_interval.paste(text);
+            }
+            ConfigStep::PlanFollowUpLimit => {
+                let _ = self.plan_follow_up_limit.paste(text);
+            }
+            ConfigStep::PlanLabel => {
+                let _ = self.plan_label.paste(text);
+            }
+            ConfigStep::TechnicalLabel => {
+                let _ = self.technical_label.paste(text);
+            }
             ConfigStep::DefaultProfile => {
                 let _ = self.default_profile.paste(text);
             }
-            ConfigStep::Agent | ConfigStep::Model | ConfigStep::Save => {}
-            ConfigStep::DefaultReasoning => {}
+            ConfigStep::AssignmentScope
+            | ConfigStep::RefreshPolicy
+            | ConfigStep::Agent
+            | ConfigStep::Model
+            | ConfigStep::DefaultReasoning
+            | ConfigStep::Save => {}
         }
     }
 
@@ -823,9 +1226,34 @@ impl ConfigApp {
         let default_profile = normalize_optional(self.default_profile.value());
         validate_default_profile(&app_config, default_profile.as_deref())?;
 
+        let poll_interval_seconds = parse_optional_u64(
+            self.poll_interval.value(),
+            "listen poll interval",
+            validate_listen_poll_interval_seconds,
+        )?;
+        let interactive_follow_up_questions = parse_optional_usize(
+            self.plan_follow_up_limit.value(),
+            "plan follow-up question limit",
+            validate_interactive_plan_follow_up_question_limit,
+        )?;
+
         Ok(SubmittedConfig {
             api_key: normalize_optional(self.api_key.value()),
             team: normalize_optional(self.team.value()),
+            project_id: normalize_optional(self.project_id.value()),
+            listen_label: normalize_optional(self.listen_label.value()),
+            assignment_scope: match self.assignment_scope.selected() {
+                1 => ListenAssignmentScope::ViewerOrUnassigned,
+                _ => ListenAssignmentScope::Any,
+            },
+            refresh_policy: match self.refresh_policy.selected() {
+                1 => ListenRefreshPolicy::RecreateFromOriginMain,
+                _ => ListenRefreshPolicy::ReuseAndRefresh,
+            },
+            poll_interval_seconds,
+            interactive_follow_up_questions,
+            plan_label: normalize_optional(self.plan_label.value()),
+            technical_label: normalize_optional(self.technical_label.value()),
             default_profile,
             default_agent,
             default_model,
@@ -846,6 +1274,17 @@ impl SubmittedConfig {
         )?;
         view.app_config.linear.api_key = self.api_key.clone();
         view.app_config.linear.team = self.team.clone();
+        view.app_config.defaults.linear.project_id = self.project_id.clone();
+        view.app_config.defaults.listen.required_label = self.listen_label.clone();
+        view.app_config.defaults.listen.assignment_scope = Some(self.assignment_scope);
+        view.app_config.defaults.listen.refresh_policy = Some(self.refresh_policy);
+        view.app_config.defaults.listen.poll_interval_seconds = self.poll_interval_seconds;
+        view.app_config
+            .defaults
+            .plan
+            .interactive_follow_up_questions = self.interactive_follow_up_questions;
+        view.app_config.defaults.issue_labels.plan = self.plan_label.clone();
+        view.app_config.defaults.issue_labels.technical = self.technical_label.clone();
         view.app_config.linear.default_profile = self.default_profile.clone();
         view.app_config.agents.default_agent = Some(self.default_agent.clone());
         view.app_config.agents.default_model = self.default_model.clone();
@@ -1214,6 +1653,36 @@ impl AdvancedRoutingApp {
     }
 }
 
+fn parse_optional_u64(
+    value: &str,
+    label: &str,
+    validate: impl Fn(u64) -> Result<()>,
+) -> Result<Option<u64>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| anyhow!("{label} must be a whole number"))?;
+    validate(parsed)?;
+    Ok(Some(parsed))
+}
+
+fn parse_optional_usize(
+    value: &str,
+    label: &str,
+    validate: impl Fn(usize) -> Result<()>,
+) -> Result<Option<usize>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| anyhow!("{label} must be a whole number"))?;
+    validate(parsed)?;
+    Ok(Some(parsed))
+}
+
 fn render_once(app: ConfigApp, args: &ConfigArgs) -> Result<String> {
     let backend = TestBackend::new(args.width, args.height);
     let mut terminal = Terminal::new(backend)?;
@@ -1509,6 +1978,24 @@ fn summarize_route_source(source: &AgentConfigSource) -> String {
     }
 }
 
+/// Minimum column width to show every step label without wrapping (single-column mode).
+/// Accounts for `"> XX. Label"` prefix plus two border characters.
+fn config_step_column_width() -> u16 {
+    let steps = ConfigStep::all();
+    let max_label = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let digits = if i + 1 >= 10 { 2 } else { 1 };
+            // "> " (2) + digits + ". " (2) + label
+            2 + digits + 2 + s.label().len()
+        })
+        .max()
+        .unwrap_or(20);
+    // +2 for left/right border
+    (max_label + 2) as u16
+}
+
 fn render_config_dashboard(frame: &mut Frame<'_>, app: &ConfigApp) {
     let area = frame.area();
     let header_height = if area.width >= 110 { 5 } else { 6 };
@@ -1544,27 +2031,29 @@ fn render_config_dashboard(frame: &mut Frame<'_>, app: &ConfigApp) {
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);
 
+    let step_col = config_step_column_width();
     let body_area = layout[1];
     if body_area.width >= 118 {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(26),
+                Constraint::Length(step_col),
                 Constraint::Min(34),
-                Constraint::Length(40),
+                Constraint::Length(48),
             ])
             .split(body_area);
         render_step_list(frame, app, body[0], 1);
         render_step_panel(frame, app, body[1]);
         render_summary_panel(frame, app, body[2]);
     } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(36);
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(36), Constraint::Min(40)])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(9), Constraint::Min(10)])
+            .constraints([Constraint::Length(17), Constraint::Min(10)])
             .split(body[0]);
         render_step_list(frame, app, sidebar[0], 1);
         render_summary_panel(frame, app, sidebar[1]);
@@ -1573,9 +2062,9 @@ fn render_config_dashboard(frame: &mut Frame<'_>, app: &ConfigApp) {
         let stacked = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),
-                Constraint::Min(8),
                 Constraint::Length(10),
+                Constraint::Min(8),
+                Constraint::Length(18),
             ])
             .split(body_area);
         render_step_list(frame, app, stacked[0], 2);
@@ -1659,6 +2148,52 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             &app.team,
             "Optional default Linear team key used when a command does not set one explicitly.",
         ),
+        ConfigStep::ProjectId => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.project_id,
+            "Optional canonical Linear project ID (leave blank to unset).",
+        ),
+        ConfigStep::ListenLabel => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.listen_label,
+            "Label that gates which Todo tickets `meta listen` picks up.",
+        ),
+        ConfigStep::AssignmentScope => {
+            render_select_panel(frame, area, &title, &app.assignment_scope)
+        }
+        ConfigStep::RefreshPolicy => render_select_panel(frame, area, &title, &app.refresh_policy),
+        ConfigStep::PollInterval => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.poll_interval,
+            "Poll interval in seconds for `meta listen` (e.g. 7).",
+        ),
+        ConfigStep::PlanFollowUpLimit => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.plan_follow_up_limit,
+            "Max follow-up questions for interactive `meta backlog plan` (e.g. 10).",
+        ),
+        ConfigStep::PlanLabel => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.plan_label,
+            "Default label for plan issues (e.g. plan).",
+        ),
+        ConfigStep::TechnicalLabel => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.technical_label,
+            "Default label for technical issues (e.g. technical).",
+        ),
         ConfigStep::DefaultProfile => render_input_panel(
             frame,
             area,
@@ -1681,6 +2216,26 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         &[
             ("Linear API key", summarize_secret(&app.api_key)),
             ("Default team", summarize_optional_value(&app.team)),
+            ("Project ID", summarize_optional_value(&app.project_id)),
+            ("Listen label", summarize_optional_value(&app.listen_label)),
+            (
+                "Assignee scope",
+                summarize_optional_select(&app.assignment_scope, ""),
+            ),
+            (
+                "Refresh policy",
+                summarize_optional_select(&app.refresh_policy, ""),
+            ),
+            (
+                "Poll interval",
+                summarize_optional_value(&app.poll_interval),
+            ),
+            (
+                "Plan follow-ups",
+                summarize_optional_value(&app.plan_follow_up_limit),
+            ),
+            ("Plan label", summarize_optional_value(&app.plan_label)),
+            ("Tech label", summarize_optional_value(&app.technical_label)),
             (
                 "Default profile",
                 summarize_optional_value(&app.default_profile),
@@ -1721,10 +2276,22 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
 
 fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
     let controls = match app.step {
-        ConfigStep::ApiKey | ConfigStep::Team | ConfigStep::DefaultProfile => {
+        ConfigStep::ApiKey
+        | ConfigStep::Team
+        | ConfigStep::ProjectId
+        | ConfigStep::ListenLabel
+        | ConfigStep::PollInterval
+        | ConfigStep::PlanFollowUpLimit
+        | ConfigStep::PlanLabel
+        | ConfigStep::TechnicalLabel
+        | ConfigStep::DefaultProfile => {
             "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
-        ConfigStep::Agent | ConfigStep::Model | ConfigStep::DefaultReasoning => {
+        ConfigStep::AssignmentScope
+        | ConfigStep::RefreshPolicy
+        | ConfigStep::Agent
+        | ConfigStep::Model
+        | ConfigStep::DefaultReasoning => {
             "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
         }
         ConfigStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",

@@ -32,8 +32,12 @@ use crate::backlog::{
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
     write_rendered_backlog_item,
 };
+use crate::backlog_defaults::{
+    TechnicalTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
+    resolve_technical_ticket_defaults, save_remembered_backlog_selection,
+};
 use crate::cli::{RunAgentArgs, TechnicalArgs};
-use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, load_required_planning_meta};
+use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, AppConfig, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::browser::{
@@ -155,6 +159,7 @@ enum InteractiveTechnicalExit {
 /// push cannot publish the generated managed files.
 pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.client.root)?;
+    let app_config = AppConfig::load()?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
     let discussion_budgets = resolve_ticket_discussion_budgets(&planning_meta);
     ensure_planning_layout(&root, false)?;
@@ -165,8 +170,14 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         default_project_id,
     } = load_linear_command_context(&args.client, None)?;
     let can_launch_tui = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let run_non_interactive = args.no_interactive || !can_launch_tui;
+    let remembered_selection = if run_non_interactive {
+        load_remembered_backlog_selection(&root)?
+    } else {
+        Default::default()
+    };
 
-    let generated = if can_launch_tui {
+    let generated = if !run_non_interactive {
         let initial_parent = match args.issue.as_ref() {
             Some(issue) => Some(service.load_issue(issue).await?),
             None => None,
@@ -211,23 +222,42 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
         )?
     };
 
+    let resolved_defaults = resolve_technical_ticket_defaults(
+        &app_config,
+        &planning_meta,
+        &remembered_selection,
+        &TechnicalTicketResolutionInput {
+            zero_prompt: run_non_interactive,
+            overrides: TicketOptionOverrides {
+                state: args.state.clone(),
+                priority: args.priority,
+                labels: args.labels.clone(),
+                assignee: args.assignee.clone(),
+            },
+            built_in_label: planning_meta.effective_technical_label(&app_config),
+        },
+        &generated.parent,
+    );
+    let assignee_id = service
+        .resolve_assignee_id(resolved_defaults.assignee.as_deref())
+        .await?;
     let child = service
         .create_issue(IssueCreateSpec {
-            team: Some(generated.parent.team.key.clone()),
+            team: resolved_defaults.team.clone(),
             title: generated.child_title.clone(),
             description: Some(rendered_index_contents(&generated.files)?),
-            project: None,
-            project_id: generated
-                .parent
-                .project
-                .as_ref()
-                .map(|project| project.id.clone()),
+            project: resolved_defaults.project.clone(),
+            project_id: resolved_defaults.project_id.clone(),
             parent_id: Some(generated.parent.id.clone()),
-            state: None,
-            priority: generated.parent.priority,
-            labels: vec![planning_meta.issue_labels.technical_label()],
+            state: resolved_defaults.state.clone(),
+            priority: resolved_defaults.priority,
+            assignee_id,
+            labels: resolved_defaults.labels.clone(),
         })
         .await?;
+    if let Err(error) = save_remembered_backlog_selection(&root, &child) {
+        eprintln!("warning: failed to persist remembered backlog defaults: {error}");
+    }
 
     let issue_dir = write_rendered_backlog_item(&root, &child.identifier, &generated.files)?;
     let download_failures =

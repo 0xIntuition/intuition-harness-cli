@@ -83,7 +83,8 @@ Repo-scoped listen settings in `.metastack/meta.json`:
 
 - `listen.required_labels`: optional string list of labels; issues are eligible when any listed label matches case-insensitively.
 - `listen.required_label`: legacy single-label compatibility input. New saves persist `required_labels`.
-- `listen.assignment_scope`: `any` or `viewer`.
+- `listen.assignment_scope`: `any`, `viewer_only`, or `viewer_or_unassigned`.
+  - Legacy compatibility: existing `viewer` values still load as `viewer_or_unassigned`.
 - `listen.refresh_policy`: `reuse_and_refresh` (default) or `recreate_from_origin_main`.
 - `listen.instructions_path`: optional markdown file merged into the shared injected workflow contract for launched-agent instructions.
 - `listen.poll_interval_seconds`: default Linear refresh cadence for `meta listen` when `--poll-interval` is not passed.

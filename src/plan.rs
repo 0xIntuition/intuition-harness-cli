@@ -32,9 +32,14 @@ use crate::backlog::{
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
     write_rendered_backlog_item,
 };
+use crate::backlog_defaults::{
+    PlanTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
+    resolve_plan_ticket_defaults, save_remembered_backlog_selection,
+};
 use crate::cli::{PlanArgs, RunAgentArgs};
 use crate::config::{
-    AGENT_ROUTE_BACKLOG_PLAN, LinearConfig, LinearConfigOverrides, load_required_planning_meta,
+    AGENT_ROUTE_BACKLOG_PLAN, AppConfig, LinearConfig, LinearConfigOverrides,
+    load_required_planning_meta,
 };
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
@@ -47,7 +52,6 @@ use crate::text_diff::render_text_diff;
 use crate::tui::fields::InputFieldState;
 use crate::tui::prompt_images::PromptImageAttachment;
 
-const BACKLOG_STATE: &str = "Backlog";
 const NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS: usize = 3;
 const SKIPPED_FOLLOW_UP_LABEL: &str = "Skipped intentionally.";
 
@@ -208,6 +212,7 @@ enum PlanMode {
 
 pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
     let root = canonicalize_existing_dir(&args.client.root)?;
+    let app_config = AppConfig::load()?;
     let planning_meta = load_required_planning_meta(&root, "plan")?;
     ensure_planning_layout(&root, false)?;
     let config = LinearConfig::new_with_root(
@@ -221,14 +226,13 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
     )?;
     let default_team = config.default_team.clone();
     let service = LinearService::new(ReqwestLinearClient::new(config)?, default_team.clone());
-    let requested_project = args.project.clone();
-    let default_project_id = if requested_project.is_some() {
-        None
-    } else {
-        planning_meta.linear.project_id.clone()
-    };
     let can_launch_tui = io::stdin().is_terminal() && io::stdout().is_terminal();
     let run_non_interactive = args.no_interactive || !can_launch_tui;
+    let remembered_selection = if run_non_interactive {
+        load_remembered_backlog_selection(&root)?
+    } else {
+        Default::default()
+    };
     let agent_overrides = PlanningAgentOverrides {
         agent: args.agent.clone(),
         model: args.model.clone(),
@@ -297,7 +301,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
         match run_interactive_plan_session(
             &root,
             args.request.clone(),
-            planning_meta.interactive_follow_up_question_limit(),
+            planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             agent_overrides.clone(),
         )? {
             InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
@@ -307,6 +311,24 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
 
     let mut created_issues = Vec::with_capacity(plan.issues.len());
     for draft in &plan.issues {
+        let resolved_defaults = resolve_plan_ticket_defaults(
+            &app_config,
+            &planning_meta,
+            &remembered_selection,
+            &PlanTicketResolutionInput {
+                zero_prompt: run_non_interactive,
+                explicit_team: args.team.clone(),
+                explicit_project: args.project.clone(),
+                overrides: TicketOptionOverrides {
+                    state: args.state.clone(),
+                    priority: args.priority,
+                    labels: args.labels.clone(),
+                    assignee: args.assignee.clone(),
+                },
+                built_in_label: planning_meta.effective_plan_label(&app_config),
+                generated_priority: draft.priority,
+            },
+        );
         let initial_files = render_planned_backlog_files(
             &root,
             draft,
@@ -316,19 +338,26 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
             },
         )?;
         let initial_description = rendered_index_contents(&initial_files)?;
+        let assignee_id = service
+            .resolve_assignee_id(resolved_defaults.assignee.as_deref())
+            .await?;
         let issue = service
             .create_issue(IssueCreateSpec {
-                team: default_team.clone(),
+                team: resolved_defaults.team.clone(),
                 title: draft.title.clone(),
                 description: Some(initial_description),
-                project: requested_project.clone(),
-                project_id: default_project_id.clone(),
+                project: resolved_defaults.project.clone(),
+                project_id: resolved_defaults.project_id.clone(),
                 parent_id: None,
-                state: Some(BACKLOG_STATE.to_string()),
-                priority: draft.priority,
-                labels: vec![planning_meta.issue_labels.plan_label()],
+                state: resolved_defaults.state.clone(),
+                priority: resolved_defaults.priority,
+                assignee_id,
+                labels: resolved_defaults.labels.clone(),
             })
             .await?;
+        if let Err(error) = save_remembered_backlog_selection(&root, &issue) {
+            eprintln!("warning: failed to persist remembered backlog defaults: {error}");
+        }
         let rendered_files = render_planned_backlog_files(
             &root,
             draft,

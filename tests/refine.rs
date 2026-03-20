@@ -295,6 +295,9 @@ fn refine_command_prefers_command_route_agent_over_global_default() -> Result<()
 api_key = "token"
 api_url = "{api_url}"
 
+[onboarding]
+completed = true
+
 [agents]
 default_agent = "global-stub"
 
@@ -846,6 +849,9 @@ fn write_refine_config(
             r#"[linear]
 api_key = "token"
 api_url = "{api_url}"
+
+[onboarding]
+completed = true
 
 [agents]
 default_agent = "refine-stub"

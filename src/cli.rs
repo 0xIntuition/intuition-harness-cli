@@ -623,6 +623,18 @@ pub struct PlanArgs {
     /// Override the Linear project name attached to created backlog issues.
     #[arg(long)]
     pub project: Option<String>,
+    /// Override the Linear workflow state attached to created backlog issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Override the Linear priority attached to created backlog issues (1-4).
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Add one or more extra Linear labels to created backlog issues.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Override the assignee attached to created backlog issues. Supports `viewer`, user IDs, names, and emails.
+    #[arg(long)]
+    pub assignee: Option<String>,
     /// Prefill the initial planning request. Required when `--no-interactive` is used.
     #[arg(long)]
     pub request: Option<String>,
@@ -679,6 +691,51 @@ pub struct ConfigArgs {
     /// Update how many times `meta merge` retries push and PR publication after transient remote failures.
     #[arg(long)]
     pub merge_publication_retry_attempts: Option<String>,
+    /// Update the default assignee used by backlog ticket creation.
+    #[arg(long)]
+    pub default_assignee: Option<String>,
+    /// Update the default state used by backlog ticket creation.
+    #[arg(long)]
+    pub default_state: Option<String>,
+    /// Update the default priority used by backlog ticket creation.
+    #[arg(long)]
+    pub default_priority: Option<String>,
+    /// Update the additive default labels used by backlog ticket creation. Pass `none` to clear them.
+    #[arg(long = "default-label")]
+    pub default_labels: Vec<String>,
+    /// Update the zero-prompt default project selector used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_project: Option<String>,
+    /// Update the zero-prompt default state used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_state: Option<String>,
+    /// Update zero-prompt auto-assignment for backlog ticket creation. Supported values: `viewer`.
+    #[arg(long)]
+    pub velocity_auto_assign: Option<String>,
+    /// Update the install-scoped default Linear project ID.
+    #[arg(long)]
+    pub project_id: Option<String>,
+    /// Update the install-scoped default listen label.
+    #[arg(long)]
+    pub listen_label: Option<String>,
+    /// Update the install-scoped listen assignee scope.
+    #[arg(long, value_enum)]
+    pub assignment_scope: Option<ListenAssignmentScopeArg>,
+    /// Update the install-scoped listen refresh policy.
+    #[arg(long, value_enum)]
+    pub refresh_policy: Option<ListenRefreshPolicyArg>,
+    /// Update the install-scoped listen poll interval (seconds).
+    #[arg(long)]
+    pub poll_interval: Option<String>,
+    /// Update the install-scoped plan follow-up question limit.
+    #[arg(long)]
+    pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped default plan label.
+    #[arg(long)]
+    pub plan_label: Option<String>,
+    /// Update the install-scoped default technical label.
+    #[arg(long)]
+    pub technical_label: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
@@ -697,6 +754,9 @@ pub struct ConfigArgs {
     /// Launch the dedicated advanced agent-routing dashboard instead of the primary simple config flow.
     #[arg(long)]
     pub advanced_routing: bool,
+    /// Launch the shared first-run onboarding wizard instead of the manual config dashboard.
+    #[arg(long)]
+    pub replay_onboarding: bool,
     /// Emit the install-scoped config view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,
@@ -768,6 +828,27 @@ pub struct SetupArgs {
     /// Update the default label applied to issues created by `meta backlog tech`.
     #[arg(long)]
     pub technical_label: Option<String>,
+    /// Update the default assignee used by backlog ticket creation.
+    #[arg(long)]
+    pub default_assignee: Option<String>,
+    /// Update the default state used by backlog ticket creation.
+    #[arg(long)]
+    pub default_state: Option<String>,
+    /// Update the default priority used by backlog ticket creation.
+    #[arg(long)]
+    pub default_priority: Option<String>,
+    /// Update the additive default labels used by backlog ticket creation. Pass `none` to clear them.
+    #[arg(long = "default-label")]
+    pub default_labels: Vec<String>,
+    /// Update the zero-prompt default project selector used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_project: Option<String>,
+    /// Update the zero-prompt default state used by backlog ticket creation.
+    #[arg(long)]
+    pub velocity_state: Option<String>,
+    /// Update zero-prompt auto-assignment for backlog ticket creation. Supported values: `viewer`.
+    #[arg(long)]
+    pub velocity_auto_assign: Option<String>,
     /// Emit the repo-scoped setup view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,
@@ -944,6 +1025,21 @@ pub struct TechnicalArgs {
     /// Optional parent issue identifier, for example MET-35.
     #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
+    /// Override the Linear workflow state attached to created backlog issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Override the Linear priority attached to created backlog issues (1-4).
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Add one or more extra Linear labels to created backlog issues.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Override the assignee attached to created backlog issues. Supports `viewer`, user IDs, names, and emails.
+    #[arg(long)]
+    pub assignee: Option<String>,
+    /// Skip the ratatui workflow and require explicit input instead of prompting.
+    #[arg(long)]
+    pub no_interactive: bool,
     /// Override the configured default agent/provider for backlog generation.
     #[arg(long)]
     pub agent: Option<String>,
@@ -1459,7 +1555,8 @@ pub enum PromptTransportArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ListenAssignmentScopeArg {
     Any,
-    Viewer,
+    ViewerOnly,
+    ViewerOrUnassigned,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

@@ -22,11 +22,12 @@ use crate::cli::{ConfigEventArg, SetupArgs};
 use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
     DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, LinearConfig, LinearConfigOverrides,
-    ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, ensure_saved_issue_labels,
-    normalize_agent_name, parse_listen_required_labels_csv, supported_agent_models,
-    supported_agent_names, supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-    validate_listen_poll_interval_seconds,
+    ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, VelocityAutoAssign,
+    ensure_saved_issue_labels, normalize_agent_name, parse_listen_required_labels_csv,
+    supported_agent_models, supported_agent_names, supported_reasoning_options,
+    validate_agent_model, validate_agent_name, validate_agent_reasoning,
+    validate_backlog_default_priority, validate_backlog_labels,
+    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
@@ -452,11 +453,11 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
     ));
     lines.push(format!(
         "Assignee filter: {}",
-        assignment_scope_label(view.planning_meta.listen.assignment_scope)
+        assignment_scope_label(view.planning_meta.listen.assignment_scope())
     ));
     lines.push(format!(
         "Workspace refresh: {}",
-        refresh_policy_label(view.planning_meta.listen.refresh_policy)
+        refresh_policy_label(view.planning_meta.listen.refresh_policy())
     ));
     lines.push(format!(
         "Instructions file: {}",
@@ -480,6 +481,55 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
             view.planning_meta.issue_labels.technical.as_deref(),
             "technical"
         )
+    ));
+    lines.push(format!(
+        "Backlog default assignee: {}",
+        display_optional(view.planning_meta.backlog.default_assignee.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default state: {}",
+        display_optional(view.planning_meta.backlog.default_state.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog default priority: {}",
+        view.planning_meta
+            .backlog
+            .default_priority
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Backlog default labels: {}",
+        render_label_summary(&view.planning_meta.backlog.default_labels)
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity project: {}",
+        display_optional(
+            view.planning_meta
+                .backlog
+                .velocity_defaults
+                .project
+                .as_deref()
+        )
+    ));
+    lines.push(format!(
+        "Zero-prompt velocity state: {}",
+        display_optional(
+            view.planning_meta
+                .backlog
+                .velocity_defaults
+                .state
+                .as_deref()
+        )
+    ));
+    lines.push(format!(
+        "Zero-prompt auto-assign: {}",
+        view.planning_meta
+            .backlog
+            .velocity_defaults
+            .auto_assign
+            .map(render_velocity_auto_assign)
+            .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
         "Listen prerequisites: {}",
@@ -509,6 +559,13 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.interactive_plan_follow_up_question_limit.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
+        || args.default_assignee.is_some()
+        || args.default_state.is_some()
+        || args.default_priority.is_some()
+        || !args.default_labels.is_empty()
+        || args.velocity_project.is_some()
+        || args.velocity_state.is_some()
+        || args.velocity_auto_assign.is_some()
 }
 
 async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Result<bool> {
@@ -600,10 +657,10 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
         view.planning_meta.listen.required_labels = parse_optional_listen_labels_input(label);
     }
     if let Some(scope) = args.assignment_scope {
-        view.planning_meta.listen.assignment_scope = scope.into();
+        view.planning_meta.listen.assignment_scope = Some(scope.into());
     }
     if let Some(policy) = args.refresh_policy {
-        view.planning_meta.listen.refresh_policy = policy.into();
+        view.planning_meta.listen.refresh_policy = Some(policy.into());
     }
     if let Some(path) = &args.instructions_path {
         view.planning_meta.listen.instructions_path = normalize_optional(path);
@@ -619,6 +676,28 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     }
     if let Some(label) = &args.technical_label {
         view.planning_meta.issue_labels.technical = normalize_optional(label);
+    }
+    if let Some(assignee) = &args.default_assignee {
+        view.planning_meta.backlog.default_assignee = normalize_optional(assignee);
+    }
+    if let Some(state) = &args.default_state {
+        view.planning_meta.backlog.default_state = normalize_optional(state);
+    }
+    if let Some(priority) = &args.default_priority {
+        view.planning_meta.backlog.default_priority = parse_optional_priority(priority)?;
+    }
+    if !args.default_labels.is_empty() {
+        view.planning_meta.backlog.default_labels = parse_default_labels(&args.default_labels)?;
+    }
+    if let Some(project) = &args.velocity_project {
+        view.planning_meta.backlog.velocity_defaults.project = normalize_optional(project);
+    }
+    if let Some(state) = &args.velocity_state {
+        view.planning_meta.backlog.velocity_defaults.state = normalize_optional(state);
+    }
+    if let Some(auto_assign) = &args.velocity_auto_assign {
+        view.planning_meta.backlog.velocity_defaults.auto_assign =
+            parse_velocity_auto_assign(auto_assign)?;
     }
 
     let after_meta = serde_json::to_value(&view.planning_meta)?;
@@ -726,11 +805,13 @@ impl SetupApp {
             assignment_field: SelectFieldState::new(
                 vec![
                     "Any eligible issue".to_string(),
+                    "Only issues assigned to the authenticated viewer".to_string(),
                     "Viewer-assigned issues plus unassigned issues".to_string(),
                 ],
-                match view.planning_meta.listen.assignment_scope {
+                match view.planning_meta.listen.assignment_scope() {
                     ListenAssignmentScope::Any => 0,
-                    ListenAssignmentScope::Viewer => 1,
+                    ListenAssignmentScope::ViewerOnly => 1,
+                    ListenAssignmentScope::ViewerOrUnassigned => 2,
                 },
             ),
             refresh_policy_field: SelectFieldState::new(
@@ -738,7 +819,7 @@ impl SetupApp {
                     "Reuse the clone and hard-refresh it from origin/main".to_string(),
                     "Delete the clone and recreate it from origin/main".to_string(),
                 ],
-                match view.planning_meta.listen.refresh_policy {
+                match view.planning_meta.listen.refresh_policy() {
                     ListenRefreshPolicy::ReuseAndRefresh => 0,
                     ListenRefreshPolicy::RecreateFromOriginMain => 1,
                 },
@@ -1070,7 +1151,8 @@ impl SetupApp {
             reasoning,
             listen_labels: parse_optional_listen_labels_input(self.listen_label.value()),
             assignment_scope: match self.assignment_field.selected() {
-                1 => ListenAssignmentScope::Viewer,
+                1 => ListenAssignmentScope::ViewerOnly,
+                2 => ListenAssignmentScope::ViewerOrUnassigned,
                 _ => ListenAssignmentScope::Any,
             },
             refresh_policy: match self.refresh_policy_field.selected() {
@@ -1107,8 +1189,8 @@ impl SubmittedSetup {
         view.planning_meta.agent.model = self.model.clone();
         view.planning_meta.agent.reasoning = self.reasoning.clone();
         view.planning_meta.listen.required_labels = self.listen_labels.clone();
-        view.planning_meta.listen.assignment_scope = self.assignment_scope;
-        view.planning_meta.listen.refresh_policy = self.refresh_policy;
+        view.planning_meta.listen.assignment_scope = Some(self.assignment_scope);
+        view.planning_meta.listen.refresh_policy = Some(self.refresh_policy);
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
         view.planning_meta.listen.poll_interval_seconds = self.listen_poll_interval;
         view.planning_meta.plan.interactive_follow_up_questions = self.interactive_plan_limit;
@@ -1160,6 +1242,22 @@ fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
     }
 }
 
+/// Minimum column width to show every step label without wrapping (single-column mode).
+/// Accounts for `"> XX. Label"` prefix plus two border characters.
+fn setup_step_column_width() -> u16 {
+    let steps = SetupStep::all();
+    let max_label = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let digits = if i + 1 >= 10 { 2 } else { 1 };
+            2 + digits + 2 + s.label().len()
+        })
+        .max()
+        .unwrap_or(20);
+    (max_label + 2) as u16
+}
+
 fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let area = frame.area();
     let header_height = if area.width >= 110 { 5 } else { 6 };
@@ -1176,7 +1274,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` and keep repo onboarding rerunnable.",
+            "Configure repo-scoped defaults stored in `.metastack/meta.json` after install onboarding is complete.",
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",
@@ -1194,12 +1292,13 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     .wrap(Wrap { trim: false });
     frame.render_widget(header, layout[0]);
 
+    let step_col = setup_step_column_width();
     let body_area = layout[1];
     if body_area.width >= 118 {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(28),
+                Constraint::Length(step_col),
                 Constraint::Min(38),
                 Constraint::Length(44),
             ])
@@ -1208,9 +1307,10 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
         render_step_panel(frame, app, body[1]);
         render_summary_panel(frame, app, body[2]);
     } else if body_area.width >= 90 {
+        let sidebar_width = step_col.max(40);
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(40), Constraint::Min(40)])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
             .split(body_area);
         let sidebar = Layout::default()
             .direction(Direction::Vertical)
@@ -1409,7 +1509,8 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             (
                 "Assignee filter",
                 assignment_scope_label(match app.assignment_field.selected() {
-                    1 => ListenAssignmentScope::Viewer,
+                    1 => ListenAssignmentScope::ViewerOnly,
+                    2 => ListenAssignmentScope::ViewerOrUnassigned,
                     _ => ListenAssignmentScope::Any,
                 })
                 .to_string(),
@@ -1519,7 +1620,10 @@ fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
 fn assignment_scope_label(scope: ListenAssignmentScope) -> &'static str {
     match scope {
         ListenAssignmentScope::Any => "Any eligible issue",
-        ListenAssignmentScope::Viewer => "Viewer-assigned issues plus unassigned issues",
+        ListenAssignmentScope::ViewerOnly => "Only issues assigned to the authenticated viewer",
+        ListenAssignmentScope::ViewerOrUnassigned => {
+            "Viewer-assigned issues plus unassigned issues"
+        }
     }
 }
 
@@ -1569,6 +1673,15 @@ fn display_listen_labels(labels: &[String]) -> String {
     }
 }
 
+fn render_label_summary(labels: &[String]) -> String {
+    display_listen_labels(labels)
+}
+
+fn render_velocity_auto_assign(value: VelocityAutoAssign) -> String {
+    match value {
+        VelocityAutoAssign::Viewer => "viewer".to_string(),
+    }
+}
 fn display_repo_auth(api_key: Option<&str>, profile: Option<&str>) -> String {
     if api_key
         .map(str::trim)
@@ -1611,6 +1724,42 @@ fn normalize_optional(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_optional_priority(value: &str) -> Result<Option<u8>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let priority = value
+        .parse::<u8>()
+        .map_err(|_| anyhow!("backlog default priority must be an integer between 1 and 4"))?;
+    validate_backlog_default_priority(priority)?;
+    Ok(Some(priority))
+}
+
+fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
+    if values.len() == 1 && values[0].trim().eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+
+    let labels = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    validate_backlog_labels(&labels)?;
+    Ok(labels)
+}
+
+fn parse_velocity_auto_assign(value: &str) -> Result<Option<VelocityAutoAssign>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "viewer" => Ok(Some(VelocityAutoAssign::Viewer)),
+        _ => Err(anyhow!(
+            "velocity auto-assign must be `viewer` or empty to clear it"
+        )),
     }
 }
 
@@ -1717,7 +1866,8 @@ mod tests {
         prompt_backlog_template_conflicts_with_io, render_summary,
     };
     use crate::config::{
-        AgentSettings, AppConfig, PlanningAgentSettings, PlanningListenSettings, PlanningMeta,
+        AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings,
+        PlanningListenSettings, PlanningMeta,
     };
     use anyhow::Result;
     use std::io::Cursor;
@@ -1847,5 +1997,21 @@ mod tests {
         assert!(output.contains("Enter `o`, `s`, or `c`"));
 
         Ok(())
+    }
+
+    #[test]
+    fn assignment_scope_labels_match_explicit_listen_semantics() {
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::Any),
+            "Any eligible issue"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOnly),
+            "Only issues assigned to the authenticated viewer"
+        );
+        assert_eq!(
+            crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOrUnassigned),
+            "Viewer-assigned issues plus unassigned issues"
+        );
     }
 }
