@@ -274,7 +274,7 @@ pub fn render_template_files(
     root: &Path,
     context: &TemplateContext,
 ) -> Result<Vec<RenderedTemplateFile>> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let context = resolve_template_context(context)?;
     let source_files = if paths.backlog_template_dir.is_dir() {
         read_template_files(&paths.backlog_template_dir)?
@@ -296,7 +296,7 @@ pub fn write_rendered_backlog_item(
     identifier: &str,
     rendered_files: &[RenderedTemplateFile],
 ) -> Result<PathBuf> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let issue_dir = paths.backlog_issue_dir(identifier);
 
     for file in rendered_files {
@@ -307,7 +307,10 @@ pub fn write_rendered_backlog_item(
 }
 
 pub fn backlog_issue_dir(root: &Path, identifier: &str) -> PathBuf {
-    PlanningPaths::new(root).backlog_issue_dir(identifier)
+    match PlanningPaths::for_root(root) {
+        Ok(paths) => paths.backlog_issue_dir(identifier),
+        Err(_) => PlanningPaths::new(root).backlog_issue_dir(identifier),
+    }
 }
 
 pub fn backlog_issue_index_path(root: &Path, identifier: &str) -> PathBuf {

@@ -152,6 +152,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     }
 
     let default_agent = resolve_default_agent_name(&config, &planning_meta, &agent_options);
+    let cron_dir_label = crate::fs::display_path(&PlanningPaths::for_root(root)?.cron_dir, root);
     let prefill = build_init_prefill(root, args, default_agent.clone())?;
     let options = CronInitFormOptions {
         render_once: args.render_once,
@@ -166,7 +167,14 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     };
 
     if args.render_once {
-        return match run_cron_init_form(CronInitFormContext { agent_options }, prefill, options)? {
+        return match run_cron_init_form(
+            CronInitFormContext {
+                agent_options,
+                cron_dir_label,
+            },
+            prefill,
+            options,
+        )? {
             CronInitFormExit::Snapshot(snapshot) => Ok(snapshot),
             CronInitFormExit::Cancelled => Ok("Cancelled cron init.".to_string()),
             CronInitFormExit::Submitted(values) => write_cron_job(root, values, args.force),
@@ -176,7 +184,14 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     let can_launch_tui = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let interactive = !args.no_interactive && can_launch_tui;
     let values = if interactive {
-        match run_cron_init_form(CronInitFormContext { agent_options }, prefill, options)? {
+        match run_cron_init_form(
+            CronInitFormContext {
+                agent_options,
+                cron_dir_label,
+            },
+            prefill,
+            options,
+        )? {
             CronInitFormExit::Cancelled => return Ok("Cancelled cron init.".to_string()),
             CronInitFormExit::Submitted(values) => values,
             CronInitFormExit::Snapshot(snapshot) => return Ok(snapshot),
@@ -253,7 +268,7 @@ fn run_init_non_interactive(
 }
 
 fn write_cron_job(root: &Path, values: CronInitFormValues, force: bool) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let path = paths.cron_job_path(&values.name);
     let front_matter = CronJobFrontMatter {
         schedule: values.schedule,
@@ -319,7 +334,7 @@ fn load_existing_prefill(root: &Path, name: Option<&str>) -> Result<Option<CronI
         return Ok(None);
     };
 
-    let path = PlanningPaths::new(root).cron_job_path(name);
+    let path = PlanningPaths::for_root(root)?.cron_job_path(name);
     if !path.exists() {
         return Ok(None);
     }
@@ -482,7 +497,7 @@ fn render_agent_prompt(
 }
 
 fn discover_jobs(root: &Path) -> Result<Vec<DiscoveredJob>> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     if !paths.cron_dir.exists() {
         return Ok(Vec::new());
     }
@@ -636,7 +651,7 @@ fn validate_job_name(name: &str) -> Result<()> {
 }
 
 fn ensure_cron_layout(root: &Path) -> Result<()> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_dir(&paths.metastack_dir)?;
     ensure_dir(&paths.cron_dir)?;
     write_text_file(&paths.cron_readme_path(), CRON_README, false)?;

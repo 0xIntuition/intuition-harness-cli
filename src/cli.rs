@@ -120,6 +120,10 @@ Examples:
   meta workspace clean --target-only --root .
   meta workspace prune --dry-run --root .";
 
+pub(crate) fn root_help_examples(command_name: &str) -> String {
+    ROOT_HELP_EXAMPLES.replace("meta ", &format!("{command_name} "))
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "meta",
@@ -619,6 +623,15 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
+    /// Update the effective branded command name shown in user-facing output.
+    #[arg(long)]
+    pub command_name: Option<String>,
+    /// Update the default repo-local state root, for example `.intuition`.
+    #[arg(long)]
+    pub repo_state_root: Option<String>,
+    /// Update the default backlog root. When unset, `<repo-state-root>/backlog` is used.
+    #[arg(long)]
+    pub backlog_root: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
@@ -657,7 +670,7 @@ pub struct ConfigArgs {
 #[derive(Debug, Clone, Args)]
 #[command(after_help = RUNTIME_SETUP_HELP)]
 pub struct SetupArgs {
-    /// Repository root containing `.metastack/meta.json`.
+    /// Repository root containing the canonical repo metadata.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     /// Update the project-specific Linear API key stored in install-scoped CLI config.
@@ -708,6 +721,18 @@ pub struct SetupArgs {
     /// Update the default label applied to issues created by `meta backlog tech`.
     #[arg(long)]
     pub technical_label: Option<String>,
+    /// Update the effective branded command name shown in repo-scoped output and templates.
+    #[arg(long)]
+    pub command_name: Option<String>,
+    /// Update the repo-local state root, for example `.intuition`.
+    #[arg(long)]
+    pub repo_state_root: Option<String>,
+    /// Update the backlog root. When unset, `<repo-state-root>/backlog` is used.
+    #[arg(long)]
+    pub backlog_root: Option<String>,
+    /// Move existing repo-local state into the configured layout after saving metadata.
+    #[arg(long)]
+    pub migrate_layout: bool,
     /// Emit the repo-scoped setup view as JSON instead of launching the dashboard.
     #[arg(long)]
     pub json: bool,

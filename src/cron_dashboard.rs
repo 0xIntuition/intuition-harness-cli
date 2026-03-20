@@ -25,6 +25,7 @@ const CRON_PROMPT_ATTACHMENT_REJECTION: &str = "image attachments are not suppor
 #[derive(Debug, Clone)]
 pub(crate) struct CronInitFormContext {
     pub(crate) agent_options: Vec<String>,
+    pub(crate) cron_dir_label: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -110,6 +111,7 @@ enum CronField {
 
 #[derive(Debug, Clone)]
 struct CronInitApp {
+    context: CronInitFormContext,
     focus: CronField,
     name: InputFieldState,
     schedule_preset: SelectFieldState,
@@ -273,7 +275,8 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     let preview = paragraph(
         Text::from(vec![
             Line::from(format!(
-                "Job file: .metastack/cron/{}.md",
+                "Job file: {}/{}.md",
+                app.context.cron_dir_label,
                 if app.name.value().trim().is_empty() {
                     "<name>"
                 } else {
@@ -342,7 +345,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
 
 impl CronInitApp {
     fn new(context: CronInitFormContext, prefill: CronInitFormPrefill) -> Self {
-        let agent_options = normalized_agent_options(context.agent_options);
+        let agent_options = normalized_agent_options(context.agent_options.clone());
         let schedule_prefill = parse_schedule_prefill(prefill.schedule.as_deref());
         let preferred_agent = normalized_optional(prefill.agent.as_deref().unwrap_or_default());
         let default_agent_index = preferred_agent
@@ -360,6 +363,7 @@ impl CronInitApp {
             });
 
         Self {
+            context,
             focus: CronField::Name,
             name: InputFieldState::new(prefill.name.unwrap_or_default()),
             schedule_preset: SelectFieldState::new(
@@ -1077,6 +1081,7 @@ mod tests {
         let app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
                 name: Some("nightly".to_string()),
@@ -1095,6 +1100,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill::default(),
         );
@@ -1109,6 +1115,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
                 name: Some("nightly".to_string()),
@@ -1134,6 +1141,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
                 name: Some("nightly".to_string()),
@@ -1155,6 +1163,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill {
                 name: Some("nightly".to_string()),
@@ -1182,6 +1191,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill::default(),
         );
@@ -1207,6 +1217,7 @@ mod tests {
         let mut app = CronInitApp::new(
             CronInitFormContext {
                 agent_options: vec!["codex".to_string()],
+                cron_dir_label: ".metastack/cron".to_string(),
             },
             CronInitFormPrefill::default(),
         );

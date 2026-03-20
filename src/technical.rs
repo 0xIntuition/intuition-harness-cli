@@ -1250,7 +1250,7 @@ fn slugify(value: &str) -> String {
 }
 
 fn load_context_bundle(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let sections = [
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),
@@ -1838,7 +1838,7 @@ Ignored.
     fn technical_prompt_includes_selected_criteria_and_repo_snapshot() {
         let temp = tempdir().expect("tempdir should be created");
         let root = temp.path();
-        let paths = PlanningPaths::new(root);
+        let paths = PlanningPaths::for_root(root).expect("paths should resolve");
         fs::create_dir_all(&paths.codebase_dir).expect("codebase dir should be created");
         fs::create_dir_all(root.join("src")).expect("src dir should be created");
         fs::write(paths.scan_path(), "# Scan\nCLI layout").expect("scan context should be written");

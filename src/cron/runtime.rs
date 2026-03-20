@@ -29,7 +29,7 @@ use super::{
 
 pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<String>> {
     super::ensure_cron_layout(root)?;
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_runtime_layout(&paths)?;
 
     if let Some(pid) = read_pid(&paths)? {
@@ -121,7 +121,7 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
 }
 
 pub(super) fn run_stop(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let Some(pid) = read_pid(&paths)? else {
         return Ok("Cron scheduler is not running.".to_string());
     };
@@ -181,7 +181,7 @@ pub(super) fn run_stop(root: &Path) -> Result<String> {
 }
 
 pub(super) fn run_status(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let state = load_scheduler_state(&paths)?;
     let running_pid = state.pid.filter(|pid| pid_is_running(*pid));
     let discovered = discover_jobs(root)?;
@@ -291,7 +291,7 @@ pub(super) fn run_status(root: &Path) -> Result<String> {
 
 pub(super) fn run_job_now(root: &Path, args: &CronRunArgs) -> Result<String> {
     super::ensure_cron_layout(root)?;
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_runtime_layout(&paths)?;
     let job = load_job(root, &paths.cron_job_path(&args.name))?;
     let mut state = load_scheduler_state(&paths)?;
@@ -333,7 +333,7 @@ fn run_scheduler_loop(
     poll_interval_seconds: u64,
     pid_override: Option<u32>,
 ) -> Result<()> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     ensure_runtime_layout(&paths)?;
 
     let mut state = load_scheduler_state(&paths)?;

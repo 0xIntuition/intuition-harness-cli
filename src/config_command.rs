@@ -181,6 +181,18 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         display_optional(view.app_config.agents.default_reasoning.as_deref())
     ));
     lines.push(format!(
+        "Effective command name: {}",
+        display_optional(view.app_config.branding.command_name.as_deref())
+    ));
+    lines.push(format!(
+        "Default repo state root: {}",
+        display_optional(view.app_config.branding.repo_state_root.as_deref())
+    ));
+    lines.push(format!(
+        "Default backlog root: {}",
+        display_optional(view.app_config.branding.backlog_root.as_deref())
+    ));
+    lines.push(format!(
         "Advanced route overrides: {}",
         render_route_override_summary(&view.app_config)
     ));
@@ -236,6 +248,9 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.default_agent.is_some()
         || args.default_model.is_some()
         || args.default_reasoning.is_some()
+        || args.command_name.is_some()
+        || args.repo_state_root.is_some()
+        || args.backlog_root.is_some()
         || args.route.is_some()
         || args.clear_route.is_some()
         || args.route_agent.is_some()
@@ -291,6 +306,15 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             normalized.as_deref(),
         )?;
         view.app_config.agents.default_reasoning = normalized;
+    }
+    if let Some(command_name) = &args.command_name {
+        view.app_config.branding.command_name = normalize_optional(command_name);
+    }
+    if let Some(repo_state_root) = &args.repo_state_root {
+        view.app_config.branding.repo_state_root = normalize_optional(repo_state_root);
+    }
+    if let Some(backlog_root) = &args.backlog_root {
+        view.app_config.branding.backlog_root = normalize_optional(backlog_root);
     }
     apply_route_updates(&mut view.app_config, args)?;
     view.app_config.validate()?;

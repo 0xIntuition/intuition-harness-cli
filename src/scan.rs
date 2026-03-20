@@ -71,6 +71,7 @@ struct TrackedScanFile {
 #[derive(Debug, Clone)]
 struct ScanProgress {
     repo_name: String,
+    command_name: String,
     agent: String,
     log_path: String,
     steps: Vec<ScanProgressEntry>,
@@ -108,12 +109,13 @@ pub fn run_scan(args: &ScanArgs) -> Result<ScanReport> {
 pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<ScanReport> {
     let root = canonicalize_existing_dir(&args.root)?;
     ensure_planning_layout(&root, false)?;
-    let paths = PlanningPaths::new(&root);
+    let paths = PlanningPaths::for_root(&root)?;
     let context = CodebaseContext::collect(&root)?;
     let agent = resolve_scan_agent_name(&root, route_key)?;
     let log_path = display_path(&paths.scan_log_path(), &root);
     let mut progress = ScanProgress::new(
         &context.repo_name,
+        &crate::fs::effective_command_name(Some(&root))?,
         &agent,
         log_path.clone(),
         tracked_scan_files(&paths, &root),
@@ -166,6 +168,7 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
         &repo_target,
         &workflow_contract,
         &context.render_prompt_summary(),
+        &display_path(&paths.codebase_dir, &root),
     );
     let run_args = RunAgentArgs {
         root: Some(root.clone()),
@@ -308,9 +311,16 @@ impl ScanReport {
 }
 
 impl ScanProgress {
-    fn new(repo_name: &str, agent: &str, log_path: String, files: Vec<TrackedScanFile>) -> Self {
+    fn new(
+        repo_name: &str,
+        command_name: &str,
+        agent: &str,
+        log_path: String,
+        files: Vec<TrackedScanFile>,
+    ) -> Self {
         Self {
             repo_name: repo_name.to_string(),
+            command_name: command_name.to_string(),
             agent: agent.to_string(),
             log_path,
             steps: vec![
@@ -381,6 +391,7 @@ impl ScanProgress {
     fn dashboard_data(&self) -> ScanDashboardData {
         ScanDashboardData {
             title: format!("Codebase scan for {}", self.repo_name),
+            command_name: self.command_name.clone(),
             status_line: format!(
                 "Using agent `{}` to refresh reusable planning context",
                 self.agent

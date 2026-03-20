@@ -26,7 +26,7 @@ pub(crate) struct AgentBriefRequest {
 pub(crate) fn write_agent_brief(root: &Path, request: AgentBriefRequest) -> Result<PathBuf> {
     let root = canonicalize_existing_dir(root)?;
     ensure_planning_layout(&root, false)?;
-    let paths = PlanningPaths::new(&root);
+    let paths = PlanningPaths::for_root(&root)?;
     ensure_dir(&paths.agent_briefs_dir)?;
 
     let output_path = request.output.clone().unwrap_or_else(|| {

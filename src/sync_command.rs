@@ -109,6 +109,11 @@ pub async fn run_sync_dashboard_command(
     match run_sync_dashboard(
         SyncDashboardData {
             title,
+            command_name: crate::fs::effective_command_name(Some(&root))?,
+            backlog_dir_label: crate::fs::display_path(
+                &crate::fs::PlanningPaths::for_root(&root)?.backlog_dir,
+                &root,
+            ),
             issues: load_sync_dashboard_issues(&service, &entries).await?,
         },
         options,
@@ -1259,7 +1264,7 @@ fn sync_dashboard_title(
 }
 
 fn discover_backlog_entries(root: &Path) -> Result<Vec<BacklogSyncEntry>> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     if !paths.backlog_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -1422,7 +1427,7 @@ fn resolve_entry_by_slug(root: &Path, entries: &[BacklogSyncEntry], slug: &str) 
         })?;
     if !entry
         .issue_dir
-        .starts_with(PlanningPaths::new(root).backlog_dir)
+        .starts_with(PlanningPaths::for_root(root)?.backlog_dir)
     {
         bail!("refusing to use backlog entry outside `.metastack/backlog/`");
     }

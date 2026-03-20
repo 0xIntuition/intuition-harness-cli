@@ -11,12 +11,13 @@ usage() {
 Install the `meta` CLI from GitHub Releases.
 
 Usage:
-  ./scripts/install-meta.sh [--version VERSION] [--bin-dir DIR] [--repo OWNER/REPO]
+  ./scripts/install-meta.sh [--version VERSION] [--bin-dir DIR] [--repo OWNER/REPO] [--alias NAME]
 
 Options:
   --version VERSION  Install a specific version (accepts vX.Y.Z or X.Y.Z)
   --bin-dir DIR      Install into DIR instead of ~/.local/bin
   --repo OWNER/REPO  Override the GitHub repository (default: metastack-systems/metastack-cli)
+  --alias NAME       Also install a branded alias that points to the same binary payload
   -h, --help         Show this help output
 
 Environment:
@@ -24,6 +25,7 @@ Environment:
   META_INSTALL_DIR             Default install directory when --bin-dir is omitted
   META_INSTALL_REPO            Default repository when --repo is omitted
   META_INSTALL_VERSION         Default version when --version is omitted
+  META_INSTALL_ALIAS           Default branded alias installed alongside meta
   META_INSTALL_LATEST_VERSION  Testing override for latest-version resolution
   META_INSTALL_OS             Override detected OS slug (default: uname -s)
   META_INSTALL_ARCH           Override detected architecture slug (default: uname -m)
@@ -97,6 +99,7 @@ VERSION_INPUT=${META_INSTALL_VERSION:-}
 BIN_DIR=${META_INSTALL_DIR:-$HOME/.local/bin}
 REPO=${META_INSTALL_REPO:-metastack-systems/metastack-cli}
 BASE_URL=${META_INSTALL_BASE_URL:-https://github.com}
+ALIAS_NAME=${META_INSTALL_ALIAS:-}
 BASE_URL=${BASE_URL%/}
 
 while [ "$#" -gt 0 ]; do
@@ -115,6 +118,11 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || die "--repo requires a value"
       REPO=$1
+      ;;
+    --alias)
+      shift
+      [ "$#" -gt 0 ] || die "--alias requires a value"
+      ALIAS_NAME=$1
       ;;
     -h|--help)
       usage
@@ -181,6 +189,12 @@ cp "$extract_dir/meta" "$install_path"
 chmod 755 "$install_path"
 
 printf '%s\n' "installed meta $VERSION to $install_path"
+if [ -n "$ALIAS_NAME" ]; then
+  alias_path=$BIN_DIR/$ALIAS_NAME
+  cp "$extract_dir/meta" "$alias_path"
+  chmod 755 "$alias_path"
+  printf '%s\n' "installed alias $ALIAS_NAME $VERSION to $alias_path"
+fi
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)

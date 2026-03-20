@@ -25,7 +25,7 @@ It is built for teams that want to:
 
 Most planning tools split work across issue trackers, docs, scripts, and ad hoc prompts. MetaStack pulls those workflows back into one place:
 
-- `meta runtime config` saves install-scoped Linear and agent defaults.
+- `meta runtime config` saves install-scoped Linear and agent defaults, plus optional branding/layout defaults such as `--command-name intuition --repo-state-root .intuition`.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
 - `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
@@ -69,6 +69,7 @@ Download the installer first when you do not want `curl | sh`:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh -o install-meta.sh
 sh install-meta.sh --version v0.1.0
+sh install-meta.sh --version v0.1.0 --alias intuition
 ```
 
 After installation:
@@ -343,6 +344,8 @@ meta runtime setup --listen-label agent --assignment-scope viewer --refresh-poli
 Legacy alias: `meta setup`
 
 `meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+
+Repo setup also accepts branding/layout overrides such as `--command-name intuition --repo-state-root .intuition --backlog-root .intuition/backlog`; add `--migrate-layout` to move the operational repo-local state into the configured destination while keeping canonical metadata discoverable at `.metastack/meta.json`.
 
 For listen setup, `assignment_scope = "viewer"` now means `viewer + unassigned` for unattended listen runs. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 

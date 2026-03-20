@@ -132,7 +132,7 @@ async fn refine_issue(
 ) -> Result<RefinementReport> {
     let started_at = now_rfc3339()?;
     let run_id = refinement_run_id()?;
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let issue_dir = paths.backlog_issue_dir(&issue.identifier);
     ensure_dir(&issue_dir)?;
     save_issue_metadata(&issue_dir, &build_issue_metadata(issue))?;
@@ -560,7 +560,7 @@ fn max_backtick_run(value: &str) -> usize {
 }
 
 fn load_context_bundle(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let sections = [
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),
@@ -712,7 +712,7 @@ mod tests {
     fn render_refinement_prompt_uses_safe_fences_for_existing_markdown_code_blocks() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path();
-        let paths = PlanningPaths::new(root);
+        let paths = PlanningPaths::for_root(root).expect("paths should resolve");
         write_text_file(&paths.scan_path(), "scan", true).expect("scan context");
         write_text_file(&paths.architecture_path(), "architecture", true).expect("architecture");
         write_text_file(&paths.conventions_path(), "conventions", true).expect("conventions");

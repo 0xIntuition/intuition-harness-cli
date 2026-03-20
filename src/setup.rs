@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::IsTerminal;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -265,8 +266,12 @@ pub async fn run_setup(args: &SetupArgs) -> Result<String> {
     }
 
     if has_direct_updates(args) {
+        let before_paths = PlanningPaths::for_root(&root)?;
         let changed = apply_direct_updates(&mut view, args).await?;
         save_view(&mut view).await?;
+        if args.migrate_layout {
+            migrate_repo_layout(&before_paths, &PlanningPaths::for_root(&root)?)?;
+        }
         return Ok(SetupReport {
             metastack_meta_path: view.metastack_meta_path.clone(),
             changed,
@@ -301,7 +306,8 @@ fn resolve_backlog_template_conflicts(
     args: &SetupArgs,
     can_launch_tui: bool,
 ) -> Result<BacklogTemplateConflictAction> {
-    let conflicts = template_seed_conflicts(&PlanningPaths::new(root).backlog_template_dir)?;
+    let paths = PlanningPaths::for_root(root).unwrap_or_else(|_| PlanningPaths::new(root));
+    let conflicts = template_seed_conflicts(&paths.backlog_template_dir)?;
     if conflicts.is_empty() {
         return Ok(BacklogTemplateConflictAction::Skip);
     }
@@ -385,7 +391,7 @@ fn load_view(root: &std::path::Path) -> Result<SetupViewData> {
     Ok(SetupViewData {
         root: root.to_path_buf(),
         config_path: crate::config::resolve_config_path()?,
-        metastack_meta_path: PlanningPaths::new(root).meta_path(),
+        metastack_meta_path: PlanningPaths::metadata_path(root),
         app_config: AppConfig::load()?,
         app_config_changed: false,
         planning_meta: PlanningMeta::load(root)?,
@@ -399,6 +405,71 @@ async fn save_view(view: &mut SetupViewData) -> Result<()> {
         view.app_config.save()?;
     }
     view.planning_meta.save(&view.root)?;
+    Ok(())
+}
+
+fn migrate_repo_layout(before: &PlanningPaths, after: &PlanningPaths) -> Result<()> {
+    if before.metastack_dir == after.metastack_dir && before.backlog_dir == after.backlog_dir {
+        return Ok(());
+    }
+
+    for (source, destination) in [
+        (before.agent_dir.clone(), after.agent_dir.clone()),
+        (before.merge_runs_dir.clone(), after.merge_runs_dir.clone()),
+        (before.codebase_dir.clone(), after.codebase_dir.clone()),
+        (before.workflows_dir.clone(), after.workflows_dir.clone()),
+        (before.cron_dir.clone(), after.cron_dir.clone()),
+        (before.backlog_dir.clone(), after.backlog_dir.clone()),
+    ] {
+        move_path_if_present(&source, &destination)?;
+    }
+
+    let before_readme = before.metastack_dir.join("README.md");
+    let after_readme = after.metastack_dir.join("README.md");
+    move_path_if_present(&before_readme, &after_readme)?;
+    Ok(())
+}
+
+fn move_path_if_present(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    if source == destination || !source.exists() {
+        return Ok(());
+    }
+
+    if destination.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) if source.is_dir() => copy_dir_recursive(source, destination),
+        Err(_) => {
+            fs::copy(source, destination)?;
+            fs::remove_file(source)?;
+            Ok(())
+        }
+    }
+}
+
+fn copy_dir_recursive(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&source_path, &destination_path)?;
+        } else {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    fs::remove_dir_all(source)?;
     Ok(())
 }
 
@@ -482,6 +553,18 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         )
     ));
     lines.push(format!(
+        "Effective command name: {}",
+        display_optional(view.planning_meta.branding.command_name.as_deref())
+    ));
+    lines.push(format!(
+        "Repo state root: {}",
+        display_optional(view.planning_meta.branding.repo_state_root.as_deref())
+    ));
+    lines.push(format!(
+        "Backlog root: {}",
+        display_optional(view.planning_meta.branding.backlog_root.as_deref())
+    ));
+    lines.push(format!(
         "Listen prerequisites: {}",
         listen_prerequisites_summary()
     ));
@@ -509,6 +592,10 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.interactive_plan_follow_up_question_limit.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
+        || args.command_name.is_some()
+        || args.repo_state_root.is_some()
+        || args.backlog_root.is_some()
+        || args.migrate_layout
 }
 
 async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Result<bool> {
@@ -619,6 +706,15 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     }
     if let Some(label) = &args.technical_label {
         view.planning_meta.issue_labels.technical = normalize_optional(label);
+    }
+    if let Some(command_name) = &args.command_name {
+        view.planning_meta.branding.command_name = normalize_optional(command_name);
+    }
+    if let Some(repo_state_root) = &args.repo_state_root {
+        view.planning_meta.branding.repo_state_root = normalize_optional(repo_state_root);
+    }
+    if let Some(backlog_root) = &args.backlog_root {
+        view.planning_meta.branding.backlog_root = normalize_optional(backlog_root);
     }
 
     let after_meta = serde_json::to_value(&view.planning_meta)?;

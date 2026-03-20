@@ -43,6 +43,7 @@ pub(crate) struct ScanDashboardRow {
 #[derive(Debug, Clone)]
 pub(crate) struct ScanDashboardData {
     pub(crate) title: String,
+    pub(crate) command_name: String,
     pub(crate) status_line: String,
     pub(crate) steps: Vec<ScanDashboardRow>,
     pub(crate) files: Vec<ScanDashboardRow>,
@@ -126,7 +127,7 @@ fn render_dashboard(frame: &mut Frame<'_>, data: &ScanDashboardData) {
             Line::from("Live agent output stays hidden while the scan runs."),
             key_hints(&[("Ctrl-C", "exit"), ("Files", "update live")]),
         ]),
-        panel_title("meta scan", false),
+        panel_title(format!("{} context scan", data.command_name), false),
     );
     frame.render_widget(header, outer[0]);
 
@@ -212,6 +213,7 @@ mod tests {
     fn scan_dashboard_snapshot_surfaces_steps_and_generated_files() {
         let data = ScanDashboardData {
             title: "Codebase scan for demo-cli".to_string(),
+            command_name: "intuition".to_string(),
             status_line: "Refreshing reusable planning docs".to_string(),
             steps: vec![
                 ScanDashboardRow {
@@ -247,7 +249,7 @@ mod tests {
 
         let snapshot = render_snapshot(&data, 120, 28).expect("snapshot should render");
 
-        assert!(snapshot.contains("meta scan"));
+        assert!(snapshot.contains("intuition context scan"));
         assert!(snapshot.contains("Collect repository facts"));
         assert!(snapshot.contains("Refresh codebase docs with `scan-stub`"));
         assert!(snapshot.contains(".metastack/codebase/ARCHITECTURE.md"));
@@ -258,6 +260,7 @@ mod tests {
     fn scan_dashboard_snapshot_handles_empty_narrow_state() {
         let data = ScanDashboardData {
             title: "Codebase scan for demo-cli".to_string(),
+            command_name: "meta".to_string(),
             status_line: "Waiting for the first agent update".to_string(),
             steps: Vec::new(),
             files: Vec::new(),

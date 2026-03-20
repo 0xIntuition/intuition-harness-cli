@@ -1,10 +1,16 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::config::{AppConfig, PlanningMeta};
+
+pub const DEFAULT_COMMAND_NAME: &str = "meta";
+pub const DEFAULT_REPO_STATE_ROOT: &str = ".metastack";
+
 #[derive(Debug, Clone)]
 pub struct PlanningPaths {
+    pub metadata_dir: PathBuf,
     pub metastack_dir: PathBuf,
     pub agent_dir: PathBuf,
     pub backlog_dir: PathBuf,
@@ -21,10 +27,37 @@ pub struct PlanningPaths {
 }
 
 impl PlanningPaths {
+    /// Resolve the effective repo-local layout for `root`.
+    ///
+    /// Returns an error when config loading fails or when a configured path escapes the repository.
+    pub fn for_root(root: &Path) -> Result<Self> {
+        let app_config = AppConfig::load()?;
+        let planning_meta = PlanningMeta::load(root)?;
+        let layout = EffectiveLayout::resolve(root, &app_config, &planning_meta)?;
+        Ok(Self::from_layout(root, &layout))
+    }
+
     pub fn new(root: &Path) -> Self {
-        let metastack_dir = root.join(".metastack");
+        let state_root = root.join(DEFAULT_REPO_STATE_ROOT);
+        Self::from_roots(
+            root.join(DEFAULT_REPO_STATE_ROOT),
+            state_root.clone(),
+            state_root.join("backlog"),
+        )
+    }
+
+    pub fn metadata_path(root: &Path) -> PathBuf {
+        root.join(DEFAULT_REPO_STATE_ROOT).join("meta.json")
+    }
+
+    fn from_layout(root: &Path, layout: &EffectiveLayout) -> Self {
+        let metadata_dir = root.join(DEFAULT_REPO_STATE_ROOT);
+        let metastack_dir = layout.repo_state_root.clone();
+        Self::from_roots(metadata_dir, metastack_dir, layout.backlog_root.clone())
+    }
+
+    fn from_roots(metadata_dir: PathBuf, metastack_dir: PathBuf, backlog_dir: PathBuf) -> Self {
         let agent_dir = metastack_dir.join("agents");
-        let backlog_dir = metastack_dir.join("backlog");
         let merge_runs_dir = metastack_dir.join("merge-runs");
         let backlog_template_dir = backlog_dir.join("_TEMPLATE");
         let agent_briefs_dir = agent_dir.join("briefs");
@@ -37,6 +70,7 @@ impl PlanningPaths {
         let cron_runtime_logs_dir = cron_runtime_dir.join("logs");
 
         Self {
+            metadata_dir,
             metastack_dir,
             agent_dir,
             backlog_dir,
@@ -98,7 +132,7 @@ impl PlanningPaths {
     }
 
     pub fn meta_path(&self) -> PathBuf {
-        self.metastack_dir.join("meta.json")
+        self.metadata_dir.join("meta.json")
     }
 
     pub fn legacy_agent_dir(&self) -> PathBuf {
@@ -155,6 +189,53 @@ impl PlanningPaths {
 
     pub fn cron_job_log_path(&self, name: &str) -> PathBuf {
         self.cron_runtime_logs_dir.join(format!("{name}.log"))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveLayout {
+    command_name: String,
+    repo_state_root: PathBuf,
+    backlog_root: PathBuf,
+}
+
+impl EffectiveLayout {
+    fn resolve(root: &Path, app_config: &AppConfig, planning_meta: &PlanningMeta) -> Result<Self> {
+        let invoked = invoked_command_name();
+        let command_name = normalize_command_name(
+            planning_meta
+                .branding
+                .command_name
+                .as_deref()
+                .or(app_config.branding.command_name.as_deref())
+                .or(invoked.as_deref())
+                .unwrap_or(DEFAULT_COMMAND_NAME),
+        );
+        let repo_state_root = resolve_repo_contained_path(
+            root,
+            planning_meta
+                .branding
+                .repo_state_root
+                .as_deref()
+                .or(app_config.branding.repo_state_root.as_deref())
+                .unwrap_or(DEFAULT_REPO_STATE_ROOT),
+            "repo state root",
+        )?;
+        let backlog_root = match planning_meta
+            .branding
+            .backlog_root
+            .as_deref()
+            .or(app_config.branding.backlog_root.as_deref())
+        {
+            Some(value) => resolve_repo_contained_path(root, value, "backlog root")?,
+            None => repo_state_root.join("backlog"),
+        };
+
+        Ok(Self {
+            command_name,
+            repo_state_root,
+            backlog_root,
+        })
     }
 }
 
@@ -249,6 +330,76 @@ pub fn display_path(path: &Path, root: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+/// Resolve the effective top-level command name for the current invocation.
+///
+/// Returns an error when loading repo or install config fails.
+pub fn effective_command_name(root: Option<&Path>) -> Result<String> {
+    let Some(root) = root else {
+        return Ok(invoked_command_name()
+            .map(|name| normalize_command_name(&name))
+            .unwrap_or_else(|| DEFAULT_COMMAND_NAME.to_string()));
+    };
+
+    let app_config = AppConfig::load()?;
+    let planning_meta = PlanningMeta::load(root)?;
+    Ok(EffectiveLayout::resolve(root, &app_config, &planning_meta)?.command_name)
+}
+
+/// Render a user-facing command path using the effective command name.
+///
+/// Returns an error when loading repo or install config fails.
+pub fn render_command(root: Option<&Path>, suffix: &str) -> Result<String> {
+    let command_name = effective_command_name(root)?;
+    if suffix.trim().is_empty() {
+        Ok(command_name)
+    } else {
+        Ok(format!("{command_name} {suffix}"))
+    }
+}
+
+fn invoked_command_name() -> Option<String> {
+    let argv0 = std::env::args().next()?;
+    let name = Path::new(&argv0).file_name()?.to_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn normalize_command_name(value: &str) -> String {
+    value.trim().to_string()
+}
+
+fn resolve_repo_contained_path(root: &Path, raw: &str, label: &str) -> Result<PathBuf> {
+    let root = canonicalize_existing_dir(root)?;
+    let mut candidate = if Path::new(raw).is_absolute() {
+        PathBuf::new()
+    } else {
+        root.clone()
+    };
+
+    for component in Path::new(raw).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => candidate.push(value),
+            Component::ParentDir => {
+                if !candidate.pop() || !candidate.starts_with(&root) {
+                    bail!("{label} `{raw}` escapes the repository root");
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                candidate.push(component.as_os_str());
+            }
+        }
+    }
+
+    if !candidate.starts_with(&root) {
+        bail!("{label} `{raw}` must stay under `{}`", root.display());
+    }
+
+    Ok(candidate)
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use crate::cli::{
 };
 use crate::config::AGENT_ROUTE_CONTEXT_RELOAD;
 use crate::config::{AppConfig, PlanningMeta, detect_supported_agents};
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, render_command};
 use crate::repo_target::RepoTarget;
 use crate::scan::{CodebaseContext, run_scan, run_scan_for_route};
 use crate::workflow_contract::{
@@ -186,14 +186,17 @@ fn run_context_doctor(args: &ContextDoctorArgs) -> Result<String> {
 fn diagnose_context(root: &Path) -> Result<DoctorReport> {
     let planning_meta = PlanningMeta::load(root)?;
     let app_config = AppConfig::load()?;
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root)?;
     let workflow_bundle = WorkflowInstructionBundle::load(root, RepoTarget::from_root(root))?;
     let mut issues = Vec::new();
     let mut notices = Vec::new();
+    let runtime_setup = render_command(Some(root), "runtime setup")?;
+    let context_reload = render_command(Some(root), "context reload")?;
+    let context_scan = render_command(Some(root), "context scan")?;
 
     if !paths.meta_path().is_file() {
         issues.push(format!(
-            "Missing `{}`. Run `meta runtime setup --root {}` to bootstrap repo-scoped defaults.",
+            "Missing `{}`. Run `{runtime_setup} --root {}` to bootstrap repo-scoped defaults.",
             display_path(&paths.meta_path(), root),
             root.display()
         ));
@@ -249,10 +252,13 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
         .filter_map(|(_, path)| (!path.is_file()).then(|| display_path(&path, root)))
         .collect::<Vec<_>>();
     if missing_codebase.is_empty() {
-        notices.push("All expected `.metastack/codebase/*.md` files are present.".to_string());
+        notices.push(format!(
+            "All expected `{}` files are present.",
+            display_path(&paths.codebase_dir, root)
+        ));
     } else {
         issues.push(format!(
-            "Missing codebase context files: {}. Run `meta context reload --root {}` or `meta context scan --root {}`.",
+            "Missing codebase context files: {}. Run `{context_reload} --root {}` or `{context_scan} --root {}`.",
             missing_codebase.join(", "),
             root.display(),
             root.display()
@@ -299,7 +305,7 @@ fn render_source_block(source: Option<&InstructionSource>, root: &Path) -> Vec<S
 }
 
 fn codebase_context_paths(root: &Path) -> Vec<(&'static str, PathBuf)> {
-    let paths = PlanningPaths::new(root);
+    let paths = PlanningPaths::for_root(root).unwrap_or_else(|_| PlanningPaths::new(root));
     vec![
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),
