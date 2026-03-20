@@ -35,6 +35,9 @@ That target is the same gate used by `.github/workflows/quality.yml` on pull req
 - `cargo test`
 - `cargo test --test release_artifacts`
 
+The interactive planning integration proof in `tests/plan.rs` shells out to `expect`, so local
+`make quality` runs also require that binary on `PATH` in addition to the Rust toolchain.
+
 The final focused test is the release-verification proof. It exercises `scripts/release-artifacts.sh` with stub builders and verifies the expected archive names, `SHA256SUMS` layout, and extracted `meta --version` output without requiring a full cross-platform packaging host.
 
 ## One-Time Prerequisites

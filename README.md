@@ -891,6 +891,9 @@ make quality
 - `cargo test`
 - `cargo test --test release_artifacts`
 
+The interactive planning integration proof in `tests/plan.rs` shells out to `expect`, so local
+`make quality` runs also require that binary on `PATH` in addition to Rust.
+
 The focused `release_artifacts` proof keeps the GitHub Release packaging contract explicit in the root gate by verifying the release-script archive names, `SHA256SUMS`, and extracted `meta --version` output.
 
 ## Testing
