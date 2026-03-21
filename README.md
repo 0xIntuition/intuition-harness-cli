@@ -574,6 +574,7 @@ Inspect and refresh the effective context that agent-backed runs consume:
 meta context show
 meta context map
 meta context doctor
+meta context scan --json
 meta context reload
 ```
 
@@ -581,6 +582,7 @@ meta context reload
 - `map` prints a repo-map style summary derived from the live repository tree
 - `doctor` reports missing or stale inputs such as `.metastack/meta.json`, repo rules, instructions files, and generated codebase docs
 - `reload` re-runs the context refresh path used by `meta scan`
+- `scan --json` runs the scan pipeline without a terminal snapshot and emits a JSON report describing the refreshed codebase context plus the written and removed files
 
 ### Machine-readable Command Contract
 
@@ -603,6 +605,34 @@ Notes:
 - Mutation commands default to structured JSON when `--no-interactive` is active.
 - `--render-once` remains a terminal snapshot mode, not a JSON mode, and conflicts with `--json` where both apply.
 - Machine-readable failures use one stable top-level shape: `status`, `command`, and `error { code, message, context? }`.
+
+### `--json` / `--no-interactive` / `--render-once` Matrix
+
+This matrix is the contract for agent callers deciding whether to drive a command as JSON, as a promptless mutation, or as a text snapshot:
+
+| Command | `--no-interactive` | `--json` | `--render-once` |
+| --- | --- | --- | --- |
+| `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
+| `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta backlog sync pull` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta backlog sync push` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `meta linear issues create` | required for promptless runs; implies JSON | n/a | supported for the create form |
+| `meta linear issues edit` | required for promptless runs; implies JSON | n/a | supported for the edit form |
+| `meta linear issues refine` | not needed; command is already headless | supported | not supported |
+| `meta context scan` | not needed; command is already headless | supported | not supported |
+| `meta agents listen --once` | not needed; `--once` is the headless poll mode | supported only with `--once`; returns one poll cycle | supported separately as a text dashboard snapshot |
+| `meta runtime cron init` | required for promptless writes; implies JSON | supported | supported as a text dashboard snapshot |
+| `meta runtime config` | not needed | supported | supported |
+| `meta merge` | required for promptless execution with explicit PR selection | supported | supported |
+
+Rules:
+
+- Prefer `--no-interactive` for any mutation command that would otherwise prompt for missing input.
+- Prefer `--json` for read-only or already-headless flows such as `meta context scan`, `meta linear issues refine`, and `meta agents listen --once`.
+- Use `--render-once` only when a text snapshot of the TUI is useful for humans or snapshot-style tests; it is not part of the machine JSON contract.
+- Where both flags exist, `--json` and `--render-once` are mutually exclusive.
 
 ### `runtime cron`
 
@@ -745,6 +775,11 @@ meta issues refine MET-35 --apply
 `meta issues refine` is the quality-improvement step after `meta plan` or `meta backlog tech`. It reuses the configured local agent to critique the current Linear description, persist each refinement pass under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`, and generate a proposed rewrite. By default the command is critique-only.
 
 Pass `--apply` only when you want to promote the final rewrite into `.metastack/backlog/<ISSUE>/index.md` and then push that rewritten description back to Linear. The command always writes the local before/after snapshots first so the refinement run stays auditable even if the remote mutation fails.
+
+Machine mode:
+
+- `meta linear issues refine --json ...` emits structured findings, artifact paths, and apply-state details
+- failure paths also use the same structured JSON envelope as the other machine-facing commands
 
 Side effects:
 
