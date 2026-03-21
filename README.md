@@ -190,6 +190,12 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta workspace` | List, clean, and prune sibling listener workspace clones under the fixed workspace root |
 | `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
 
+## Interactive TUI Scrolling
+
+Long-form editors and preview panes in the terminal UI now share one scrolling model. When a multiline editor or preview has focus, `Up`, `Down`, `PgUp`, `PgDn`, `Home`, and `End` move within the wrapped content, and mouse-wheel scrolling applies to the focused pane instead of leaking into surrounding lists or forms.
+
+This applies to flows such as `meta backlog plan`, `meta linear issues create`, `meta linear issues edit`, `meta dashboard linear`, `meta backlog tech`, `meta merge`, and related preview-driven dashboards that render long descriptions or generated file content.
+
 ## Build From Source
 
 Build and install the CLI into your local Cargo bin directory:
