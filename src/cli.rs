@@ -221,6 +221,9 @@ pub struct ScanArgs {
     /// Repository root to scan.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
+    /// Emit the scan result as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -580,6 +583,9 @@ pub struct CronInitArgs {
     /// Skip the dashboard flow and create directly from CLI flags.
     #[arg(long)]
     pub no_interactive: bool,
+    /// Emit the cron-init result as JSON.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Render the cron init dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
     pub render_once: bool,
@@ -1006,6 +1012,9 @@ pub struct ListenRunArgs {
     /// Execute a single live poll cycle and print a textual summary.
     #[arg(long)]
     pub once: bool,
+    /// Emit the single poll-cycle result as JSON. Requires `--once`.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Execute a single cycle and print a deterministic ratatui snapshot.
     #[arg(long)]
     pub render_once: bool,
@@ -1071,6 +1080,9 @@ pub struct SyncArgs {
     /// Skip interactive sync pickers and require explicit command arguments.
     #[arg(long)]
     pub no_interactive: bool,
+    /// Emit direct sync-command results as JSON.
+    #[arg(long, conflicts_with = "render_once")]
+    pub json: bool,
     /// Filter to a specific project name (overrides the repo default).
     #[arg(long)]
     pub project: Option<String>,
@@ -1412,6 +1424,9 @@ pub struct IssueRefineArgs {
     /// Update the local backlog packet and push the final rewrite back to Linear.
     #[arg(long)]
     pub apply: bool,
+    /// Emit refinement results as JSON.
+    #[arg(long)]
+    pub json: bool,
     /// Override the configured default agent/provider for refinement.
     #[arg(long)]
     pub agent: Option<String>,
@@ -1584,4 +1599,79 @@ pub enum ConfigEventArg {
     BackTab,
     Enter,
     Esc,
+}
+
+impl Cli {
+    pub(crate) fn machine_output_command(&self) -> Option<&'static str> {
+        match &self.command {
+            Command::Backlog(args) => match &args.command {
+                BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
+                BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
+                BacklogCommands::Sync(args) if args.no_interactive || args.json => {
+                    Some("backlog.sync")
+                }
+                _ => None,
+            },
+            Command::Agents(args) => match &args.command {
+                AgentsCommands::Listen(args) if args.run.json => Some("agents.listen"),
+                _ => None,
+            },
+            Command::Linear(args) => match &args.command {
+                LinearCommands::Projects(ProjectsCommands::List(args)) if args.json => {
+                    Some("linear.projects.list")
+                }
+                LinearCommands::Issues(command) => match command {
+                    IssueCommands::List(args) if args.json => Some("linear.issues.list"),
+                    IssueCommands::Create(args) if args.no_interactive => {
+                        Some("linear.issues.create")
+                    }
+                    IssueCommands::Edit(args) if args.no_interactive => Some("linear.issues.edit"),
+                    IssueCommands::Refine(args) if args.json => Some("linear.issues.refine"),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Command::Context(args) => match &args.command {
+                ContextCommands::Scan(args) if args.json => Some("context.scan"),
+                _ => None,
+            },
+            Command::Runtime(args) => match &args.command {
+                RuntimeCommands::Config(args) if args.json => Some("runtime.config"),
+                RuntimeCommands::Setup(args) if args.json => Some("runtime.setup"),
+                RuntimeCommands::Cron(args) => match &args.command {
+                    CronCommands::Init(args) if args.no_interactive || args.json => {
+                        Some("runtime.cron.init")
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            Command::Merge(args) if args.json => Some("merge"),
+            Command::Plan(args) if args.no_interactive => Some("backlog.plan"),
+            Command::Technical(args) if args.no_interactive => Some("backlog.tech"),
+            Command::Listen(args) if args.run.json => Some("agents.listen"),
+            Command::Issues(args) => match &args.command {
+                IssueCommands::List(args) if args.json => Some("linear.issues.list"),
+                IssueCommands::Create(args) if args.no_interactive => Some("linear.issues.create"),
+                IssueCommands::Edit(args) if args.no_interactive => Some("linear.issues.edit"),
+                IssueCommands::Refine(args) if args.json => Some("linear.issues.refine"),
+                _ => None,
+            },
+            Command::Projects(args) => match &args.command {
+                ProjectsCommands::List(args) if args.json => Some("linear.projects.list"),
+                _ => None,
+            },
+            Command::Cron(args) => match &args.command {
+                CronCommands::Init(args) if args.no_interactive || args.json => {
+                    Some("runtime.cron.init")
+                }
+                _ => None,
+            },
+            Command::Scan(args) if args.json => Some("context.scan"),
+            Command::Config(args) if args.json => Some("runtime.config"),
+            Command::Setup(args) if args.json => Some("runtime.setup"),
+            Command::Sync(args) if args.no_interactive || args.json => Some("backlog.sync"),
+            _ => None,
+        }
+    }
 }
