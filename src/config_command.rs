@@ -1347,13 +1347,13 @@ impl ConfigApp {
                     ConfigStep::PlanFollowUpLimit => {
                         let _ = self.plan_follow_up_limit.handle_key(key);
                     }
-            ConfigStep::PlanFastQuestions => {
-                let _ = self.plan_fast_questions.handle_key(key);
-            }
-            ConfigStep::VimMode => {}
-            ConfigStep::PlanLabel => {
-                let _ = self.plan_label.handle_key(key);
-            }
+                    ConfigStep::PlanFastQuestions => {
+                        let _ = self.plan_fast_questions.handle_key(key);
+                    }
+                    ConfigStep::VimMode => {}
+                    ConfigStep::PlanLabel => {
+                        let _ = self.plan_label.handle_key(key);
+                    }
                     ConfigStep::TechnicalLabel => {
                         let _ = self.technical_label.handle_key(key);
                     }

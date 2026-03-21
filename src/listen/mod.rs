@@ -2559,7 +2559,6 @@ where
     Ok(())
 }
 
-
 fn resolve_listen_poll_interval_seconds(
     args: &ListenRunArgs,
     planning_meta: &PlanningMeta,
