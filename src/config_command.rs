@@ -60,20 +60,24 @@ struct SerializableConfigView<'a> {
 pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
     let mut view = load_view()?;
 
-    if args.json {
-        return Ok(ConfigCommandOutput::Json(render_json(&view)?));
-    }
-
     if has_direct_updates(args) {
         let changed = apply_direct_updates(&mut view, args)?;
         save_view(&view)?;
-        return Ok(ConfigCommandOutput::Text(
-            ConfigReport {
-                config_path: view.config_path.clone(),
-                changed,
-            }
-            .render(&view),
-        ));
+        return if args.json {
+            Ok(ConfigCommandOutput::Json(render_json(&view)?))
+        } else {
+            Ok(ConfigCommandOutput::Text(
+                ConfigReport {
+                    config_path: view.config_path.clone(),
+                    changed,
+                }
+                .render(&view),
+            ))
+        };
+    }
+
+    if args.json {
+        return Ok(ConfigCommandOutput::Json(render_json(&view)?));
     }
 
     if args.render_once {
