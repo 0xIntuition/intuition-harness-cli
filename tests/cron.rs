@@ -196,6 +196,43 @@ fn cron_init_no_interactive_writes_agent_prompt_fields() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn cron_init_no_interactive_missing_schedule_emits_structured_json_error()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+
+    let assert = cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "runtime",
+            "cron",
+            "init",
+            "nightly",
+            "--no-interactive",
+            "--command",
+            "echo hello",
+        ])
+        .assert()
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "runtime.cron.init");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`--schedule` is required")
+    );
+    assert!(assert.get_output().stderr.is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn cron_run_executes_shell_command_and_agent_with_shared_context() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let config_path = temp.path().join("metastack.toml");

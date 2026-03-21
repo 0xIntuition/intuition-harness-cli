@@ -1170,6 +1170,33 @@ fn listen_once_json_outputs_machine_readable_poll_result() -> Result<(), Box<dyn
 }
 
 #[test]
+fn listen_json_without_once_emits_structured_json_error() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    write_onboarded_config(&config_path, "")?;
+
+    let assert = meta()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["agents", "listen", "--json"])
+        .assert()
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "agents.listen");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert_eq!(
+        payload["error"]["message"],
+        "`meta agents listen --json` requires `--once`"
+    );
+    assert!(assert.get_output().stderr.is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
