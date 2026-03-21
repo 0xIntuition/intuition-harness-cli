@@ -408,9 +408,9 @@ impl DashboardApp {
             }
             DashboardAction::End => {
                 if self.focus == Focus::Preview {
-                    let _ = self.preview_scroll.apply_key(
-                        crossterm::event::KeyEvent::from(KeyCode::End),
-                        preview_viewport.height,
+                    let _ = self.preview_scroll.apply_key_code_in_viewport(
+                        KeyCode::End,
+                        preview_viewport,
                         self.preview_content_rows(preview_viewport.width),
                     );
                 }
@@ -569,13 +569,13 @@ impl DashboardApp {
 
     fn scroll_preview_line(&mut self, delta: isize, viewport: Rect) {
         let key = if delta.is_negative() {
-            crossterm::event::KeyEvent::from(KeyCode::Up)
+            KeyCode::Up
         } else {
-            crossterm::event::KeyEvent::from(KeyCode::Down)
+            KeyCode::Down
         };
-        let _ = self.preview_scroll.apply_key(
+        let _ = self.preview_scroll.apply_key_code_in_viewport(
             key,
-            viewport.height.max(1),
+            viewport,
             self.preview_content_rows(viewport.width.max(1)),
         );
     }
@@ -589,9 +589,9 @@ impl DashboardApp {
         } else {
             crossterm::event::KeyEvent::from(KeyCode::PageDown)
         };
-        let _ = self.preview_scroll.apply_key(
+        let _ = self.preview_scroll.apply_key_in_viewport(
             key,
-            viewport.height.max(1),
+            viewport,
             self.preview_content_rows(viewport.width.max(1)),
         );
     }
@@ -601,10 +601,9 @@ impl DashboardApp {
         mouse: crossterm::event::MouseEvent,
         viewport: Rect,
     ) -> bool {
-        self.preview_scroll.apply_mouse(
+        self.preview_scroll.apply_mouse_in_viewport(
             mouse,
             viewport,
-            viewport.height.max(1),
             self.preview_content_rows(viewport.width.max(1)),
         )
     }

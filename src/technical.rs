@@ -482,10 +482,9 @@ fn run_interactive_technical_session(
                             ) =>
                     {
                         let viewport = issue_picker_preview_viewport(terminal.size()?.into());
-                        let _ = picker.preview_scroll.apply_mouse(
+                        let _ = picker.preview_scroll.apply_mouse_in_viewport(
                             mouse,
                             viewport,
-                            viewport.height.max(1),
                             picker.preview_content_rows(viewport.width.max(1)),
                         );
                     }
@@ -497,10 +496,9 @@ fn run_interactive_technical_session(
                             ) =>
                     {
                         let viewport = technical_review_preview_viewport(terminal.size()?.into());
-                        let _ = review.preview_scroll.apply_mouse(
+                        let _ = review.preview_scroll.apply_mouse_in_viewport(
                             mouse,
                             viewport,
-                            viewport.height.max(1),
                             review.preview_content_rows(viewport.width.max(1)),
                         );
                     }
@@ -528,9 +526,9 @@ fn handle_issue_picker_key(
         }
         KeyCode::Up => {
             if app.focus == IssuePickerFocus::Preview {
-                let _ = app.preview_scroll.apply_key(
-                    crossterm::event::KeyEvent::from(KeyCode::Up),
-                    preview_viewport.height.max(1),
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Up,
+                    preview_viewport,
                     app.preview_content_rows(preview_viewport.width.max(1)),
                 );
             } else {
@@ -549,9 +547,9 @@ fn handle_issue_picker_key(
         }
         KeyCode::Down => {
             if app.focus == IssuePickerFocus::Preview {
-                let _ = app.preview_scroll.apply_key(
-                    crossterm::event::KeyEvent::from(KeyCode::Down),
-                    preview_viewport.height.max(1),
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Down,
+                    preview_viewport,
                     app.preview_content_rows(preview_viewport.width.max(1)),
                 );
             } else {
@@ -569,9 +567,9 @@ fn handle_issue_picker_key(
         KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
             if app.focus == IssuePickerFocus::Preview =>
         {
-            let _ = app.preview_scroll.apply_key(
+            let _ = app.preview_scroll.apply_key_in_viewport(
                 key,
-                preview_viewport.height.max(1),
+                preview_viewport,
                 app.preview_content_rows(preview_viewport.width.max(1)),
             );
             app.error = None;
@@ -658,9 +656,9 @@ fn handle_technical_review_key(
         }
         KeyCode::Up => {
             if app.focus == TechnicalReviewFocus::Preview {
-                let _ = app.preview_scroll.apply_key(
-                    crossterm::event::KeyEvent::from(KeyCode::Up),
-                    preview_viewport.height.max(1),
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Up,
+                    preview_viewport,
                     app.preview_content_rows(preview_viewport.width.max(1)),
                 );
             } else if app.selected_file == 0 {
@@ -674,9 +672,9 @@ fn handle_technical_review_key(
         }
         KeyCode::Down => {
             if app.focus == TechnicalReviewFocus::Preview {
-                let _ = app.preview_scroll.apply_key(
-                    crossterm::event::KeyEvent::from(KeyCode::Down),
-                    preview_viewport.height.max(1),
+                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                    KeyCode::Down,
+                    preview_viewport,
                     app.preview_content_rows(preview_viewport.width.max(1)),
                 );
             } else if !app.generated.files.is_empty() {
@@ -689,9 +687,9 @@ fn handle_technical_review_key(
         KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
             if app.focus == TechnicalReviewFocus::Preview =>
         {
-            let _ = app.preview_scroll.apply_key(
+            let _ = app.preview_scroll.apply_key_in_viewport(
                 key,
-                preview_viewport.height.max(1),
+                preview_viewport,
                 app.preview_content_rows(preview_viewport.width.max(1)),
             );
             app.error = None;
@@ -1839,6 +1837,7 @@ mod tests {
     use crate::tui::scroll::ScrollState;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use std::fs;
     use tempfile::tempdir;
 
@@ -2058,9 +2057,9 @@ mod tests {
             error: None,
         };
 
-        let _ = app.preview_scroll.apply_key(
-            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
-            20,
+        let _ = app.preview_scroll.apply_key_code_in_viewport(
+            crossterm::event::KeyCode::End,
+            Rect::new(0, 0, 70, 20),
             app.preview_content_rows(70),
         );
 

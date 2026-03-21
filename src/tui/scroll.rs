@@ -68,6 +68,24 @@ impl ScrollState {
         }
     }
 
+    pub(crate) fn apply_key_in_viewport(
+        &mut self,
+        key: KeyEvent,
+        viewport: Rect,
+        content_rows: usize,
+    ) -> bool {
+        self.apply_key(key, viewport.height.max(1), content_rows.max(1))
+    }
+
+    pub(crate) fn apply_key_code_in_viewport(
+        &mut self,
+        code: KeyCode,
+        viewport: Rect,
+        content_rows: usize,
+    ) -> bool {
+        self.apply_key_in_viewport(KeyEvent::from(code), viewport, content_rows)
+    }
+
     pub(crate) fn apply_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -84,6 +102,15 @@ impl ScrollState {
             MouseEventKind::ScrollDown => self.scroll_lines(3, viewport_height, content_rows),
             _ => false,
         }
+    }
+
+    pub(crate) fn apply_mouse_in_viewport(
+        &mut self,
+        mouse: MouseEvent,
+        viewport: Rect,
+        content_rows: usize,
+    ) -> bool {
+        self.apply_mouse(mouse, viewport, viewport.height.max(1), content_rows.max(1))
     }
 
     fn scroll_lines(&mut self, delta: isize, viewport_height: u16, content_rows: usize) -> bool {
@@ -224,6 +251,29 @@ mod tests {
         );
         assert!(handled);
         assert_eq!(state.offset(), 0);
+    }
+
+    #[test]
+    fn scroll_state_handles_viewport_helpers() {
+        let mut state = ScrollState::default();
+        let viewport = Rect::new(0, 0, 10, 4);
+
+        let handled = state.apply_key_code_in_viewport(KeyCode::End, viewport, 12);
+        assert!(handled);
+        assert_eq!(state.offset(), 8);
+
+        let handled = state.apply_mouse_in_viewport(
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+            12,
+        );
+        assert!(handled);
+        assert_eq!(state.offset(), 5);
     }
 
     #[test]

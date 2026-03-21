@@ -515,9 +515,9 @@ impl MergeDashboardApp {
     }
 
     fn scroll_preview_key(&mut self, key: KeyCode, viewport: Rect) {
-        let _ = self.preview_scroll.apply_key(
-            crossterm::event::KeyEvent::from(key),
-            viewport.height.max(1),
+        let _ = self.preview_scroll.apply_key_code_in_viewport(
+            key,
+            viewport,
             self.preview_content_rows(viewport.width.max(1)),
         );
     }

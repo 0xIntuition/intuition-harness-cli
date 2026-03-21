@@ -475,7 +475,7 @@ impl InputFieldState {
         mouse: crossterm::event::MouseEvent,
         area: Rect,
         width: u16,
-        height: u16,
+        _height: u16,
     ) -> bool {
         if self.mode != InputFieldMode::MultiLine {
             return false;
@@ -483,7 +483,7 @@ impl InputFieldState {
 
         let content_rows = wrapped_rows(&self.display_value(), width.max(1));
         self.scroll
-            .apply_mouse(mouse, area, height.max(1), content_rows.max(1))
+            .apply_mouse_in_viewport(mouse, area, content_rows)
     }
 }
 
