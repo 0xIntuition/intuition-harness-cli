@@ -12,7 +12,9 @@ use walkdir::{DirEntry, WalkDir};
 use crate::agents::run_agent_capture;
 use crate::cli::{RoadmapArgs, RunAgentArgs};
 use crate::config::{AGENT_ROUTE_BACKLOG_ROADMAP, AppConfig, load_required_planning_meta};
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file};
+use crate::fs::{
+    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
+};
 use crate::linear::{
     IssueListFilters, LinearClient, LinearService, ProjectSummary, ProjectUpdateRequest,
 };
@@ -130,7 +132,9 @@ pub async fn run_roadmap(args: &RoadmapArgs) -> Result<()> {
     let request = resolve_request(run_non_interactive, args.request.as_deref())?;
 
     let run_id = OffsetDateTime::now_utc()
-        .format(&format_description!("[year][month][day]T[hour][minute][second]Z"))
+        .format(&format_description!(
+            "[year][month][day]T[hour][minute][second]Z"
+        ))
         .context("failed to format the roadmap run id")?;
     let paths = PlanningPaths::new(&root);
     let roadmap_runs_dir = paths.metastack_dir.join("roadmap-runs");
@@ -152,11 +156,8 @@ pub async fn run_roadmap(args: &RoadmapArgs) -> Result<()> {
     .with_context(|| format!("failed to write `{}`", source_manifest_path.display()))?;
 
     let follow_up_questions = generate_follow_up_questions(&root, &request)?;
-    let follow_up_answers = resolve_follow_up_answers(
-        run_non_interactive,
-        &follow_up_questions,
-        &args.answers,
-    )?;
+    let follow_up_answers =
+        resolve_follow_up_answers(run_non_interactive, &follow_up_questions, &args.answers)?;
     let proposal = generate_proposal(
         &root,
         &request,
@@ -208,11 +209,7 @@ pub async fn run_roadmap(args: &RoadmapArgs) -> Result<()> {
             pre_sync_divergence,
             Some(error.to_string()),
         ),
-        None => (
-            RoadmapWriteStatus::NotApplied,
-            pre_sync_divergence,
-            None,
-        ),
+        None => (RoadmapWriteStatus::NotApplied, pre_sync_divergence, None),
     };
 
     let summary = RoadmapRunSummary {
@@ -330,10 +327,7 @@ where
     let mut manifest = Vec::new();
     let mut sources = Vec::new();
 
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_entry(should_collect)
-    {
+    for entry in WalkDir::new(root).into_iter().filter_entry(should_collect) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -606,17 +600,17 @@ fn collect_merged_pr_evidence(root: &Path) -> Result<Option<String>> {
         .output()
         .context("failed to run `git log --merges`")?;
     if !output.status.success() {
-        bail!(
-            "`git log --merges` exited with status {}",
-            output.status
-        );
+        bail!("`git log --merges` exited with status {}", output.status);
     }
     let stdout = String::from_utf8(output.stdout).context("git merge output was not UTF-8")?;
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    Ok(Some(format!("## Recent Merged Pull Requests\n\n{}\n", trimmed)))
+    Ok(Some(format!(
+        "## Recent Merged Pull Requests\n\n{}\n",
+        trimmed
+    )))
 }
 
 fn generate_follow_up_questions(root: &Path, request: &str) -> Result<Vec<String>> {
@@ -795,7 +789,12 @@ where
             },
         )
         .await
-        .with_context(|| format!("failed to sync roadmap content to Linear project `{}`", project.name))?;
+        .with_context(|| {
+            format!(
+                "failed to sync roadmap content to Linear project `{}`",
+                project.name
+            )
+        })?;
 
     Ok((repo_write_status, DivergenceStatus::InSync))
 }
@@ -839,7 +838,12 @@ mod tests {
             DivergenceStatus::RepoAhead
         );
         assert_eq!(
-            classify_divergence(Some("# Roadmap\nold"), "# Roadmap\nremote", false, "# Roadmap\nnew"),
+            classify_divergence(
+                Some("# Roadmap\nold"),
+                "# Roadmap\nremote",
+                false,
+                "# Roadmap\nnew"
+            ),
             DivergenceStatus::LinearAhead
         );
     }
@@ -908,10 +912,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn create_issue_label(
-            &self,
-            _request: IssueLabelCreateRequest,
-        ) -> Result<LabelRef> {
+        async fn create_issue_label(&self, _request: IssueLabelCreateRequest) -> Result<LabelRef> {
             unreachable!()
         }
 
@@ -946,11 +947,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn update_comment(
-            &self,
-            _comment_id: &str,
-            _body: String,
-        ) -> Result<IssueComment> {
+        async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
             unreachable!()
         }
 

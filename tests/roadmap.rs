@@ -33,10 +33,7 @@ completed = true
 }
 
 #[cfg(unix)]
-fn write_roadmap_agent_stub(
-    stub_path: &Path,
-    proposal: &str,
-) -> Result<(), Box<dyn Error>> {
+fn write_roadmap_agent_stub(stub_path: &Path, proposal: &str) -> Result<(), Box<dyn Error>> {
     fs::write(
         stub_path,
         format!(
@@ -125,8 +122,8 @@ fn latest_run_dir(repo_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
 
 #[cfg(unix)]
 #[test]
-fn roadmap_first_run_creates_repo_file_and_run_artifacts_before_linear_sync() -> Result<(), Box<dyn Error>>
-{
+fn roadmap_first_run_creates_repo_file_and_run_artifacts_before_linear_sync()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
@@ -139,8 +136,14 @@ fn roadmap_first_run_creates_repo_file_and_run_artifacts_before_linear_sync() ->
     fs::create_dir_all(&repo_root)?;
     fs::create_dir_all(repo_root.join("docs"))?;
     fs::create_dir_all(&output_dir)?;
-    fs::write(repo_root.join("README.md"), "# Demo Repo\n\nRoadmap source.\n")?;
-    fs::write(repo_root.join("docs/notes.txt"), "Important roadmap note.\n")?;
+    fs::write(
+        repo_root.join("README.md"),
+        "# Demo Repo\n\nRoadmap source.\n",
+    )?;
+    fs::write(
+        repo_root.join("docs/notes.txt"),
+        "Important roadmap note.\n",
+    )?;
     write_minimal_planning_context(
         &repo_root,
         r#"{
@@ -306,7 +309,9 @@ fn roadmap_refresh_run_writes_diff_artifact_without_blind_replacement() -> Resul
         }));
     });
     let update_project_mock = server.mock(|when, then| {
-        when.method(POST).path("/graphql").body_includes("mutation UpdateProject");
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateProject");
         then.status(200).json_body(updated_project_payload(current));
     });
 
@@ -347,8 +352,8 @@ fn roadmap_refresh_run_writes_diff_artifact_without_blind_replacement() -> Resul
 
 #[cfg(unix)]
 #[test]
-fn roadmap_apply_refuses_linear_ahead_state_and_records_failure_summary() -> Result<(), Box<dyn Error>>
-{
+fn roadmap_apply_refuses_linear_ahead_state_and_records_failure_summary()
+-> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
     let config_path = temp.path().join("metastack.toml");
@@ -383,7 +388,8 @@ fn roadmap_apply_refuses_linear_ahead_state_and_records_failure_summary() -> Res
             .path("/graphql")
             .header("authorization", "token")
             .body_includes("query Project");
-        then.status(200).json_body(roadmap_project_payload(linear_roadmap));
+        then.status(200)
+            .json_body(roadmap_project_payload(linear_roadmap));
     });
     let done_issues_mock = server.mock(|when, then| {
         when.method(POST)
@@ -403,8 +409,11 @@ fn roadmap_apply_refuses_linear_ahead_state_and_records_failure_summary() -> Res
         }));
     });
     let update_project_mock = server.mock(|when, then| {
-        when.method(POST).path("/graphql").body_includes("mutation UpdateProject");
-        then.status(200).json_body(updated_project_payload(linear_roadmap));
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateProject");
+        then.status(200)
+            .json_body(updated_project_payload(linear_roadmap));
     });
 
     cli()
@@ -424,14 +433,26 @@ fn roadmap_apply_refuses_linear_ahead_state_and_records_failure_summary() -> Res
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Linear-ahead").or(predicate::str::contains("Linear project doc")));
+        .stderr(
+            predicate::str::contains("Linear-ahead")
+                .or(predicate::str::contains("Linear project doc")),
+        );
 
-    assert_eq!(fs::read_to_string(repo_root.join("roadmap.md"))?, repo_roadmap);
+    assert_eq!(
+        fs::read_to_string(repo_root.join("roadmap.md"))?,
+        repo_roadmap
+    );
     let run_dir = latest_run_dir(&repo_root)?;
     let summary: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(run_dir.join("summary.json"))?)?;
-    assert_eq!(summary["pre_sync_divergence"].as_str(), Some("linear-ahead"));
-    assert_eq!(summary["post_sync_divergence"].as_str(), Some("linear-ahead"));
+    assert_eq!(
+        summary["pre_sync_divergence"].as_str(),
+        Some("linear-ahead")
+    );
+    assert_eq!(
+        summary["post_sync_divergence"].as_str(),
+        Some("linear-ahead")
+    );
     assert_eq!(summary["repo_write_status"].as_str(), Some("not-applied"));
     assert!(
         summary["apply_error"]

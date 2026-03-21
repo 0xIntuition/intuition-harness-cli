@@ -191,9 +191,10 @@ impl LinearClient for FakeLinearClient {
             .lock()
             .expect("mutex poisoned")
             .push((project_id.to_string(), request));
-        Ok(self.updated_project.clone().unwrap_or_else(|| {
-            project(project_id, "MetaStack CLI", &["MET"])
-        }))
+        Ok(self
+            .updated_project
+            .clone()
+            .unwrap_or_else(|| project(project_id, "MetaStack CLI", &["MET"])))
     }
 
     async fn update_issue(

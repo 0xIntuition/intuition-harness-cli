@@ -10,8 +10,8 @@ use super::{
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueAssigneeFilter, IssueComment,
     IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, IssueSummary,
-    IssueUpdateRequest, LabelRef, LinearClient, ProjectSummary, ProjectUpdateRequest,
-    TeamSummary, UserRef,
+    IssueUpdateRequest, LabelRef, LinearClient, ProjectSummary, ProjectUpdateRequest, TeamSummary,
+    UserRef,
 };
 use crate::linear::{IssueCreateSpec, IssueEditSpec};
 
