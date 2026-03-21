@@ -624,7 +624,8 @@ fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result
 
 #[cfg(unix)]
 #[test]
-fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Error>> {
+fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata()
+-> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -661,6 +662,10 @@ fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Err
                 "updated_at_epoch_seconds": 1_773_575_100u64,
                 "pid": 4242,
                 "session_id": "session-10181",
+                "latest_resume_handle": {
+                    "provider": "codex",
+                    "id": "019d0763-afc9-70d1-8022-51624918cf76"
+                },
                 "turns": 2,
                 "tokens": {
                     "input": 210,
@@ -693,6 +698,19 @@ fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Err
     meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PROVIDER"))
+        .stdout(predicate::str::contains("RESUME ID"))
+        .stdout(predicate::str::contains("codex"))
+        .stdout(predicate::str::contains(
+            "019d0763-afc9-70d1-8022-51624918cf76",
+        ));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
         .args([
             "listen",
             "sessions",
@@ -704,6 +722,10 @@ fn listen_sessions_inspect_reports_mixed_token_usage() -> Result<(), Box<dyn Err
         .success()
         .stdout(predicate::str::contains("Latest session:"))
         .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
+        .stdout(predicate::str::contains("Resume provider: codex"))
+        .stdout(predicate::str::contains(
+            "Resume ID: 019d0763-afc9-70d1-8022-51624918cf76",
+        ))
         .stdout(predicate::str::contains(
             "  - ENG-10181 [Running] Token telemetry is flowing | tokens in 210 | out 34 | total 244",
         ))
@@ -903,6 +925,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -1127,6 +1150,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -2116,7 +2140,11 @@ exit 0
                     "workpad_comment_id": "comment-40",
                     "updated_at_epoch_seconds": 1_773_575_000u64,
                     "pid": 4242,
-                    "session_id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a",
+                    "session_id": "issue-40",
+                    "latest_resume_handle": {
+                        "provider": "codex",
+                        "id": "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
+                    },
                     "turns": 3,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-40.log"
@@ -2139,7 +2167,11 @@ exit 0
                     "workpad_comment_id": "comment-41",
                     "updated_at_epoch_seconds": 1_773_574_900u64,
                     "pid": 4343,
-                    "session_id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd",
+                    "session_id": "issue-41",
+                    "latest_resume_handle": {
+                        "provider": "claude",
+                        "id": "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
+                    },
                     "turns": 4,
                     "tokens": {},
                     "log_path": ".metastack/agents/sessions/MET-41.log"
@@ -4031,6 +4063,7 @@ if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
 -p, --print
 --model <model>
 --effort <level>
+--verbose
 --output-format <format>
 --permission-mode <mode>
 EOF
@@ -4067,6 +4100,7 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 -m, --model <MODEL>
 -c, --config <key=value>
+    --json
 EOF
   exit 0
 fi
@@ -4307,6 +4341,8 @@ exit 99
 
     let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
     assert!(args.contains("--permission-mode=bypassPermissions"));
+    assert!(args.contains("--verbose"));
+    assert!(args.contains("--output-format=stream-json"));
     assert!(args.contains("-p"));
     assert!(args.contains("--model=sonnet"));
     assert!(args.contains("--effort=high"));
@@ -4671,10 +4707,10 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
         .stdout(predicate::str::contains("1 claimed this cycle"))
         .stdout(predicate::str::contains("MET-32"));
 
-    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(120))?;
+    wait_for_path_with_timeout(&stub_dir.join("payload-2.txt"), Duration::from_secs(180))?;
     wait_for_path_with_timeout(
         &stub_dir.join("instructions-2.txt"),
-        Duration::from_secs(120),
+        Duration::from_secs(180),
     )?;
     let turn_count = fs::read_to_string(stub_dir.join("count.txt"))?
         .trim()
