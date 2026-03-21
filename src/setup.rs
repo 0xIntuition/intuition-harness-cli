@@ -25,17 +25,18 @@ use crate::cli::{ConfigEventArg, SetupArgs};
 use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
     DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, LinearConfig, LinearConfigOverrides,
-    ListenAssignmentScope, ListenRefreshPolicy, PlanningMeta, VelocityAutoAssign,
+    ListenAssignmentScope, ListenRefreshPolicy, PlanDefaultMode, PlanningMeta, VelocityAutoAssign,
     ensure_saved_issue_labels, normalize_agent_name, parse_listen_required_labels_csv,
     supported_agent_models, supported_agent_names, supported_reasoning_options,
     validate_agent_model, validate_agent_name, validate_agent_reasoning,
-    validate_backlog_default_priority, validate_backlog_labels,
+    validate_backlog_default_priority, validate_backlog_labels, validate_fast_plan_question_limit,
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ struct SetupReport {
 
 #[derive(Debug, Clone)]
 struct SetupApp {
+    keybindings: KeybindingPolicy,
     step: SetupStep,
     profile: Option<String>,
     repo_auth_field: SelectFieldState,
@@ -80,6 +82,9 @@ struct SetupApp {
     instructions_path: InputFieldState,
     listen_poll_interval: InputFieldState,
     interactive_plan_limit: InputFieldState,
+    plan_default_mode: SelectFieldState,
+    plan_fast_single_ticket: SelectFieldState,
+    plan_fast_questions: InputFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
     summary_scroll: ScrollState,
@@ -102,6 +107,9 @@ struct SubmittedSetup {
     instructions_path: Option<String>,
     listen_poll_interval: Option<u64>,
     interactive_plan_limit: Option<usize>,
+    plan_default_mode: Option<PlanDefaultMode>,
+    fast_single_ticket: Option<bool>,
+    fast_questions: Option<usize>,
     plan_label: Option<String>,
     technical_label: Option<String>,
 }
@@ -128,13 +136,16 @@ enum SetupStep {
     InstructionsPath,
     ListenPollInterval,
     InteractivePlanLimit,
+    PlanDefaultMode,
+    PlanFastSingleTicket,
+    PlanFastQuestions,
     PlanLabel,
     TechnicalLabel,
     Save,
 }
 
 impl SetupStep {
-    fn all() -> [Self; 16] {
+    fn all() -> [Self; 19] {
         [
             Self::LinearAuth,
             Self::LinearApiKey,
@@ -149,6 +160,9 @@ impl SetupStep {
             Self::InstructionsPath,
             Self::ListenPollInterval,
             Self::InteractivePlanLimit,
+            Self::PlanDefaultMode,
+            Self::PlanFastSingleTicket,
+            Self::PlanFastQuestions,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::Save,
@@ -187,6 +201,9 @@ impl SetupStep {
             Self::InstructionsPath => "Instructions file",
             Self::ListenPollInterval => "Listen poll interval",
             Self::InteractivePlanLimit => "Plan follow-up limit",
+            Self::PlanDefaultMode => "Plan mode",
+            Self::PlanFastSingleTicket => "Fast plan shape",
+            Self::PlanFastQuestions => "Fast plan questions",
             Self::PlanLabel => "Plan issue label",
             Self::TechnicalLabel => "Technical issue label",
             Self::Save => "Save",
@@ -208,6 +225,9 @@ impl SetupStep {
             Self::InstructionsPath => "Instructions",
             Self::ListenPollInterval => "Poll interval",
             Self::InteractivePlanLimit => "Plan limit",
+            Self::PlanDefaultMode => "Plan mode",
+            Self::PlanFastSingleTicket => "Fast shape",
+            Self::PlanFastQuestions => "Fast questions",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::Save => "Save",
@@ -229,6 +249,9 @@ impl SetupStep {
             Self::InstructionsPath => "Listen instructions file",
             Self::ListenPollInterval => "Listen poll interval in seconds",
             Self::InteractivePlanLimit => "Interactive plan follow-up question limit",
+            Self::PlanDefaultMode => "Default plan mode",
+            Self::PlanFastSingleTicket => "Default fast ticket shape",
+            Self::PlanFastQuestions => "Default fast follow-up batch size",
             Self::PlanLabel => "Default plan issue label",
             Self::TechnicalLabel => "Default technical issue label",
             Self::Save => "Save repo setup",
@@ -477,6 +500,18 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_plan_limit(view.planning_meta.plan.interactive_follow_up_questions)
     ));
     lines.push(format!(
+        "Default plan mode: {}",
+        display_plan_default_mode(view.planning_meta.plan.default_mode)
+    ));
+    lines.push(format!(
+        "Fast single-ticket default: {}",
+        display_fast_single_ticket(view.planning_meta.plan.fast_single_ticket)
+    ));
+    lines.push(format!(
+        "Fast plan question limit: {}",
+        display_fast_question_limit(view.planning_meta.plan.fast_questions)
+    ));
+    lines.push(format!(
         "Plan issue label: {}",
         effective_label(view.planning_meta.issue_labels.plan.as_deref(), "plan")
     ));
@@ -562,6 +597,9 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.instructions_path.is_some()
         || args.listen_poll_interval.is_some()
         || args.interactive_plan_follow_up_question_limit.is_some()
+        || args.plan_default_mode.is_some()
+        || args.plan_fast_single_ticket.is_some()
+        || args.plan_fast_questions.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
         || args.default_assignee.is_some()
@@ -676,6 +714,18 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     if let Some(limit) = &args.interactive_plan_follow_up_question_limit {
         view.planning_meta.plan.interactive_follow_up_questions = parse_plan_limit(limit)?;
     }
+    if let Some(mode) = &args.plan_default_mode {
+        view.planning_meta.plan.default_mode =
+            parse_optional_plan_default_mode(mode, "plan default mode")?;
+    }
+    if let Some(single_ticket) = &args.plan_fast_single_ticket {
+        view.planning_meta.plan.fast_single_ticket =
+            parse_optional_bool(single_ticket, "fast single-ticket default")?;
+    }
+    if let Some(limit) = &args.plan_fast_questions {
+        view.planning_meta.plan.fast_questions =
+            parse_fast_plan_limit(limit, "fast plan question limit")?;
+    }
     if let Some(label) = &args.plan_label {
         view.planning_meta.issue_labels.plan = normalize_optional(label);
     }
@@ -765,6 +815,16 @@ impl SetupApp {
             .iter()
             .map(|name| (*name).to_string())
             .collect::<Vec<_>>();
+        let plan_mode_options = vec![
+            "Leave unset".to_string(),
+            "Normal".to_string(),
+            "Fast".to_string(),
+        ];
+        let fast_single_ticket_options = vec![
+            "Leave unset".to_string(),
+            "Single ticket by default".to_string(),
+            "Multiple tickets by default".to_string(),
+        ];
         let selected_provider = view
             .planning_meta
             .agent
@@ -779,6 +839,7 @@ impl SetupApp {
             .unwrap_or(0);
 
         let mut app = Self {
+            keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
             step: SetupStep::LinearAuth,
             profile: view.planning_meta.linear.profile.clone(),
             repo_auth_field: SelectFieldState::new(
@@ -847,6 +908,29 @@ impl SetupApp {
                 view.planning_meta
                     .plan
                     .interactive_follow_up_questions
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
+            plan_default_mode: SelectFieldState::new(
+                plan_mode_options,
+                match view.planning_meta.plan.default_mode {
+                    Some(PlanDefaultMode::Normal) => 1,
+                    Some(PlanDefaultMode::Fast) => 2,
+                    None => 0,
+                },
+            ),
+            plan_fast_single_ticket: SelectFieldState::new(
+                fast_single_ticket_options,
+                match view.planning_meta.plan.fast_single_ticket {
+                    Some(true) => 1,
+                    Some(false) => 2,
+                    None => 0,
+                },
+            ),
+            plan_fast_questions: InputFieldState::new(
+                view.planning_meta
+                    .plan
+                    .fast_questions
                     .map(|value| value.to_string())
                     .unwrap_or_default(),
             ),
@@ -965,6 +1049,8 @@ impl SetupApp {
                         | SetupStep::Reasoning
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
+                        | SetupStep::PlanDefaultMode
+                        | SetupStep::PlanFastSingleTicket
                 ) {
                     self.move_selection(-1);
                 } else {
@@ -981,6 +1067,8 @@ impl SetupApp {
                         | SetupStep::Reasoning
                         | SetupStep::AssignmentScope
                         | SetupStep::RefreshPolicy
+                        | SetupStep::PlanDefaultMode
+                        | SetupStep::PlanFastSingleTicket
                 ) {
                     self.move_selection(1);
                 } else {
@@ -992,6 +1080,16 @@ impl SetupApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent, summary_viewport: Rect) -> Option<SetupExit> {
+        if self.select_step_active()
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            return self.apply_action(if delta < 0 {
+                SetupAction::Up
+            } else {
+                SetupAction::Down
+            });
+        }
+
         match key.code {
             KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
                 if self.step == SetupStep::Save =>
@@ -1033,6 +1131,20 @@ impl SetupApp {
         )
     }
 
+    fn select_step_active(&self) -> bool {
+        matches!(
+            self.step,
+            SetupStep::LinearAuth
+                | SetupStep::Provider
+                | SetupStep::Model
+                | SetupStep::Reasoning
+                | SetupStep::AssignmentScope
+                | SetupStep::RefreshPolicy
+                | SetupStep::PlanDefaultMode
+                | SetupStep::PlanFastSingleTicket
+        )
+    }
+
     fn handle_paste(&mut self, text: &str) {
         self.error = None;
         match self.step {
@@ -1057,6 +1169,9 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.paste(text);
             }
+            SetupStep::PlanFastQuestions => {
+                let _ = self.plan_fast_questions.paste(text);
+            }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.paste(text);
             }
@@ -1069,6 +1184,8 @@ impl SetupApp {
             | SetupStep::Reasoning
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
+            | SetupStep::PlanDefaultMode
+            | SetupStep::PlanFastSingleTicket
             | SetupStep::Save => {}
         }
     }
@@ -1097,6 +1214,9 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.handle_key(key);
             }
+            SetupStep::PlanFastQuestions => {
+                let _ = self.plan_fast_questions.handle_key(key);
+            }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.handle_key(key);
             }
@@ -1109,6 +1229,8 @@ impl SetupApp {
             | SetupStep::Reasoning
             | SetupStep::AssignmentScope
             | SetupStep::RefreshPolicy
+            | SetupStep::PlanDefaultMode
+            | SetupStep::PlanFastSingleTicket
             | SetupStep::Save => {}
         }
     }
@@ -1132,6 +1254,8 @@ impl SetupApp {
             SetupStep::Reasoning => self.reasoning.move_by(delta),
             SetupStep::AssignmentScope => self.assignment_field.move_by(delta),
             SetupStep::RefreshPolicy => self.refresh_policy_field.move_by(delta),
+            SetupStep::PlanDefaultMode => self.plan_default_mode.move_by(delta),
+            SetupStep::PlanFastSingleTicket => self.plan_fast_single_ticket.move_by(delta),
             SetupStep::Save => {
                 let key = if delta.is_negative() {
                     KeyCode::Up
@@ -1152,6 +1276,7 @@ impl SetupApp {
             | SetupStep::InstructionsPath
             | SetupStep::ListenPollInterval
             | SetupStep::InteractivePlanLimit
+            | SetupStep::PlanFastQuestions
             | SetupStep::PlanLabel
             | SetupStep::TechnicalLabel => {}
         }
@@ -1215,6 +1340,18 @@ impl SetupApp {
                     "Interactive plan limit",
                     summarize_optional(&self.interactive_plan_limit),
                 ),
+                (
+                    "Plan mode",
+                    summarize_optional_select(&self.plan_default_mode, "Leave unset"),
+                ),
+                (
+                    "Fast single-ticket",
+                    summarize_optional_select(&self.plan_fast_single_ticket, "Leave unset"),
+                ),
+                (
+                    "Fast questions",
+                    summarize_optional(&self.plan_fast_questions),
+                ),
                 ("Plan label", summarize_optional(&self.plan_label)),
                 ("Technical label", summarize_optional(&self.technical_label)),
             ],
@@ -1269,6 +1406,20 @@ impl SetupApp {
             instructions_path: normalize_optional(self.instructions_path.value()),
             listen_poll_interval: parse_poll_interval(self.listen_poll_interval.value())?,
             interactive_plan_limit: parse_plan_limit(self.interactive_plan_limit.value())?,
+            plan_default_mode: match self.plan_default_mode.selected() {
+                1 => Some(PlanDefaultMode::Normal),
+                2 => Some(PlanDefaultMode::Fast),
+                _ => None,
+            },
+            fast_single_ticket: match self.plan_fast_single_ticket.selected() {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            },
+            fast_questions: parse_fast_plan_limit(
+                self.plan_fast_questions.value(),
+                "fast plan question limit",
+            )?,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
         })
@@ -1301,6 +1452,9 @@ impl SubmittedSetup {
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
         view.planning_meta.listen.poll_interval_seconds = self.listen_poll_interval;
         view.planning_meta.plan.interactive_follow_up_questions = self.interactive_plan_limit;
+        view.planning_meta.plan.default_mode = self.plan_default_mode;
+        view.planning_meta.plan.fast_single_ticket = self.fast_single_ticket;
+        view.planning_meta.plan.fast_questions = self.fast_questions;
         view.planning_meta.issue_labels.plan = self.plan_label.clone();
         view.planning_meta.issue_labels.technical = self.technical_label.clone();
         Ok(())
@@ -1576,6 +1730,19 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             &app.interactive_plan_limit,
             "Optional `meta backlog plan` interactive follow-up limit between 1 and 10.",
         ),
+        SetupStep::PlanDefaultMode => {
+            render_select_panel(frame, area, &title, &app.plan_default_mode)
+        }
+        SetupStep::PlanFastSingleTicket => {
+            render_select_panel(frame, area, &title, &app.plan_fast_single_ticket)
+        }
+        SetupStep::PlanFastQuestions => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.plan_fast_questions,
+            "Optional fast planning follow-up batch size between 0 and 10.",
+        ),
         SetupStep::PlanLabel => render_input_panel(
             frame,
             area,
@@ -1623,8 +1790,14 @@ fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         | SetupStep::Model
         | SetupStep::Reasoning
         | SetupStep::AssignmentScope
-        | SetupStep::RefreshPolicy => {
-            "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+        | SetupStep::RefreshPolicy
+        | SetupStep::PlanDefaultMode
+        | SetupStep::PlanFastSingleTicket => {
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            } else {
+                "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            }
         }
         SetupStep::Save => {
             "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels."
@@ -1781,6 +1954,29 @@ fn display_plan_limit(limit: Option<usize>) -> String {
     }
 }
 
+fn display_plan_default_mode(mode: Option<PlanDefaultMode>) -> String {
+    match mode {
+        Some(PlanDefaultMode::Normal) => "normal".to_string(),
+        Some(PlanDefaultMode::Fast) => "fast".to_string(),
+        None => "unset".to_string(),
+    }
+}
+
+fn display_fast_single_ticket(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "single ticket".to_string(),
+        Some(false) => "multiple tickets".to_string(),
+        None => "unset".to_string(),
+    }
+}
+
+fn display_fast_question_limit(limit: Option<usize>) -> String {
+    match limit {
+        Some(limit) => limit.to_string(),
+        None => "unset".to_string(),
+    }
+}
+
 fn effective_label(value: Option<&str>, default: &str) -> String {
     value
         .map(str::trim)
@@ -1863,6 +2059,39 @@ fn parse_plan_limit(value: &str) -> Result<Option<usize>> {
     })?;
     validate_interactive_plan_follow_up_question_limit(limit)?;
     Ok(Some(limit))
+}
+
+fn parse_fast_plan_limit(value: &str, label: &str) -> Result<Option<usize>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| anyhow!("{label} must be a whole number between 0 and 10"))?;
+    validate_fast_plan_question_limit(limit)?;
+    Ok(Some(limit))
+}
+
+fn parse_optional_bool(value: &str, label: &str) -> Result<Option<bool>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(anyhow!("{label} must be `true`, `false`, or `none`")),
+    }
+}
+
+fn parse_optional_plan_default_mode(value: &str, label: &str) -> Result<Option<PlanDefaultMode>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "normal" => Ok(Some(PlanDefaultMode::Normal)),
+        "fast" => Ok(Some(PlanDefaultMode::Fast)),
+        _ => Err(anyhow!("{label} must be `normal`, `fast`, or `none`")),
+    }
 }
 
 fn summarize_optional(field: &InputFieldState) -> String {

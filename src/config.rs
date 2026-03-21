@@ -21,6 +21,9 @@ pub const DEFAULT_LISTEN_POLL_INTERVAL_SECONDS: u64 = 7;
 pub const DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
 pub const MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 1;
 pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+pub const DEFAULT_FAST_PLAN_QUESTION_LIMIT: usize = 3;
+pub const MIN_FAST_PLAN_QUESTION_LIMIT: usize = 0;
+pub const MAX_FAST_PLAN_QUESTION_LIMIT: usize = 10;
 pub const DEFAULT_SYNC_DISCUSSION_FILE_CHAR_LIMIT: usize = 20_000;
 pub const DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT: usize = 6_000;
 pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
@@ -80,6 +83,8 @@ pub struct InstallDefaults {
     #[serde(default)]
     pub plan: InstallPlanSettings,
     #[serde(default)]
+    pub ui: InstallUiSettings,
+    #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
 }
 
@@ -99,6 +104,15 @@ pub struct InstallListenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InstallPlanSettings {
     pub interactive_follow_up_questions: Option<usize>,
+    pub default_mode: Option<PlanDefaultMode>,
+    pub fast_single_ticket: Option<bool>,
+    pub fast_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallUiSettings {
+    #[serde(default)]
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -176,6 +190,17 @@ pub struct PlanningListenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanningPlanSettings {
     pub interactive_follow_up_questions: Option<usize>,
+    pub default_mode: Option<PlanDefaultMode>,
+    pub fast_single_ticket: Option<bool>,
+    pub fast_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDefaultMode {
+    #[default]
+    Normal,
+    Fast,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -606,6 +631,11 @@ impl AppConfig {
         self.onboarding.completed
     }
 
+    /// Reports whether install-scoped vim navigation aliases are enabled for supported TUI flows.
+    pub fn vim_mode_enabled(&self) -> bool {
+        self.defaults.ui.vim_mode
+    }
+
     /// Marks first-run onboarding as completed in the install-scoped config.
     pub fn mark_onboarding_complete(&mut self) {
         self.onboarding.completed = true;
@@ -731,6 +761,23 @@ impl PlanningMeta {
             .unwrap_or(DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT)
     }
 
+    /// Returns the repo-scoped default plan mode, falling back to the built-in default.
+    pub fn plan_default_mode(&self) -> PlanDefaultMode {
+        self.plan.default_mode.unwrap_or_default()
+    }
+
+    /// Returns whether fast planning should prefer a single ticket by default.
+    pub fn fast_single_ticket(&self) -> bool {
+        self.plan.fast_single_ticket.unwrap_or(true)
+    }
+
+    /// Returns the repo-scoped fast follow-up question limit, falling back to the built-in default.
+    pub fn fast_question_limit(&self) -> usize {
+        self.plan
+            .fast_questions
+            .unwrap_or(DEFAULT_FAST_PLAN_QUESTION_LIMIT)
+    }
+
     /// Resolves the effective Linear project selector using repo defaults before install defaults.
     pub fn effective_project_id(&self, app_config: &AppConfig) -> Option<String> {
         normalize_optional_ref(self.linear.project_id.as_deref())
@@ -781,6 +828,30 @@ impl PlanningMeta {
             .interactive_follow_up_questions
             .or(app_config.defaults.plan.interactive_follow_up_questions)
             .unwrap_or_else(|| self.interactive_follow_up_question_limit())
+    }
+
+    /// Resolves the effective default plan mode using repo defaults before install defaults.
+    pub fn effective_plan_default_mode(&self, app_config: &AppConfig) -> PlanDefaultMode {
+        self.plan
+            .default_mode
+            .or(app_config.defaults.plan.default_mode)
+            .unwrap_or_else(|| self.plan_default_mode())
+    }
+
+    /// Resolves the effective fast single-ticket preference using repo defaults before install defaults.
+    pub fn effective_fast_single_ticket(&self, app_config: &AppConfig) -> bool {
+        self.plan
+            .fast_single_ticket
+            .or(app_config.defaults.plan.fast_single_ticket)
+            .unwrap_or_else(|| self.fast_single_ticket())
+    }
+
+    /// Resolves the effective fast follow-up limit using repo defaults before install defaults.
+    pub fn effective_fast_question_limit(&self, app_config: &AppConfig) -> usize {
+        self.plan
+            .fast_questions
+            .or(app_config.defaults.plan.fast_questions)
+            .unwrap_or_else(|| self.fast_question_limit())
     }
 
     /// Resolves the effective planning label using repo defaults before install defaults.
@@ -850,6 +921,9 @@ impl PlanningMeta {
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
         }
+        if let Some(limit) = self.plan.fast_questions {
+            validate_fast_plan_question_limit(limit)?;
+        }
         self.sync.validate()?;
         Ok(())
     }
@@ -900,6 +974,9 @@ impl InstallDefaults {
         }
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
+        }
+        if let Some(limit) = self.plan.fast_questions {
+            validate_fast_plan_question_limit(limit)?;
         }
         Ok(())
     }
@@ -1642,6 +1719,20 @@ fn default_linear_api_url() -> String {
     DEFAULT_LINEAR_API_URL.to_string()
 }
 
+/// Validates the configured fast-plan follow-up question limit.
+///
+/// Returns an error when the value is outside the supported range of 0 through 10.
+pub fn validate_fast_plan_question_limit(limit: usize) -> Result<()> {
+    if !(MIN_FAST_PLAN_QUESTION_LIMIT..=MAX_FAST_PLAN_QUESTION_LIMIT).contains(&limit) {
+        return Err(anyhow!(
+            "fast plan follow-up question limit must be between {} and {}",
+            MIN_FAST_PLAN_QUESTION_LIMIT,
+            MAX_FAST_PLAN_QUESTION_LIMIT
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_required_labels<I, S>(values: I) -> Option<Vec<String>>
 where
     I: IntoIterator<Item = S>,
@@ -2008,8 +2099,10 @@ fn validate_agent_route_config(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
 
     use serde_json::json;
+    use tempfile::tempdir;
 
     use super::{
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
@@ -2018,14 +2111,19 @@ mod tests {
         DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
-        InstallListenSettings, InstallPlanSettings, ListenAssignmentScope, MergeSettings,
-        NoAgentSelectedError, PlanningAgentSettings, PlanningIssueLabels, PlanningListenSettings,
-        PlanningMeta, PlanningPlanSettings, VelocityAutoAssign, VelocityDefaults,
-        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
-        parse_listen_required_labels_csv, resolve_agent_config, resolve_agent_route,
-        validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-        validate_listen_poll_interval_seconds,
+        InstallListenSettings, InstallPlanSettings, InstallUiSettings, ListenAssignmentScope,
+        METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
+        PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
+        VelocityAutoAssign, VelocityDefaults, is_no_agent_selected_error,
+        no_agent_selected_route_key, normalize_agent_route_key, parse_listen_required_labels_csv,
+        resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
+        validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
     };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn listen_assignment_scope_serializes_to_explicit_values() {
@@ -2111,6 +2209,7 @@ mod tests {
         let mut meta = PlanningMeta {
             plan: PlanningPlanSettings {
                 interactive_follow_up_questions: Some(0),
+                ..PlanningPlanSettings::default()
             },
             ..PlanningMeta::default()
         };
@@ -2132,6 +2231,7 @@ mod tests {
         let meta = PlanningMeta {
             plan: PlanningPlanSettings {
                 interactive_follow_up_questions: Some(4),
+                ..PlanningPlanSettings::default()
             },
             ..PlanningMeta::default()
         };
@@ -2181,7 +2281,9 @@ mod tests {
                 },
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),
+                    ..InstallPlanSettings::default()
                 },
+                ui: InstallUiSettings { vim_mode: true },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),
                     technical: Some("engineering".to_string()),
@@ -2217,6 +2319,7 @@ mod tests {
             planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             4
         );
+        assert!(app_config.vim_mode_enabled());
         assert_eq!(planning_meta.effective_plan_label(&app_config), "planning");
         assert_eq!(
             planning_meta.effective_technical_label(&app_config),
@@ -2244,6 +2347,7 @@ mod tests {
             app_config.defaults.plan.interactive_follow_up_questions,
             None
         );
+        assert!(!app_config.defaults.ui.vim_mode);
         assert_eq!(app_config.defaults.issue_labels.plan, None);
         assert_eq!(app_config.defaults.issue_labels.technical, None);
     }
@@ -2330,7 +2434,9 @@ mod tests {
                 },
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),
+                    ..InstallPlanSettings::default()
                 },
+                ui: InstallUiSettings { vim_mode: true },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),
                     technical: Some("engineering".to_string()),
@@ -2352,6 +2458,7 @@ mod tests {
             },
             plan: PlanningPlanSettings {
                 interactive_follow_up_questions: Some(9),
+                ..PlanningPlanSettings::default()
             },
             issue_labels: PlanningIssueLabels {
                 plan: Some("repo-plan".to_string()),
@@ -2386,6 +2493,7 @@ mod tests {
             planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             9
         );
+        assert!(app_config.vim_mode_enabled());
         assert_eq!(planning_meta.effective_plan_label(&app_config), "repo-plan");
         assert_eq!(
             planning_meta.effective_technical_label(&app_config),
@@ -2618,6 +2726,50 @@ mod tests {
                 .to_string()
                 .contains("unknown agent command route key `backlog.unknown`")
         );
+    }
+
+    #[test]
+    fn app_config_save_and_load_round_trip_vim_mode() {
+        let _guard = env_lock().lock().expect("env lock should be available");
+        let temp = tempdir().expect("temp dir should build");
+        let config_path = temp.path().join("config.toml");
+        unsafe {
+            std::env::set_var(METASTACK_CONFIG_ENV, &config_path);
+        }
+
+        let config = AppConfig {
+            defaults: InstallDefaults {
+                ui: InstallUiSettings { vim_mode: true },
+                ..InstallDefaults::default()
+            },
+            ..AppConfig::default()
+        };
+
+        config.save().expect("config should save");
+        let loaded = AppConfig::load().expect("config should load");
+
+        unsafe {
+            std::env::remove_var(METASTACK_CONFIG_ENV);
+        }
+
+        assert!(loaded.vim_mode_enabled());
+        assert!(config_path.is_file());
+    }
+
+    #[test]
+    fn app_config_toml_round_trips_vim_mode() {
+        let config = AppConfig {
+            defaults: InstallDefaults {
+                ui: InstallUiSettings { vim_mode: true },
+                ..InstallDefaults::default()
+            },
+            ..AppConfig::default()
+        };
+
+        let encoded = toml::to_string_pretty(&config).expect("config should encode");
+        let decoded: AppConfig = toml::from_str(&encoded).expect("config should decode");
+
+        assert!(decoded.vim_mode_enabled());
     }
 
     #[test]

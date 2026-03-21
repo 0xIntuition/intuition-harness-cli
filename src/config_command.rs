@@ -21,17 +21,19 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
 
-use crate::cli::ConfigArgs;
+use crate::cli::{ConfigArgs, VimModeArg};
 use crate::config::{
     AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
-    ListenRefreshPolicy, VelocityAutoAssign, detect_supported_agents, normalize_agent_name,
-    normalize_agent_route_key, resolve_agent_route, supported_agent_models, supported_agent_names,
-    supported_agent_route_definitions, supported_agent_route_families, supported_reasoning_options,
-    validate_agent_model, validate_agent_name, validate_agent_reasoning,
-    validate_backlog_default_priority, validate_backlog_labels,
-    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    ListenRefreshPolicy, PlanDefaultMode, VelocityAutoAssign, detect_supported_agents,
+    normalize_agent_name, normalize_agent_route_key, resolve_agent_route, supported_agent_models,
+    supported_agent_names, supported_agent_route_definitions, supported_agent_route_families,
+    supported_reasoning_options, validate_agent_model, validate_agent_name,
+    validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
+    validate_fast_plan_question_limit, validate_interactive_plan_follow_up_question_limit,
+    validate_listen_poll_interval_seconds,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
@@ -63,20 +65,24 @@ struct SerializableConfigView<'a> {
 pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
     let mut view = load_view()?;
 
-    if args.json {
-        return Ok(ConfigCommandOutput::Json(render_json(&view)?));
-    }
-
     if has_direct_updates(args) {
         let changed = apply_direct_updates(&mut view, args)?;
         save_view(&view)?;
-        return Ok(ConfigCommandOutput::Text(
-            ConfigReport {
-                config_path: view.config_path.clone(),
-                changed,
-            }
-            .render(&view),
-        ));
+        return if args.json {
+            Ok(ConfigCommandOutput::Json(render_json(&view)?))
+        } else {
+            Ok(ConfigCommandOutput::Text(
+                ConfigReport {
+                    config_path: view.config_path.clone(),
+                    changed,
+                }
+                .render(&view),
+            ))
+        };
+    }
+
+    if args.json {
+        return Ok(ConfigCommandOutput::Json(render_json(&view)?));
     }
 
     if args.render_once {
@@ -223,6 +229,31 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
+        "Install default plan mode: {}",
+        display_plan_default_mode(view.app_config.defaults.plan.default_mode)
+    ));
+    lines.push(format!(
+        "Install fast single-ticket default: {}",
+        display_fast_single_ticket(view.app_config.defaults.plan.fast_single_ticket)
+    ));
+    lines.push(format!(
+        "Install fast question limit: {}",
+        view.app_config
+            .defaults
+            .plan
+            .fast_questions
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Vim mode: {}",
+        if view.app_config.vim_mode_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+    lines.push(format!(
         "Install plan label: {}",
         display_optional(view.app_config.defaults.issue_labels.plan.as_deref())
     ));
@@ -332,6 +363,22 @@ fn display_optional(value: Option<&str>) -> String {
         .to_string()
 }
 
+fn display_plan_default_mode(value: Option<PlanDefaultMode>) -> String {
+    match value {
+        Some(PlanDefaultMode::Normal) => "normal".to_string(),
+        Some(PlanDefaultMode::Fast) => "fast".to_string(),
+        None => "unset".to_string(),
+    }
+}
+
+fn display_fast_single_ticket(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "single ticket".to_string(),
+        Some(false) => "multiple tickets".to_string(),
+        None => "unset".to_string(),
+    }
+}
+
 fn render_label_summary(labels: &[String]) -> String {
     if labels.is_empty() {
         "unset".to_string()
@@ -367,6 +414,10 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
         || args.plan_follow_up_limit.is_some()
+        || args.plan_default_mode.is_some()
+        || args.plan_fast_single_ticket.is_some()
+        || args.plan_fast_questions.is_some()
+        || args.vim_mode.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
         || args.default_profile.is_some()
@@ -428,6 +479,24 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             "plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
         )?;
+    }
+    if let Some(mode) = &args.plan_default_mode {
+        view.app_config.defaults.plan.default_mode =
+            parse_optional_plan_default_mode(mode, "plan default mode")?;
+    }
+    if let Some(single_ticket) = &args.plan_fast_single_ticket {
+        view.app_config.defaults.plan.fast_single_ticket =
+            parse_optional_bool(single_ticket, "fast single-ticket default")?;
+    }
+    if let Some(limit) = &args.plan_fast_questions {
+        view.app_config.defaults.plan.fast_questions = parse_optional_usize(
+            limit,
+            "fast plan question limit",
+            validate_fast_plan_question_limit,
+        )?;
+    }
+    if let Some(vim_mode) = args.vim_mode {
+        view.app_config.defaults.ui.vim_mode = matches!(vim_mode, VimModeArg::Enabled);
     }
     if let Some(plan_label) = &args.plan_label {
         view.app_config.defaults.issue_labels.plan = normalize_optional(plan_label);
@@ -561,6 +630,28 @@ fn normalize_optional(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_optional_bool(value: &str, label: &str) -> Result<Option<bool>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(anyhow!("{label} must be `true`, `false`, or `none`")),
+    }
+}
+
+fn parse_optional_plan_default_mode(value: &str, label: &str) -> Result<Option<PlanDefaultMode>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "normal" => Ok(Some(PlanDefaultMode::Normal)),
+        "fast" => Ok(Some(PlanDefaultMode::Fast)),
+        _ => Err(anyhow!("{label} must be `normal`, `fast`, or `none`")),
     }
 }
 
@@ -733,6 +824,10 @@ enum ConfigStep {
     RefreshPolicy,
     PollInterval,
     PlanFollowUpLimit,
+    PlanDefaultMode,
+    PlanFastSingleTicket,
+    PlanFastQuestions,
+    VimMode,
     PlanLabel,
     TechnicalLabel,
     DefaultProfile,
@@ -743,7 +838,7 @@ enum ConfigStep {
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 15] {
+    fn all() -> [Self; 19] {
         [
             Self::ApiKey,
             Self::Team,
@@ -753,6 +848,10 @@ impl ConfigStep {
             Self::RefreshPolicy,
             Self::PollInterval,
             Self::PlanFollowUpLimit,
+            Self::PlanDefaultMode,
+            Self::PlanFastSingleTicket,
+            Self::PlanFastQuestions,
+            Self::VimMode,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::DefaultProfile,
@@ -790,6 +889,10 @@ impl ConfigStep {
             Self::RefreshPolicy => "Refresh policy",
             Self::PollInterval => "Poll interval",
             Self::PlanFollowUpLimit => "Plan follow-ups",
+            Self::PlanDefaultMode => "Plan mode",
+            Self::PlanFastSingleTicket => "Fast plan shape",
+            Self::PlanFastQuestions => "Fast plan questions",
+            Self::VimMode => "Vim mode",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::DefaultProfile => "Default profile",
@@ -810,6 +913,10 @@ impl ConfigStep {
             Self::RefreshPolicy => "Workspace refresh policy",
             Self::PollInterval => "Listen poll interval",
             Self::PlanFollowUpLimit => "Plan follow-up limit",
+            Self::PlanDefaultMode => "Default plan mode",
+            Self::PlanFastSingleTicket => "Fast single-ticket default",
+            Self::PlanFastQuestions => "Fast follow-up batch size",
+            Self::VimMode => "Install-scoped vim navigation",
             Self::PlanLabel => "Default plan label",
             Self::TechnicalLabel => "Default technical label",
             Self::DefaultProfile => "Default Linear profile",
@@ -833,6 +940,7 @@ pub enum ConfigAction {
 
 #[derive(Debug, Clone)]
 struct ConfigApp {
+    keybindings: KeybindingPolicy,
     step: ConfigStep,
     api_key: InputFieldState,
     team: InputFieldState,
@@ -840,6 +948,10 @@ struct ConfigApp {
     listen_label: InputFieldState,
     poll_interval: InputFieldState,
     plan_follow_up_limit: InputFieldState,
+    plan_default_mode: SelectFieldState,
+    plan_fast_single_ticket: SelectFieldState,
+    plan_fast_questions: InputFieldState,
+    vim_mode: SelectFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
     assignment_scope: SelectFieldState,
@@ -863,6 +975,10 @@ struct SubmittedConfig {
     refresh_policy: ListenRefreshPolicy,
     poll_interval_seconds: Option<u64>,
     interactive_follow_up_questions: Option<usize>,
+    plan_default_mode: Option<PlanDefaultMode>,
+    fast_single_ticket: Option<bool>,
+    fast_questions: Option<usize>,
+    vim_mode: bool,
     plan_label: Option<String>,
     technical_label: Option<String>,
     default_profile: Option<String>,
@@ -885,6 +1001,16 @@ impl ConfigApp {
             .iter()
             .map(|value| (*value).to_string())
             .collect::<Vec<_>>();
+        let plan_mode_options = vec![
+            "Leave unset".to_string(),
+            "Normal".to_string(),
+            "Fast".to_string(),
+        ];
+        let fast_single_ticket_options = vec![
+            "Leave unset".to_string(),
+            "Single ticket by default".to_string(),
+            "Multiple tickets by default".to_string(),
+        ];
         let selected_agent = selected_global_agent(&view.app_config);
         let agent_index = agent_options
             .iter()
@@ -901,6 +1027,7 @@ impl ConfigApp {
         ];
 
         let mut app = Self {
+            keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
             step: ConfigStep::ApiKey,
             api_key: InputFieldState::new(
                 view.app_config.linear.api_key.clone().unwrap_or_default(),
@@ -937,6 +1064,34 @@ impl ConfigApp {
                     .interactive_follow_up_questions
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
+            ),
+            plan_default_mode: SelectFieldState::new(
+                plan_mode_options,
+                match view.app_config.defaults.plan.default_mode {
+                    Some(PlanDefaultMode::Normal) => 1,
+                    Some(PlanDefaultMode::Fast) => 2,
+                    None => 0,
+                },
+            ),
+            plan_fast_single_ticket: SelectFieldState::new(
+                fast_single_ticket_options,
+                match view.app_config.defaults.plan.fast_single_ticket {
+                    Some(true) => 1,
+                    Some(false) => 2,
+                    None => 0,
+                },
+            ),
+            plan_fast_questions: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .plan
+                    .fast_questions
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            vim_mode: SelectFieldState::new(
+                vec!["Disabled".to_string(), "Enabled".to_string()],
+                usize::from(view.app_config.vim_mode_enabled()),
             ),
             plan_label: InputFieldState::new(
                 view.app_config
@@ -1096,6 +1251,12 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(-1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(-1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(-1),
+                    ConfigStep::PlanDefaultMode => self.plan_default_mode.move_by(-1),
+                    ConfigStep::PlanFastSingleTicket => self.plan_fast_single_ticket.move_by(-1),
+                    ConfigStep::VimMode => {
+                        self.vim_mode.move_by(-1);
+                        self.keybindings = KeybindingPolicy::new(self.vim_mode.selected() == 1);
+                    }
                     ConfigStep::Save => {
                         let viewport = summary_viewport(Rect::new(0, 0, 120, 32));
                         let _ = self.summary_scroll.apply_key_code_in_viewport(
@@ -1122,6 +1283,12 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(1),
+                    ConfigStep::PlanDefaultMode => self.plan_default_mode.move_by(1),
+                    ConfigStep::PlanFastSingleTicket => self.plan_fast_single_ticket.move_by(1),
+                    ConfigStep::VimMode => {
+                        self.vim_mode.move_by(1);
+                        self.keybindings = KeybindingPolicy::new(self.vim_mode.selected() == 1);
+                    }
                     ConfigStep::Save => {
                         let viewport = summary_viewport(Rect::new(0, 0, 120, 32));
                         let _ = self.summary_scroll.apply_key_code_in_viewport(
@@ -1138,6 +1305,16 @@ impl ConfigApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent, summary_viewport: Rect) -> Option<ConfigDashboardExit> {
+        if self.select_step_active()
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            return self.apply_action(if delta < 0 {
+                ConfigAction::Up
+            } else {
+                ConfigAction::Down
+            });
+        }
+
         match key.code {
             KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
                 if self.step == ConfigStep::Save =>
@@ -1170,6 +1347,10 @@ impl ConfigApp {
                     ConfigStep::PlanFollowUpLimit => {
                         let _ = self.plan_follow_up_limit.handle_key(key);
                     }
+                    ConfigStep::PlanFastQuestions => {
+                        let _ = self.plan_fast_questions.handle_key(key);
+                    }
+                    ConfigStep::VimMode => {}
                     ConfigStep::PlanLabel => {
                         let _ = self.plan_label.handle_key(key);
                     }
@@ -1181,6 +1362,8 @@ impl ConfigApp {
                     }
                     ConfigStep::AssignmentScope
                     | ConfigStep::RefreshPolicy
+                    | ConfigStep::PlanDefaultMode
+                    | ConfigStep::PlanFastSingleTicket
                     | ConfigStep::DefaultReasoning
                     | ConfigStep::Agent
                     | ConfigStep::Model
@@ -1209,6 +1392,20 @@ impl ConfigApp {
         )
     }
 
+    fn select_step_active(&self) -> bool {
+        matches!(
+            self.step,
+            ConfigStep::AssignmentScope
+                | ConfigStep::RefreshPolicy
+                | ConfigStep::PlanDefaultMode
+                | ConfigStep::PlanFastSingleTicket
+                | ConfigStep::VimMode
+                | ConfigStep::Agent
+                | ConfigStep::Model
+                | ConfigStep::DefaultReasoning
+        )
+    }
+
     fn handle_paste(&mut self, text: &str) {
         self.error = None;
         match self.step {
@@ -1230,6 +1427,10 @@ impl ConfigApp {
             ConfigStep::PlanFollowUpLimit => {
                 let _ = self.plan_follow_up_limit.paste(text);
             }
+            ConfigStep::PlanFastQuestions => {
+                let _ = self.plan_fast_questions.paste(text);
+            }
+            ConfigStep::VimMode => {}
             ConfigStep::PlanLabel => {
                 let _ = self.plan_label.paste(text);
             }
@@ -1241,6 +1442,8 @@ impl ConfigApp {
             }
             ConfigStep::AssignmentScope
             | ConfigStep::RefreshPolicy
+            | ConfigStep::PlanDefaultMode
+            | ConfigStep::PlanFastSingleTicket
             | ConfigStep::Agent
             | ConfigStep::Model
             | ConfigStep::DefaultReasoning
@@ -1271,6 +1474,25 @@ impl ConfigApp {
                 (
                     "Plan follow-ups",
                     summarize_optional_value(&self.plan_follow_up_limit),
+                ),
+                (
+                    "Plan mode",
+                    summarize_optional_select(&self.plan_default_mode, "Leave unset"),
+                ),
+                (
+                    "Fast single-ticket",
+                    summarize_optional_select(&self.plan_fast_single_ticket, "Leave unset"),
+                ),
+                (
+                    "Fast questions",
+                    summarize_optional_value(&self.plan_fast_questions),
+                ),
+                (
+                    "Vim mode",
+                    self.vim_mode
+                        .selected_label()
+                        .unwrap_or("Disabled")
+                        .to_string(),
                 ),
                 ("Plan label", summarize_optional_value(&self.plan_label)),
                 (
@@ -1346,6 +1568,11 @@ impl ConfigApp {
             "plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
         )?;
+        let fast_questions = parse_optional_usize(
+            self.plan_fast_questions.value(),
+            "fast plan question limit",
+            validate_fast_plan_question_limit,
+        )?;
 
         Ok(SubmittedConfig {
             api_key: normalize_optional(self.api_key.value()),
@@ -1362,6 +1589,18 @@ impl ConfigApp {
             },
             poll_interval_seconds,
             interactive_follow_up_questions,
+            plan_default_mode: match self.plan_default_mode.selected() {
+                1 => Some(PlanDefaultMode::Normal),
+                2 => Some(PlanDefaultMode::Fast),
+                _ => None,
+            },
+            fast_single_ticket: match self.plan_fast_single_ticket.selected() {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            },
+            fast_questions,
+            vim_mode: self.vim_mode.selected() == 1,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
             default_profile,
@@ -1393,6 +1632,10 @@ impl SubmittedConfig {
             .defaults
             .plan
             .interactive_follow_up_questions = self.interactive_follow_up_questions;
+        view.app_config.defaults.plan.default_mode = self.plan_default_mode;
+        view.app_config.defaults.plan.fast_single_ticket = self.fast_single_ticket;
+        view.app_config.defaults.plan.fast_questions = self.fast_questions;
+        view.app_config.defaults.ui.vim_mode = self.vim_mode;
         view.app_config.defaults.issue_labels.plan = self.plan_label.clone();
         view.app_config.defaults.issue_labels.technical = self.technical_label.clone();
         view.app_config.linear.default_profile = self.default_profile.clone();
@@ -2300,6 +2543,20 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             &app.plan_follow_up_limit,
             "Max follow-up questions for interactive `meta backlog plan` (e.g. 10).",
         ),
+        ConfigStep::PlanDefaultMode => {
+            render_select_panel(frame, area, &title, &app.plan_default_mode)
+        }
+        ConfigStep::PlanFastSingleTicket => {
+            render_select_panel(frame, area, &title, &app.plan_fast_single_ticket)
+        }
+        ConfigStep::PlanFastQuestions => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.plan_fast_questions,
+            "Max follow-up questions in the one-round fast planning Q&A (0-10).",
+        ),
+        ConfigStep::VimMode => render_select_panel(frame, area, &title, &app.vim_mode),
         ConfigStep::PlanLabel => render_input_panel(
             frame,
             area,
@@ -2360,6 +2617,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         | ConfigStep::ListenLabel
         | ConfigStep::PollInterval
         | ConfigStep::PlanFollowUpLimit
+        | ConfigStep::PlanFastQuestions
         | ConfigStep::PlanLabel
         | ConfigStep::TechnicalLabel
         | ConfigStep::DefaultProfile => {
@@ -2367,6 +2625,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         }
         ConfigStep::AssignmentScope
         | ConfigStep::RefreshPolicy
+        | ConfigStep::PlanDefaultMode
+        | ConfigStep::PlanFastSingleTicket
+        | ConfigStep::VimMode
         | ConfigStep::Agent
         | ConfigStep::Model
         | ConfigStep::DefaultReasoning => {
@@ -2550,11 +2811,11 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::Result;
-    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
     use super::{AdvancedRoutingApp, ConfigApp, ConfigStep, ConfigViewData, summary_viewport};
-    use crate::config::{AgentSettings, AppConfig};
+    use crate::config::{AgentSettings, AppConfig, InstallDefaults, InstallUiSettings};
 
     #[test]
     fn config_app_refreshes_reasoning_options_when_provider_changes() {
@@ -2655,6 +2916,57 @@ mod tests {
 
         assert!(handled);
         assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn config_app_vim_keys_remain_literal_in_text_inputs() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    ui: InstallUiSettings { vim_mode: true },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::Team;
+
+        let _ = app.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            Rect::new(0, 0, 120, 32),
+        );
+
+        assert_eq!(app.team.value(), "j");
+    }
+
+    #[test]
+    fn config_app_vim_keys_navigate_select_steps() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    ui: InstallUiSettings { vim_mode: true },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::AssignmentScope;
+        let initial = app.assignment_scope.selected();
+
+        let _ = app.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            Rect::new(0, 0, 120, 32),
+        );
+
+        assert_eq!(app.assignment_scope.selected(), initial + 1);
     }
 
     #[test]

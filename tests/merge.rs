@@ -62,7 +62,7 @@ if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
-  printf '%s' '{{"url":"{create_url}"}}'
+  printf '%s' '{{"number":999,"url":"{create_url}","isDraft":false}}'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
@@ -179,7 +179,7 @@ if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
     printf '%s\n' 'temporary github failure' >&2
     exit 1
   fi
-  printf '%s' '{{"url":"{create_url}"}}'
+  printf '%s' '{{"number":999,"url":"{create_url}","isDraft":false}}'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
@@ -243,7 +243,7 @@ fi
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
   count=$((count + 1))
   printf '%s' "$count" > "$count_file"
-  printf '%s' '{{"url":"{create_url}"}}'
+  printf '%s' '{{"number":999,"url":"{create_url}","isDraft":false}}'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then

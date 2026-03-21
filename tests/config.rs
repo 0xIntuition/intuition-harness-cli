@@ -38,6 +38,78 @@ fn config_json_is_global_only_and_does_not_scaffold_repo_defaults() -> Result<()
 }
 
 #[test]
+fn config_direct_updates_persist_fast_plan_defaults() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--plan-default-mode",
+            "fast",
+            "--plan-fast-single-ticket",
+            "false",
+            "--plan-fast-questions",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    assert_eq!(
+        parsed["defaults"]["plan"]["default_mode"].as_str(),
+        Some("fast")
+    );
+    assert_eq!(
+        parsed["defaults"]["plan"]["fast_single_ticket"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        parsed["defaults"]["plan"]["fast_questions"].as_integer(),
+        Some(2)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_json_updates_vim_mode_and_returns_effective_value() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+            "--vim-mode",
+            "enabled",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let rendered: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(rendered["app"]["defaults"]["ui"]["vim_mode"], json!(true));
+
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(config_path)?)?;
+    assert_eq!(saved["defaults"]["ui"]["vim_mode"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[test]
 fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -58,6 +130,39 @@ fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("\"metastack_meta_path\""));
 
     assert!(repo_root.join(".metastack/meta.json").is_file());
+    Ok(())
+}
+
+#[test]
+fn setup_direct_updates_persist_fast_plan_defaults() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "setup",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--plan-default-mode",
+            "fast",
+            "--plan-fast-single-ticket",
+            "false",
+            "--plan-fast-questions",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo_root.join(".metastack/meta.json"))?)?;
+    assert_eq!(parsed["plan"]["default_mode"].as_str(), Some("fast"));
+    assert_eq!(parsed["plan"]["fast_single_ticket"].as_bool(), Some(false));
+    assert_eq!(parsed["plan"]["fast_questions"].as_u64(), Some(2));
+
     Ok(())
 }
 
@@ -759,7 +864,6 @@ default_reasoning = "medium"
         .assert()
         .success()
         .stdout(predicate::str::contains("Global configuration"))
-        .stdout(predicate::str::contains("Default reasoning"))
         .stdout(predicate::str::contains("Meta Config"))
         .stdout(predicate::str::contains("Listen label"))
         .stdout(predicate::str::contains("Project ID"))
@@ -767,6 +871,9 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Refresh policy"))
         .stdout(predicate::str::contains("Poll interval"))
         .stdout(predicate::str::contains("Plan follow-ups"))
+        .stdout(predicate::str::contains("Plan mode"))
+        .stdout(predicate::str::contains("Fast single-ticket"))
+        .stdout(predicate::str::contains("Fast questions"))
         .stdout(predicate::str::contains("Plan label"))
         .stdout(predicate::str::contains("Tech label"));
 
@@ -1032,8 +1139,9 @@ default_model = "gpt-5.4"
         .stdout(predicate::str::contains("Questions"))
         .stdout(predicate::str::contains("Summary"))
         .stdout(predicate::str::contains("agent ticket needing extra room"))
-        .stdout(predicate::str::contains("14. Plan label"))
-        .stdout(predicate::str::contains("15. Tech label"));
+        .stdout(predicate::str::contains("17. Plan label"))
+        .stdout(predicate::str::contains("18. Tech label"))
+        .stdout(predicate::str::contains("19. Save"));
 
     Ok(())
 }

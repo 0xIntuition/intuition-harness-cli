@@ -19,6 +19,7 @@ use ratatui::{Frame, Terminal};
 
 use super::WorkflowState;
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::KeybindingPolicy;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ pub struct IssueEditFormOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<IssueEditAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +120,7 @@ const PRIORITY_OPTIONS: [PriorityOption; 5] = [
 
 #[derive(Debug, Clone)]
 struct IssueEditApp {
+    keybindings: KeybindingPolicy,
     context: IssueEditFormContext,
     step: EditStep,
     step_focus: StatusPriorityFocus,
@@ -135,6 +138,7 @@ pub fn run_issue_edit_form(
     options: IssueEditFormOptions,
 ) -> Result<IssueEditFormExit> {
     let mut app = IssueEditApp::new(context, prefill)?;
+    app.keybindings = KeybindingPolicy::new(options.vim_mode);
 
     if options.render_once {
         return render_once(app, options);
@@ -378,6 +382,7 @@ impl IssueEditApp {
         let selected_priority = select_priority_index(prefill.priority);
 
         Ok(Self {
+            keybindings: KeybindingPolicy::new(false),
             context,
             step: EditStep::Title,
             step_focus: StatusPriorityFocus::State,
@@ -403,6 +408,23 @@ impl IssueEditApp {
         key: KeyEvent,
         viewport: ratatui::layout::Rect,
     ) -> Option<IssueEditFormExit> {
+        if self.step == EditStep::StatusPriority {
+            if let Some(delta) = self.keybindings.vertical_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueEditAction::Up
+                } else {
+                    IssueEditAction::Down
+                });
+            }
+            if let Some(delta) = self.keybindings.horizontal_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueEditAction::Left
+                } else {
+                    IssueEditAction::Right
+                });
+            }
+        }
+
         if self.handle_text_navigation_key(key, viewport) {
             return None;
         }

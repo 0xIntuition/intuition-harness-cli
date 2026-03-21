@@ -31,6 +31,7 @@ pub struct DashboardOptions {
     pub height: u16,
     pub actions: Vec<DashboardAction>,
     pub initial_state_filter: Option<String>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +84,7 @@ struct DashboardApp {
 }
 
 pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<Option<String>> {
+    let _ = options.vim_mode;
     if options.render_once {
         return render_once(data, options).map(Some);
     }
@@ -878,6 +880,7 @@ mod tests {
                 height: 30,
                 actions: Vec::new(),
                 initial_state_filter: None,
+                vim_mode: false,
             },
         )
         .expect("render once should succeed")

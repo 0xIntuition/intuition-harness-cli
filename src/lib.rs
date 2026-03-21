@@ -10,6 +10,7 @@ mod context;
 mod cron;
 mod cron_dashboard;
 mod fs;
+mod github_pr;
 mod linear;
 mod listen;
 mod merge;
@@ -153,6 +154,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                                 .into_iter()
                                 .map(SyncDashboardAction::from)
                                 .collect(),
+                            vim_mode: crate::config::AppConfig::load()?.vim_mode_enabled(),
                         },
                     )
                     .await?;
@@ -263,6 +265,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                                 .into_iter()
                                 .map(SyncDashboardAction::from)
                                 .collect(),
+                            vim_mode: crate::config::AppConfig::load()?.vim_mode_enabled(),
                         },
                     )
                     .await?;
@@ -395,6 +398,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                             .into_iter()
                             .map(SyncDashboardAction::from)
                             .collect(),
+                        vim_mode: crate::config::AppConfig::load()?.vim_mode_enabled(),
                     },
                 )
                 .await?;

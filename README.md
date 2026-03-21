@@ -273,6 +273,7 @@ meta runtime config --default-profile work
 meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
 meta runtime config --default-assignee viewer --default-state Backlog --default-priority 2 --default-label platform --default-label cli
 meta runtime config --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
+meta runtime config --vim-mode enabled
 meta runtime config --merge-validation-repair-attempts 8
 meta runtime config --merge-validation-transient-retry-attempts 2
 meta runtime config --merge-publication-retry-attempts 6
@@ -297,6 +298,7 @@ The persisted config can store:
 - install-scoped onboarding completion state
 - install-scoped Linear API key/default team/default project values
 - install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, and plan/technical issue labels
+- install-scoped UI defaults under `[defaults.ui]`, including `vim_mode = true|false` for safe `h/j/k/l` navigation aliases
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
@@ -324,6 +326,11 @@ First-run behavior:
 For the built-in providers, `--reasoning`, `default_reasoning`, and `route_reasoning` are validated
 against the selected provider/model catalog instead of being accepted as free text. The dashboards
 now render reasoning as a select field tied to the current provider/model choice.
+
+When `vim_mode` is enabled, supported TUIs add `h/j/k/l` aliases only while a non-text control is
+focused. Search bars, single-line inputs, and multiline editors continue to insert literal
+characters, and search-first dashboards require leaving query focus before vim navigation takes
+over.
 
 Built-in reasoning options shipped in-repo:
 
@@ -441,6 +448,8 @@ prerelease opt-in, and deliberate downgrades with explicit flags.
 Legacy alias: `meta setup`
 
 `meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+
+Repo setup dashboards automatically honor the install-scoped `vim_mode` toggle from `meta runtime config`, but only for non-text controls such as select lists. Title, label, path, and prompt fields keep literal `h/j/k/l` editing behavior.
 
 For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 Promoted repo-aware settings now resolve as `CLI override -> repo default -> install default` for the shared team/project, listen label/scope/refresh/poll interval, interactive plan follow-up limit, and plan/technical issue labels. Repo-scoped `.metastack/meta.json` still overrides the install-scoped defaults saved by onboarding.
@@ -636,6 +645,9 @@ Turn a planning request into one or more Linear backlog issues:
 ```bash
 meta backlog plan
 meta backlog plan --no-interactive --request "Plan a dashboard for feature intake" --answer "Use the existing TUI patterns" --answer "Split the work into multiple tickets"
+meta backlog plan --fast
+meta backlog plan --fast --multi --questions 1
+meta backlog plan --fast --no-interactive --request "Plan the onboarding rewrite"
 meta backlog plan ENG-10144
 meta backlog plan ENG-10144 --velocity
 ```
@@ -644,17 +656,29 @@ Legacy alias: `meta plan`
 
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
 
+Fast mode keeps the same downstream issue creation path but switches the interaction model to a single pass. When `--fast` is active, the command captures the request, optionally asks at most one round of follow-up questions, prompts once for `Anything Else To Add?`, streams the draft preview while the agent is still generating it, and then shows an approve-or-reject review screen. Fast review intentionally removes merge groups, skip states, and regeneration controls.
+
 Within one `meta backlog plan` run, the shared agent runtime now reuses a built-in Codex or Claude session across follow-up generation, ticket generation, and interactive revisions when the provider returns a resume handle. That continuation is run-scoped only: the command does not persist planning sessions under `.metastack/` or share them with listen workers.
 
 Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow. Focused editors also support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, and mouse-wheel scrolling so long wrapped prompts and follow-up answers stay editable after they overflow the visible pane.
 
 For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values. In zero-prompt mode (`--no-interactive` or no TTY), backlog planning resolves ticket defaults in this order: explicit flags, remembered project/team for the canonical repo root, repo `backlog.velocity_defaults`, global `backlog.velocity_defaults`, repo defaults from `.metastack/meta.json`, global defaults from `config.toml`, then built-in behavior. Generated plan priority still wins over config priority unless you pass `--priority`.
 
+Fast planning adds three mode-specific controls:
+
+- `--fast` enables the single-pass planning flow. Repo or install config can also enable it by default with `plan.default_mode = "fast"`.
+- `--multi` only applies in fast mode and overrides the default single-ticket shape so the agent may emit multiple issues.
+- `--questions <N>` only applies in fast mode and caps the one-round follow-up phase. `0` skips fast Q&A entirely.
+
+Fast mode defaults to a single ticket unless you pass `--multi` or disable that preference through repo/install config with `plan.fast_single_ticket = false`. The follow-up cap resolves in the same precedence order as other plan defaults: explicit CLI flag, repo config, install config, then built-in default. Fast non-interactive runs do not accept `--answer`; they go straight from `--request` to generation so the flow stays single-pass.
+
 `meta backlog plan` also accepts `--state`, `--priority`, repeated `--label`, and `--assignee`. Built-in `plan` labeling remains mandatory and additive, so config labels and explicit labels are appended rather than replacing it.
 
 `meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
 
 Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
+
+`--fast`, `--multi`, and `--questions` do not apply to reshape mode. The command rejects those combinations instead of silently changing reshape behavior.
 
 The planning prompt is repo-scoped by default: it derives the active project identity from the resolved repository root, plans for the full repository directory, and asks the agent to create backlog issues only for that repository unless the user explicitly narrows the request to a subproject.
 
@@ -770,6 +794,7 @@ Legacy alias: `meta sync`
 Side effects:
 
 - bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.metastack/backlog/` state
+- the dashboard starts with query focus; finish editing the search, then press `Tab` or `Enter` to move into the backlog list
 - linked dashboard rows hydrate the mapped Linear issue from `.linear.json`, while unlinked rows stay visible with explicit `unlinked` state
 - unlinked dashboard rows are local-only until you run `meta backlog sync link <ISSUE> --entry <SLUG>`
 - `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
@@ -853,7 +878,7 @@ Required auth:
 
 ### `agents listen`
 
-Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work.
+Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker re-runs the configured local agent with Symphony-inspired first-turn and continuation prompts while the ticket stays active, but it now stops once a turn leaves meaningful local workspace progress and attempts to move the issue into a review-style state instead of burning all 20 turns on the same in-progress work. When the ticket branch is pushed, shared automation creates or updates that branch PR as a draft, keeps the `metastack` label attached, and promotes the same PR to ready for review during the existing review handoff without demoting an already-ready PR on continuation.
 
 With repo setup `assignment_scope = "viewer_only"`, listen watches only Todo issues assigned to the authenticated viewer. Use `assignment_scope = "viewer_or_unassigned"` to also watch unassigned Todo issues, or `--all-assignees` to disable assignee filtering for just the active run.
 
@@ -864,7 +889,8 @@ Legacy alias: `meta listen`
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
 
 When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
-
+When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
+for the existing left/right view-switching controls.
 Examples:
 
 ```bash

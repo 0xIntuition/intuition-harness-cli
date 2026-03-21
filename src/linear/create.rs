@@ -19,6 +19,7 @@ use ratatui::{Frame, Terminal};
 
 use super::WorkflowState;
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ pub struct IssueCreateFormOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<IssueCreateAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -116,6 +118,7 @@ const PRIORITY_OPTIONS: [PriorityOption; 5] = [
 
 #[derive(Debug, Clone)]
 struct IssueCreateApp {
+    keybindings: KeybindingPolicy,
     context: IssueCreateFormContext,
     step: CreateStep,
     step_focus: StatusPriorityFocus,
@@ -133,6 +136,7 @@ pub fn run_issue_create_form(
     options: IssueCreateFormOptions,
 ) -> Result<IssueCreateFormExit> {
     let mut app = IssueCreateApp::new(context, prefill)?;
+    app.keybindings = KeybindingPolicy::new(options.vim_mode);
 
     if options.render_once {
         return render_once(app, options);
@@ -387,6 +391,7 @@ impl IssueCreateApp {
             .collect();
 
         Ok(Self {
+            keybindings: KeybindingPolicy::new(false),
             context,
             step: CreateStep::Title,
             step_focus: StatusPriorityFocus::State,
@@ -412,6 +417,23 @@ impl IssueCreateApp {
         key: KeyEvent,
         viewport: ratatui::layout::Rect,
     ) -> Option<IssueCreateFormExit> {
+        if self.step == CreateStep::StatusPriority {
+            if let Some(delta) = self.keybindings.vertical_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Up
+                } else {
+                    IssueCreateAction::Down
+                });
+            }
+            if let Some(delta) = self.keybindings.horizontal_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Left
+                } else {
+                    IssueCreateAction::Right
+                });
+            }
+        }
+
         if self.handle_text_navigation_key(key, viewport) {
             return None;
         }

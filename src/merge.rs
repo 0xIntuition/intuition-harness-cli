@@ -21,6 +21,9 @@ use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, ensure_dir, ensure_workspace_path_is_safe,
     sibling_workspace_root, write_text_file,
 };
+use crate::github_pr::{
+    GhCli, PullRequestLifecycleAction, PullRequestPublishMode, PullRequestPublishRequest,
+};
 use crate::merge_dashboard::{
     MergeDashboardAction, MergeDashboardData, MergeDashboardExit, MergeDashboardOptions,
     MergeDashboardPullRequest, run_merge_dashboard,
@@ -178,28 +181,46 @@ struct PublicationArtifact {
     validation_success: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct ExistingAggregatePullRequest {
-    number: u64,
-    url: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CreatedPullRequest {
-    url: String,
-}
-
 #[derive(Debug, Clone)]
 struct AggregatePublication {
     url: String,
     action: &'static str,
 }
 
-#[derive(Debug, Clone)]
-struct GhCli;
+fn resolve_repository(gh: &GhCli, root: &Path) -> Result<GithubRepository> {
+    let output = gh.run_json::<RepoViewResponse>(
+        root,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner,url,defaultBranchRef",
+        ],
+    )?;
+    Ok(GithubRepository {
+        name_with_owner: output.name_with_owner,
+        url: output.url,
+        default_branch: output.default_branch_ref.name,
+    })
+}
+
+fn list_open_pull_requests(gh: &GhCli, root: &Path) -> Result<Vec<GithubPullRequest>> {
+    gh.run_json(
+        root,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,title,body,url,headRefName,baseRefName,updatedAt,author",
+        ],
+    )
+}
 
 pub async fn run_merge(args: &MergeArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
+    let app_config = AppConfig::load()?;
     let _planning_meta = load_required_planning_meta(&root, "merge")?;
     ensure_planning_layout(&root, false)?;
 
@@ -227,8 +248,8 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let repository = gh.resolve_repository(&root)?;
-    let pull_requests = gh.list_open_pull_requests(&root)?;
+    let repository = resolve_repository(&gh, &root)?;
+    let pull_requests = list_open_pull_requests(&gh, &root)?;
 
     if args.json {
         println!(
@@ -254,6 +275,7 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
                     .copied()
                     .map(MergeDashboardAction::from)
                     .collect(),
+                vim_mode: app_config.vim_mode_enabled(),
             },
         )?;
         let MergeDashboardExit::Snapshot(snapshot) = exit else {
@@ -274,6 +296,7 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
                 width: args.width,
                 height: args.height,
                 actions: Vec::new(),
+                vim_mode: app_config.vim_mode_enabled(),
             },
         )? {
             MergeDashboardExit::Selected(numbers) if numbers.is_empty() => {
@@ -2099,37 +2122,6 @@ fn run_agent_capture_in_dir(
 }
 
 impl GhCli {
-    fn resolve_repository(&self, root: &Path) -> Result<GithubRepository> {
-        let output = self.run_json::<RepoViewResponse>(
-            root,
-            &[
-                "repo",
-                "view",
-                "--json",
-                "nameWithOwner,url,defaultBranchRef",
-            ],
-        )?;
-        Ok(GithubRepository {
-            name_with_owner: output.name_with_owner,
-            url: output.url,
-            default_branch: output.default_branch_ref.name,
-        })
-    }
-
-    fn list_open_pull_requests(&self, root: &Path) -> Result<Vec<GithubPullRequest>> {
-        self.run_json(
-            root,
-            &[
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--json",
-                "number,title,body,url,headRefName,baseRefName,updatedAt,author",
-            ],
-        )
-    }
-
     fn publish_aggregate_pull_request(
         &self,
         workspace_path: &Path,
@@ -2139,140 +2131,29 @@ impl GhCli {
         title: &str,
         body_path: &Path,
     ) -> Result<AggregatePublication> {
-        let existing = self.run_json::<Vec<ExistingAggregatePullRequest>>(
+        let created = self.publish_branch_pull_request(
             workspace_path,
-            &[
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--head",
-                aggregate_branch,
-                "--base",
+            PullRequestPublishRequest {
+                head_branch: aggregate_branch,
                 base_branch,
-                "--json",
-                "number,url",
-            ],
+                title,
+                body_path,
+                mode: PullRequestPublishMode::Ready,
+            },
         )?;
-        if let Some(pr) = existing.into_iter().next() {
-            self.run_plain(
-                workspace_path,
-                &[
-                    "pr",
-                    "edit",
-                    &pr.number.to_string(),
-                    "--title",
-                    title,
-                    "--body-file",
-                    body_path
-                        .to_str()
-                        .ok_or_else(|| anyhow!("invalid PR body path"))?,
-                ],
-            )?;
-            return Ok(AggregatePublication {
-                url: pr.url,
-                action: "updated",
-            });
-        }
-
-        let created = self
-            .run_json::<CreatedPullRequest>(
-                workspace_path,
-                &[
-                    "pr",
-                    "create",
-                    "--base",
-                    base_branch,
-                    "--head",
-                    aggregate_branch,
-                    "--title",
-                    title,
-                    "--body-file",
-                    body_path
-                        .to_str()
-                        .ok_or_else(|| anyhow!("invalid PR body path"))?,
-                    "--json",
-                    "url",
-                ],
-            )
-            .or_else(|_| {
-                self.run_plain(
-                    workspace_path,
-                    &[
-                        "pr",
-                        "create",
-                        "--base",
-                        base_branch,
-                        "--head",
-                        aggregate_branch,
-                        "--title",
-                        title,
-                        "--body-file",
-                        body_path
-                            .to_str()
-                            .ok_or_else(|| anyhow!("invalid PR body path"))?,
-                    ],
-                )?;
-                let mut prs = self.run_json::<Vec<CreatedPullRequest>>(
-                    workspace_path,
-                    &[
-                        "pr",
-                        "list",
-                        "--state",
-                        "open",
-                        "--head",
-                        aggregate_branch,
-                        "--base",
-                        base_branch,
-                        "--json",
-                        "url",
-                    ],
-                )?;
-                prs.pop().ok_or_else(|| {
-                    anyhow!(
-                        "gh created an aggregate pull request for `{}` but no open PR was returned",
-                        repository.name_with_owner
-                    )
-                })
-            })?;
 
         Ok(AggregatePublication {
             url: created.url,
-            action: "created",
+            action: match created.action {
+                PullRequestLifecycleAction::CreatedReady => "created",
+                PullRequestLifecycleAction::UpdatedExisting => "updated",
+                _ => bail!(
+                    "unexpected aggregate PR lifecycle action `{:?}` for `{}`",
+                    created.action,
+                    repository.name_with_owner
+                ),
+            },
         })
-    }
-
-    fn run_json<T: for<'de> Deserialize<'de>>(&self, root: &Path, args: &[&str]) -> Result<T> {
-        let output = Command::new("gh")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .with_context(|| format!("failed to run `gh {}`", args.join(" ")))?;
-        if !output.status.success() {
-            bail!(
-                "gh {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        serde_json::from_slice(&output.stdout)
-            .with_context(|| format!("failed to decode JSON from `gh {}`", args.join(" ")))
-    }
-
-    fn run_plain(&self, root: &Path, args: &[&str]) -> Result<()> {
-        let output = Command::new("gh")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .with_context(|| format!("failed to run `gh {}`", args.join(" ")))?;
-        if !output.status.success() {
-            bail!(
-                "gh {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(())
     }
 }
 
