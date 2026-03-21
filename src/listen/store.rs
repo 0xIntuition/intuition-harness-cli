@@ -906,7 +906,7 @@ mod tests {
             &store,
             vec![
                 default_session("ENG-10163", SessionPhase::Completed, now - ttl - 1),
-                default_session("ENG-10164", SessionPhase::Completed, now - ttl),
+                default_session("ENG-10164", SessionPhase::Completed, now - ttl + 5),
                 default_session("ENG-10165", SessionPhase::Blocked, now - ttl - 1),
             ],
         )?;

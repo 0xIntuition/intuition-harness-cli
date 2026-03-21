@@ -5,9 +5,11 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
+use serde_json::json;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde_json::json;
+use tokio::time::sleep;
 
 use crate::agent_provider::builtin_provider_adapter;
 use crate::agents::{
@@ -527,17 +529,35 @@ async fn load_worker_issue<C>(service: &LinearService<C>, identifier: &str) -> R
 where
     C: LinearClient,
 {
-    service
-        .find_issue_by_identifier(
-            identifier,
-            IssueListFilters {
-                team: issue_team_key(identifier),
-                limit: 250,
-                ..IssueListFilters::default()
-            },
-        )
-        .await?
-        .ok_or_else(|| anyhow!("issue `{identifier}` was not found in Linear"))
+    let filters = IssueListFilters {
+        team: issue_team_key(identifier),
+        limit: 250,
+        ..IssueListFilters::default()
+    };
+
+    for attempt in 0..2 {
+        match service
+            .find_issue_by_identifier(identifier, filters.clone())
+            .await
+        {
+            Ok(Some(issue)) => return Ok(issue),
+            Ok(None) => return Err(anyhow!("issue `{identifier}` was not found in Linear")),
+            Err(error) if attempt == 0 && is_transient_linear_read_failure(&error) => {
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(anyhow!("issue `{identifier}` was not found in Linear"))
+}
+
+fn is_transient_linear_read_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("failed to reach the Linear GraphQL endpoint")
+    })
 }
 
 fn load_worker_backlog_issue(

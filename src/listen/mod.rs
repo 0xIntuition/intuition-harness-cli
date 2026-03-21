@@ -24,6 +24,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use serde::Serialize;
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -47,6 +48,7 @@ use crate::linear::{
 };
 use crate::listen::workpad::{extract_requirements, render_bootstrap_workpad};
 use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
+use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
 pub use state::{AgentSession, PendingIssue, SessionPhase, TokenUsage};
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState};
@@ -67,7 +69,7 @@ const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
     &["Human Review", "In Review", "Review", "Ready for Review"];
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ListenDashboardData {
     pub title: String,
     pub scope: String,
@@ -136,7 +138,7 @@ impl ListenDashboardData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ListenRuntimeSummary {
     pub agents: String,
     pub throughput: String,
@@ -2093,6 +2095,10 @@ pub async fn run_listen_session_resume(args: &ListenSessionResumeArgs) -> Result
 }
 
 pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
+    if args.json && !args.once {
+        bail!("`meta agents listen --json` requires `--once`");
+    }
+
     let requested_root = canonicalize_existing_dir(&args.root)?;
     let root = resolve_source_project_root(&requested_root)?;
     let planning_meta = load_required_planning_meta(&root, "listen")?;
@@ -2158,7 +2164,11 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     vim_mode: app_config.vim_mode_enabled(),
                 },
             );
-            println!("{}", data.render_summary());
+            if args.json {
+                println!("{}", render_json_success("agents.listen", &data)?);
+            } else {
+                println!("{}", data.render_summary());
+            }
             return Ok(());
         }
 
@@ -2329,7 +2339,11 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 vim_mode: daemon.app_config.vim_mode_enabled(),
             },
         );
-        println!("{}", data.render_summary());
+        if args.json {
+            println!("{}", render_json_success("agents.listen", &data)?);
+        } else {
+            println!("{}", data.render_summary());
+        }
         return Ok(());
     }
 
