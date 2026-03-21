@@ -22,8 +22,8 @@ use super::browser::{
 };
 use super::{DashboardData, IssueSummary};
 use crate::tui::fields::InputFieldState;
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -140,7 +140,10 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
                     ),
                     _ => {
                         if let Some(action) = navigation_action(key, &app) {
-                            app.apply_in_viewport(action, preview_viewport(terminal.size()?.into()));
+                            app.apply_in_viewport(
+                                action,
+                                preview_viewport(terminal.size()?.into()),
+                            );
                         } else {
                             let _ = app.handle_query_key(key);
                         }
@@ -838,14 +841,13 @@ fn preview_viewport(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        DashboardAction, DashboardApp, DashboardOptions, EstimateFilter, Focus, preview_viewport,
-        run_dashboard,
-        navigation_action,
+        DashboardAction, DashboardApp, DashboardOptions, EstimateFilter, Focus, navigation_action,
+        preview_viewport, run_dashboard,
     };
     use crate::linear::DashboardData;
     use crate::tui::fields::InputFieldState;
-    use ratatui::layout::Rect;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
 
     #[test]
     fn dashboard_state_applies_status_and_estimate_filters() {

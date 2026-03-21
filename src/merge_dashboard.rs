@@ -3,8 +3,8 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::event::MouseEvent;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -16,8 +16,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
     panel_title, paragraph,
@@ -631,8 +631,8 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         Focus, MergeDashboardAction, MergeDashboardApp, MergeDashboardData, MergeDashboardExit,
-        MergeDashboardOptions, MergeDashboardPullRequest, preview_viewport, run_merge_dashboard,
-        navigation_action,
+        MergeDashboardOptions, MergeDashboardPullRequest, navigation_action, preview_viewport,
+        run_merge_dashboard,
     };
     use crate::tui::keybindings::KeybindingPolicy;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};

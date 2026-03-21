@@ -23,8 +23,8 @@ use crate::linear::browser::{
     render_issue_row, search_issues,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -817,14 +817,14 @@ fn preview_viewport(area: Rect) -> Rect {
 mod tests {
     use super::{
         Focus, SyncDashboardAction, SyncDashboardApp, SyncDashboardData, SyncDashboardExit,
-        SyncDashboardIssue, SyncDashboardOptions, preview_viewport, run_sync_dashboard,
-        navigation_action,
+        SyncDashboardIssue, SyncDashboardOptions, navigation_action, preview_viewport,
+        run_sync_dashboard,
     };
     use crate::backlog::BacklogSyncStatus;
     use crate::linear::{DashboardData, IssueSummary, ProjectRef, WorkflowState};
     use crate::tui::fields::InputFieldState;
-    use ratatui::layout::Rect;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();

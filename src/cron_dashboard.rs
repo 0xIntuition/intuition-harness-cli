@@ -1229,9 +1229,9 @@ mod tests {
         CronField, CronInitAction, CronInitApp, CronInitFormContext, CronInitFormExit,
         CronInitFormPrefill, SchedulePreset, parse_schedule_prefill, prompt_editor_viewport,
     };
+    use crate::tui::keybindings::KeybindingPolicy;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
-    use crate::tui::keybindings::KeybindingPolicy;
 
     #[test]
     fn schedule_prefill_detects_hourly_expression() {

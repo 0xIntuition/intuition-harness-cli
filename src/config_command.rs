@@ -33,8 +33,8 @@ use crate::config::{
     validate_listen_poll_interval_seconds,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::keybindings::KeybindingPolicy;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
 pub struct ConfigReport {

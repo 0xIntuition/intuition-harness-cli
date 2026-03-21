@@ -52,8 +52,8 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push_for_issue;
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const ISSUE_PICKER_LIMIT: usize = 250;
@@ -1905,10 +1905,9 @@ mod tests {
     use super::{
         AcceptanceCriteriaApp, IssuePickerApp, IssuePickerFocus, LoadingApp,
         TechnicalGeneratedBacklog, TechnicalReviewApp, TechnicalReviewFocus,
-        handle_issue_picker_key, handle_issue_picker_paste, render_acceptance_criteria_frame,
-        render_issue_picker_frame, render_loading_frame, render_review_frame,
-        render_technical_prompt, search_results, snapshot,
-        extract_acceptance_criteria,
+        extract_acceptance_criteria, handle_issue_picker_key, handle_issue_picker_paste,
+        render_acceptance_criteria_frame, render_issue_picker_frame, render_loading_frame,
+        render_review_frame, render_technical_prompt, search_results, snapshot,
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
@@ -1917,8 +1916,8 @@ mod tests {
         prepare_issue_context,
     };
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
-    use crate::tui::scroll::ScrollState;
     use crate::tui::keybindings::KeybindingPolicy;
+    use crate::tui::scroll::ScrollState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

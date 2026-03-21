@@ -36,8 +36,8 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::keybindings::KeybindingPolicy;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
 struct SetupViewData {
