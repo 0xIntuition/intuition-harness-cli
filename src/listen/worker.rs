@@ -31,8 +31,8 @@ use super::{
     BACKLOG_STATE, MAX_STALLED_TURNS, SessionPhase, TokenUsage, agent_log_path,
     backlog_progress_for_issue_dir, capture_workspace_snapshot, compact_blocked_summary,
     compact_completed_summary, compact_running_summary, compare_workspace_snapshots,
-    current_workspace_branch, issue_state_label, issue_team_key, listen_issue_is_active,
-    now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
+    current_workspace_branch, issue_description_text, issue_state_label, issue_team_key,
+    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
     try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
 };
 
@@ -916,7 +916,7 @@ fn build_agent_instructions(
         );
     }
 
-    if issue.description.is_none() {
+    if issue_description_text(issue).is_none() {
         sections.push(
             "Issue description is empty in Linear; rely on the current workspace and workpad state."
                 .to_string(),
@@ -1016,10 +1016,15 @@ fn load_existing_session_id(
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerSessionContext, build_worker_session};
+    use super::{
+        ListenTurnContext, WorkerSessionContext, build_agent_instructions, build_worker_session,
+    };
+    use crate::cli::ListenWorkerArgs;
+    use crate::config::{AppConfig, PlanningMeta};
     use crate::linear::{IssueSummary, TeamRef};
     use crate::listen::{SessionPhase, TokenUsage};
     use std::path::Path;
+    use tempfile::tempdir;
 
     fn issue() -> IssueSummary {
         IssueSummary {
@@ -1105,5 +1110,69 @@ mod tests {
         assert_eq!(third.tokens.input, Some(120));
         assert_eq!(third.tokens.output, Some(45));
         assert_eq!(third.tokens.total(), Some(165));
+    }
+
+    #[test]
+    fn build_agent_instructions_flags_blank_issue_descriptions() {
+        let temp = tempdir().expect("temp dir should build");
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = ListenWorkerArgs {
+            source_root: temp.path().to_path_buf(),
+            project: None,
+            workspace: temp.path().to_path_buf(),
+            issue: "MET-25".to_string(),
+            workpad_comment_id: "comment-25".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let issue = IssueSummary {
+            id: "issue-MET-25".to_string(),
+            identifier: "MET-25".to_string(),
+            title: "Blank description".to_string(),
+            description: Some(" \n\t ".to_string()),
+            url: "https://linear.app/issues/MET-25".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-03-20T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "MET".to_string(),
+                name: "Metastack".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: Vec::new(),
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        };
+        let context = ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root: temp.path(),
+            project_selector: None,
+            workspace_path: temp.path(),
+            workpad_comment_id: "comment-25",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+
+        let instructions =
+            build_agent_instructions(&issue, 1, &context).expect("instructions should render");
+
+        assert!(instructions.contains(
+            "Issue description is empty in Linear; rely on the current workspace and workpad state."
+        ));
     }
 }
