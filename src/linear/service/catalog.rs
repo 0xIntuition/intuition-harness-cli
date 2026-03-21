@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::linear::{
     DashboardData, DashboardFilters, IssueListFilters, LinearClient, ProjectListFilters,
-    ProjectSummary, UserRef,
+    ProjectSummary, ProjectUpdateRequest, UserRef,
 };
 
 use super::{LinearService, resolution::project_has_team};
@@ -23,6 +23,18 @@ where
 
         projects.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(projects)
+    }
+
+    pub async fn get_project(&self, project_id: &str) -> Result<ProjectSummary> {
+        self.client.get_project(project_id).await
+    }
+
+    pub async fn update_project(
+        &self,
+        project_id: &str,
+        request: ProjectUpdateRequest,
+    ) -> Result<ProjectSummary> {
+        self.client.update_project(project_id, request).await
     }
 
     pub async fn load_dashboard(&self, filters: DashboardFilters) -> Result<DashboardData> {

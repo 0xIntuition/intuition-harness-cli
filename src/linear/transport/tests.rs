@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::config::LinearConfig;
 use crate::linear::{
     IssueAssigneeFilter, IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters,
-    LinearClient, ReqwestLinearClient,
+    LinearClient, ProjectUpdateRequest, ReqwestLinearClient,
 };
 
 #[tokio::test]
@@ -253,6 +253,85 @@ async fn reqwest_client_creates_issue_labels() {
     assert_eq!(label.id, "label-technical");
     assert_eq!(label.name, "technical");
     create_mock.assert_calls(1);
+}
+
+#[tokio::test]
+async fn reqwest_client_reads_and_updates_project_descriptions() {
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let get_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Project")
+            .body_includes("\"id\":\"project-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "project": {
+                    "id": "project-1",
+                    "name": "MetaStack CLI",
+                    "description": "Current project doc",
+                    "url": "https://linear.app/project/project-1",
+                    "progress": 0.5,
+                    "teams": {
+                        "nodes": [{
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        }]
+                    }
+                }
+            }
+        }));
+    });
+    let update_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateProject")
+            .body_includes("\"id\":\"project-1\"")
+            .body_includes("\"description\":\"# Roadmap");
+        then.status(200).json_body(json!({
+            "data": {
+                "projectUpdate": {
+                    "success": true,
+                    "project": {
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": "# Roadmap\n\nUpdated",
+                        "url": "https://linear.app/project/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }
+                }
+            }
+        }));
+    });
+    let client = client(api_url);
+
+    let project = client
+        .get_project("project-1")
+        .await
+        .expect("project should load");
+    assert_eq!(project.description.as_deref(), Some("Current project doc"));
+
+    let updated = client
+        .update_project(
+            "project-1",
+            ProjectUpdateRequest {
+                description: Some("# Roadmap\n\nUpdated".to_string()),
+            },
+        )
+        .await
+        .expect("project should update");
+    assert_eq!(updated.description.as_deref(), Some("# Roadmap\n\nUpdated"));
+
+    get_mock.assert_calls(1);
+    update_mock.assert_calls(1);
 }
 
 #[tokio::test]

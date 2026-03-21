@@ -28,6 +28,6 @@ pub use types::{
     AttachmentCreateRequest, AttachmentSummary, DashboardData, DashboardFilters,
     IssueAssigneeFilter, IssueComment, IssueCreateRequest, IssueCreateSpec, IssueEditContext,
     IssueEditSpec, IssueLabelCreateRequest, IssueLink, IssueListFilters, IssueSummary,
-    IssueUpdateRequest, LabelRef, ProjectListFilters, ProjectRef, ProjectSummary, TeamRef,
-    TeamSummary, UserRef, WorkflowState,
+    IssueUpdateRequest, LabelRef, ProjectListFilters, ProjectRef, ProjectSummary,
+    ProjectUpdateRequest, TeamRef, TeamSummary, UserRef, WorkflowState,
 };

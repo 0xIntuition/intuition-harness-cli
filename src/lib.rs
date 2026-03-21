@@ -17,6 +17,7 @@ mod onboarding;
 mod plan;
 mod progress;
 mod repo_target;
+mod roadmap;
 mod scaffold;
 mod scan;
 mod scan_dashboard;
@@ -63,6 +64,7 @@ use crate::onboarding::{
     OnboardingLaunchMode, OnboardingOptions, OnboardingResult, run_onboarding,
 };
 use crate::plan::run_plan;
+use crate::roadmap::run_roadmap;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
 use crate::setup::run_setup;
@@ -107,6 +109,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             BacklogCommands::Plan(args) => {
                 let report = run_plan(&args).await?;
                 println!("{}", report.render());
+            }
+            BacklogCommands::Roadmap(args) => {
+                run_roadmap(&args).await?;
             }
             BacklogCommands::Tech(args) => {
                 run_technical(&args).await?;

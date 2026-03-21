@@ -1058,6 +1058,10 @@ reasoning = "high"
 [agents.routing.commands."backlog.plan"]
 provider = "codex"
 model = "gpt-5.3-codex"
+
+[agents.routing.commands."backlog.roadmap"]
+provider = "claude"
+model = "sonnet"
 "#,
     )?;
 
@@ -1083,6 +1087,10 @@ model = "gpt-5.3-codex"
     assert_eq!(
         parsed["app"]["agents"]["routing"]["commands"]["backlog.plan"]["model"].as_str(),
         Some("gpt-5.3-codex")
+    );
+    assert_eq!(
+        parsed["app"]["agents"]["routing"]["commands"]["backlog.roadmap"]["provider"].as_str(),
+        Some("claude")
     );
 
     Ok(())
@@ -1144,9 +1152,26 @@ fn config_direct_route_updates_can_set_and_clear_family_and_command_overrides()
         .assert()
         .success();
 
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--route",
+            "backlog.roadmap",
+            "--route-agent",
+            "claude",
+            "--route-model",
+            "sonnet",
+        ])
+        .assert()
+        .success();
+
     let config = fs::read_to_string(&config_path)?;
     assert!(config.contains("[agents.routing.families.backlog]"));
     assert!(config.contains("[agents.routing.commands.\"backlog.plan\"]"));
+    assert!(config.contains("[agents.routing.commands.\"backlog.roadmap\"]"));
 
     cli()
         .env("METASTACK_CONFIG", &config_path)
@@ -1224,6 +1249,7 @@ model = "opus"
         .stdout(predicate::str::contains("Advanced Agent Routing"))
         .stdout(predicate::str::contains("Family: backlog"))
         .stdout(predicate::str::contains("Command: backlog.plan"))
+        .stdout(predicate::str::contains("Command: backlog.roadmap"))
         .stdout(predicate::str::contains("Effective routes"));
 
     Ok(())

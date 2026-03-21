@@ -6,8 +6,8 @@ use std::sync::{
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueAssigneeFilter, IssueComment,
     IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, IssueSummary,
-    IssueUpdateRequest, LabelRef, LinearClient, ProjectRef, ProjectSummary, TeamRef, TeamSummary,
-    UserRef, WorkflowState,
+    IssueUpdateRequest, LabelRef, LinearClient, ProjectRef, ProjectSummary, ProjectUpdateRequest,
+    TeamRef, TeamSummary, UserRef, WorkflowState,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -22,8 +22,11 @@ pub(super) struct FakeLinearClient {
     pub(super) teams: Vec<TeamSummary>,
     pub(super) issue_detail: Option<IssueSummary>,
     pub(super) updated_issue: Option<IssueSummary>,
+    pub(super) project_detail: Option<ProjectSummary>,
+    pub(super) updated_project: Option<ProjectSummary>,
     pub(super) create_requests: Arc<Mutex<Vec<IssueCreateRequest>>>,
     pub(super) update_requests: Arc<Mutex<Vec<(String, IssueUpdateRequest)>>>,
+    pub(super) project_update_requests: Arc<Mutex<Vec<(String, ProjectUpdateRequest)>>>,
     pub(super) created_issue_labels: Arc<Mutex<Vec<IssueLabelCreateRequest>>>,
     pub(super) created_comments: Arc<Mutex<Vec<(String, String)>>>,
     pub(super) updated_comments: Arc<Mutex<Vec<(String, String)>>>,
@@ -35,6 +38,17 @@ pub(super) struct FakeLinearClient {
 impl LinearClient for FakeLinearClient {
     async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
         Ok(self.projects.clone())
+    }
+
+    async fn get_project(&self, project_id: &str) -> Result<ProjectSummary> {
+        if let Some(project) = self.project_detail.clone() {
+            return Ok(project);
+        }
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("project `{project_id}` was not found in Linear"))
     }
 
     async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
@@ -166,6 +180,20 @@ impl LinearClient for FakeLinearClient {
             id: format!("label-{}", request.name),
             name: request.name,
         })
+    }
+
+    async fn update_project(
+        &self,
+        project_id: &str,
+        request: ProjectUpdateRequest,
+    ) -> Result<ProjectSummary> {
+        self.project_update_requests
+            .lock()
+            .expect("mutex poisoned")
+            .push((project_id.to_string(), request));
+        Ok(self.updated_project.clone().unwrap_or_else(|| {
+            project(project_id, "MetaStack CLI", &["MET"])
+        }))
     }
 
     async fn update_issue(

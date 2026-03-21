@@ -24,6 +24,7 @@ Examples:
   meta backlog plan --root . --request \"Split the onboarding work into tickets\"
   meta backlog plan --root . ENG-10144
   meta backlog plan --root . ENG-10144 --velocity
+  meta backlog roadmap --root . --request \"Refresh the canonical roadmap\" --apply
   meta backlog tech MET-35
   meta backlog split MET-35
   meta backlog sync status
@@ -241,6 +242,8 @@ pub struct BacklogArgs {
 pub enum BacklogCommands {
     /// Plan a backlog request into one or more Linear backlog issues.
     Plan(PlanArgs),
+    /// Draft or refresh the canonical repo-root roadmap and sync it to the configured Linear project doc.
+    Roadmap(RoadmapArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
     Tech(TechnicalArgs),
@@ -665,6 +668,36 @@ pub struct PlanArgs {
     #[arg(long)]
     pub velocity: bool,
     /// Skip the ratatui workflow and run directly from flags/stdin context.
+    #[arg(long)]
+    pub no_interactive: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct RoadmapArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Prefill the roadmap request. Required when `--no-interactive` is used.
+    #[arg(long)]
+    pub request: Option<String>,
+    /// Provide follow-up answers in the same order the roadmap agent asks them.
+    #[arg(long = "answer")]
+    pub answers: Vec<String>,
+    /// Include one or more explicit `.md` or `.txt` source files in the roadmap run.
+    #[arg(long = "source", value_name = "PATH")]
+    pub sources: Vec<PathBuf>,
+    /// Override the configured default agent/provider for this roadmap run.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for this roadmap run.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for this roadmap run.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+    /// Persist the proposed roadmap to repo root and sync it to the configured Linear project doc.
+    #[arg(long)]
+    pub apply: bool,
+    /// Skip the interactive roadmap review flow and run directly from flags/stdin context.
     #[arg(long)]
     pub no_interactive: bool,
 }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use reqwest::Client;
 
@@ -6,7 +6,7 @@ use crate::config::LinearConfig;
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
     IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
-    ProjectSummary, TeamSummary, UserRef,
+    ProjectSummary, ProjectUpdateRequest, TeamSummary, UserRef,
 };
 
 mod attachments;
@@ -26,6 +26,13 @@ mod viewer;
 #[async_trait]
 pub trait LinearClient: Send + Sync {
     async fn list_projects(&self, limit: usize) -> Result<Vec<ProjectSummary>>;
+    async fn get_project(&self, project_id: &str) -> Result<ProjectSummary> {
+        self.list_projects(100)
+            .await?
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| anyhow!("project `{project_id}` was not found in Linear"))
+    }
     async fn list_users(&self, limit: usize) -> Result<Vec<UserRef>>;
     async fn list_issues(&self, limit: usize) -> Result<Vec<IssueSummary>>;
     async fn list_filtered_issues(&self, filters: &IssueListFilters) -> Result<Vec<IssueSummary>>;
@@ -35,6 +42,14 @@ pub trait LinearClient: Send + Sync {
     async fn viewer(&self) -> Result<UserRef>;
     async fn create_issue(&self, request: IssueCreateRequest) -> Result<IssueSummary>;
     async fn create_issue_label(&self, request: IssueLabelCreateRequest) -> Result<LabelRef>;
+    async fn update_project(
+        &self,
+        project_id: &str,
+        request: ProjectUpdateRequest,
+    ) -> Result<ProjectSummary> {
+        let _ = (project_id, request);
+        bail!("project updates are not supported by this Linear client")
+    }
     async fn update_issue(
         &self,
         issue_id: &str,
@@ -83,6 +98,10 @@ impl LinearClient for ReqwestLinearClient {
         self.list_projects_resource(limit).await
     }
 
+    async fn get_project(&self, project_id: &str) -> Result<ProjectSummary> {
+        self.get_project_resource(project_id).await
+    }
+
     async fn list_users(&self, limit: usize) -> Result<Vec<UserRef>> {
         self.list_users_resource(limit).await
     }
@@ -117,6 +136,14 @@ impl LinearClient for ReqwestLinearClient {
 
     async fn create_issue_label(&self, request: IssueLabelCreateRequest) -> Result<LabelRef> {
         self.create_issue_label_resource(request).await
+    }
+
+    async fn update_project(
+        &self,
+        project_id: &str,
+        request: ProjectUpdateRequest,
+    ) -> Result<ProjectSummary> {
+        self.update_project_resource(project_id, request).await
     }
 
     async fn update_issue(

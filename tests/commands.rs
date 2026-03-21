@@ -124,15 +124,30 @@ fn agents_help_lists_listen_and_workflows() {
 }
 
 #[test]
-fn backlog_help_lists_tech_and_sync_commands() {
+fn backlog_help_lists_plan_roadmap_tech_and_sync_commands() {
     cli()
         .args(["backlog", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  plan "))
+        .stdout(predicate::str::contains("\n  roadmap "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
+        .stdout(predicate::str::contains("meta backlog roadmap --root ."))
         .stdout(predicate::str::contains("meta backlog tech MET-35"));
+}
+
+#[test]
+fn roadmap_help_describes_apply_and_explicit_sources() {
+    cli()
+        .args(["backlog", "roadmap", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--request <REQUEST>"))
+        .stdout(predicate::str::contains("--answer <ANSWERS>"))
+        .stdout(predicate::str::contains("--source <PATH>"))
+        .stdout(predicate::str::contains("--apply"))
+        .stdout(predicate::str::contains("--no-interactive"));
 }
 
 #[test]

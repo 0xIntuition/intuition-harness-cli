@@ -39,6 +39,11 @@ pub(super) struct ProjectsPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct ProjectByIdPayload {
+    pub(super) project: Option<ProjectNode>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct UsersPayload {
     pub(super) users: Connection<UserRef>,
 }
@@ -93,6 +98,12 @@ pub(super) struct IssueLabelCreatePayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct ProjectUpdatePayload {
+    #[serde(rename = "projectUpdate")]
+    pub(super) project_update: ProjectMutationNode,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct CommentMutationPayload {
     #[serde(rename = "commentCreate", alias = "commentUpdate")]
     pub(super) comment_mutation: CommentMutationNode,
@@ -133,6 +144,12 @@ pub(super) struct IssueLabelMutationNode {
     pub(super) success: bool,
     #[serde(rename = "issueLabel")]
     pub(super) issue_label: Option<LabelRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectMutationNode {
+    pub(super) success: bool,
+    pub(super) project: Option<ProjectNode>,
 }
 
 #[derive(Debug, Deserialize)]

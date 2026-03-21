@@ -10,7 +10,8 @@ use super::{
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueAssigneeFilter, IssueComment,
     IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, IssueSummary,
-    IssueUpdateRequest, LabelRef, LinearClient, ProjectSummary, TeamSummary, UserRef,
+    IssueUpdateRequest, LabelRef, LinearClient, ProjectSummary, ProjectUpdateRequest,
+    TeamSummary, UserRef,
 };
 use crate::linear::{IssueCreateSpec, IssueEditSpec};
 
@@ -348,6 +349,41 @@ async fn ensure_issue_labels_exist_creates_only_missing_labels() {
     assert_eq!(created.len(), 1);
     assert_eq!(created[0].team_id, "team-MET");
     assert_eq!(created[0].name, "technical");
+}
+
+#[tokio::test]
+async fn project_doc_helpers_load_and_update_the_configured_project() {
+    let client = FakeLinearClient {
+        projects: vec![project("project-1", "MetaStack CLI", &["MET"])],
+        project_detail: Some(project("project-1", "MetaStack CLI", &["MET"])),
+        updated_project: Some(project("project-1", "MetaStack CLI", &["MET"])),
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), Some("MET".to_string()));
+
+    let project = service
+        .get_project("project-1")
+        .await
+        .expect("project should load");
+    assert_eq!(project.id, "project-1");
+
+    service
+        .update_project(
+            "project-1",
+            ProjectUpdateRequest {
+                description: Some("# Roadmap".to_string()),
+            },
+        )
+        .await
+        .expect("project should update");
+
+    let requests = client
+        .project_update_requests
+        .lock()
+        .expect("mutex poisoned");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "project-1");
+    assert_eq!(requests[0].1.description.as_deref(), Some("# Roadmap"));
 }
 
 #[derive(Clone)]

@@ -210,6 +210,11 @@ pub struct IssueLabelCreateRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ProjectUpdateRequest {
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct IssueUpdateRequest {
     pub title: Option<String>,
     pub description: Option<String>,

@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog plan`, `meta backlog roadmap`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
@@ -116,6 +116,7 @@ meta runtime setup
 meta context scan
 meta context show
 meta backlog plan --request "Break the next release into Linear-ready tickets"
+meta backlog roadmap --request "Refresh the canonical roadmap" --apply
 ```
 
 If you are ready to supervise issue execution:
@@ -170,6 +171,7 @@ sandbox_mode = "danger-full-access"
     README.md
   workflows/
     README.md
+  roadmap-runs/
   cron/
     README.md
 ```
@@ -180,7 +182,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, create technical backlog children, and sync backlog work for the current repository |
+| `meta backlog` | Plan tickets, refresh the canonical roadmap, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
 | `meta agents` | Run the unattended listener and reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
@@ -211,7 +213,7 @@ A typical end-to-end loop looks like this:
 1. Run `meta runtime config` once to save install-scoped Linear auth and agent defaults.
 2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
 3. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-4. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
+4. Use `meta backlog plan`, `meta backlog roadmap`, or `meta backlog tech` to create structured backlog work.
 5. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 6. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
 7. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
@@ -225,6 +227,7 @@ Engineer:
 meta runtime setup --team MET --project "MetaStack CLI"
 meta context scan
 meta backlog plan --request "Break the next release into Linear-ready tickets"
+meta backlog roadmap --request "Refresh the canonical roadmap" --apply
 meta backlog tech MET-35
 ```
 
@@ -660,6 +663,22 @@ Side effects:
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
 - writes `.metastack/backlog/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
 
+### `backlog roadmap`
+
+Draft or refresh the canonical repo-root roadmap and optionally sync the same content to the configured Linear project description:
+
+```bash
+meta backlog roadmap --request "Refresh the canonical roadmap"
+meta backlog roadmap --request "Refresh the canonical roadmap" --answer "Focus on the next release" --apply --no-interactive
+meta backlog roadmap --source docs/strategy.md --source notes/launch.txt --request "Pull the explicit sources into the roadmap" --apply --no-interactive
+```
+
+`meta backlog roadmap` treats the repository root as canonical and writes the durable output to `roadmap.md` at repo root. Every run also persists immutable artifacts under `.metastack/roadmap-runs/<RUN_ID>/`, including `source-manifest.json`, `proposal.md`, `summary.json`, and `diff.md` when an existing roadmap is being refreshed.
+
+The collector ingests repo-local `.md` and `.txt` files, records each source as `used`, `skipped`, or `error`, enriches that bundle with the configured Linear project description, tries to include completed project issues, and records merged-PR evidence from local git when it is available.
+
+In zero-prompt mode, pass `--request`, the exact number of `--answer` values requested by the configured roadmap agent, and `--apply` when you want the command to update `roadmap.md` and then sync the same content to Linear. The command refuses a silent overwrite when the current Linear project description is ahead of the repo copy.
+
 ### `backlog tech`
 
 Create a technical sub-issue from an existing Linear parent issue and have the configured local agent turn the repo template into a concrete backlog item:
@@ -926,7 +945,7 @@ Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog roadmap`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
