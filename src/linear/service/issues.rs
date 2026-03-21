@@ -182,7 +182,9 @@ where
                 Some(&team.key),
             )
             .await?;
-        let label_ids = self.resolve_label_ids(&spec.labels, &team.key).await?;
+        let label_ids = self
+            .ensure_and_resolve_label_ids(Some(team.key.clone()), &spec.labels)
+            .await?;
 
         self.client
             .create_issue(IssueCreateRequest {
@@ -207,11 +209,10 @@ where
             .resolve_project_id(spec.project.as_deref(), None, Some(&issue.team.key))
             .await?;
         let label_ids = match spec.labels.as_ref() {
-            Some(labels) => {
-                self.ensure_issue_labels_exist(Some(issue.team.key.clone()), labels)
-                    .await?;
-                Some(self.resolve_label_ids(labels, &issue.team.key).await?)
-            }
+            Some(labels) => Some(
+                self.ensure_and_resolve_label_ids(Some(issue.team.key.clone()), labels)
+                    .await?,
+            ),
             None => None,
         };
         let parent_id = match spec.parent_identifier.as_deref() {

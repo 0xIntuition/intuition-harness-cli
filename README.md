@@ -708,12 +708,15 @@ meta backlog improve ENG-10144 --mode advanced --apply
 
 `meta backlog improve` is the repo-scoped backlog triage pass for existing backlog issues. Use it when you want to scan the current backlog for missing labels, weak titles/descriptions, missing acceptance criteria, absent priority or estimate, and parent-child structure opportunities. The default `basic` mode stays conservative and focuses on metadata hygiene. `advanced` mode can rewrite issue content more deeply and propose or apply an existing parent issue when the repository backlog clearly supports that structure.
 
+In a TTY, the command now stays inside one guided dashboard flow after issue selection. For each issue, the configured agent classifies the ticket into one of four states: `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`. The engineer then explicitly accepts, skips, or rejects that recommendation before the command moves on. The decision panel always shows the primary `Enter` action for the current ticket, plus explicit `skip` and `reject` paths. When the agent needs direct follow-up answers, the dashboard captures them inline, reruns the same issue review, and only offers an apply path once the recommendation is concrete enough to mutate local backlog content or Linear.
+
 Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and the main goal is improving the issue description itself. Use `meta backlog improve` when you want a backlog-quality sweep that evaluates whether existing repo-scoped backlog issues are ready for execution.
 
 Side effects:
 
 - scans either explicit issue identifiers or repo-scoped issues in the configured backlog state
 - writes `original.md`, `issue.json`, `local-index.md` when present, `proposal.json`, `proposal.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/improvement/<RUN_ID>/`
+- in the interactive dashboard, keeps local and remote changes gated behind an explicit human decision for each issue
 - keeps the default flow proposal-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue
 - with `--apply`, writes the local artifact trail first, then updates `.metastack/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear
 

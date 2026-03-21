@@ -683,6 +683,47 @@ async fn edit_issue_updates_labels_estimate_and_parent() {
 }
 
 #[tokio::test]
+async fn edit_issue_creates_missing_labels_and_uses_created_ids() {
+    let client = FakeLinearClient {
+        issues: vec![issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")],
+        all_issues: vec![issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")],
+        issue_labels: vec![label("label-plan", "plan")],
+        teams: vec![team("MET", &[("state-1", "Todo"), ("state-2", "Backlog")])],
+        updated_issue: Some(issue("MET-11", "Todo", Some("project-1"), "MetaStack CLI")),
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), Some("MET".to_string()));
+
+    service
+        .edit_issue(IssueEditSpec {
+            identifier: "MET-11".to_string(),
+            title: None,
+            description: None,
+            project: None,
+            state: None,
+            priority: None,
+            estimate: None,
+            labels: Some(vec!["plan".to_string(), "feature".to_string()]),
+            parent_identifier: None,
+        })
+        .await
+        .expect("issue edit should create the missing label before update");
+
+    let created = client.created_issue_labels.lock().expect("mutex poisoned");
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].name, "feature");
+
+    let updates = client.update_requests.lock().expect("mutex poisoned");
+    let (_issue_id, request) = updates
+        .first()
+        .expect("an update request should be recorded");
+    assert_eq!(
+        request.label_ids.as_ref(),
+        Some(&vec!["label-plan".to_string(), "label-feature".to_string()])
+    );
+}
+
+#[tokio::test]
 async fn upsert_workpad_comment_updates_existing_active_comment() {
     let client = FakeLinearClient::default();
     let service = LinearService::new(client.clone(), None);
