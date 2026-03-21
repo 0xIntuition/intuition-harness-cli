@@ -1001,6 +1001,26 @@ fn dynamic_linear_response(
         }));
     }
 
+    if body.contains("mutation CreateAttachment") {
+        return Ok(json!({
+            "data": {
+                "attachmentCreate": {
+                    "success": true,
+                    "attachment": {
+                        "id": "attachment-32",
+                        "title": "GitHub PR #321",
+                        "url": "https://github.com/example/repo/pull/321",
+                        "sourceType": "custom",
+                        "metadata": {
+                            "provider": "github",
+                            "type": "pull_request"
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
     if body.contains("query Issue($id: String!)") {
         if body.contains("\"id\":\"issue-33\"") {
             return Ok(json!({
