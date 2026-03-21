@@ -270,6 +270,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
                 ("Tab", "focus"),
                 ("Up/Down", "move"),
                 ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
                 ("Space", "select"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
@@ -695,7 +696,7 @@ impl WorkspaceDashboardApp {
                 )
             }
             Focus::Preview => {
-                "Review the selected workspace details. Scroll when the panel overflows."
+                "Review the selected workspace details. PgUp/PgDn/Home/End or the mouse wheel scroll when the panel overflows."
                     .to_string()
             }
             Focus::Actions => {
@@ -734,7 +735,7 @@ impl WorkspaceDashboardApp {
                 "Step 1 of 3: search workspaces and choose entries with Space.".to_string()
             }
             Focus::Preview => {
-                "Step 2 of 3: review or scroll the selected workspace details.".to_string()
+                "Step 2 of 3: review or scroll the selected workspace details with PgUp/PgDn/Home/End or the mouse wheel.".to_string()
             }
             Focus::Actions => {
                 "Step 3 of 3: choose an action for the selected workspace(s).".to_string()
@@ -887,8 +888,9 @@ fn preview_viewport(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        Focus, WorkspaceDashboardApp, WorkspaceDashboardData, WorkspaceDashboardEntry,
-        preview_viewport,
+        Focus, WorkspaceDashboardAction, WorkspaceDashboardApp, WorkspaceDashboardData,
+        WorkspaceDashboardEntry, WorkspaceDashboardExit, WorkspaceDashboardOptions,
+        preview_viewport, run_workspace_dashboard,
     };
     use ratatui::layout::Rect;
 
@@ -917,10 +919,31 @@ mod tests {
     fn workspace_dashboard_preview_scrolls_to_bottom() {
         let viewport = preview_viewport(Rect::new(0, 0, 120, 18));
         let mut app = WorkspaceDashboardApp::new(demo_data());
-        let _ = app.apply_in_viewport(super::WorkspaceDashboardAction::Enter, viewport);
-        let _ = app.apply_in_viewport(super::WorkspaceDashboardAction::End, viewport);
+        let _ = app.apply_in_viewport(WorkspaceDashboardAction::Enter, viewport);
+        let _ = app.apply_in_viewport(WorkspaceDashboardAction::End, viewport);
 
         assert_eq!(app.focus, Focus::Preview);
         assert!(app.preview_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn workspace_dashboard_snapshot_mentions_mouse_wheel_preview_controls() {
+        let exit = run_workspace_dashboard(
+            demo_data(),
+            WorkspaceDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 32,
+                actions: vec![WorkspaceDashboardAction::Enter],
+            },
+            None,
+        )
+        .expect("render once should succeed");
+
+        let WorkspaceDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+
+        assert!(snapshot.contains("mouse wheel"));
     }
 }

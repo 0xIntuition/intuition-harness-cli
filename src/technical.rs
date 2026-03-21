@@ -1219,7 +1219,7 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type to search issues by identifier, title, state, project, or description. Tab switches between the issue list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End scroll the preview when focused. Enter generates the technical backlog draft. Esc cancels.",
+        "Type to search issues by identifier, title, state, project, or description. Tab switches between the issue list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter generates the technical backlog draft. Esc cancels.",
     );
 }
 
@@ -1387,7 +1387,7 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
+        "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
     );
 }
 
@@ -1418,7 +1418,7 @@ fn base_layout(frame: &mut Frame<'_>) -> Vec<Rect> {
 fn base_layout_for_area(area: Rect) -> Vec<Rect> {
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(4)])
+        .constraints([Constraint::Min(0), Constraint::Length(5)])
         .split(area)
         .to_vec()
 }
@@ -1953,6 +1953,7 @@ mod tests {
         assert!(snapshot.contains("Select Parent Issue [search]"));
         assert!(snapshot.contains("MET-42  Terminal experience"));
         assert!(snapshot.contains("Issue Preview"));
+        assert!(snapshot.contains("mouse wheel scroll the preview"));
     }
 
     #[test]

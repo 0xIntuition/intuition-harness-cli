@@ -183,7 +183,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Length(5),
             Constraint::Length(3),
             Constraint::Min(0),
         ])
@@ -226,6 +226,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
                 ("Tab", "focus"),
                 ("Up/Down", "move"),
                 ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
                 ("Enter", "apply"),
                 ("q", "exit"),
             ]),
@@ -767,7 +768,7 @@ fn preview_viewport(area: Rect) -> Rect {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(if narrow { 5 } else { 4 }),
+            Constraint::Length(5),
             Constraint::Length(3),
             Constraint::Min(0),
         ])

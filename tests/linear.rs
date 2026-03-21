@@ -1207,7 +1207,8 @@ fn dashboard_render_once_uses_ratatui_snapshot_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Description Preview [focus]"))
-        .stdout(predicate::str::contains("MET-11"));
+        .stdout(predicate::str::contains("MET-11"))
+        .stdout(predicate::str::contains("Wheel scroll preview"));
 }
 
 #[test]

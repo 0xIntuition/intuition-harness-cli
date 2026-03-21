@@ -222,6 +222,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
                 ("Tab", "focus"),
                 ("Up/Down", "move"),
                 ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
                 ("q", "exit"),
@@ -495,7 +496,7 @@ impl SyncDashboardApp {
                 }
             }
             Focus::Preview => {
-                "Review the selected backlog preview. Scroll when the panel overflows.".to_string()
+                "Review the selected backlog preview. PgUp/PgDn/Home/End or the mouse wheel scroll when the panel overflows.".to_string()
             }
             Focus::Actions => match self.selected_issue() {
                 Some(issue) if issue.is_linked() => format!(
@@ -539,7 +540,7 @@ impl SyncDashboardApp {
                         .to_string()
                 }
             }
-            Focus::Preview => "Step 2 of 3: review or scroll the selected backlog preview before choosing a sync action.".to_string(),
+            Focus::Preview => "Step 2 of 3: review or scroll the selected backlog preview with PgUp/PgDn/Home/End or the mouse wheel before choosing a sync action.".to_string(),
             Focus::Actions => match self.selected_issue() {
                 Some(issue) if issue.is_linked() => "Step 3 of 3: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
                 Some(issue) => format!(
@@ -934,5 +935,25 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Preview);
         assert!(app.preview_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn render_once_mentions_mouse_wheel_in_preview_guidance() {
+        let exit = run_sync_dashboard(
+            demo_data(),
+            SyncDashboardOptions {
+                render_once: true,
+                width: 120,
+                height: 32,
+                actions: vec![SyncDashboardAction::Enter],
+            },
+        )
+        .expect("render once should succeed");
+
+        let SyncDashboardExit::Snapshot(snapshot) = exit else {
+            panic!("render_once should return a snapshot");
+        };
+
+        assert!(snapshot.contains("mouse wheel"));
     }
 }
