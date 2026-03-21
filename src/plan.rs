@@ -3437,6 +3437,10 @@ fn request_input_viewport(area: Rect) -> Rect {
     inner_rect(body[0])
 }
 
+fn request_input_width(area: Rect) -> u16 {
+    request_input_viewport(area).width.max(1)
+}
+
 fn questions_answer_input_viewport(area: Rect) -> Rect {
     let layout = base_layout_for_area(area);
     let body = Layout::default()
@@ -3448,6 +3452,10 @@ fn questions_answer_input_viewport(area: Rect) -> Rect {
         .constraints([Constraint::Percentage(42), Constraint::Min(0)])
         .split(body[0]);
     inner_rect(main[1])
+}
+
+fn questions_answer_input_width(area: Rect) -> u16 {
+    questions_answer_input_viewport(area).width.max(1)
 }
 
 fn base_layout_for_area(area: Rect) -> Vec<Rect> {

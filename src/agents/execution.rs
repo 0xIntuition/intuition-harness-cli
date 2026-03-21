@@ -647,7 +647,7 @@ fn run_agent_streaming_text_attempt(
     continuation: Option<&AgentContinuation>,
     on_stdout: &mut impl FnMut(&str),
 ) -> Result<AgentCaptureReport> {
-    let command_args = command_args_for_options(
+    let command_args = command_args_for_invocation_with_options(
         invocation,
         AgentExecutionOptions {
             working_dir: None,
@@ -735,6 +735,7 @@ fn run_agent_streaming_text_attempt(
     Ok(AgentCaptureReport {
         continuation: None,
         stdout: raw_stdout,
+        usage: None,
     })
 }
 

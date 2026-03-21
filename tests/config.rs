@@ -78,6 +78,38 @@ fn config_direct_updates_persist_fast_plan_defaults() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn config_json_updates_vim_mode_and_returns_effective_value() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+            "--vim-mode",
+            "enabled",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let rendered: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(rendered["app"]["defaults"]["ui"]["vim_mode"], json!(true));
+
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(config_path)?)?;
+    assert_eq!(saved["defaults"]["ui"]["vim_mode"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[test]
 fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

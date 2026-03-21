@@ -50,6 +50,7 @@ pub(crate) struct CronInitFormOptions {
     pub(crate) width: u16,
     pub(crate) height: u16,
     pub(crate) actions: Vec<CronInitAction>,
+    pub(crate) vim_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +140,7 @@ pub(crate) fn run_cron_init_form(
     options: CronInitFormOptions,
 ) -> Result<CronInitFormExit> {
     let mut app = CronInitApp::new(context, prefill);
+    let _ = options.vim_mode;
 
     if options.render_once {
         return render_once(app, options);

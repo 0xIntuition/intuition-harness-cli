@@ -45,6 +45,7 @@ pub struct SyncDashboardOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<SyncDashboardAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +104,7 @@ pub fn run_sync_dashboard(
     data: SyncDashboardData,
     options: SyncDashboardOptions,
 ) -> Result<SyncDashboardExit> {
+    let _ = options.vim_mode;
     if options.render_once {
         return render_once(data, options).map(SyncDashboardExit::Snapshot);
     }
@@ -851,6 +853,7 @@ mod tests {
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                 ],
+                vim_mode: false,
             },
         )
         .expect("render once should succeed");
@@ -904,6 +907,7 @@ mod tests {
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                 ],
+                vim_mode: false,
             },
         )
         .expect("render once should succeed");
@@ -946,6 +950,7 @@ mod tests {
                 width: 120,
                 height: 32,
                 actions: vec![SyncDashboardAction::Enter],
+                vim_mode: false,
             },
         )
         .expect("render once should succeed");

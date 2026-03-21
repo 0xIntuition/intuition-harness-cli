@@ -45,6 +45,7 @@ pub struct MergeDashboardOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<MergeDashboardAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +90,7 @@ pub fn run_merge_dashboard(
     data: MergeDashboardData,
     options: MergeDashboardOptions,
 ) -> Result<MergeDashboardExit> {
+    let _ = options.vim_mode;
     if options.render_once {
         return render_once(data, options).map(MergeDashboardExit::Snapshot);
     }
@@ -655,6 +657,7 @@ mod tests {
                 width: 120,
                 height: 32,
                 actions: Vec::new(),
+                vim_mode: false,
             },
         )
         .expect("render_once should succeed");
@@ -675,6 +678,7 @@ mod tests {
                 width: 120,
                 height: 32,
                 actions: vec![MergeDashboardAction::Toggle, MergeDashboardAction::Enter],
+                vim_mode: false,
             },
         )
         .expect("render_once should succeed");
@@ -700,6 +704,7 @@ mod tests {
                     MergeDashboardAction::Toggle,
                     MergeDashboardAction::Enter,
                 ],
+                vim_mode: false,
             },
         )
         .expect("render_once should succeed");

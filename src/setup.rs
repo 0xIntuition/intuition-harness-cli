@@ -36,6 +36,7 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ struct SetupReport {
 
 #[derive(Debug, Clone)]
 struct SetupApp {
+    keybindings: KeybindingPolicy,
     step: SetupStep,
     profile: Option<String>,
     repo_auth_field: SelectFieldState,
@@ -837,6 +839,7 @@ impl SetupApp {
             .unwrap_or(0);
 
         let mut app = Self {
+            keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
             step: SetupStep::LinearAuth,
             profile: view.planning_meta.linear.profile.clone(),
             repo_auth_field: SelectFieldState::new(
@@ -1077,6 +1080,16 @@ impl SetupApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent, summary_viewport: Rect) -> Option<SetupExit> {
+        if self.select_step_active()
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            return self.apply_action(if delta < 0 {
+                SetupAction::Up
+            } else {
+                SetupAction::Down
+            });
+        }
+
         match key.code {
             KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
                 if self.step == SetupStep::Save =>
@@ -1115,6 +1128,20 @@ impl SetupApp {
             mouse,
             summary_viewport,
             self.summary_content_rows(summary_viewport.width),
+        )
+    }
+
+    fn select_step_active(&self) -> bool {
+        matches!(
+            self.step,
+            SetupStep::LinearAuth
+                | SetupStep::Provider
+                | SetupStep::Model
+                | SetupStep::Reasoning
+                | SetupStep::AssignmentScope
+                | SetupStep::RefreshPolicy
+                | SetupStep::PlanDefaultMode
+                | SetupStep::PlanFastSingleTicket
         )
     }
 
@@ -1766,7 +1793,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         | SetupStep::RefreshPolicy
         | SetupStep::PlanDefaultMode
         | SetupStep::PlanFastSingleTicket => {
-            "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            } else {
+                "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            }
         }
         SetupStep::Save => {
             "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels."
