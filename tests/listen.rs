@@ -1118,6 +1118,58 @@ fn agents_listen_matches_legacy_once_output() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn listen_once_json_outputs_machine_readable_poll_result() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+
+    let assert = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--demo",
+            "--once",
+            "--json",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "agents.listen");
+    assert!(payload["result"]["title"].as_str().is_some());
+    assert!(payload["result"]["scope"].as_str().is_some());
+    assert!(payload["result"]["watch_scope"].as_str().is_some());
+    assert!(payload["result"]["cycle_summary"].as_str().is_some());
+    assert!(payload["result"]["sessions"].is_array());
+    assert!(payload["result"]["notes"].is_array());
+    assert!(payload["result"]["state_file"].as_str().is_some());
+    assert!(
+        payload["result"]["runtime"]["current_epoch_seconds"]
+            .as_u64()
+            .is_some()
+    );
+
+    Ok(())
+}
+
+#[test]
 fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;

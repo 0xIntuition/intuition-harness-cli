@@ -350,6 +350,7 @@ pub async fn run_sync_link(
                 &issue_dir,
                 discussion_budgets,
                 false,
+                json_output,
             )
             .await?;
             if json_output {
@@ -380,6 +381,7 @@ pub async fn run_sync_link(
             &issue_dir,
             discussion_budgets,
             false,
+            json_output,
         )
         .await?;
         if json_output {
@@ -564,6 +566,7 @@ pub async fn run_sync_pull(
         &issue_dir,
         discussion_budgets,
         false,
+        json_output,
     )
     .await?;
     emit_sync_issue_result(
@@ -611,6 +614,7 @@ pub async fn run_sync_push(
         &issue_dir,
         args.update_description,
         false,
+        json_output,
     )
     .await?;
     emit_sync_issue_result(
@@ -632,8 +636,18 @@ pub(crate) async fn run_sync_push_for_issue(
     service: &LinearService<ReqwestLinearClient>,
     issue: &IssueSummary,
     issue_dir: &Path,
+    machine_output: bool,
 ) -> Result<()> {
-    let _ = sync_push_issue(root, service, issue, issue_dir, false, false).await?;
+    let _ = sync_push_issue(
+        root,
+        service,
+        issue,
+        issue_dir,
+        false,
+        false,
+        machine_output,
+    )
+    .await?;
     Ok(())
 }
 
@@ -690,6 +704,7 @@ async fn run_sync_pull_all(
                 &entry.issue_dir,
                 discussion_budgets,
                 true,
+                json_output,
             )
             .await
             {
@@ -778,6 +793,7 @@ async fn run_sync_push_all(
                     &entry.issue_dir,
                     update_description,
                     true,
+                    json_output,
                 )
                 .await
                 {
@@ -827,6 +843,7 @@ async fn sync_pull_issue(
     issue_dir: &Path,
     discussion_budgets: TicketDiscussionBudgets,
     skip_if_synced: bool,
+    machine_output: bool,
 ) -> Result<SyncExecutionOutcome> {
     ensure_dir(issue_dir)?;
     let issue_for_pull = issue_with_sync_visible_comments(issue);
@@ -867,10 +884,12 @@ async fn sync_pull_issue(
 
         if io::stdin().is_terminal() && io::stdout().is_terminal() {
             if !prompt_pull_overwrite(&issue.identifier, resolution.status, &diff)? {
-                println!(
-                    "Canceled pull for {}. Local backlog files and hash baselines were left unchanged.",
-                    issue.identifier
-                );
+                if !machine_output {
+                    println!(
+                        "Canceled pull for {}. Local backlog files and hash baselines were left unchanged.",
+                        issue.identifier
+                    );
+                }
                 return Ok(SyncExecutionOutcome::Skipped);
             }
         } else {
@@ -939,27 +958,29 @@ async fn sync_pull_issue(
         ),
     )?;
 
-    println!(
-        "Pulled {} into {} (restored {} managed attachment file{}; rebuilt discussion context with {} comment{} and {} image{}).",
-        issue.identifier,
-        display_path(issue_dir, root),
-        issue
-            .attachments
-            .iter()
-            .filter(|attachment| managed_attachment_path(&attachment.metadata).is_some())
-            .count(),
-        plural_suffix(
+    if !machine_output {
+        println!(
+            "Pulled {} into {} (restored {} managed attachment file{}; rebuilt discussion context with {} comment{} and {} image{}).",
+            issue.identifier,
+            display_path(issue_dir, root),
             issue
                 .attachments
                 .iter()
                 .filter(|attachment| managed_attachment_path(&attachment.metadata).is_some())
-                .count()
-        ),
-        issue_for_pull.comments.len(),
-        plural_suffix(issue_for_pull.comments.len()),
-        prepared_context.images.len(),
-        plural_suffix(prepared_context.images.len()),
-    );
+                .count(),
+            plural_suffix(
+                issue
+                    .attachments
+                    .iter()
+                    .filter(|attachment| managed_attachment_path(&attachment.metadata).is_some())
+                    .count()
+            ),
+            issue_for_pull.comments.len(),
+            plural_suffix(issue_for_pull.comments.len()),
+            prepared_context.images.len(),
+            plural_suffix(prepared_context.images.len()),
+        );
+    }
 
     Ok(SyncExecutionOutcome::Synced)
 }
@@ -971,6 +992,7 @@ async fn sync_push_issue(
     issue_dir: &Path,
     update_description: bool,
     skip_if_synced: bool,
+    machine_output: bool,
 ) -> Result<SyncExecutionOutcome> {
     if !issue_dir.is_dir() {
         bail!(
@@ -1131,20 +1153,23 @@ async fn sync_push_issue(
     }
     save_issue_metadata(issue_dir, &updated_metadata)?;
 
-    println!(
-        "Pushed {} from {} (synced {} managed attachment file{}; {}; {}).",
-        issue.identifier,
-        display_path(issue_dir, root),
-        local_path_count,
-        plural_suffix(local_path_count),
-        if update_description {
-            "updated Linear issue description from index.md"
-        } else {
-            "left the Linear issue description unchanged; pass --update-description to send index.md"
-        },
-        progress_comment_status
-            .unwrap_or("skipped [harness-sync] progress comment because checklist.md is missing"),
-    );
+    if !machine_output {
+        println!(
+            "Pushed {} from {} (synced {} managed attachment file{}; {}; {}).",
+            issue.identifier,
+            display_path(issue_dir, root),
+            local_path_count,
+            plural_suffix(local_path_count),
+            if update_description {
+                "updated Linear issue description from index.md"
+            } else {
+                "left the Linear issue description unchanged; pass --update-description to send index.md"
+            },
+            progress_comment_status.unwrap_or(
+                "skipped [harness-sync] progress comment because checklist.md is missing",
+            ),
+        );
+    }
 
     Ok(SyncExecutionOutcome::Synced)
 }

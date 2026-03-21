@@ -336,7 +336,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
         },
     )?;
 
-    run_sync_push_for_issue(&root, &service, &child, &issue_dir).await?;
+    run_sync_push_for_issue(&root, &service, &child, &issue_dir, args.no_interactive).await?;
 
     Ok(TechnicalReport {
         child: Some(child),
