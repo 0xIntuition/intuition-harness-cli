@@ -1,6 +1,8 @@
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -206,6 +208,44 @@ pub fn run_agent_capture(args: &RunAgentArgs) -> Result<AgentCaptureReport> {
     run_agent_capture_with_continuation(args, &mut continuation)
 }
 
+/// Runs one non-interactive agent turn, streaming stdout chunks to the provided callback.
+///
+/// Returns an error when config resolution fails, the configured command surface is invalid, the
+/// subprocess cannot be launched, or the agent exits unsuccessfully.
+pub(crate) fn run_agent_streaming_text_with_continuation(
+    args: &RunAgentArgs,
+    continuation: &mut Option<AgentContinuation>,
+    mut on_stdout: impl FnMut(&str),
+) -> Result<AgentCaptureReport> {
+    let config = AppConfig::load()?;
+    let planning_meta = match args.root.as_deref() {
+        Some(root) => PlanningMeta::load(root)?,
+        None => PlanningMeta::default(),
+    };
+    let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, args)?;
+    let attempted_continuation = continuation
+        .as_ref()
+        .filter(|state| state.provider == invocation.agent);
+    match run_agent_streaming_text_attempt(
+        &invocation,
+        args,
+        attempted_continuation,
+        &mut on_stdout,
+    ) {
+        Ok(report) => Ok(report),
+        Err(error)
+            if attempted_continuation.is_some()
+                && invocation.builtin_provider
+                && builtin_provider_adapter(&invocation.agent).is_some_and(|provider| {
+                    provider.is_invalid_resume_error(&error.to_string())
+                }) =>
+        {
+            run_agent_streaming_text_attempt(&invocation, args, None, &mut on_stdout)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn run_agent_capture_with_continuation(
     args: &RunAgentArgs,
     continuation: &mut Option<AgentContinuation>,
@@ -238,6 +278,18 @@ pub(crate) fn run_agent_capture_with_continuation(
         }
         Err(error) => Err(error),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug)]
+struct OutputChunk {
+    stream: OutputStream,
+    text: String,
 }
 
 pub(crate) fn resolve_agent_invocation_for_planning(
@@ -587,6 +639,125 @@ fn run_agent_capture_attempt(
         stdout,
         usage,
     })
+}
+
+fn run_agent_streaming_text_attempt(
+    invocation: &ResolvedAgentInvocation,
+    args: &RunAgentArgs,
+    continuation: Option<&AgentContinuation>,
+    on_stdout: &mut impl FnMut(&str),
+) -> Result<AgentCaptureReport> {
+    let command_args = command_args_for_options(
+        invocation,
+        AgentExecutionOptions {
+            working_dir: None,
+            extra_env: Vec::new(),
+            capture_output: false,
+            continuation: continuation.map(|state| state.session_id.clone()),
+        },
+    )?;
+    let attempted_command = validate_invocation_command_surface(invocation, &command_args)?;
+
+    let mut command = Command::new(&invocation.command);
+    command.args(&command_args);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    apply_noninteractive_agent_environment(&mut command);
+    apply_invocation_environment(
+        &mut command,
+        invocation,
+        &args.prompt,
+        args.instructions.as_deref(),
+    );
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to launch agent `{}` with command `{attempted_command}`",
+            invocation.agent
+        )
+    })?;
+
+    if invocation.transport == PromptTransport::Stdin {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to open stdin for agent `{}`", invocation.agent))?;
+        stdin
+            .write_all(invocation.payload.as_bytes())
+            .with_context(|| {
+                format!(
+                    "failed to write prompt payload to agent `{}`",
+                    invocation.agent
+                )
+            })?;
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to open stdout for agent `{}`", invocation.agent))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to open stderr for agent `{}`", invocation.agent))?;
+    let (sender, receiver) = mpsc::channel();
+    spawn_output_reader(stdout, OutputStream::Stdout, sender.clone());
+    spawn_output_reader(stderr, OutputStream::Stderr, sender);
+
+    let mut raw_stdout = String::new();
+    let mut raw_stderr = String::new();
+    while let Ok(chunk) = receiver.recv() {
+        match chunk.stream {
+            OutputStream::Stdout => {
+                raw_stdout.push_str(&chunk.text);
+                on_stdout(&chunk.text);
+            }
+            OutputStream::Stderr => raw_stderr.push_str(&chunk.text),
+        }
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for agent `{}`", invocation.agent))?;
+    if !status.success() {
+        let code = status
+            .code()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "terminated by signal".to_string());
+        bail!(
+            "agent `{}` exited unsuccessfully ({code}) while running `{attempted_command}`: {}",
+            invocation.agent,
+            raw_stderr.trim()
+        );
+    }
+
+    Ok(AgentCaptureReport {
+        continuation: None,
+        stdout: raw_stdout,
+    })
+}
+
+fn spawn_output_reader(
+    mut reader: impl Read + Send + 'static,
+    stream: OutputStream,
+    sender: mpsc::Sender<OutputChunk>,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0u8; 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let text = String::from_utf8_lossy(&buffer[..count]).to_string();
+                    if sender.send(OutputChunk { stream, text }).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 pub(crate) fn format_agent_config_source(source: &AgentConfigSource) -> String {

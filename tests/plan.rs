@@ -32,8 +32,304 @@ fn plan_help_lists_non_interactive_inputs() {
         .stdout(predicate::str::contains("[IDENTIFIER]"))
         .stdout(predicate::str::contains("--request <REQUEST>"))
         .stdout(predicate::str::contains("--answer <ANSWERS>"))
+        .stdout(predicate::str::contains("--fast"))
+        .stdout(predicate::str::contains("--multi"))
+        .stdout(predicate::str::contains("--questions <QUESTIONS>"))
         .stdout(predicate::str::contains("--velocity"))
         .stdout(predicate::str::contains("--no-interactive"));
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_fast_no_interactive_skips_questions_and_addendum_but_uses_backlog_templates()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "plan-agent-stub"
+transport = "stdin"
+"#,
+        )
+        .as_str(),
+    )?;
+
+    let stub_path = bin_dir.join("plan-agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
+printf '%s' '{"summary":"Create one fast ticket.","issues":[{"title":"Fast plan ticket","description":"Create backlog artifacts through the shared template path.","acceptance_criteria":["fast mode skips follow-up Q&A in non-interactive runs","fast mode still writes the standard backlog files"],"priority":2}]}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(team_payload());
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query IssueLabels");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueLabels": {
+                    "nodes": [{
+                        "id": "label-plan",
+                        "name": "plan"
+                    }]
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"title\":\"Fast plan ticket\"")
+            .body_includes("\"projectId\":\"project-1\"")
+            .body_includes("\"stateId\":\"state-backlog\"")
+            .body_includes("\"labelIds\":[\"label-plan\"]");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-91",
+                        "identifier": "MET-91",
+                        "title": "Fast plan ticket",
+                        "description": "Create backlog artifacts through the shared template path.",
+                        "url": "https://linear.app/issues/91",
+                        "priority": 2,
+                        "updatedAt": "2026-03-21T01:10:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env(
+            "PATH",
+            format!("{}:{}", bin_dir.display(), std::env::var("PATH")?),
+        )
+        .args([
+            "plan",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--fast",
+            "--no-interactive",
+            "--request",
+            "Draft one fast backlog ticket for the repo",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
+        .stdout(predicate::str::contains("MET-91"));
+
+    assert_eq!(fs::read_to_string(stub_dir.join("count.txt"))?, "1");
+    let payload = fs::read_to_string(stub_dir.join("payload-1.txt"))?;
+    assert!(payload.contains("fast single-pass mode"));
+    assert!(payload.contains("Anything else to add:\nNo additional addendum was provided."));
+    assert!(!payload.contains("Ask at most"));
+
+    let backlog_index = fs::read_to_string(repo_root.join(".metastack/backlog/MET-91/index.md"))?;
+    assert!(backlog_index.contains("# Fast plan ticket"));
+    assert!(backlog_index.contains("## Acceptance Criteria"));
+    assert!(backlog_index.contains("fast mode still writes the standard backlog files"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_fast_review_is_approve_or_reject_only() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        r#"[linear]
+api_key = "token"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "plan-agent-stub"
+transport = "stdin"
+"#,
+    )?;
+
+    let stub_path = bin_dir.join("plan-agent-stub");
+    fs::write(
+        &stub_path,
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+cat > "$TEST_OUTPUT_DIR/payload-$count.txt"
+printf '%s' '{"summary":"Review a fast draft.","issues":[{"title":"Fast review ticket","description":"Show approve-or-reject only review controls.","acceptance_criteria":["review stays approve-or-reject only"],"priority":2}]}'
+"#,
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    let meta_command = test_command();
+    let meta_bin = meta_command.get_program().to_os_string();
+    let output = ProcessCommand::new("expect")
+        .arg("-c")
+        .arg(format!(
+            r#"
+set timeout 10
+spawn -noecho {meta_bin} plan --root {repo_root} --agent stub --fast --questions 0
+expect {{
+  -re "Planning Request" {{}}
+}}
+send -- "Render the fast planning review\r"
+expect {{
+  -re "Anything Else To Add\\?" {{}}
+}}
+send -- "\r"
+expect {{
+  -re "Generating fast draft" {{ exp_continue }}
+  -re "Review Action" {{}}
+}}
+expect {{
+  -re "Fast review is approve-or-reject only\\." {{}}
+}}
+send -- "r"
+expect eof
+"#,
+            meta_bin = tcl_escape(&meta_bin.to_string_lossy()),
+            repo_root = tcl_escape(&repo_root.display().to_string()),
+        ))
+        .current_dir(&repo_root)
+        .env("HOME", isolated_home_dir())
+        .env("XDG_CONFIG_HOME", isolated_home_dir().join(".config"))
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env(
+            "PATH",
+            format!("{}:{}", bin_dir.display(), std::env::var("PATH")?),
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "interactive fast plan failed: stdout=`{}` stderr=`{}`",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(fs::read_to_string(stub_dir.join("count.txt"))?, "1");
+
+    Ok(())
 }
 
 #[cfg(unix)]
