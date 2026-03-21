@@ -1,7 +1,10 @@
+use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -92,6 +95,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     };
     let mut session_tokens =
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
+    let mut session_id = load_existing_session_id(&source_root, project_selector, &args.issue)?;
     let mut saw_implementation_progress = workspace_has_meaningful_progress(&workspace_path)?;
     let mut stalled_turns = 0u32;
     let log_path = agent_log_path(&source_root, args.project.as_deref(), &args.issue);
@@ -130,6 +134,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
+                session_id.as_deref(),
                 &session_tokens,
             ),
         )?;
@@ -146,6 +151,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_completed_summary(None, turns_completed, &issue_state_label(&issue)),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -172,6 +178,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -200,11 +207,66 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
                 &session_context,
                 turns_completed,
+                session_id.as_deref(),
                 &session_tokens,
             ),
         )?;
 
-        let turn_result = match execute_agent_turn(&issue, turn_number, &turn_context) {
+        let session_id_state = RefCell::new(session_id.clone());
+        let turn_result = match execute_agent_turn(
+            &issue,
+            turn_number,
+            &turn_context,
+            |current_session_id| {
+                if session_id_state.borrow().as_deref() == Some(current_session_id) {
+                    return Ok(());
+                }
+                *session_id_state.borrow_mut() = Some(current_session_id.to_string());
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Running,
+                        compact_running_summary(
+                            backlog_progress_before.as_ref(),
+                            turn_number,
+                            args.max_turns,
+                            0,
+                        ),
+                        &session_context,
+                        turns_completed,
+                        session_id_state.borrow().as_deref(),
+                        &session_tokens,
+                    ),
+                )
+            },
+            |usage| {
+                let mut displayed_tokens = session_tokens.clone();
+                displayed_tokens.accumulate(&TokenUsage {
+                    input: usage.input,
+                    output: usage.output,
+                });
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Running,
+                        compact_running_summary(
+                            backlog_progress_before.as_ref(),
+                            turn_number,
+                            args.max_turns,
+                            0,
+                        ),
+                        &session_context,
+                        turns_completed,
+                        session_id_state.borrow().as_deref(),
+                        &displayed_tokens,
+                    ),
+                )
+            },
+        ) {
             Ok(result) => result,
             Err(error) => {
                 write_listen_session(
@@ -220,12 +282,16 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
+                        session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
                 return Err(error);
             }
         };
+        session_id = turn_result
+            .session_id
+            .or_else(|| session_id_state.into_inner());
         if let Some(usage) = turn_result.usage {
             session_tokens.accumulate(&TokenUsage {
                 input: usage.input,
@@ -272,6 +338,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             ),
                             &session_context,
                             turns_completed,
+                            session_id.as_deref(),
                             &session_tokens,
                         ),
                     )?;
@@ -314,6 +381,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             summary,
                             &session_context,
                             turns_completed,
+                            session_id.as_deref(),
                             &session_tokens,
                         ),
                     )?;
@@ -333,6 +401,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
+                        session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
@@ -353,6 +422,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         ),
                         &session_context,
                         turns_completed,
+                        session_id.as_deref(),
                         &session_tokens,
                     ),
                 )?;
@@ -373,6 +443,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     ),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -386,6 +457,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_running_summary(None, turns_completed, args.max_turns, stalled_turns),
                     &session_context,
                     turns_completed,
+                    session_id.as_deref(),
                     &session_tokens,
                 ),
             )?;
@@ -417,6 +489,7 @@ struct WorkerSessionContext<'a> {
 
 #[derive(Debug, Default)]
 struct TurnExecutionResult {
+    session_id: Option<String>,
     usage: Option<AgentTokenUsage>,
 }
 
@@ -527,6 +600,8 @@ fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    mut on_session_started: impl FnMut(&str) -> Result<()>,
+    mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
 ) -> Result<TurnExecutionResult> {
     let run_args = build_listen_run_args(issue, turn_number, context)?;
     let invocation = resolve_agent_invocation_for_planning(
@@ -681,15 +756,71 @@ fn execute_agent_turn(
     }
 
     if capture_output {
-        let output = child
-            .wait_with_output()
+        let provider = builtin_provider_adapter(&invocation.agent)
+            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture stdout for listen turn {turn_number}"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture stderr for listen turn {turn_number}"))?;
+        let stderr_log_path = log_path.clone();
+        let stderr_handle = thread::spawn(move || -> Result<()> {
+            let mut stderr_log = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&stderr_log_path)
+                .with_context(|| format!("failed to open `{}`", stderr_log_path.display()))?;
+            for line in BufReader::new(stderr).lines() {
+                let line = line.with_context(|| {
+                    format!("failed to read stderr for `{}`", stderr_log_path.display())
+                })?;
+                writeln!(stderr_log, "{line}")
+                    .with_context(|| format!("failed to write `{}`", stderr_log_path.display()))?;
+            }
+            Ok(())
+        });
+
+        let mut stdout_log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+        let mut raw_stdout = String::new();
+        let mut continuation = None;
+        let mut usage = None;
+        for line in BufReader::new(stdout).lines() {
+            let line = line
+                .with_context(|| format!("failed to read stdout for `{}`", log_path.display()))?;
+            writeln!(stdout_log, "{line}")
+                .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+            raw_stdout.push_str(&line);
+            raw_stdout.push('\n');
+            let parsed = provider.parse_capture_output(&line)?;
+            if let Some(current_session_id) = parsed.continuation
+                && continuation.as_deref() != Some(current_session_id.as_str())
+            {
+                on_session_started(&current_session_id)?;
+                continuation = Some(current_session_id);
+            }
+            if let Some(update) = parsed.usage
+                && usage.as_ref() != Some(&update)
+            {
+                on_usage(&update)?;
+                usage = Some(update);
+            }
+        }
+
+        let status = child
+            .wait()
             .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
-        let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        append_turn_output(&log_path, &raw_stdout, &raw_stderr)?;
-        if !output.status.success() {
-            let code = output
-                .status
+        stderr_handle
+            .join()
+            .map_err(|_| anyhow!("stderr drain thread panicked for listen turn {turn_number}"))??;
+        if !status.success() {
+            let code = status
                 .code()
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "terminated by signal".to_string());
@@ -698,12 +829,11 @@ fn execute_agent_turn(
                 invocation.agent
             );
         }
-
-        let usage = builtin_provider_adapter(&invocation.agent)
-            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?
-            .parse_capture_output(&raw_stdout)?
-            .usage;
-        return Ok(TurnExecutionResult { usage });
+        let parsed = provider.parse_capture_output(&raw_stdout)?;
+        return Ok(TurnExecutionResult {
+            session_id: parsed.continuation.or(continuation),
+            usage: parsed.usage.or(usage),
+        });
     }
 
     let status = child
@@ -802,6 +932,7 @@ fn build_worker_session(
     summary: String,
     context: &WorkerSessionContext<'_>,
     turns: u32,
+    session_id: Option<&str>,
     tokens: &TokenUsage,
 ) -> super::AgentSession {
     super::AgentSession {
@@ -837,7 +968,9 @@ fn build_worker_session(
         workpad_comment_id: Some(context.workpad_comment_id.to_string()),
         updated_at_epoch_seconds: now_epoch_seconds(),
         pid: context.pid.filter(|value| *value > 0),
-        session_id: Some(issue.id.clone()),
+        session_id: session_id
+            .map(str::to_string)
+            .or_else(|| Some(issue.id.clone())),
         turns: Some(turns),
         tokens: tokens.clone(),
         log_path: Some(
@@ -850,23 +983,6 @@ fn build_worker_session(
             .to_string(),
         ),
     }
-}
-
-fn append_turn_output(log_path: &Path, stdout: &str, stderr: &str) -> Result<()> {
-    let mut log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-    if !stdout.is_empty() {
-        writeln!(log, "{stdout}")
-            .with_context(|| format!("failed to write `{}`", log_path.display()))?;
-    }
-    if !stderr.is_empty() {
-        writeln!(log, "{stderr}")
-            .with_context(|| format!("failed to write `{}`", log_path.display()))?;
-    }
-    Ok(())
 }
 
 fn load_existing_session_tokens(
@@ -882,6 +998,20 @@ fn load_existing_session_tokens(
         .find(|session| session.issue_matches(issue_identifier))
         .map(|session| session.tokens)
         .unwrap_or_default())
+}
+
+fn load_existing_session_id(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<String>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.session_id))
 }
 
 #[cfg(test)]
@@ -937,6 +1067,7 @@ mod tests {
             "turn 1".to_string(),
             &context,
             0,
+            Some("thread-1"),
             &tokens,
         );
         assert_eq!(first.tokens.input, None);
@@ -952,6 +1083,7 @@ mod tests {
             "turn 2".to_string(),
             &context,
             1,
+            Some("thread-1"),
             &tokens,
         );
         assert_eq!(second.tokens.input, Some(120));
@@ -967,6 +1099,7 @@ mod tests {
             "done".to_string(),
             &context,
             2,
+            Some("thread-1"),
             &tokens,
         );
         assert_eq!(third.tokens.input, Some(120));

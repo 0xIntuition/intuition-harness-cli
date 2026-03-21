@@ -25,7 +25,7 @@ impl From<IssueSummary> for PendingIssue {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     #[serde(default)]
     pub input: Option<u64>,

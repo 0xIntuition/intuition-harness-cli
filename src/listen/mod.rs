@@ -6,11 +6,13 @@ mod worker;
 mod workpad;
 mod workspace;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::env;
 use std::fs;
 use std::future::Future;
-use std::io;
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +24,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
@@ -59,6 +62,7 @@ const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
+const INPUT_POLL_INTERVAL_MILLIS: u64 = 100;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
@@ -321,6 +325,226 @@ struct DashboardRuntimeContext {
     dashboard_label: &'static str,
     dashboard_refresh_seconds: u64,
     linear_refresh_seconds: u64,
+}
+
+#[derive(Debug, Default)]
+struct CodexLiveTokenHydrator {
+    sessions_root: Option<PathBuf>,
+    snapshots: HashMap<String, CodexSessionSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexSessionSnapshot {
+    path: PathBuf,
+    file_len: u64,
+    usage: Option<TokenUsage>,
+}
+
+impl CodexLiveTokenHydrator {
+    fn new() -> Self {
+        Self {
+            sessions_root: env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".codex").join("sessions"))
+                .filter(|path| path.is_dir()),
+            snapshots: HashMap::new(),
+        }
+    }
+
+    fn refresh_sessions(&mut self, sessions: &mut [AgentSession]) -> Result<()> {
+        for session in sessions
+            .iter_mut()
+            .filter(|session| !session.phase.is_completed())
+        {
+            let Some(thread_id) = self.resolve_thread_id(session)? else {
+                continue;
+            };
+            session.session_id = Some(thread_id.clone());
+            if let Some(usage) = self.load_usage(&thread_id)? {
+                session.tokens.accumulate(&usage);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_thread_id(&mut self, session: &AgentSession) -> Result<Option<String>> {
+        if let Some(candidate) = session.session_id.as_deref()
+            && self.session_file_path(candidate)?.is_some()
+        {
+            return Ok(Some(candidate.to_string()));
+        }
+
+        let Some(log_path) = session.log_path.as_deref() else {
+            return Ok(None);
+        };
+        let thread_id = parse_codex_thread_id_from_log(Path::new(log_path))?;
+        if let Some(thread_id) = thread_id.as_deref()
+            && self.session_file_path(thread_id)?.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(thread_id)
+    }
+
+    fn load_usage(&mut self, thread_id: &str) -> Result<Option<TokenUsage>> {
+        let Some(path) = self.session_file_path(thread_id)? else {
+            return Ok(None);
+        };
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to read `{}` metadata", path.display()))?;
+        let file_len = metadata.len();
+
+        if let Some(snapshot) = self.snapshots.get(thread_id)
+            && snapshot.file_len == file_len
+        {
+            return Ok(snapshot.usage.clone());
+        }
+
+        let usage = parse_codex_token_usage_from_session_file(&path)?;
+        self.snapshots.insert(
+            thread_id.to_string(),
+            CodexSessionSnapshot {
+                path,
+                file_len,
+                usage: usage.clone(),
+            },
+        );
+        Ok(usage)
+    }
+
+    fn session_file_path(&mut self, thread_id: &str) -> Result<Option<PathBuf>> {
+        if let Some(snapshot) = self.snapshots.get(thread_id)
+            && snapshot.path.is_file()
+        {
+            return Ok(Some(snapshot.path.clone()));
+        }
+
+        let Some(root) = self.sessions_root.as_deref() else {
+            return Ok(None);
+        };
+        for entry in WalkDir::new(root).min_depth(1).max_depth(4) {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to scan Codex session files under `{}`",
+                    root.display()
+                )
+            })?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.file_name().to_string_lossy().contains(thread_id) {
+                let path = entry.into_path();
+                self.snapshots
+                    .entry(thread_id.to_string())
+                    .or_insert(CodexSessionSnapshot {
+                        path: path.clone(),
+                        file_len: 0,
+                        usage: None,
+                    });
+                return Ok(Some(path));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+fn parse_codex_thread_id_from_log(path: &Path) -> Result<Option<String>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let mut latest = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("failed to read `{}`", path.display()))?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("thread.started") => {
+                latest = value
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            Some("thread/started") => {
+                latest = value
+                    .get("params")
+                    .and_then(|params| {
+                        params
+                            .get("thread_id")
+                            .or_else(|| params.get("threadId"))
+                            .or_else(|| params.get("id"))
+                    })
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(latest);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(latest)
+}
+
+fn parse_codex_token_usage_from_session_file(path: &Path) -> Result<Option<TokenUsage>> {
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let mut latest = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("failed to read `{}`", path.display()))?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+            continue;
+        }
+        let Some(total_usage) = payload
+            .get("info")
+            .and_then(|info| info.get("total_token_usage"))
+        else {
+            continue;
+        };
+        latest = extract_codex_token_usage(total_usage);
+    }
+
+    Ok(latest)
+}
+
+fn extract_codex_token_usage(value: &Value) -> Option<TokenUsage> {
+    fn parse_u64(value: Option<&Value>) -> u64 {
+        value
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                value
+                    .and_then(Value::as_i64)
+                    .filter(|number| *number >= 0)
+                    .map(|number| number as u64)
+            })
+            .or_else(|| {
+                value
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    let input = parse_u64(value.get("input_tokens")) + parse_u64(value.get("cached_input_tokens"));
+    let output =
+        parse_u64(value.get("output_tokens")) + parse_u64(value.get("reasoning_output_tokens"));
+    (input > 0 || output > 0).then_some(TokenUsage {
+        input: (input > 0).then_some(input),
+        output: (output > 0).then_some(output),
+    })
 }
 
 #[derive(Debug)]
@@ -2097,6 +2321,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         daemon.watch_scope_label(),
         display_path(&daemon.store.paths().state_path, &daemon.root),
     );
+    let mut codex_live_tokens = CodexLiveTokenHydrator::new();
     run_live_loop(
         args,
         poll_interval_seconds,
@@ -2106,6 +2331,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         || daemon.run_cycle(),
         |cycle| {
             cycle.apply_state_snapshot(daemon.store.load_state()?);
+            codex_live_tokens.refresh_sessions(&mut cycle.sessions)?;
             Ok(())
         },
     )
@@ -2230,6 +2456,7 @@ where
         Instant::now() + linear_refresh_interval
     };
     let mut next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+    let mut pending_cycle_refresh: Option<Pin<Box<Fut>>> = None;
 
     loop {
         let now = now_epoch_seconds();
@@ -2249,44 +2476,62 @@ where
         );
         terminal.draw(|frame| dashboard::render(frame, &data, session_view))?;
 
-        let wait_for_input = next_linear_refresh_at
-            .saturating_duration_since(Instant::now())
-            .min(
-                next_terminal_refresh_at
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(250)),
-            );
-
-        if event::poll(wait_for_input)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-            if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
-                break;
-            } else if matches!(key.code, KeyCode::Tab) {
-                session_view = session_view.toggle();
-            } else if matches!(key.code, KeyCode::Left) {
-                session_view = SessionListView::Active;
-            } else if matches!(key.code, KeyCode::Right) {
-                session_view = SessionListView::Completed;
-            }
+        if drain_dashboard_input(&mut session_view)? {
+            break;
         }
 
         let now = Instant::now();
-        if now >= next_linear_refresh_at {
-            cycle = next_cycle().await?;
-            let refreshed_at = Instant::now();
-            next_linear_refresh_at = refreshed_at + linear_refresh_interval;
-            next_terminal_refresh_at = refreshed_at + terminal_refresh_interval;
-        } else if now >= next_terminal_refresh_at {
+        if pending_cycle_refresh.is_none() && now >= next_linear_refresh_at {
+            pending_cycle_refresh = Some(Box::pin(next_cycle()));
+        }
+        if now >= next_terminal_refresh_at {
             refresh_dashboard_state(&mut cycle)?;
             next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+        }
+
+        if let Some(refresh) = pending_cycle_refresh.as_mut() {
+            tokio::select! {
+                result = refresh => {
+                    cycle = result?;
+                    let refreshed_at = Instant::now();
+                    next_linear_refresh_at = refreshed_at + linear_refresh_interval;
+                    pending_cycle_refresh = None;
+                    refresh_dashboard_state(&mut cycle)?;
+                    next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)) => {}
+            }
+        } else {
+            tokio::time::sleep(Duration::from_millis(INPUT_POLL_INTERVAL_MILLIS)).await;
         }
     }
 
     Ok(())
+}
+
+fn drain_dashboard_input(session_view: &mut SessionListView) -> Result<bool> {
+    while event::poll(Duration::ZERO)? {
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
+            return Ok(true);
+        }
+        if matches!(key.code, KeyCode::Tab) {
+            *session_view = session_view.toggle();
+        } else if matches!(key.code, KeyCode::Left) {
+            *session_view = SessionListView::Active;
+        } else if matches!(key.code, KeyCode::Right) {
+            *session_view = SessionListView::Completed;
+        }
+    }
+
+    Ok(false)
 }
 
 fn resolve_listen_poll_interval_seconds(
@@ -3020,6 +3265,48 @@ mod tests {
 
         let dashboard = super::build_dashboard_data(&cycle, &runtime);
         assert_eq!(dashboard.runtime.tokens, "in 100 | out n/a | total 100");
+    }
+
+    #[test]
+    fn parse_codex_thread_id_from_log_reads_latest_started_event() -> Result<()> {
+        let temp = tempdir()?;
+        let log_path = temp.path().join("MET-7.log");
+        fs::write(
+            &log_path,
+            concat!(
+                "plain text\n",
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n",
+                "{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}\n"
+            ),
+        )?;
+
+        assert_eq!(
+            super::parse_codex_thread_id_from_log(&log_path)?,
+            Some("thread-2".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_codex_token_usage_from_session_file_reads_total_usage() -> Result<()> {
+        let temp = tempdir()?;
+        let session_path = temp.path().join("rollout-thread-2.jsonl");
+        fs::write(
+            &session_path,
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":120,\"cached_input_tokens\":30,\"output_tokens\":8,\"reasoning_output_tokens\":2}}}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":200,\"cached_input_tokens\":50,\"output_tokens\":11,\"reasoning_output_tokens\":4}}}}\n"
+            ),
+        )?;
+
+        assert_eq!(
+            super::parse_codex_token_usage_from_session_file(&session_path)?,
+            Some(TokenUsage {
+                input: Some(250),
+                output: Some(15),
+            })
+        );
+        Ok(())
     }
 
     fn listen_settings(required_labels: Option<Vec<&str>>) -> PlanningListenSettings {
