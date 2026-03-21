@@ -837,6 +837,8 @@ Legacy alias: `meta listen`
 
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
 
+When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns and renders both per-session and runtime rollups as `in`, `out`, and `total`. When exact counts are unavailable, the dashboard and textual summaries continue to show `n/a`.
+
 Examples:
 
 ```bash
