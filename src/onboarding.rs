@@ -1200,7 +1200,7 @@ fn review_viewport(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use httpmock::Method::POST;
     use httpmock::MockServer;
     use ratatui::layout::Rect;
@@ -1227,6 +1227,30 @@ mod tests {
 
         let viewport = review_viewport(Rect::new(0, 0, 72, 20));
         assert!(app.handle_key(KeyCode::End.into(), viewport));
+        assert!(app.review_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn onboarding_review_mouse_wheel_scrolls_when_summary_overflows() {
+        let mut app = OnboardingApp::new(&AppConfig::default(), OnboardingLaunchMode::Replay);
+        app.step = OnboardingStep::Review;
+        let long = "repo-default-label-".repeat(10);
+        let _ = app.listen_label.paste(&long);
+        let _ = app.plan_label.paste(&long);
+        let _ = app.technical_label.paste(&long);
+
+        let viewport = review_viewport(Rect::new(0, 0, 72, 20));
+        let handled = app.handle_review_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: viewport.x,
+                row: viewport.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+        );
+
+        assert!(handled);
         assert!(app.review_scroll.offset() > 0);
     }
 

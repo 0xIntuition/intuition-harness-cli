@@ -2550,7 +2550,7 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::Result;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
     use super::{AdvancedRoutingApp, ConfigApp, ConfigStep, ConfigViewData, summary_viewport};
@@ -2625,6 +2625,35 @@ mod tests {
         let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
         let _ = app.handle_key(KeyCode::End.into(), viewport);
 
+        assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn config_save_summary_mouse_wheel_scrolls_when_content_overflows() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig::default(),
+            detected_agents: vec!["codex".to_string(), "claude".to_string()],
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::Save;
+        let long = "profile-value-".repeat(12);
+        let _ = app.default_profile.paste(&long);
+        let _ = app.listen_label.paste(&long);
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let handled = app.handle_summary_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: viewport.x,
+                row: viewport.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+        );
+
+        assert!(handled);
         assert!(app.summary_scroll.offset() > 0);
     }
 

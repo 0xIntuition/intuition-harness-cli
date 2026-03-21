@@ -1994,7 +1994,7 @@ mod tests {
         PlanningListenSettings, PlanningMeta,
     };
     use anyhow::Result;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use std::io::Cursor;
 
@@ -2078,6 +2078,37 @@ mod tests {
         let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
         let _ = app.handle_key(KeyCode::End.into(), viewport);
 
+        assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn setup_save_summary_mouse_wheel_scrolls_when_content_overflows() {
+        let mut view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig::default(),
+            app_config_changed: false,
+            planning_meta: PlanningMeta::default(),
+            detected_agents: Vec::new(),
+        };
+        view.planning_meta.listen.instructions_path =
+            Some("docs/".to_string() + &"very-long-review-value/".repeat(12));
+        let mut app = SetupApp::new(&view);
+        app.step = SetupStep::Save;
+
+        let viewport = summary_viewport(Rect::new(0, 0, 72, 20));
+        let handled = app.handle_summary_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: viewport.x,
+                row: viewport.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            viewport,
+        );
+
+        assert!(handled);
         assert!(app.summary_scroll.offset() > 0);
     }
 
