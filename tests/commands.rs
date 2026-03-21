@@ -225,6 +225,36 @@ fn merge_help_lists_discovery_and_execution_flags() {
 }
 
 #[test]
+fn agents_listen_machine_parse_failures_emit_json_errors() {
+    cli()
+        .args(["agents", "listen", "--json", "--render-once"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"status\": \"error\""))
+        .stdout(predicate::str::contains("\"command\": \"agents.listen\""))
+        .stdout(predicate::str::contains("\"code\": \"invalid_input\""))
+        .stdout(predicate::str::contains(
+            "the argument '--json' cannot be used with '--render-once'",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn backlog_sync_machine_parse_failures_emit_json_errors() {
+    cli()
+        .args(["backlog", "sync", "--json", "--render-once"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"status\": \"error\""))
+        .stdout(predicate::str::contains("\"command\": \"backlog.sync\""))
+        .stdout(predicate::str::contains("\"code\": \"invalid_input\""))
+        .stdout(predicate::str::contains(
+            "the argument '--json' cannot be used with '--render-once'",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn scaffold_creates_planning_layout_and_is_repeat_safe() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

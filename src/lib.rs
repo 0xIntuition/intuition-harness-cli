@@ -38,6 +38,7 @@ use std::ffi::OsString;
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use clap::error::ErrorKind;
 
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
@@ -63,7 +64,7 @@ use crate::merge_dashboard::MergeDashboardAction;
 use crate::onboarding::{
     OnboardingLaunchMode, OnboardingOptions, OnboardingResult, run_onboarding,
 };
-use crate::output::render_json_error;
+use crate::output::{render_json_clap_error, render_json_error};
 use crate::plan::run_plan;
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
@@ -94,7 +95,24 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = Cli::parse_from(args);
+    let argv = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    let inferred_machine_output_command = Cli::machine_output_command_from_argv(&argv);
+    let cli = match Cli::try_parse_from(&argv) {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                let _ = error.print();
+            } else if let Some(command) = inferred_machine_output_command {
+                println!("{}", render_json_clap_error(command, &error));
+            } else {
+                let _ = error.print();
+            }
+            return error.exit_code();
+        }
+    };
     let machine_output_command = cli.machine_output_command();
 
     match dispatch(cli).await {

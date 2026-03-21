@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
@@ -1602,6 +1603,16 @@ pub enum ConfigEventArg {
 }
 
 impl Cli {
+    /// Infer the machine-output command from raw argv when clap parsing fails before dispatch.
+    pub(crate) fn machine_output_command_from_argv(args: &[OsString]) -> Option<&'static str> {
+        let tokens = args
+            .iter()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        infer_machine_output_command(&tokens)
+    }
+
     pub(crate) fn machine_output_command(&self) -> Option<&'static str> {
         match &self.command {
             Command::Backlog(args) => match &args.command {
@@ -1674,4 +1685,115 @@ impl Cli {
             _ => None,
         }
     }
+}
+
+fn infer_machine_output_command(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "backlog" => infer_backlog_machine_output(rest),
+        "agents" => infer_agents_machine_output(rest),
+        "linear" => infer_linear_machine_output(rest),
+        "context" => {
+            if matches_subcommand(rest, "scan") && has_flag(rest, "--json") {
+                Some("context.scan")
+            } else {
+                None
+            }
+        }
+        "runtime" => infer_runtime_machine_output(rest),
+        "merge" if has_flag(rest, "--json") => Some("merge"),
+        "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
+        "technical" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        "issues" => infer_issue_machine_output(rest),
+        "projects" => {
+            if matches_subcommand(rest, "list") && has_flag(rest, "--json") {
+                Some("linear.projects.list")
+            } else {
+                None
+            }
+        }
+        "cron" => infer_cron_init_machine_output(rest),
+        "scan" if has_flag(rest, "--json") => Some("context.scan"),
+        "config" if has_flag(rest, "--json") => Some("runtime.config"),
+        "setup" if has_flag(rest, "--json") => Some("runtime.setup"),
+        "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
+            Some("backlog.sync")
+        }
+        _ => None,
+    }
+}
+
+fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
+        "tech" | "split" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
+            Some("backlog.sync")
+        }
+        _ => None,
+    }
+}
+
+fn infer_agents_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "listen" if has_flag(rest, "--json") => Some("agents.listen"),
+        _ => None,
+    }
+}
+
+fn infer_linear_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "projects" => {
+            if matches_subcommand(rest, "list") && has_flag(rest, "--json") {
+                Some("linear.projects.list")
+            } else {
+                None
+            }
+        }
+        "issues" => infer_issue_machine_output(rest),
+        _ => None,
+    }
+}
+
+fn infer_issue_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "list" if has_flag(rest, "--json") => Some("linear.issues.list"),
+        "create" if has_flag(rest, "--no-interactive") => Some("linear.issues.create"),
+        "edit" if has_flag(rest, "--no-interactive") => Some("linear.issues.edit"),
+        "refine" if has_flag(rest, "--json") => Some("linear.issues.refine"),
+        _ => None,
+    }
+}
+
+fn infer_runtime_machine_output(tokens: &[String]) -> Option<&'static str> {
+    let (command, rest) = tokens.split_first()?;
+    match command.as_str() {
+        "config" if has_flag(rest, "--json") => Some("runtime.config"),
+        "setup" if has_flag(rest, "--json") => Some("runtime.setup"),
+        "cron" => infer_cron_init_machine_output(rest),
+        _ => None,
+    }
+}
+
+fn infer_cron_init_machine_output(tokens: &[String]) -> Option<&'static str> {
+    if matches_subcommand(tokens, "init")
+        && (has_flag(tokens, "--json") || has_flag(tokens, "--no-interactive"))
+    {
+        Some("runtime.cron.init")
+    } else {
+        None
+    }
+}
+
+fn matches_subcommand(tokens: &[String], name: &str) -> bool {
+    matches!(tokens.first(), Some(token) if token == name)
+}
+
+fn has_flag(tokens: &[String], flag: &str) -> bool {
+    tokens.iter().any(|token| token == flag)
 }
