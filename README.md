@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog plan`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout.
@@ -346,6 +346,7 @@ Supported route families:
 Supported command route keys:
 
 - `backlog.plan`
+- `backlog.improve`
 - `backlog.split`
 - `context.scan`
 - `context.reload`
@@ -700,6 +701,31 @@ Side effects:
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
 
+### `backlog improve`
+
+Review repo-scoped backlog issues for issue hygiene gaps before execution:
+
+```bash
+meta backlog improve
+meta backlog improve --mode basic
+meta backlog improve ENG-10144 --mode advanced
+meta backlog improve ENG-10144 --mode advanced --apply
+```
+
+`meta backlog improve` is the repo-scoped backlog triage pass for existing backlog issues. Use it when you want to scan the current backlog for missing labels, weak titles/descriptions, missing acceptance criteria, absent priority or estimate, and parent-child structure opportunities. The default `basic` mode stays conservative and focuses on metadata hygiene. `advanced` mode can rewrite issue content more deeply and propose or apply an existing parent issue when the repository backlog clearly supports that structure.
+
+In a TTY, the command now stays inside one guided dashboard flow after issue selection. For each issue, the configured agent classifies the ticket into one of four states: `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`. The engineer then explicitly accepts, skips, or rejects that recommendation before the command moves on. The decision panel always shows the primary `Enter` action for the current ticket, plus explicit `skip` and `reject` paths. When the agent needs direct follow-up answers, the dashboard captures them inline, reruns the same issue review, and only offers an apply path once the recommendation is concrete enough to mutate local backlog content or Linear.
+
+Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and the main goal is improving the issue description itself. Use `meta backlog improve` when you want a backlog-quality sweep that evaluates whether existing repo-scoped backlog issues are ready for execution.
+
+Side effects:
+
+- scans either explicit issue identifiers or repo-scoped issues in the configured backlog state
+- writes `original.md`, `issue.json`, `local-index.md` when present, `proposal.json`, `proposal.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/improvement/<RUN_ID>/`
+- in the interactive dashboard, keeps local and remote changes gated behind an explicit human decision for each issue
+- keeps the default flow proposal-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue
+- with `--apply`, writes the local artifact trail first, then updates `.metastack/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear
+
 ### `issues refine`
 
 Critique and rewrite one or more existing Linear issues that already belong to the active repository scope:
@@ -934,7 +960,7 @@ Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
@@ -951,7 +977,7 @@ For capture-oriented non-interactive runs such as `meta backlog plan`, the runti
 Sandbox and permission handling depends on the command path:
 
 - `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
-- `meta context scan`, `meta backlog plan`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
+- `meta context scan`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
 
 Listen startup now runs a provider preflight before polling Linear, and worker pickup reruns it inside the workspace before the first agent turn. Codex checks require a readable `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` and warn when `[mcp_servers.linear]` is configured. Claude checks require `claude` on `PATH` and fail fast when `ANTHROPIC_API_KEY` is set. Both providers also validate that the resolved built-in launch command exposes the required unrestricted mode for unattended listen runs.
 
