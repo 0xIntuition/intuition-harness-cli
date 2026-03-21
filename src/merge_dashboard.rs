@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEvent};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -111,31 +111,39 @@ pub fn run_merge_dashboard(
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            let viewport = preview_viewport(terminal.size()?.into());
-            let action = match key.code {
-                KeyCode::Char('q') => return Ok(MergeDashboardExit::Cancelled),
-                KeyCode::Up => Some(MergeDashboardAction::Up),
-                KeyCode::Down => Some(MergeDashboardAction::Down),
-                KeyCode::Tab => Some(MergeDashboardAction::Tab),
-                KeyCode::PageUp => Some(MergeDashboardAction::PageUp),
-                KeyCode::PageDown => Some(MergeDashboardAction::PageDown),
-                KeyCode::Home => Some(MergeDashboardAction::Home),
-                KeyCode::End => Some(MergeDashboardAction::End),
-                KeyCode::Char(' ') => Some(MergeDashboardAction::Toggle),
-                KeyCode::Enter => Some(MergeDashboardAction::Enter),
-                KeyCode::Esc | KeyCode::Backspace => Some(MergeDashboardAction::Back),
-                _ => None,
-            };
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
 
-            if let Some(action) = action
-                && let Some(selection) = app.apply_in_viewport(action, viewport)
-            {
-                return Ok(MergeDashboardExit::Selected(selection));
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let viewport = preview_viewport(terminal.size()?.into());
+                let action = match key.code {
+                    KeyCode::Char('q') => return Ok(MergeDashboardExit::Cancelled),
+                    KeyCode::Up => Some(MergeDashboardAction::Up),
+                    KeyCode::Down => Some(MergeDashboardAction::Down),
+                    KeyCode::Tab => Some(MergeDashboardAction::Tab),
+                    KeyCode::PageUp => Some(MergeDashboardAction::PageUp),
+                    KeyCode::PageDown => Some(MergeDashboardAction::PageDown),
+                    KeyCode::Home => Some(MergeDashboardAction::Home),
+                    KeyCode::End => Some(MergeDashboardAction::End),
+                    KeyCode::Char(' ') => Some(MergeDashboardAction::Toggle),
+                    KeyCode::Enter => Some(MergeDashboardAction::Enter),
+                    KeyCode::Esc | KeyCode::Backspace => Some(MergeDashboardAction::Back),
+                    _ => None,
+                };
+
+                if let Some(action) = action
+                    && let Some(selection) = app.apply_in_viewport(action, viewport)
+                {
+                    return Ok(MergeDashboardExit::Selected(selection));
+                }
             }
+            Event::Mouse(mouse) => {
+                let viewport = preview_viewport(terminal.size()?.into());
+                let _ = app.handle_mouse(mouse, viewport);
+            }
+            _ => {}
         }
     }
 }
@@ -189,6 +197,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
                 ("Up/Down", "move/scroll"),
                 ("Tab", "focus"),
                 ("PgUp/PgDn", "scroll preview"),
+                ("Wheel", "scroll preview"),
                 ("Space", "select"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
@@ -417,7 +426,7 @@ impl MergeDashboardApp {
                     "The GitHub repository currently has no open pull requests.".to_string()
                 } else if self.selected.is_empty() {
                     format!(
-                        "{} open pull request(s) discovered for {}. Select one or more entries, then press Enter. Tab moves focus into the preview pane.",
+                        "{} open pull request(s) discovered for {}. Select one or more entries, then press Enter. Tab moves focus into the preview pane, where PgUp/PgDn/Home/End and the mouse wheel scroll long details.",
                         self.data.pull_requests.len(),
                         self.data.repo_label
                     )
@@ -521,6 +530,18 @@ impl MergeDashboardApp {
             self.preview_content_rows(viewport.width.max(1)),
         );
     }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, viewport: Rect) -> bool {
+        if self.focus != Focus::Preview {
+            return false;
+        }
+
+        self.preview_scroll.apply_mouse_in_viewport(
+            mouse,
+            viewport,
+            self.preview_content_rows(viewport.width.max(1)),
+        )
+    }
 }
 
 fn shift_index(index: &mut usize, len: usize, delta: isize) {
@@ -591,6 +612,7 @@ mod tests {
         Focus, MergeDashboardAction, MergeDashboardApp, MergeDashboardData, MergeDashboardExit,
         MergeDashboardOptions, MergeDashboardPullRequest, preview_viewport, run_merge_dashboard,
     };
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
     fn demo_data() -> MergeDashboardData {
@@ -738,6 +760,35 @@ mod tests {
         app.apply_in_viewport(MergeDashboardAction::End, viewport);
 
         assert_eq!(app.focus, Focus::Preview);
+        assert!(app.preview_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn preview_mouse_wheel_scrolls_only_when_preview_is_focused() {
+        let mut data = demo_data();
+        data.pull_requests[0].title = (1..=18)
+            .map(|index| format!("overflow detail line {index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        data.pull_requests[0].url = (1..=18)
+            .map(|index| format!("https://example.com/long/path/segment/{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let viewport = preview_viewport(Rect::new(0, 0, 120, 20));
+        let mut app = MergeDashboardApp::new(data);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x,
+            row: viewport.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(!app.handle_mouse(mouse, viewport));
+        assert_eq!(app.preview_scroll.offset(), 0);
+
+        app.apply_in_viewport(MergeDashboardAction::Tab, viewport);
+        assert!(app.handle_mouse(mouse, viewport));
         assert!(app.preview_scroll.offset() > 0);
     }
 }
