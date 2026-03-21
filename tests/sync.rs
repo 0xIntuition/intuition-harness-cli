@@ -2697,7 +2697,7 @@ fn sync_link_in_no_interactive_mode_creates_metadata_without_hashes() -> Result<
         }));
     });
 
-    cli()
+    let assert = cli()
         .sync_repo(temp.path())?
         .args([
             "sync",
@@ -2712,10 +2712,18 @@ fn sync_link_in_no_interactive_mode_creates_metadata_without_hashes() -> Result<
             "manual-entry",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Linked .metastack/backlog/manual-entry to MET-35.",
-        ));
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "backlog.sync");
+    assert_eq!(payload["result"]["issue"]["identifier"], "MET-35");
+    assert_eq!(
+        payload["result"]["backlog_path"],
+        ".metastack/backlog/manual-entry"
+    );
+    assert_eq!(payload["result"]["pulled"], false);
+    assert_eq!(payload["result"]["already_linked"], false);
 
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
     assert!(metadata.contains("\"identifier\": \"MET-35\""));
@@ -2856,7 +2864,7 @@ fn sync_link_does_not_write_metadata_when_the_issue_is_missing() -> Result<(), B
         }));
     });
 
-    cli()
+    let assert = cli()
         .sync_repo(temp.path())?
         .args([
             "sync",
@@ -2871,10 +2879,16 @@ fn sync_link_does_not_write_metadata_when_the_issue_is_missing() -> Result<(), B
             "manual-entry",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "issue `MET-35` was not found in Linear",
-        ));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "backlog.sync");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert_eq!(
+        payload["error"]["message"],
+        "issue `MET-35` was not found in Linear"
+    );
 
     assert!(!issue_dir.join(".linear.json").exists());
     assert_eq!(
@@ -3185,7 +3199,7 @@ fn sync_pull_all_reports_synced_and_skipped_summary() -> Result<(), Box<dyn Erro
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Pull summary: 1 synced, 1 skipped, 0 errors.",
+            "pull summary: 1 synced, 1 skipped, 0 errors.",
         ));
 
     assert_eq!(
@@ -3312,7 +3326,7 @@ fn sync_push_all_exits_non_zero_when_any_entry_errors() -> Result<(), Box<dyn Er
         .assert()
         .failure()
         .stdout(predicate::str::contains(
-            "Push summary: 0 synced, 1 skipped, 1 errors.",
+            "push summary: 0 synced, 1 skipped, 1 errors.",
         ))
         .stderr(predicate::str::contains(
             "`meta backlog sync push --all` completed with 1 error",

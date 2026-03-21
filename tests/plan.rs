@@ -20,6 +20,47 @@ fn write_onboarded_config(
     Ok(())
 }
 
+#[cfg(unix)]
+fn assert_plan_created_issues(
+    assert: &assert_cmd::assert::Assert,
+    expected: &[(&str, &str, &str, &str, &str)],
+) {
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("plan output should be valid JSON");
+    let issues = payload["result"]["issues"]
+        .as_array()
+        .expect("plan result should contain an issue array");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "backlog.plan");
+    assert_eq!(payload["result"]["mode"], "created");
+    assert_eq!(issues.len(), expected.len());
+
+    for (issue, (identifier, title, state, project, team)) in issues.iter().zip(expected.iter()) {
+        assert_eq!(issue["identifier"], *identifier);
+        assert_eq!(issue["title"], *title);
+        assert_eq!(issue["state"], *state);
+        assert_eq!(issue["project"], *project);
+        assert_eq!(issue["team"], *team);
+    }
+}
+
+#[cfg(unix)]
+fn assert_plan_reshaped_issue(
+    assert: &assert_cmd::assert::Assert,
+    expected_identifier: &str,
+    expected_url: &str,
+) {
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("plan output should be valid JSON");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "backlog.plan");
+    assert_eq!(payload["result"]["mode"], "reshaped");
+    assert_eq!(payload["result"]["identifier"], expected_identifier);
+    assert_eq!(payload["result"]["url"], expected_url);
+}
+
 #[test]
 fn plan_help_lists_non_interactive_inputs() {
     cli()
@@ -385,7 +426,7 @@ fn plan_reshape_velocity_updates_existing_issue_and_workpad() -> Result<(), Box<
 
     let current_path = std::env::var("PATH")?;
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
@@ -399,8 +440,9 @@ fn plan_reshape_velocity_updates_existing_issue_and_workpad() -> Result<(), Box<
             "ENG-10144",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Reshaped ENG-10144 in place"));
+        .success();
+
+    assert_plan_reshaped_issue(&assert, "ENG-10144", "https://linear.app/issues/ENG-10144");
 
     issues_mock.assert_calls(2);
     issue_detail_mock.assert_calls(1);
@@ -611,7 +653,7 @@ fn plan_reshape_missing_issue_fails_without_creating_new_ticket() -> Result<(), 
         }));
     });
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .args([
@@ -623,10 +665,16 @@ fn plan_reshape_missing_issue_fails_without_creating_new_ticket() -> Result<(), 
             "ENG-10144",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "issue `ENG-10144` was not found in Linear",
-        ));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "backlog.plan");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert_eq!(
+        payload["error"]["message"],
+        "issue `ENG-10144` was not found in Linear"
+    );
 
     issues_mock.assert_calls(1);
     create_issue_mock.assert_calls(0);
@@ -851,7 +899,7 @@ fi
 
     let current_path = std::env::var("PATH")?;
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
@@ -869,10 +917,27 @@ fi
             "Split it into multiple tickets",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created 2 backlog issue(s):"))
-        .stdout(predicate::str::contains("MET-41"))
-        .stdout(predicate::str::contains("MET-42"));
+        .success();
+
+    assert_plan_created_issues(
+        &assert,
+        &[
+            (
+                "MET-41",
+                "Add the meta plan command",
+                "Backlog",
+                "MetaStack CLI",
+                "MET",
+            ),
+            (
+                "MET-42",
+                "Build the planning dashboard",
+                "Backlog",
+                "MetaStack CLI",
+                "MET",
+            ),
+        ],
+    );
 
     teams_mock.assert_calls(2);
     projects_mock.assert_calls(2);
@@ -1137,7 +1202,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{
 
     let current_path = std::env::var("PATH")?;
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
@@ -1155,9 +1220,18 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{
             "Prioritize backlog planning first",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
-        .stdout(predicate::str::contains("MET-51"));
+        .success();
+
+    assert_plan_created_issues(
+        &assert,
+        &[(
+            "MET-51",
+            "Reuse the planning session",
+            "Backlog",
+            "MetaStack CLI",
+            "MET",
+        )],
+    );
 
     let first_args = fs::read_to_string(stub_dir.join("args-1.txt"))?;
     assert!(first_args.contains("exec"));
@@ -1355,7 +1429,7 @@ printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Creat
 
     let current_path = std::env::var("PATH")?;
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
@@ -1373,9 +1447,18 @@ printf '%s' '{"type":"result","subtype":"success","result":"{\"summary\":\"Creat
             "Handle the retry in the shared runtime layer",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
-        .stdout(predicate::str::contains("MET-52"));
+        .success();
+
+    assert_plan_created_issues(
+        &assert,
+        &[(
+            "MET-52",
+            "Retry Claude planning fresh",
+            "Backlog",
+            "MetaStack CLI",
+            "MET",
+        )],
+    );
 
     let second_args = fs::read_to_string(stub_dir.join("args-2.txt"))?;
     assert!(second_args.contains("--resume"));
@@ -1748,7 +1831,7 @@ fi
 
     let current_path = std::env::var("PATH")?;
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
@@ -1762,9 +1845,18 @@ fi
             "Fix the meta plan command so it can create backlog tickets",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
-        .stdout(predicate::str::contains("MET-42"));
+        .success();
+
+    assert_plan_created_issues(
+        &assert,
+        &[(
+            "MET-42",
+            "Fix the meta plan command",
+            "Backlog",
+            "MetaStack CLI",
+            "MET",
+        )],
+    );
 
     teams_mock.assert_calls(1);
     projects_mock.assert_calls(1);
@@ -2033,7 +2125,7 @@ fi
 
     let current_path = std::env::var("PATH")?;
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
@@ -2049,9 +2141,18 @@ fi
             "cli-extra",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
-        .stdout(predicate::str::contains("MET-61"));
+        .success();
+
+    assert_plan_created_issues(
+        &assert,
+        &[(
+            "MET-61",
+            "Remember velocity defaults",
+            "Todo",
+            "Remembered Project",
+            "MET",
+        )],
+    );
 
     teams_mock.assert_calls(1);
     projects_mock.assert_calls(1);
@@ -2244,7 +2345,7 @@ fi
         }));
     });
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env(
@@ -2261,9 +2362,18 @@ fi
             "Create an install-default proof",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
-        .stdout(predicate::str::contains("MET-52"));
+        .success();
+
+    assert_plan_created_issues(
+        &assert,
+        &[(
+            "MET-52",
+            "Use install defaults",
+            "Backlog",
+            "Install Project",
+            "MET",
+        )],
+    );
 
     teams_mock.assert();
     projects_mock.assert();
@@ -2976,7 +3086,7 @@ fn plan_requires_linear_auth_for_non_interactive_runs() -> Result<(), Box<dyn Er
 "#,
     )?;
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env_remove("LINEAR_API_KEY")
         .env_remove("LINEAR_API_URL")
@@ -2993,8 +3103,18 @@ fn plan_requires_linear_auth_for_non_interactive_runs() -> Result<(), Box<dyn Er
             "Plan a new backlog workflow",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Linear auth is required"));
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "backlog.plan");
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Linear auth is required")
+    );
 
     Ok(())
 }

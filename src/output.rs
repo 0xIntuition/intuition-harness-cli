@@ -160,6 +160,7 @@ fn classify_error_code(
         || combined.contains("cannot be used")
         || combined.contains("without a tty")
         || combined.contains("rerun in a tty")
+        || combined.contains("not found in linear")
     {
         "invalid_input"
     } else if combined.contains("api key")
@@ -169,6 +170,18 @@ fn classify_error_code(
         || combined.contains("forbidden")
     {
         "auth_error"
+    } else if combined.contains("metastack.toml")
+        || combined.contains("config.toml")
+        || combined.contains("unknown agent command route key")
+        || combined.contains("supported keys:")
+        || combined.contains("invalid `") && combined.contains(".toml")
+    {
+        "configuration_error"
+    } else if combined.contains("interactive terminal")
+        || combined.contains("local changes")
+        || combined.contains("choose overwrite")
+    {
+        "invalid_input"
     } else if combined.contains("configured local agent")
         || combined.contains("default agent")
         || combined.contains("meta runtime config")
