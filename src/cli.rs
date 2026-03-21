@@ -717,6 +717,15 @@ pub struct PlanArgs {
     /// Override the resolved built-in reasoning option for this planning run.
     #[arg(long)]
     pub reasoning: Option<String>,
+    /// Use the fast single-pass planning flow.
+    #[arg(long)]
+    pub fast: bool,
+    /// In fast mode, allow the generated plan to contain multiple tickets instead of the single-ticket default.
+    #[arg(long)]
+    pub multi: bool,
+    /// In fast mode, cap the one-round follow-up batch size between 0 and 10.
+    #[arg(long)]
+    pub questions: Option<usize>,
     /// Skip the reshape diff preview and apply the in-place update immediately.
     #[arg(long)]
     pub velocity: bool,
@@ -797,6 +806,15 @@ pub struct ConfigArgs {
     /// Update the install-scoped plan follow-up question limit.
     #[arg(long)]
     pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped default mode for `meta backlog plan`. Supported values: `normal`, `fast`, or `none`.
+    #[arg(long)]
+    pub plan_default_mode: Option<String>,
+    /// Update whether install-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
+    #[arg(long)]
+    pub plan_fast_single_ticket: Option<String>,
+    /// Update the install-scoped fast planning follow-up batch size.
+    #[arg(long)]
+    pub plan_fast_questions: Option<String>,
     /// Update the install-scoped default plan label.
     #[arg(long)]
     pub plan_label: Option<String>,
@@ -889,6 +907,15 @@ pub struct SetupArgs {
     /// Update the interactive `meta plan` follow-up question limit.
     #[arg(long)]
     pub interactive_plan_follow_up_question_limit: Option<String>,
+    /// Update the repo-scoped default mode for `meta backlog plan`. Supported values: `normal`, `fast`, or `none`.
+    #[arg(long)]
+    pub plan_default_mode: Option<String>,
+    /// Update whether repo-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
+    #[arg(long)]
+    pub plan_fast_single_ticket: Option<String>,
+    /// Update the repo-scoped fast planning follow-up batch size.
+    #[arg(long)]
+    pub plan_fast_questions: Option<String>,
     /// Update the default label applied to issues created by `meta plan`.
     #[arg(long)]
     pub plan_label: Option<String>,

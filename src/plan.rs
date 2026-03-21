@@ -27,7 +27,10 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-use crate::agents::{AgentContinuation, run_agent_capture, run_agent_capture_with_continuation};
+use crate::agents::{
+    AgentContinuation, run_agent_capture, run_agent_capture_with_continuation,
+    run_agent_streaming_text_with_continuation,
+};
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, RenderedTemplateFile,
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
@@ -39,8 +42,8 @@ use crate::backlog_defaults::{
 };
 use crate::cli::{PlanArgs, RunAgentArgs};
 use crate::config::{
-    AGENT_ROUTE_BACKLOG_PLAN, AppConfig, LinearConfig, LinearConfigOverrides,
-    load_required_planning_meta,
+    AGENT_ROUTE_BACKLOG_PLAN, AppConfig, LinearConfig, LinearConfigOverrides, PlanDefaultMode,
+    load_required_planning_meta, validate_fast_plan_question_limit,
 };
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
@@ -56,6 +59,7 @@ use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_
 
 const NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS: usize = 3;
 const SKIPPED_FOLLOW_UP_LABEL: &str = "Skipped intentionally.";
+const FAST_PLAN_STREAM_PREVIEW_CHAR_LIMIT: usize = 4_000;
 
 #[derive(Debug, Clone)]
 pub enum PlanReport {
@@ -159,10 +163,30 @@ enum ReviewFocus {
 }
 
 #[derive(Debug, Clone)]
+struct FastAddendumApp {
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+    follow_ups: Vec<FollowUpResponse>,
+    addendum: InputFieldState,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FastReviewApp {
+    request: String,
+    follow_ups: Vec<FollowUpResponse>,
+    addendum: String,
+    plan: PlannedIssueSet,
+    selected: usize,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct LoadingApp {
     message: String,
     detail: String,
     spinner_index: usize,
+    preview: String,
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +243,30 @@ struct PlanningAgentOverrides {
     reasoning: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FastPlanOptions {
+    single_ticket: bool,
+    question_limit: usize,
+}
+
+struct FastPlanPrompt<'a> {
+    root: &'a Path,
+    request: &'a str,
+    follow_ups: &'a [FollowUpResponse],
+    addendum: Option<&'a str>,
+    attachments: Vec<PromptImageAttachment>,
+    single_ticket: bool,
+}
+
+struct FastPlanJobInput {
+    root: PathBuf,
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+    follow_ups: Vec<FollowUpResponse>,
+    addendum: Option<String>,
+    single_ticket: bool,
+}
+
 enum PlanMode {
     Create,
     Reshape { identifier: String },
@@ -256,70 +304,91 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
     match resolve_plan_mode(args.target.as_deref())? {
         PlanMode::Create => {}
         PlanMode::Reshape { identifier } => {
+            if args.fast || args.multi || args.questions.is_some() {
+                bail!(
+                    "`meta backlog plan <IDENTIFIER>` does not support `--fast`, `--multi`, or `--questions`; reshape mode keeps its existing flow"
+                );
+            }
             return run_reshape_plan(&root, &service, &identifier, args, &agent_overrides).await;
         }
     }
+    let fast_options = resolve_fast_plan_options(args, &planning_meta, &app_config)?;
 
     let plan = if run_non_interactive {
-        let request = args.request.clone().ok_or_else(|| {
-            anyhow!(
-                "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
-            )
-        })?;
-        let mut continuation = None;
-
-        let questions = generate_follow_up_questions(
-            &root,
-            &request,
-            Vec::new(),
-            NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS,
-            &agent_overrides,
-            &mut continuation,
-        )?;
-        let answers = if questions.is_empty() {
-            Vec::new()
+        if let Some(options) = fast_options {
+            run_fast_plan_non_interactive(&root, args, options, &agent_overrides)?
         } else {
-            if args.answers.len() != questions.len() {
-                bail!(
-                    "planning agent requested {} follow-up question(s); pass exactly {} `--answer` value(s)",
-                    questions.len(),
-                    questions.len()
-                );
-            }
-            args.answers.clone()
-        };
-        let follow_ups = questions
-            .into_iter()
-            .zip(answers)
-            .map(|(question, answer)| FollowUpResponse {
-                question,
-                answer,
-                skipped: false,
-                attachments: Vec::new(),
-            })
-            .collect::<Vec<_>>();
+            let request = args.request.clone().ok_or_else(|| {
+                anyhow!(
+                    "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
+                )
+            })?;
+            let mut continuation = None;
 
-        let plan = generate_issue_plan(
-            &root,
-            &request,
-            &follow_ups,
-            Vec::new(),
-            &agent_overrides,
-            &mut continuation,
-        )?;
-        if plan.issues.is_empty() {
-            bail!("planning agent returned no issues to create");
+            let questions = generate_follow_up_questions(
+                &root,
+                &request,
+                Vec::new(),
+                NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS,
+                &agent_overrides,
+                &mut continuation,
+            )?;
+            let answers = if questions.is_empty() {
+                Vec::new()
+            } else {
+                if args.answers.len() != questions.len() {
+                    bail!(
+                        "planning agent requested {} follow-up question(s); pass exactly {} `--answer` value(s)",
+                        questions.len(),
+                        questions.len()
+                    );
+                }
+                args.answers.clone()
+            };
+            let follow_ups = questions
+                .into_iter()
+                .zip(answers)
+                .map(|(question, answer)| FollowUpResponse {
+                    question,
+                    answer,
+                    skipped: false,
+                    attachments: Vec::new(),
+                })
+                .collect::<Vec<_>>();
+
+            let plan = generate_issue_plan(
+                &root,
+                &request,
+                &follow_ups,
+                Vec::new(),
+                &agent_overrides,
+                &mut continuation,
+            )?;
+            if plan.issues.is_empty() {
+                bail!("planning agent returned no issues to create");
+            }
+            plan
         }
-        plan
     } else {
-        match run_interactive_plan_session(
-            &root,
-            args.request.clone(),
-            planning_meta.effective_interactive_follow_up_question_limit(&app_config),
-            agent_overrides.clone(),
-        )? {
-            InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
-            InteractivePlanExit::Confirmed(plan) => plan,
+        match fast_options {
+            Some(options) => match run_fast_interactive_plan_session(
+                &root,
+                args.request.clone(),
+                options,
+                agent_overrides.clone(),
+            )? {
+                InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
+                InteractivePlanExit::Confirmed(plan) => plan,
+            },
+            None => match run_interactive_plan_session(
+                &root,
+                args.request.clone(),
+                planning_meta.effective_interactive_follow_up_question_limit(&app_config),
+                agent_overrides.clone(),
+            )? {
+                InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
+                InteractivePlanExit::Confirmed(plan) => plan,
+            },
         }
     };
 
@@ -494,6 +563,82 @@ fn resolve_plan_mode(target: Option<&str>) -> Result<PlanMode> {
     );
 }
 
+fn resolve_fast_plan_options(
+    args: &PlanArgs,
+    planning_meta: &crate::config::PlanningMeta,
+    app_config: &AppConfig,
+) -> Result<Option<FastPlanOptions>> {
+    if let Some(limit) = args.questions {
+        validate_fast_plan_question_limit(limit)?;
+    }
+
+    let fast_active = args.fast
+        || matches!(
+            planning_meta.effective_plan_default_mode(app_config),
+            PlanDefaultMode::Fast
+        );
+    if !fast_active {
+        if args.multi {
+            bail!(
+                "`--multi` only applies to fast planning; pass `--fast` or configure `plan.default_mode = \"fast\"`"
+            );
+        }
+        if args.questions.is_some() {
+            bail!(
+                "`--questions` only applies to fast planning; pass `--fast` or configure `plan.default_mode = \"fast\"`"
+            );
+        }
+        return Ok(None);
+    }
+
+    if !args.answers.is_empty() {
+        bail!(
+            "fast planning does not accept `--answer`; the fast path only uses live interactive Q&A"
+        );
+    }
+
+    Ok(Some(FastPlanOptions {
+        single_ticket: if args.multi {
+            false
+        } else {
+            planning_meta.effective_fast_single_ticket(app_config)
+        },
+        question_limit: args
+            .questions
+            .unwrap_or_else(|| planning_meta.effective_fast_question_limit(app_config)),
+    }))
+}
+
+fn run_fast_plan_non_interactive(
+    root: &Path,
+    args: &PlanArgs,
+    options: FastPlanOptions,
+    overrides: &PlanningAgentOverrides,
+) -> Result<PlannedIssueSet> {
+    let request = args.request.clone().ok_or_else(|| {
+        anyhow!(
+            "`--request` is required when `--no-interactive` is used or when `meta plan` runs without a TTY"
+        )
+    })?;
+    let mut continuation = None;
+    let plan = generate_fast_issue_plan(
+        FastPlanPrompt {
+            root,
+            request: &request,
+            follow_ups: &[],
+            addendum: None,
+            attachments: Vec::new(),
+            single_ticket: options.single_ticket,
+        },
+        overrides,
+        &mut continuation,
+    )?;
+    if plan.issues.is_empty() {
+        bail!("planning agent returned no issues to create");
+    }
+    Ok(plan)
+}
+
 fn is_strict_issue_identifier(value: &str) -> bool {
     let Some((team, number)) = value.split_once('-') else {
         return false;
@@ -629,6 +774,96 @@ fn generate_issue_plan(
     })
 }
 
+fn generate_fast_issue_plan(
+    prompt_input: FastPlanPrompt<'_>,
+    overrides: &PlanningAgentOverrides,
+    continuation: &mut Option<AgentContinuation>,
+) -> Result<PlannedIssueSet> {
+    let prompt = render_fast_issue_plan_prompt(
+        prompt_input.root,
+        prompt_input.request,
+        prompt_input.follow_ups,
+        prompt_input.addendum,
+        prompt_input.single_ticket,
+    )?;
+    let output = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(prompt_input.root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
+            agent: overrides.agent.clone(),
+            prompt,
+            instructions: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
+            transport: None,
+            attachments: prompt_input.attachments,
+        },
+        continuation,
+    )?;
+    let parsed: PlannedIssueSet = parse_agent_json(&output.stdout, "fast issue planning")?;
+    normalize_planned_issue_set(parsed)
+}
+
+fn generate_fast_issue_plan_streaming(
+    prompt_input: FastPlanPrompt<'_>,
+    overrides: &PlanningAgentOverrides,
+    continuation: &mut Option<AgentContinuation>,
+    mut on_stdout: impl FnMut(&str),
+) -> Result<PlannedIssueSet> {
+    let prompt = render_fast_issue_plan_prompt(
+        prompt_input.root,
+        prompt_input.request,
+        prompt_input.follow_ups,
+        prompt_input.addendum,
+        prompt_input.single_ticket,
+    )?;
+    let output = run_agent_streaming_text_with_continuation(
+        &RunAgentArgs {
+            root: Some(prompt_input.root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
+            agent: overrides.agent.clone(),
+            prompt,
+            instructions: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
+            transport: None,
+            attachments: prompt_input.attachments,
+        },
+        continuation,
+        &mut on_stdout,
+    )?;
+    let parsed: PlannedIssueSet = parse_agent_json(&output.stdout, "fast issue planning")?;
+    normalize_planned_issue_set(parsed)
+}
+
+fn normalize_planned_issue_set(parsed: PlannedIssueSet) -> Result<PlannedIssueSet> {
+    let normalized = PlannedIssueSet {
+        summary: parsed.summary.trim().to_string(),
+        issues: parsed
+            .issues
+            .into_iter()
+            .map(|draft| PlannedIssueDraft {
+                title: draft.title.trim().to_string(),
+                description: draft.description.trim().to_string(),
+                acceptance_criteria: draft
+                    .acceptance_criteria
+                    .into_iter()
+                    .map(|criterion| criterion.trim().to_string())
+                    .filter(|criterion| !criterion.is_empty())
+                    .collect(),
+                priority: draft.priority,
+            })
+            .filter(|draft| !draft.title.is_empty() && !draft.description.is_empty())
+            .collect(),
+    };
+
+    if normalized.issues.is_empty() {
+        bail!("planning agent returned no issues to create");
+    }
+
+    Ok(normalized)
+}
+
 fn render_question_prompt(root: &Path, request: &str, max_questions: usize) -> Result<String> {
     let context = load_context_bundle(root)?;
     let workflow_contract = load_workflow_contract(root)?;
@@ -658,6 +893,39 @@ User request:\n{request}\n\n\
 Follow-up answers:\n{follow_up_block}\n\n\
 Repository planning context:\n{context}\n\n\
 Break the work into 1 to 5 actionable Linear backlog issues for this repository directory only. Each issue must be independently understandable, ready to create in Backlog, and scoped to the target repository unless the user explicitly requested a narrower subproject.\n\n\
+Return JSON only using this exact shape:\n\
+{{\n  \"summary\":\"One paragraph summary of the overall plan\",\n  \"issues\":[\n    {{\n      \"title\":\"Issue title\",\n      \"description\":\"Short markdown description\",\n      \"acceptance_criteria\":[\"criterion one\",\"criterion two\"],\n      \"priority\": 2\n    }}\n  ]\n}}",
+    ))
+}
+
+fn render_fast_issue_plan_prompt(
+    root: &Path,
+    request: &str,
+    follow_ups: &[FollowUpResponse],
+    addendum: Option<&str>,
+    single_ticket: bool,
+) -> Result<String> {
+    let context = load_context_bundle(root)?;
+    let workflow_contract = load_workflow_contract(root)?;
+    let follow_up_block = render_follow_up_block(follow_ups);
+    let addendum = addendum
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("No additional addendum was provided.");
+    let issue_count_guidance = if single_ticket {
+        "Draft exactly 1 actionable Linear backlog issue for this repository only unless the user explicitly asked for a narrower subproject."
+    } else {
+        "Break the work into 1 to 5 actionable Linear backlog issues for this repository only unless the user explicitly asked for a narrower subproject."
+    };
+
+    Ok(format!(
+        "You are helping plan backlog work for the active repository in fast single-pass mode.\n\n\
+Injected workflow contract:\n{workflow_contract}\n\n\
+User request:\n{request}\n\n\
+Follow-up answers:\n{follow_up_block}\n\n\
+Anything else to add:\n{addendum}\n\n\
+Repository planning context:\n{context}\n\n\
+{issue_count_guidance} Keep the result implementation-ready, concise, and compatible with Linear backlog creation for this repository root by default.\n\n\
 Return JSON only using this exact shape:\n\
 {{\n  \"summary\":\"One paragraph summary of the overall plan\",\n  \"issues\":[\n    {{\n      \"title\":\"Issue title\",\n      \"description\":\"Short markdown description\",\n      \"acceptance_criteria\":[\"criterion one\",\"criterion two\"],\n      \"priority\": 2\n    }}\n  ]\n}}",
     ))
@@ -1185,6 +1453,951 @@ fn run_interactive_plan_session(
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum FastPlanStage {
+    Request(RequestApp),
+    Questions(QuestionsApp),
+    Addendum(FastAddendumApp),
+    Review(FastReviewApp),
+    Loading(LoadingApp),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FastPlanStageKind {
+    Request,
+    Questions,
+    Addendum,
+    Review,
+    Loading,
+}
+
+struct FastPlanSessionApp {
+    stage: FastPlanStage,
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
+    pending: Option<PendingFastPlanJob>,
+    options: FastPlanOptions,
+}
+
+struct PendingFastPlanJob {
+    receiver: Receiver<FastPlanEvent>,
+    previous_stage: FastPlanStage,
+}
+
+enum FastPlanEvent {
+    Progress(String),
+    Complete(FastPlanWorkerReport),
+}
+
+struct FastPlanWorkerReport {
+    continuation: Option<AgentContinuation>,
+    outcome: Result<FastPlanWorkerOutcome>,
+}
+
+enum FastPlanWorkerOutcome {
+    Questions {
+        request: String,
+        request_attachments: Vec<PromptImageAttachment>,
+        questions: Vec<String>,
+    },
+    Review(FastReviewApp),
+}
+
+enum FastSessionAction {
+    None,
+    GenerateQuestions {
+        request: String,
+        request_attachments: Vec<PromptImageAttachment>,
+    },
+    OpenAddendum {
+        request: String,
+        request_attachments: Vec<PromptImageAttachment>,
+        follow_ups: Vec<FollowUpResponse>,
+    },
+    GeneratePlan {
+        request: String,
+        request_attachments: Vec<PromptImageAttachment>,
+        follow_ups: Vec<FollowUpResponse>,
+        addendum: Option<String>,
+    },
+    Confirm(PlannedIssueSet),
+    Reject,
+}
+
+fn run_fast_interactive_plan_session(
+    root: &Path,
+    prefill: Option<String>,
+    options: FastPlanOptions,
+    agent_overrides: PlanningAgentOverrides,
+) -> Result<InteractivePlanExit> {
+    let mut app = FastPlanSessionApp {
+        stage: FastPlanStage::Request(RequestApp {
+            request: InputFieldState::multiline_with_prompt_attachments(
+                prefill.unwrap_or_default(),
+            ),
+            error: None,
+        }),
+        agent_overrides,
+        continuation: None,
+        pending: None,
+        options,
+    };
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    let _cleanup = TerminalCleanup;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let mut previous_stage = fast_stage_kind(&app.stage);
+    terminal.clear()?;
+
+    loop {
+        if let Some(exit) = process_pending_fast_plan_job(&mut app)? {
+            return Ok(exit);
+        }
+        advance_fast_loading_spinner(&mut app);
+        let current_stage = fast_stage_kind(&app.stage);
+        if current_stage != previous_stage {
+            terminal.clear()?;
+            previous_stage = current_stage;
+        }
+        terminal.draw(|frame| render_fast_plan_session(frame, &app))?;
+
+        if event::poll(Duration::from_millis(if app.pending.is_some() {
+            120
+        } else {
+            250
+        }))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if key.code == KeyCode::Esc {
+                        return Ok(InteractivePlanExit::Cancelled);
+                    }
+
+                    if app.pending.is_some() {
+                        continue;
+                    }
+
+                    let frame_size = terminal.size()?;
+                    let action = match &mut app.stage {
+                        FastPlanStage::Request(request_app) => handle_fast_request_step_key(
+                            request_app,
+                            key,
+                            request_input_viewport(frame_size.into()).width,
+                            app.options.question_limit,
+                        ),
+                        FastPlanStage::Questions(questions_app) => handle_fast_questions_step_key(
+                            questions_app,
+                            key,
+                            questions_answer_input_viewport(frame_size.into()).width,
+                        ),
+                        FastPlanStage::Addendum(addendum_app) => handle_fast_addendum_step_key(
+                            addendum_app,
+                            key,
+                            request_input_viewport(frame_size.into()).width,
+                        ),
+                        FastPlanStage::Review(review_app) => {
+                            handle_fast_review_step_key(review_app, key)
+                        }
+                        FastPlanStage::Loading(_) => FastSessionAction::None,
+                    };
+
+                    match action {
+                        FastSessionAction::None => {}
+                        FastSessionAction::GenerateQuestions {
+                            request,
+                            request_attachments,
+                        } => {
+                            start_fast_question_generation(
+                                &mut app,
+                                root,
+                                request,
+                                request_attachments,
+                            );
+                        }
+                        FastSessionAction::OpenAddendum {
+                            request,
+                            request_attachments,
+                            follow_ups,
+                        } => {
+                            app.stage = FastPlanStage::Addendum(build_fast_addendum_app(
+                                request,
+                                request_attachments,
+                                follow_ups,
+                            ));
+                        }
+                        FastSessionAction::GeneratePlan {
+                            request,
+                            request_attachments,
+                            follow_ups,
+                            addendum,
+                        } => {
+                            start_fast_plan_generation(
+                                &mut app,
+                                root,
+                                request,
+                                request_attachments,
+                                follow_ups,
+                                addendum,
+                            );
+                        }
+                        FastSessionAction::Confirm(plan) => {
+                            return Ok(InteractivePlanExit::Confirmed(plan));
+                        }
+                        FastSessionAction::Reject => return Ok(InteractivePlanExit::Cancelled),
+                    }
+                }
+                Event::Paste(text) => match &mut app.stage {
+                    FastPlanStage::Request(request_app) => {
+                        handle_request_step_paste(request_app, &text)
+                    }
+                    FastPlanStage::Questions(questions_app) => {
+                        handle_questions_step_paste(questions_app, &text)
+                    }
+                    FastPlanStage::Addendum(addendum_app) => {
+                        addendum_app.addendum.paste(&text);
+                        addendum_app.error = None;
+                    }
+                    FastPlanStage::Review(_) | FastPlanStage::Loading(_) => {}
+                },
+                _ => {}
+            }
+        }
+    }
+}
+
+fn fast_stage_kind(stage: &FastPlanStage) -> FastPlanStageKind {
+    match stage {
+        FastPlanStage::Request(_) => FastPlanStageKind::Request,
+        FastPlanStage::Questions(_) => FastPlanStageKind::Questions,
+        FastPlanStage::Addendum(_) => FastPlanStageKind::Addendum,
+        FastPlanStage::Review(_) => FastPlanStageKind::Review,
+        FastPlanStage::Loading(_) => FastPlanStageKind::Loading,
+    }
+}
+
+fn build_fast_addendum_app(
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+    follow_ups: Vec<FollowUpResponse>,
+) -> FastAddendumApp {
+    FastAddendumApp {
+        request,
+        request_attachments,
+        follow_ups,
+        addendum: InputFieldState::new(String::new()),
+        error: None,
+    }
+}
+
+fn build_fast_review_app(
+    request: String,
+    follow_ups: Vec<FollowUpResponse>,
+    addendum: Option<String>,
+    plan: PlannedIssueSet,
+) -> FastReviewApp {
+    FastReviewApp {
+        request,
+        follow_ups,
+        addendum: addendum.unwrap_or_default(),
+        plan,
+        selected: 0,
+        error: None,
+    }
+}
+
+fn handle_fast_request_step_key(
+    app: &mut RequestApp,
+    key: crossterm::event::KeyEvent,
+    input_width: u16,
+    question_limit: usize,
+) -> FastSessionAction {
+    match key.code {
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match app.request.paste_clipboard_with_prompt_attachments() {
+                Ok(_) => app.error = None,
+                Err(error) => app.error = Some(error.to_string()),
+            }
+            FastSessionAction::None
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let request_value = app.request.display_value();
+            let request = request_value.trim();
+            if request.is_empty() {
+                app.error = Some("Enter a planning request before continuing.".to_string());
+                FastSessionAction::None
+            } else {
+                app.error = None;
+                if question_limit == 0 {
+                    FastSessionAction::OpenAddendum {
+                        request: request.to_string(),
+                        request_attachments: app.request.prompt_attachments().to_vec(),
+                        follow_ups: Vec::new(),
+                    }
+                } else {
+                    FastSessionAction::GenerateQuestions {
+                        request: request.to_string(),
+                        request_attachments: app.request.prompt_attachments().to_vec(),
+                    }
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if app.request.insert_newline() {
+                    app.error = None;
+                }
+                return FastSessionAction::None;
+            }
+            let request_value = app.request.display_value();
+            let request = request_value.trim();
+            if request.is_empty() {
+                app.error = Some("Enter a planning request before continuing.".to_string());
+                FastSessionAction::None
+            } else {
+                app.error = None;
+                if question_limit == 0 {
+                    FastSessionAction::OpenAddendum {
+                        request: request.to_string(),
+                        request_attachments: app.request.prompt_attachments().to_vec(),
+                        follow_ups: Vec::new(),
+                    }
+                } else {
+                    FastSessionAction::GenerateQuestions {
+                        request: request.to_string(),
+                        request_attachments: app.request.prompt_attachments().to_vec(),
+                    }
+                }
+            }
+        }
+        _ => {
+            if app.request.handle_key_with_width(key, input_width) {
+                app.error = None;
+            }
+            FastSessionAction::None
+        }
+    }
+}
+
+fn handle_fast_questions_step_key(
+    app: &mut QuestionsApp,
+    key: crossterm::event::KeyEvent,
+    input_width: u16,
+) -> FastSessionAction {
+    match key.code {
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(question) = app.questions.get_mut(app.selected) {
+                match question.answer.paste_clipboard_with_prompt_attachments() {
+                    Ok(_) => {
+                        question.state = FollowUpAnswerState::Pending;
+                        app.error = None;
+                    }
+                    Err(error) => app.error = Some(error.to_string()),
+                }
+            }
+            FastSessionAction::None
+        }
+        KeyCode::BackTab => {
+            if app.selected == 0 {
+                app.selected = app.questions.len().saturating_sub(1);
+            } else {
+                app.selected -= 1;
+            }
+            app.error = None;
+            FastSessionAction::None
+        }
+        KeyCode::Tab => {
+            app.selected = (app.selected + 1) % app.questions.len();
+            app.error = None;
+            FastSessionAction::None
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let Some(selected) = app.questions.get_mut(app.selected) else {
+                return FastSessionAction::None;
+            };
+            selected.state = if selected.answer.display_value().trim().is_empty() {
+                FollowUpAnswerState::Skipped
+            } else {
+                FollowUpAnswerState::Answered
+            };
+
+            if app.questions.iter().all(question_is_completed) {
+                app.error = None;
+                FastSessionAction::OpenAddendum {
+                    request: app.request.clone(),
+                    request_attachments: app.request_attachments.clone(),
+                    follow_ups: collect_follow_up_responses(&app.questions),
+                }
+            } else {
+                if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
+                    app.selected = index;
+                }
+                app.error = None;
+                FastSessionAction::None
+            }
+        }
+        KeyCode::Enter => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(question) = app.questions.get_mut(app.selected)
+                    && question.answer.insert_newline()
+                {
+                    question.state = FollowUpAnswerState::Pending;
+                    app.error = None;
+                }
+                return FastSessionAction::None;
+            }
+
+            let Some(selected) = app.questions.get_mut(app.selected) else {
+                return FastSessionAction::None;
+            };
+            selected.state = if selected.answer.display_value().trim().is_empty() {
+                FollowUpAnswerState::Skipped
+            } else {
+                FollowUpAnswerState::Answered
+            };
+
+            if app.questions.iter().all(question_is_completed) {
+                app.error = None;
+                FastSessionAction::OpenAddendum {
+                    request: app.request.clone(),
+                    request_attachments: app.request_attachments.clone(),
+                    follow_ups: collect_follow_up_responses(&app.questions),
+                }
+            } else {
+                if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
+                    app.selected = index;
+                }
+                app.error = None;
+                FastSessionAction::None
+            }
+        }
+        _ => {
+            if let Some(question) = app.questions.get_mut(app.selected)
+                && question.answer.handle_key_with_width(key, input_width)
+            {
+                question.state = FollowUpAnswerState::Pending;
+                app.error = None;
+            }
+            FastSessionAction::None
+        }
+    }
+}
+
+fn handle_fast_addendum_step_key(
+    app: &mut FastAddendumApp,
+    key: crossterm::event::KeyEvent,
+    input_width: u16,
+) -> FastSessionAction {
+    match key.code {
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.error = None;
+            FastSessionAction::GeneratePlan {
+                request: app.request.clone(),
+                request_attachments: app.request_attachments.clone(),
+                follow_ups: app.follow_ups.clone(),
+                addendum: normalize_optional_string(app.addendum.display_value()),
+            }
+        }
+        KeyCode::Enter => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if app.addendum.insert_newline() {
+                    app.error = None;
+                }
+                return FastSessionAction::None;
+            }
+            app.error = None;
+            FastSessionAction::GeneratePlan {
+                request: app.request.clone(),
+                request_attachments: app.request_attachments.clone(),
+                follow_ups: app.follow_ups.clone(),
+                addendum: normalize_optional_string(app.addendum.display_value()),
+            }
+        }
+        _ => {
+            if app.addendum.handle_key_with_width(key, input_width) {
+                app.error = None;
+            }
+            FastSessionAction::None
+        }
+    }
+}
+
+fn handle_fast_review_step_key(
+    app: &mut FastReviewApp,
+    key: crossterm::event::KeyEvent,
+) -> FastSessionAction {
+    match key.code {
+        KeyCode::Up => {
+            app.selected = app.selected.saturating_sub(1);
+            app.error = None;
+            FastSessionAction::None
+        }
+        KeyCode::Down => {
+            if app.selected + 1 < app.plan.issues.len() {
+                app.selected += 1;
+            }
+            app.error = None;
+            FastSessionAction::None
+        }
+        KeyCode::Char('a') | KeyCode::Enter => FastSessionAction::Confirm(app.plan.clone()),
+        KeyCode::Char('r') => FastSessionAction::Reject,
+        _ => FastSessionAction::None,
+    }
+}
+
+fn render_fast_plan_session(frame: &mut Frame<'_>, app: &FastPlanSessionApp) {
+    frame.render_widget(Clear, frame.area());
+    match &app.stage {
+        FastPlanStage::Request(request_app) => render_request_form_frame(frame, request_app),
+        FastPlanStage::Questions(questions_app) => {
+            render_questions_form_frame(frame, questions_app)
+        }
+        FastPlanStage::Addendum(addendum_app) => render_fast_addendum_frame(frame, addendum_app),
+        FastPlanStage::Review(review_app) => render_fast_review_frame(frame, review_app),
+        FastPlanStage::Loading(loading_app) => render_loading_frame(frame, loading_app),
+    }
+}
+
+fn render_fast_addendum_frame(frame: &mut Frame<'_>, app: &FastAddendumApp) {
+    let layout = base_layout(frame);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(layout[0]);
+
+    let addendum_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Anything Else To Add? [editing]")
+        .border_style(Style::default().add_modifier(Modifier::BOLD));
+    let addendum_inner = addendum_block.inner(body[0]);
+    let rendered = app.addendum.render_with_width(
+        "Optional final guidance before the fast ticket draft...",
+        true,
+        addendum_inner.width,
+    );
+    let addendum = Paragraph::new(rendered.text.clone())
+        .block(addendum_block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(addendum, body[0]);
+    rendered.set_cursor(frame, addendum_inner);
+
+    let answered_follow_ups = app
+        .follow_ups
+        .iter()
+        .filter(|follow_up| !follow_up.skipped)
+        .count();
+    let skipped_follow_ups = app
+        .follow_ups
+        .iter()
+        .filter(|follow_up| follow_up.skipped)
+        .count();
+    let summary = Paragraph::new(Text::from(vec![
+        Line::from("Original request"),
+        Line::from(""),
+        Line::from(app.request.clone()),
+        Line::from(""),
+        Line::from(format!(
+            "Follow-ups: {} answered, {} skipped",
+            answered_follow_ups, skipped_follow_ups
+        )),
+        Line::from(""),
+        Line::from("Press Enter to draft the fast plan."),
+        Line::from("Leave this blank if there is nothing else to add."),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("Summary"))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(summary, body[1]);
+
+    render_footer(
+        frame,
+        layout[1],
+        app.error.as_deref(),
+        "Type any final context. Enter drafts the fast plan. Shift+Enter inserts a newline. Esc cancels.",
+    );
+}
+
+fn render_fast_review_frame(frame: &mut Frame<'_>, app: &FastReviewApp) {
+    let layout = base_layout(frame);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .split(layout[0]);
+    let top_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(rows[0]);
+    let bottom_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(rows[1]);
+
+    let mut issue_state = ListState::default();
+    issue_state.select(Some(
+        app.selected.min(app.plan.issues.len().saturating_sub(1)),
+    ));
+    let issue_items = app
+        .plan
+        .issues
+        .iter()
+        .map(|issue| ListItem::new(issue.title.clone()))
+        .collect::<Vec<_>>();
+    let issue_list = List::new(issue_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Fast Draft ({}) [active]", app.plan.issues.len()))
+                .border_style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(issue_list, top_row[0], &mut issue_state);
+
+    let selected = &app.plan.issues[app.selected];
+    let mut detail_lines = vec![
+        Line::from(format!("Title: {}", selected.title)),
+        Line::from(format!(
+            "Priority: {}",
+            selected
+                .priority
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unset".to_string())
+        )),
+        Line::from(""),
+        Line::from(selected.description.clone()),
+    ];
+    if !selected.acceptance_criteria.is_empty() {
+        detail_lines.push(Line::from(""));
+        detail_lines.push(Line::from("Acceptance Criteria"));
+        detail_lines.push(Line::from(""));
+        detail_lines.extend(
+            selected
+                .acceptance_criteria
+                .iter()
+                .map(|criterion| Line::from(format!("- {criterion}"))),
+        );
+    }
+    let detail = Paragraph::new(Text::from(detail_lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Selected Ticket"),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(detail, top_row[1]);
+
+    let answered_follow_ups = app
+        .follow_ups
+        .iter()
+        .filter(|follow_up| !follow_up.skipped)
+        .count();
+    let skipped_follow_ups = app
+        .follow_ups
+        .iter()
+        .filter(|follow_up| follow_up.skipped)
+        .count();
+    let mut overview_lines = vec![
+        Line::from("Original request"),
+        Line::from(""),
+        Line::from(app.request.clone()),
+        Line::from(""),
+        Line::from(format!(
+            "Follow-ups: {} answered, {} skipped",
+            answered_follow_ups, skipped_follow_ups
+        )),
+        Line::from(format!(
+            "Addendum: {}",
+            if app.addendum.trim().is_empty() {
+                "none".to_string()
+            } else {
+                "provided".to_string()
+            }
+        )),
+        Line::from(""),
+        Line::from("Plan Summary"),
+        Line::from(""),
+        Line::from(app.plan.summary.clone()),
+    ];
+    if !app.addendum.trim().is_empty() {
+        overview_lines.push(Line::from(""));
+        overview_lines.push(Line::from("Final addendum"));
+        overview_lines.push(Line::from(""));
+        overview_lines.push(Line::from(app.addendum.clone()));
+    }
+    let overview = Paragraph::new(Text::from(overview_lines))
+        .block(Block::default().borders(Borders::ALL).title("Overview"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(overview, bottom_row[0]);
+
+    let review = Paragraph::new(Text::from(vec![
+        Line::from("Fast review is approve-or-reject only."),
+        Line::from(""),
+        Line::from("Press Enter or A to approve and create this draft batch."),
+        Line::from("Press R to reject the draft and cancel without creating issues."),
+        Line::from(""),
+        Line::from(
+            "No merge groups, skip states, or regeneration actions are available in fast mode.",
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Review Action"),
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(review, bottom_row[1]);
+
+    render_footer(
+        frame,
+        layout[1],
+        app.error.as_deref(),
+        "Up/Down moves through tickets. Enter or A approves. R rejects. Esc cancels.",
+    );
+}
+
+fn advance_fast_loading_spinner(app: &mut FastPlanSessionApp) {
+    if let FastPlanStage::Loading(loading) = &mut app.stage {
+        loading.spinner_index = (loading.spinner_index + 1) % SPINNER_FRAMES.len();
+    }
+}
+
+fn process_pending_fast_plan_job(
+    app: &mut FastPlanSessionApp,
+) -> Result<Option<InteractivePlanExit>> {
+    loop {
+        let result = match app.pending.as_ref() {
+            Some(pending) => pending.receiver.try_recv(),
+            None => return Ok(None),
+        };
+
+        match result {
+            Ok(FastPlanEvent::Progress(chunk)) => {
+                if let FastPlanStage::Loading(loading) = &mut app.stage {
+                    append_loading_preview(loading, &chunk);
+                }
+            }
+            Ok(FastPlanEvent::Complete(result)) => {
+                let pending = app
+                    .pending
+                    .take()
+                    .ok_or_else(|| anyhow!("pending fast plan job disappeared unexpectedly"))?;
+                if result.continuation.is_some() {
+                    app.continuation = result.continuation;
+                }
+                match result.outcome {
+                    Ok(FastPlanWorkerOutcome::Questions {
+                        request,
+                        request_attachments,
+                        questions,
+                    }) => {
+                        if questions.is_empty() {
+                            app.stage = FastPlanStage::Addendum(build_fast_addendum_app(
+                                request,
+                                request_attachments,
+                                Vec::new(),
+                            ));
+                        } else {
+                            app.stage = FastPlanStage::Questions(build_questions_app(
+                                request,
+                                request_attachments,
+                                questions,
+                            ));
+                        }
+                    }
+                    Ok(FastPlanWorkerOutcome::Review(review)) => {
+                        app.stage = FastPlanStage::Review(review);
+                    }
+                    Err(error) => {
+                        let mut previous_stage = pending.previous_stage;
+                        set_fast_stage_error(&mut previous_stage, error.to_string());
+                        app.stage = previous_stage;
+                    }
+                }
+                return Ok(None);
+            }
+            Err(TryRecvError::Empty) => return Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                let pending = app
+                    .pending
+                    .take()
+                    .ok_or_else(|| anyhow!("pending fast plan job disappeared unexpectedly"))?;
+                let mut previous_stage = pending.previous_stage;
+                set_fast_stage_error(
+                    &mut previous_stage,
+                    "fast planning worker exited before returning a result".to_string(),
+                );
+                app.stage = previous_stage;
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn start_fast_question_generation(
+    app: &mut FastPlanSessionApp,
+    root: &Path,
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+) {
+    let previous_stage = app.stage.clone();
+    app.stage = FastPlanStage::Loading(LoadingApp {
+        message: "Generating fast follow-up questions".to_string(),
+        detail: "Reviewing the request for one concise round of Q&A.".to_string(),
+        spinner_index: 0,
+        preview: String::new(),
+    });
+    app.pending = Some(PendingFastPlanJob {
+        receiver: spawn_fast_questions_job(
+            root.to_path_buf(),
+            request,
+            request_attachments,
+            app.options.question_limit,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
+        ),
+        previous_stage,
+    });
+}
+
+fn start_fast_plan_generation(
+    app: &mut FastPlanSessionApp,
+    root: &Path,
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+    follow_ups: Vec<FollowUpResponse>,
+    addendum: Option<String>,
+) {
+    let previous_stage = app.stage.clone();
+    app.stage = FastPlanStage::Loading(LoadingApp {
+        message: "Generating fast draft".to_string(),
+        detail: "Drafting the final fast-mode ticket plan and streaming the output as it arrives."
+            .to_string(),
+        spinner_index: 0,
+        preview: String::new(),
+    });
+    app.pending = Some(PendingFastPlanJob {
+        receiver: spawn_fast_plan_job(
+            FastPlanJobInput {
+                root: root.to_path_buf(),
+                request,
+                request_attachments,
+                follow_ups,
+                addendum,
+                single_ticket: app.options.single_ticket,
+            },
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
+        ),
+        previous_stage,
+    });
+}
+
+fn spawn_fast_questions_job(
+    root: PathBuf,
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+    question_limit: usize,
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<FastPlanEvent> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation;
+        let outcome = generate_follow_up_questions(
+            &root,
+            &request,
+            request_attachments.clone(),
+            question_limit,
+            &agent_overrides,
+            &mut continuation,
+        )
+        .map(|questions| FastPlanWorkerOutcome::Questions {
+            request,
+            request_attachments: request_attachments.clone(),
+            questions,
+        });
+        let _ = sender.send(FastPlanEvent::Complete(FastPlanWorkerReport {
+            continuation,
+            outcome,
+        }));
+    });
+    receiver
+}
+
+fn spawn_fast_plan_job(
+    job: FastPlanJobInput,
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<FastPlanEvent> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let attachments = collect_prompt_attachments(&job.request_attachments, &job.follow_ups);
+        let mut continuation = continuation;
+        let progress_sender = sender.clone();
+        let outcome = generate_fast_issue_plan_streaming(
+            FastPlanPrompt {
+                root: &job.root,
+                request: &job.request,
+                follow_ups: &job.follow_ups,
+                addendum: job.addendum.as_deref(),
+                attachments,
+                single_ticket: job.single_ticket,
+            },
+            &agent_overrides,
+            &mut continuation,
+            move |chunk| {
+                let _ = progress_sender.send(FastPlanEvent::Progress(chunk.to_string()));
+            },
+        )
+        .map(|plan| {
+            FastPlanWorkerOutcome::Review(build_fast_review_app(
+                job.request,
+                job.follow_ups,
+                job.addendum,
+                plan,
+            ))
+        });
+        let _ = sender.send(FastPlanEvent::Complete(FastPlanWorkerReport {
+            continuation,
+            outcome,
+        }));
+    });
+    receiver
+}
+
+fn set_fast_stage_error(stage: &mut FastPlanStage, error: String) {
+    match stage {
+        FastPlanStage::Request(request_app) => request_app.error = Some(error),
+        FastPlanStage::Questions(questions_app) => questions_app.error = Some(error),
+        FastPlanStage::Addendum(addendum_app) => addendum_app.error = Some(error),
+        FastPlanStage::Review(review_app) => review_app.error = Some(error),
+        FastPlanStage::Loading(_) => {}
+    }
+}
+
+fn append_loading_preview(loading: &mut LoadingApp, chunk: &str) {
+    if chunk.is_empty() {
+        return;
+    }
+    loading.preview.push_str(chunk);
+    if loading.preview.chars().count() > FAST_PLAN_STREAM_PREVIEW_CHAR_LIMIT {
+        loading.preview = loading
+            .preview
+            .chars()
+            .rev()
+            .take(FAST_PLAN_STREAM_PREVIEW_CHAR_LIMIT)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+    }
+}
+
+fn normalize_optional_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn build_questions_app(
@@ -2261,13 +3474,21 @@ fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
         &LoadingPanelData {
             title: "Agent Working [loading]".to_string(),
             message: app.message.clone(),
-            detail: app.detail.clone(),
+            detail: render_loading_detail(app),
             spinner_index: app.spinner_index,
             status_line:
                 "State: loading. The dashboard advances automatically when the agent responds."
                     .to_string(),
         },
     );
+}
+
+fn render_loading_detail(app: &LoadingApp) -> String {
+    if app.preview.trim().is_empty() {
+        app.detail.clone()
+    } else {
+        format!("{}\n\nLive output:\n{}", app.detail, app.preview.trim())
+    }
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, error: Option<&str>, help: &str) {
@@ -2440,6 +3661,7 @@ fn start_question_generation(
         message: "Generating follow-up questions".to_string(),
         detail: "Reviewing the request and deciding whether more context is needed.".to_string(),
         spinner_index: 0,
+        preview: String::new(),
     });
     app.pending = Some(PendingPlanJob {
         receiver: spawn_questions_job(
@@ -2472,6 +3694,7 @@ fn start_plan_generation(
         detail: "Drafting Linear-ready backlog tickets from the request and collected context."
             .to_string(),
         spinner_index: 0,
+        preview: String::new(),
     });
     app.pending = Some(PendingPlanJob {
         receiver: spawn_plan_job(
@@ -2499,6 +3722,7 @@ fn start_plan_revision(app: &mut PlanSessionApp, root: &Path, review: ReviewApp)
         message: format!("Rebuilding preview into batch {next_revision}"),
         detail: format!("Combining merge groups {group_labels} into a new ticket draft."),
         spinner_index: 0,
+        preview: String::new(),
     });
     app.pending = Some(PendingPlanJob {
         receiver: spawn_plan_revision_job(
@@ -3660,6 +4884,7 @@ mod tests {
             message: "Generating suggested tickets".to_string(),
             detail: "Drafting Linear-ready backlog tickets from the request.".to_string(),
             spinner_index: 1,
+            preview: String::new(),
         });
 
         assert!(snapshot.contains("[==  ] Generating suggested tickets"));
@@ -3699,6 +4924,7 @@ mod tests {
                             detail: "Drafting Linear-ready backlog tickets from the request."
                                 .to_string(),
                             spinner_index: 0,
+                            preview: String::new(),
                         }),
                         agent_overrides: PlanningAgentOverrides::default(),
                         continuation: None,
@@ -3927,6 +5153,7 @@ mod tests {
                 message: "Generating follow-up questions".to_string(),
                 detail: "Reviewing the request.".to_string(),
                 spinner_index: 0,
+                preview: String::new(),
             }),
             agent_overrides: PlanningAgentOverrides::default(),
             continuation: None,

@@ -21,6 +21,9 @@ pub const DEFAULT_LISTEN_POLL_INTERVAL_SECONDS: u64 = 7;
 pub const DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
 pub const MIN_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 1;
 pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+pub const DEFAULT_FAST_PLAN_QUESTION_LIMIT: usize = 3;
+pub const MIN_FAST_PLAN_QUESTION_LIMIT: usize = 0;
+pub const MAX_FAST_PLAN_QUESTION_LIMIT: usize = 10;
 pub const DEFAULT_SYNC_DISCUSSION_FILE_CHAR_LIMIT: usize = 20_000;
 pub const DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT: usize = 6_000;
 pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
@@ -99,6 +102,9 @@ pub struct InstallListenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InstallPlanSettings {
     pub interactive_follow_up_questions: Option<usize>,
+    pub default_mode: Option<PlanDefaultMode>,
+    pub fast_single_ticket: Option<bool>,
+    pub fast_questions: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -176,6 +182,17 @@ pub struct PlanningListenSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlanningPlanSettings {
     pub interactive_follow_up_questions: Option<usize>,
+    pub default_mode: Option<PlanDefaultMode>,
+    pub fast_single_ticket: Option<bool>,
+    pub fast_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDefaultMode {
+    #[default]
+    Normal,
+    Fast,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -731,6 +748,23 @@ impl PlanningMeta {
             .unwrap_or(DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT)
     }
 
+    /// Returns the repo-scoped default plan mode, falling back to the built-in default.
+    pub fn plan_default_mode(&self) -> PlanDefaultMode {
+        self.plan.default_mode.unwrap_or_default()
+    }
+
+    /// Returns whether fast planning should prefer a single ticket by default.
+    pub fn fast_single_ticket(&self) -> bool {
+        self.plan.fast_single_ticket.unwrap_or(true)
+    }
+
+    /// Returns the repo-scoped fast follow-up question limit, falling back to the built-in default.
+    pub fn fast_question_limit(&self) -> usize {
+        self.plan
+            .fast_questions
+            .unwrap_or(DEFAULT_FAST_PLAN_QUESTION_LIMIT)
+    }
+
     /// Resolves the effective Linear project selector using repo defaults before install defaults.
     pub fn effective_project_id(&self, app_config: &AppConfig) -> Option<String> {
         normalize_optional_ref(self.linear.project_id.as_deref())
@@ -781,6 +815,30 @@ impl PlanningMeta {
             .interactive_follow_up_questions
             .or(app_config.defaults.plan.interactive_follow_up_questions)
             .unwrap_or_else(|| self.interactive_follow_up_question_limit())
+    }
+
+    /// Resolves the effective default plan mode using repo defaults before install defaults.
+    pub fn effective_plan_default_mode(&self, app_config: &AppConfig) -> PlanDefaultMode {
+        self.plan
+            .default_mode
+            .or(app_config.defaults.plan.default_mode)
+            .unwrap_or_else(|| self.plan_default_mode())
+    }
+
+    /// Resolves the effective fast single-ticket preference using repo defaults before install defaults.
+    pub fn effective_fast_single_ticket(&self, app_config: &AppConfig) -> bool {
+        self.plan
+            .fast_single_ticket
+            .or(app_config.defaults.plan.fast_single_ticket)
+            .unwrap_or_else(|| self.fast_single_ticket())
+    }
+
+    /// Resolves the effective fast follow-up limit using repo defaults before install defaults.
+    pub fn effective_fast_question_limit(&self, app_config: &AppConfig) -> usize {
+        self.plan
+            .fast_questions
+            .or(app_config.defaults.plan.fast_questions)
+            .unwrap_or_else(|| self.fast_question_limit())
     }
 
     /// Resolves the effective planning label using repo defaults before install defaults.
@@ -850,6 +908,9 @@ impl PlanningMeta {
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
         }
+        if let Some(limit) = self.plan.fast_questions {
+            validate_fast_plan_question_limit(limit)?;
+        }
         self.sync.validate()?;
         Ok(())
     }
@@ -900,6 +961,9 @@ impl InstallDefaults {
         }
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
+        }
+        if let Some(limit) = self.plan.fast_questions {
+            validate_fast_plan_question_limit(limit)?;
         }
         Ok(())
     }
@@ -1642,6 +1706,20 @@ fn default_linear_api_url() -> String {
     DEFAULT_LINEAR_API_URL.to_string()
 }
 
+/// Validates the configured fast-plan follow-up question limit.
+///
+/// Returns an error when the value is outside the supported range of 0 through 10.
+pub fn validate_fast_plan_question_limit(limit: usize) -> Result<()> {
+    if !(MIN_FAST_PLAN_QUESTION_LIMIT..=MAX_FAST_PLAN_QUESTION_LIMIT).contains(&limit) {
+        return Err(anyhow!(
+            "fast plan follow-up question limit must be between {} and {}",
+            MIN_FAST_PLAN_QUESTION_LIMIT,
+            MAX_FAST_PLAN_QUESTION_LIMIT
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_required_labels<I, S>(values: I) -> Option<Vec<String>>
 where
     I: IntoIterator<Item = S>,
@@ -2111,6 +2189,7 @@ mod tests {
         let mut meta = PlanningMeta {
             plan: PlanningPlanSettings {
                 interactive_follow_up_questions: Some(0),
+                ..PlanningPlanSettings::default()
             },
             ..PlanningMeta::default()
         };
@@ -2132,6 +2211,7 @@ mod tests {
         let meta = PlanningMeta {
             plan: PlanningPlanSettings {
                 interactive_follow_up_questions: Some(4),
+                ..PlanningPlanSettings::default()
             },
             ..PlanningMeta::default()
         };
@@ -2181,6 +2261,7 @@ mod tests {
                 },
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),
+                    ..InstallPlanSettings::default()
                 },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),
@@ -2330,6 +2411,7 @@ mod tests {
                 },
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),
+                    ..InstallPlanSettings::default()
                 },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),
@@ -2352,6 +2434,7 @@ mod tests {
             },
             plan: PlanningPlanSettings {
                 interactive_follow_up_questions: Some(9),
+                ..PlanningPlanSettings::default()
             },
             issue_labels: PlanningIssueLabels {
                 plan: Some("repo-plan".to_string()),

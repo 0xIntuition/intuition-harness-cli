@@ -636,6 +636,9 @@ Turn a planning request into one or more Linear backlog issues:
 ```bash
 meta backlog plan
 meta backlog plan --no-interactive --request "Plan a dashboard for feature intake" --answer "Use the existing TUI patterns" --answer "Split the work into multiple tickets"
+meta backlog plan --fast
+meta backlog plan --fast --multi --questions 1
+meta backlog plan --fast --no-interactive --request "Plan the onboarding rewrite"
 meta backlog plan ENG-10144
 meta backlog plan ENG-10144 --velocity
 ```
@@ -644,17 +647,29 @@ Legacy alias: `meta plan`
 
 In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
 
+Fast mode keeps the same downstream issue creation path but switches the interaction model to a single pass. When `--fast` is active, the command captures the request, optionally asks at most one round of follow-up questions, prompts once for `Anything Else To Add?`, streams the draft preview while the agent is still generating it, and then shows an approve-or-reject review screen. Fast review intentionally removes merge groups, skip states, and regeneration controls.
+
 Within one `meta backlog plan` run, the shared agent runtime now reuses a built-in Codex or Claude session across follow-up generation, ticket generation, and interactive revisions when the provider returns a resume handle. That continuation is run-scoped only: the command does not persist planning sessions under `.metastack/` or share them with listen workers.
 
 Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow. Focused editors also support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, and mouse-wheel scrolling so long wrapped prompts and follow-up answers stay editable after they overflow the visible pane.
 
 For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values. In zero-prompt mode (`--no-interactive` or no TTY), backlog planning resolves ticket defaults in this order: explicit flags, remembered project/team for the canonical repo root, repo `backlog.velocity_defaults`, global `backlog.velocity_defaults`, repo defaults from `.metastack/meta.json`, global defaults from `config.toml`, then built-in behavior. Generated plan priority still wins over config priority unless you pass `--priority`.
 
+Fast planning adds three mode-specific controls:
+
+- `--fast` enables the single-pass planning flow. Repo or install config can also enable it by default with `plan.default_mode = "fast"`.
+- `--multi` only applies in fast mode and overrides the default single-ticket shape so the agent may emit multiple issues.
+- `--questions <N>` only applies in fast mode and caps the one-round follow-up phase. `0` skips fast Q&A entirely.
+
+Fast mode defaults to a single ticket unless you pass `--multi` or disable that preference through repo/install config with `plan.fast_single_ticket = false`. The follow-up cap resolves in the same precedence order as other plan defaults: explicit CLI flag, repo config, install config, then built-in default. Fast non-interactive runs do not accept `--answer`; they go straight from `--request` to generation so the flow stays single-pass.
+
 `meta backlog plan` also accepts `--state`, `--priority`, repeated `--label`, and `--assignee`. Built-in `plan` labeling remains mandatory and additive, so config labels and explicit labels are appended rather than replacing it.
 
 `meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
 
 Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
+
+`--fast`, `--multi`, and `--questions` do not apply to reshape mode. The command rejects those combinations instead of silently changing reshape behavior.
 
 The planning prompt is repo-scoped by default: it derives the active project identity from the resolved repository root, plans for the full repository directory, and asks the agent to create backlog issues only for that repository unless the user explicitly narrows the request to a subproject.
 
