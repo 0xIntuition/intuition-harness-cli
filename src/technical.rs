@@ -1152,9 +1152,7 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         true,
         query_inner.width,
     );
-    let query = Paragraph::new(rendered_query.text.clone())
-        .block(query_block)
-        .wrap(Wrap { trim: false });
+    let query = rendered_query.paragraph(query_block);
     frame.render_widget(query, body[0]);
     rendered_query.set_cursor(frame, query_inner);
 

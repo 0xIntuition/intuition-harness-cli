@@ -6,6 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 use crate::tui::prompt_images::{
@@ -291,6 +292,13 @@ impl InputFieldState {
 }
 
 impl InputFieldRender {
+    pub(crate) fn paragraph(&self, block: Block<'static>) -> Paragraph<'static> {
+        Paragraph::new(self.text.clone())
+            .block(block)
+            .scroll((self.scroll_offset, 0))
+            .wrap(Wrap { trim: false })
+    }
+
     pub(crate) fn set_cursor(&self, frame: &mut Frame<'_>, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;

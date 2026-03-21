@@ -2316,9 +2316,7 @@ fn render_input_panel(
         .border_style(Style::default().add_modifier(Modifier::BOLD));
     let inner = block.inner(area);
     let rendered = field.render_with_width(placeholder, true, inner.width);
-    let paragraph = Paragraph::new(rendered.text.clone())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = rendered.paragraph(block);
     frame.render_widget(paragraph, area);
     rendered.set_cursor(frame, inner);
 }

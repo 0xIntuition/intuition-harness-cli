@@ -12,7 +12,7 @@ use crossterm::terminal::{
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use super::browser::{
@@ -246,9 +246,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
             "Issue Search"
         });
     let query_inner = query_block.inner(outer[1]);
-    let query = Paragraph::new(rendered_query.text.clone())
-        .block(query_block)
-        .wrap(Wrap { trim: false });
+    let query = rendered_query.paragraph(query_block);
     frame.render_widget(query, outer[1]);
     rendered_query.set_cursor(frame, query_inner);
 

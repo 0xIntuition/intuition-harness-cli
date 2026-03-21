@@ -1617,10 +1617,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         request_inner.width,
         request_inner.height,
     );
-    let request = Paragraph::new(rendered.text.clone())
-        .block(request_block)
-        .scroll((rendered.scroll_offset, 0))
-        .wrap(Wrap { trim: false });
+    let request = rendered.paragraph(request_block);
     frame.render_widget(request, body[0]);
     rendered.set_cursor(frame, request_inner);
 
@@ -1698,10 +1695,7 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         answer_inner.width,
         answer_inner.height,
     );
-    let answer = Paragraph::new(rendered.text.clone())
-        .block(answer_block)
-        .scroll((rendered.scroll_offset, 0))
-        .wrap(Wrap { trim: false });
+    let answer = rendered.paragraph(answer_block);
     frame.render_widget(answer, main[1]);
     rendered.set_cursor(frame, answer_inner);
 

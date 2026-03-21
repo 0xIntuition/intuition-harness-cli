@@ -966,9 +966,7 @@ fn render_input_panel(
         .padding(Padding::new(1, 1, 1, 0));
     let inner = block.inner(area);
     let rendered: InputFieldRender = field.render_with_width(placeholder, true, inner.width);
-    let paragraph = Paragraph::new(rendered.text.clone())
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = rendered.paragraph(block);
     frame.render_widget(paragraph, area);
     rendered.set_cursor(frame, inner);
 }

@@ -249,10 +249,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui:
                 inner.width,
                 inner.height,
             );
-            let paragraph = Paragraph::new(rendered.text.clone())
-                .block(block)
-                .scroll((rendered.scroll_offset, 0))
-                .wrap(Wrap { trim: false });
+            let paragraph = rendered.paragraph(block);
             frame.render_widget(paragraph, area);
             rendered.set_cursor(frame, inner);
         }
@@ -268,10 +265,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui:
                 inner.width,
                 inner.height,
             );
-            let paragraph = Paragraph::new(rendered.text.clone())
-                .block(block)
-                .scroll((rendered.scroll_offset, 0))
-                .wrap(Wrap { trim: false });
+            let paragraph = rendered.paragraph(block);
             frame.render_widget(paragraph, area);
             rendered.set_cursor(frame, inner);
         }

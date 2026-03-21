@@ -16,7 +16,7 @@ use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
 use crate::tui::fields::{InputFieldState, SelectFieldState};
@@ -370,10 +370,7 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
         prompt_inner.width,
         prompt_inner.height,
     );
-    let prompt = Paragraph::new(rendered_prompt.text.clone())
-        .block(prompt_block)
-        .scroll((rendered_prompt.scroll_offset, 0))
-        .wrap(Wrap { trim: false });
+    let prompt = rendered_prompt.paragraph(prompt_block);
     frame.render_widget(prompt, prompt_sections[1]);
     rendered_prompt.set_cursor(frame, prompt_inner);
 }
