@@ -11,7 +11,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -19,6 +19,7 @@ use ratatui::{Frame, Terminal};
 
 use super::WorkflowState;
 use crate::tui::fields::InputFieldState;
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 
 #[derive(Debug, Clone)]
 pub struct IssueEditFormContext {
@@ -122,6 +123,7 @@ struct IssueEditApp {
     step_focus: StatusPriorityFocus,
     title: InputFieldState,
     description: InputFieldState,
+    summary_scroll: ScrollState,
     selected_state: usize,
     selected_priority: usize,
     error: Option<String>,
@@ -152,15 +154,20 @@ pub fn run_issue_edit_form(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let viewport = step_input_viewport(terminal.size()?.into());
+                    let size = terminal.size()?;
+                    let viewport = step_input_viewport(size.into());
                     if let Some(exit) = app.handle_key_in_viewport(key, viewport) {
                         return Ok(exit);
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
                 Event::Mouse(mouse) => {
-                    let viewport = step_input_viewport(terminal.size()?.into());
-                    let _ = app.handle_mouse_in_viewport(mouse, viewport);
+                    let size = terminal.size()?;
+                    let _ = app.handle_mouse_in_viewport(
+                        mouse,
+                        step_input_viewport(size.into()),
+                        summary_viewport(size.into()),
+                    );
                 }
                 _ => {}
             }
@@ -329,36 +336,11 @@ fn render_priorities(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
 }
 
 fn render_summary(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layout::Rect) {
-    let description = if app.description.value().trim().is_empty() {
-        "No description".to_string()
-    } else {
-        app.description
-            .value()
-            .lines()
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join(" / ")
-    };
-    let summary = vec![
-        Line::from(format!("Issue: {}", app.context.issue_identifier.as_str())),
-        Line::from(format!(
-            "Title: {}",
-            if app.title.value().trim().is_empty() {
-                "Untitled issue"
-            } else {
-                app.title.value().trim()
-            }
-        )),
-        Line::from(format!("Description: {description}")),
-        Line::from(format!(
-            "Status: {}",
-            app.selected_state_name().unwrap_or("Unassigned")
-        )),
-        Line::from(format!("Priority: {}", app.selected_priority_label())),
-        Line::from(format!("Project: {}", app.context.project_label())),
-    ];
-    let paragraph = Paragraph::new(Text::from(summary))
-        .block(Block::default().borders(Borders::ALL).title("Review"))
+    let paragraph = scrollable_paragraph(
+        app.summary_text(),
+        "Review [scroll]",
+        &app.summary_scroll,
+    )
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
@@ -369,7 +351,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layou
             "Type the title. Tab/Shift+Tab or Up/Down switches fields. Enter moves to Description."
         }
         EditStep::Description => {
-            "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the pane is focused. Enter advances. Tab/Shift+Tab switches fields."
+            "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the description or review pane is hovered. Enter advances. Tab/Shift+Tab switches fields."
         }
         EditStep::StatusPriority => {
             "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Esc cancels."
@@ -404,6 +386,7 @@ impl IssueEditApp {
             step_focus: StatusPriorityFocus::State,
             title: InputFieldState::new(prefill.title),
             description: InputFieldState::multiline(prefill.description.unwrap_or_default()),
+            summary_scroll: ScrollState::default(),
             selected_state,
             selected_priority,
             error: None,
@@ -476,13 +459,27 @@ impl IssueEditApp {
         &mut self,
         mouse: MouseEvent,
         viewport: ratatui::layout::Rect,
+        summary_viewport: ratatui::layout::Rect,
     ) -> bool {
-        if self.step != EditStep::Description
-            || !matches!(
-                mouse.kind,
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        if !matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            return false;
+        }
+
+        if self
+            .summary_scroll
+            .apply_mouse_in_viewport(
+                mouse,
+                summary_viewport,
+                self.summary_content_rows(summary_viewport.width),
             )
         {
+            return true;
+        }
+
+        if self.step != EditStep::Description {
             return false;
         }
 
@@ -637,6 +634,40 @@ impl IssueEditApp {
     fn selected_priority_label(&self) -> &'static str {
         PRIORITY_OPTIONS[self.selected_priority].label
     }
+
+    fn summary_text(&self) -> Text<'static> {
+        let description = if self.description.value().trim().is_empty() {
+            "No description".to_string()
+        } else {
+            self.description.value().trim_end().to_string()
+        };
+        Text::from(vec![
+            Line::from(format!("Issue: {}", self.context.issue_identifier.as_str())),
+            Line::from(format!(
+                "Title: {}",
+                if self.title.value().trim().is_empty() {
+                    "Untitled issue"
+                } else {
+                    self.title.value().trim()
+                }
+            )),
+            Line::from(""),
+            Line::from("Description:"),
+            Line::from(""),
+            Line::from(description),
+            Line::from(""),
+            Line::from(format!(
+                "Status: {}",
+                self.selected_state_name().unwrap_or("Unassigned")
+            )),
+            Line::from(format!("Priority: {}", self.selected_priority_label())),
+            Line::from(format!("Project: {}", self.context.project_label())),
+        ])
+    }
+
+    fn summary_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.summary_text()), width.max(1))
+    }
 }
 
 fn step_input_viewport(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
@@ -658,6 +689,32 @@ fn step_input_viewport(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
         .split(layout[1]);
     let panel = body[1];
     ratatui::layout::Rect::new(
+        panel.x.saturating_add(1),
+        panel.y.saturating_add(1),
+        panel.width.saturating_sub(2).max(1),
+        panel.height.saturating_sub(2).max(1),
+    )
+}
+
+fn summary_viewport(area: Rect) -> Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(24),
+            Constraint::Min(0),
+            Constraint::Length(34),
+        ])
+        .split(layout[1]);
+    let panel = body[2];
+    Rect::new(
         panel.x.saturating_add(1),
         panel.y.saturating_add(1),
         panel.width.saturating_sub(2).max(1),
@@ -1058,6 +1115,35 @@ mod tests {
     }
 
     #[test]
+    fn issue_edit_review_mouse_wheel_scrolls_long_description_preview() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: Some(
+                    (1..=40)
+                        .map(|index| format!("review line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        let viewport = super::summary_viewport(Rect::new(0, 0, 120, 16));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: viewport.x.saturating_add(1),
+            row: viewport.y.saturating_add(1),
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(app.handle_mouse_in_viewport(mouse, Rect::new(0, 0, 40, 8), viewport));
+        assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
     fn issue_edit_description_mouse_wheel_scrolls_only_when_description_is_active() {
         let mut app = IssueEditApp::new(
             context(),
@@ -1082,9 +1168,9 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
 
-        assert!(!app.handle_mouse_in_viewport(mouse, viewport));
+        assert!(!app.handle_mouse_in_viewport(mouse, viewport, Rect::new(40, 40, 10, 4)));
         app.step = EditStep::Description;
-        assert!(app.handle_mouse_in_viewport(mouse, viewport));
+        assert!(app.handle_mouse_in_viewport(mouse, viewport, Rect::new(40, 40, 10, 4)));
         assert!(
             app.description
                 .render_with_viewport("", true, viewport.width, viewport.height)

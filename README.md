@@ -815,7 +815,7 @@ Notes:
 - `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
 - the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
-- In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused
+- In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused; the summary/review sidebar also scrolls with the mouse wheel when long descriptions overflow
 - `meta linear issues refine` is non-interactive, uses the configured local agent, and defaults to critique-only unless you pass `--apply`
 - `meta dashboard linear` is the preferred Linear dashboard path; bare `meta dashboard` remains a compatibility alias during migration
 
