@@ -582,7 +582,7 @@ pub struct CronInitArgs {
     #[arg(long)]
     pub disabled: bool,
     /// Skip the dashboard flow and create directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Emit the cron-init result as JSON.
     #[arg(long, conflicts_with = "render_once")]
@@ -776,7 +776,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub replay_onboarding: bool,
     /// Emit the install-scoped config view as JSON instead of launching the dashboard.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the config dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -868,7 +868,7 @@ pub struct SetupArgs {
     #[arg(long)]
     pub velocity_auto_assign: Option<String>,
     /// Emit the repo-scoped setup view as JSON instead of launching the dashboard.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the setup dashboard once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1011,7 +1011,7 @@ pub struct ListenRunArgs {
     #[arg(long, conflicts_with_all = ["once", "render_once", "demo"])]
     pub check: bool,
     /// Execute a single live poll cycle and print a textual summary.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub once: bool,
     /// Emit the single poll-cycle result as JSON. Requires `--once`.
     #[arg(long, conflicts_with = "render_once")]
@@ -1079,7 +1079,7 @@ pub struct SyncArgs {
     #[command(subcommand)]
     pub command: Option<SyncCommands>,
     /// Skip interactive sync pickers and require explicit command arguments.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Emit direct sync-command results as JSON.
     #[arg(long, conflicts_with = "render_once")]
@@ -1324,7 +1324,7 @@ pub struct IssueListArgs {
     #[arg(long)]
     pub state: Option<String>,
     /// Emit raw JSON instead of a table.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub json: bool,
     /// Render the issue browser once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1361,7 +1361,7 @@ pub struct IssueCreateArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub priority: Option<u8>,
     /// Skip the ratatui workflow and create directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Render the create form once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]
@@ -1398,7 +1398,7 @@ pub struct IssueEditArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub priority: Option<u8>,
     /// Skip the ratatui workflow and update directly from CLI flags.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
     /// Render the edit form once to an in-memory buffer and print the snapshot.
     #[arg(long, hide = true)]

@@ -603,7 +603,7 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 Notes:
 
 - Mutation commands default to structured JSON when `--no-interactive` is active.
-- `--render-once` remains a terminal snapshot mode, not a JSON mode, and conflicts with `--json` where both apply.
+- `--render-once` remains a terminal snapshot mode, not a machine-output mode, and conflicts with `--json`, `--no-interactive`, or `--once` where those modes overlap.
 - Machine-readable failures use one stable top-level shape: `status`, `command`, and `error { code, message, context? }`.
 
 ### `--json` / `--no-interactive` / `--render-once` Matrix
@@ -632,7 +632,7 @@ Rules:
 - Prefer `--no-interactive` for any mutation command that would otherwise prompt for missing input.
 - Prefer `--json` for read-only or already-headless flows such as `meta context scan`, `meta linear issues refine`, and `meta agents listen --once`.
 - Use `--render-once` only when a text snapshot of the TUI is useful for humans or snapshot-style tests; it is not part of the machine JSON contract.
-- Where both flags exist, `--json` and `--render-once` are mutually exclusive.
+- Where both modes exist, `--render-once` is mutually exclusive with `--json`, `--no-interactive`, and `--once` because snapshot output is a separate text contract.
 
 ### `runtime cron`
 
