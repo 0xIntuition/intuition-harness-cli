@@ -188,7 +188,7 @@ fn render_cron_init_form(frame: &mut Frame<'_>, app: &CronInitApp) {
         .constraints([
             Constraint::Length(if narrow { 5 } else { 4 }),
             Constraint::Min(0),
-            Constraint::Length(4),
+            Constraint::Length(6),
         ])
         .split(frame.area());
     let body = Layout::default()
