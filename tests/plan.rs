@@ -228,7 +228,7 @@ printf '%s' '{"summary":"Create one fast ticket.","issues":[{"title":"Fast plan 
         }));
     });
 
-    meta()
+    let assert = meta()
         .current_dir(&repo_root)
         .env("METASTACK_CONFIG", &config_path)
         .env("TEST_OUTPUT_DIR", &stub_dir)
@@ -246,9 +246,18 @@ printf '%s' '{"summary":"Create one fast ticket.","issues":[{"title":"Fast plan 
             "Draft one fast backlog ticket for the repo",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Created 1 backlog issue(s):"))
-        .stdout(predicate::str::contains("MET-91"));
+        .success();
+
+    assert_plan_created_issues(
+        &assert,
+        &[(
+            "MET-91",
+            "Fast plan ticket",
+            "Backlog",
+            "MetaStack CLI",
+            "MET",
+        )],
+    );
 
     assert_eq!(fs::read_to_string(stub_dir.join("count.txt"))?, "1");
     let payload = fs::read_to_string(stub_dir.join("payload-1.txt"))?;

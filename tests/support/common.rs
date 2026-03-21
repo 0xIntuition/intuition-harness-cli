@@ -58,18 +58,14 @@ const TEST_ENV_REMOVALS: &[&str] = &[
     "XDG_CONFIG_HOME",
 ];
 
-fn isolated_home_dir() -> &'static PathBuf {
-    static HOME_DIR: OnceLock<PathBuf> = OnceLock::new();
-    HOME_DIR.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!(
-            "metastack-test-home-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("main")
-        ));
-        fs::create_dir_all(path.join(".config"))
-            .expect("test home directory should be creatable");
-        path
-    })
+fn isolated_home_dir() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "metastack-test-home-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("main")
+    ));
+    fs::create_dir_all(path.join(".config")).expect("test home directory should be creatable");
+    path
 }
 
 fn test_command() -> Command {
@@ -91,7 +87,7 @@ fn test_command() -> Command {
         command.env_remove(key);
     }
     let home_dir = isolated_home_dir();
-    command.env("HOME", home_dir);
+    command.env("HOME", &home_dir);
     command.env("XDG_CONFIG_HOME", home_dir.join(".config"));
     command
 }

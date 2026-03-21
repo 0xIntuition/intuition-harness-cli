@@ -286,21 +286,32 @@ fn render_sessions(
             .add_modifier(Modifier::BOLD),
     )
     .bottom_margin(1);
-    let table = Table::new(
-        rows,
-        [
+    let constraints = if inner.width >= 165 {
+        vec![
             Constraint::Length(10),
             Constraint::Length(13),
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(44),
-            Constraint::Length(9),
-            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Length(13),
             Constraint::Min(24),
-        ],
-    )
-    .header(header)
-    .column_spacing(1);
+        ]
+    } else {
+        vec![
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(16),
+            Constraint::Length(8),
+            Constraint::Length(13),
+            Constraint::Min(24),
+        ]
+    };
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .column_spacing(1);
     frame.render_widget(table, sections[1]);
 }
 

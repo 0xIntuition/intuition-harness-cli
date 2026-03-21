@@ -38,8 +38,8 @@ use crate::repo_target::RepoTarget;
 use crate::workflow_contract::render_workflow_contract;
 
 use super::{
-    BACKLOG_STATE, LatestResumeHandle, MAX_STALLED_TURNS, ResumeProvider, SessionPhase,
-    TokenUsage, agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
+    BACKLOG_STATE, LatestResumeHandle, MAX_STALLED_TURNS, ResumeProvider, SessionPhase, TokenUsage,
+    agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
     compact_blocked_summary, compact_completed_summary, compact_running_summary,
     compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
     listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,

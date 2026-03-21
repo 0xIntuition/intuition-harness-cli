@@ -624,8 +624,8 @@ fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result
 
 #[cfg(unix)]
 #[test]
-fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata()
--> Result<(), Box<dyn Error>> {
+fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Result<(), Box<dyn Error>>
+{
     let _guard = listen_test_lock();
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
