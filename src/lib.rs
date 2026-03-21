@@ -148,6 +148,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                                 .into_iter()
                                 .map(SyncDashboardAction::from)
                                 .collect(),
+                            vim_mode: crate::config::AppConfig::load()?.vim_mode_enabled(),
                         },
                     )
                     .await?;
@@ -258,6 +259,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                                 .into_iter()
                                 .map(SyncDashboardAction::from)
                                 .collect(),
+                            vim_mode: crate::config::AppConfig::load()?.vim_mode_enabled(),
                         },
                     )
                     .await?;
@@ -390,6 +392,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                             .into_iter()
                             .map(SyncDashboardAction::from)
                             .collect(),
+                        vim_mode: crate::config::AppConfig::load()?.vim_mode_enabled(),
                     },
                 )
                 .await?;

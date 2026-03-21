@@ -50,6 +50,7 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
 use crate::tui::prompt_images::PromptImageAttachment;
 
 const NON_INTERACTIVE_MAX_FOLLOW_UP_QUESTIONS: usize = 3;
@@ -134,6 +135,7 @@ struct QuestionsApp {
 
 #[derive(Debug, Clone)]
 struct ReviewApp {
+    keybindings: KeybindingPolicy,
     request: String,
     request_attachments: Vec<PromptImageAttachment>,
     follow_ups: Vec<FollowUpResponse>,
@@ -168,6 +170,7 @@ enum PlanStageKind {
 }
 
 struct PlanSessionApp {
+    vim_mode: bool,
     stage: PlanStage,
     agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
@@ -177,6 +180,14 @@ struct PlanSessionApp {
 struct PendingPlanJob {
     receiver: Receiver<PlanWorkerReport>,
     previous_stage: PlanStage,
+}
+
+struct PlanJobInput {
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+    follow_ups: Vec<FollowUpResponse>,
+    revision: usize,
+    vim_mode: bool,
 }
 
 struct PlanWorkerReport {
@@ -303,6 +314,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
             args.request.clone(),
             planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             agent_overrides.clone(),
+            app_config.vim_mode_enabled(),
         )? {
             InteractivePlanExit::Cancelled => return Ok(PlanReport::Cancelled),
             InteractivePlanExit::Confirmed(plan) => plan,
@@ -991,8 +1003,10 @@ fn run_interactive_plan_session(
     prefill: Option<String>,
     follow_up_question_limit: usize,
     agent_overrides: PlanningAgentOverrides,
+    vim_mode: bool,
 ) -> Result<InteractivePlanExit> {
     let mut app = PlanSessionApp {
+        vim_mode,
         stage: PlanStage::Request(RequestApp {
             request: InputFieldState::multiline_with_prompt_attachments(
                 prefill.unwrap_or_default(),
@@ -1153,6 +1167,7 @@ fn build_questions_app(
 }
 
 fn build_review_app(
+    vim_mode: bool,
     request: String,
     request_attachments: Vec<PromptImageAttachment>,
     follow_ups: Vec<FollowUpResponse>,
@@ -1161,6 +1176,7 @@ fn build_review_app(
 ) -> ReviewApp {
     let decision_len = plan.issues.len();
     ReviewApp {
+        keybindings: KeybindingPolicy::new(vim_mode),
         request,
         request_attachments,
         follow_ups,
@@ -1370,6 +1386,24 @@ fn handle_questions_step_paste(app: &mut QuestionsApp, text: &str) {
 }
 
 fn handle_review_step_key(app: &mut ReviewApp, key: crossterm::event::KeyEvent) -> SessionAction {
+    if let Some(direction) = app.keybindings.navigation_direction(key) {
+        match direction {
+            NavigationDirection::Up => {
+                app.selected = app.selected.saturating_sub(1);
+                app.error = None;
+                return SessionAction::None;
+            }
+            NavigationDirection::Down => {
+                if app.selected + 1 < app.plan.issues.len() {
+                    app.selected += 1;
+                }
+                app.error = None;
+                return SessionAction::None;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Up => {
             app.selected = app.selected.saturating_sub(1);
@@ -1832,7 +1866,11 @@ fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Up/Down moves through tickets. Space cycles [ ] skip -> [x] keep -> [1] -> [2] ... Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels.",
+        if app.keybindings.vim_mode_enabled() {
+            "Up/Down/j/k moves through tickets. Space cycles [ ] skip -> [x] keep -> [1] -> [2] ... Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels."
+        } else {
+            "Up/Down moves through tickets. Space cycles [ ] skip -> [x] keep -> [1] -> [2] ... Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels."
+        },
     );
 }
 
@@ -2109,10 +2147,13 @@ fn start_plan_generation(
     app.pending = Some(PendingPlanJob {
         receiver: spawn_plan_job(
             root.to_path_buf(),
-            request,
-            request_attachments,
-            follow_ups,
-            revision,
+            PlanJobInput {
+                request,
+                request_attachments,
+                follow_ups,
+                revision,
+                vim_mode: app.vim_mode,
+            },
             app.agent_overrides.clone(),
             app.continuation.clone(),
         ),
@@ -2179,21 +2220,18 @@ fn spawn_questions_job(
 
 fn spawn_plan_job(
     root: PathBuf,
-    request: String,
-    request_attachments: Vec<PromptImageAttachment>,
-    follow_ups: Vec<FollowUpResponse>,
-    revision: usize,
+    job: PlanJobInput,
     agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
 ) -> Receiver<PlanWorkerReport> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let attachments = collect_prompt_attachments(&request_attachments, &follow_ups);
+        let attachments = collect_prompt_attachments(&job.request_attachments, &job.follow_ups);
         let mut continuation = continuation;
         let outcome = generate_issue_plan(
             &root,
-            &request,
-            &follow_ups,
+            &job.request,
+            &job.follow_ups,
             attachments,
             &agent_overrides,
             &mut continuation,
@@ -2203,11 +2241,12 @@ fn spawn_plan_job(
                 bail!("planning agent returned no issues to create");
             }
             Ok(PlanWorkerOutcome::Review(build_review_app(
-                request,
-                request_attachments,
-                follow_ups,
+                job.vim_mode,
+                job.request,
+                job.request_attachments,
+                job.follow_ups,
                 plan,
-                revision,
+                job.revision,
             )))
         });
         let _ = sender.send(PlanWorkerReport {
@@ -2244,6 +2283,7 @@ fn spawn_plan_revision_job(
                 bail!("planning agent returned no issues to create");
             }
             Ok(PlanWorkerOutcome::Review(build_review_app(
+                review.keybindings.vim_mode_enabled(),
                 review.request,
                 review.request_attachments,
                 review.follow_ups,
@@ -2352,15 +2392,16 @@ mod tests {
         PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
         ReviewApp, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
         build_review_app, handle_questions_step_key, handle_questions_step_paste,
-        handle_request_step_key, handle_request_step_paste, next_incomplete_question,
-        parse_agent_json, process_pending_plan_job, render_issue_merge_prompt,
-        render_loading_frame, render_plan_session, render_question_prompt,
-        render_questions_form_frame, render_request_form_frame, render_review_form_frame,
-        review_kept_indices, review_marker, review_merge_groups, review_submission_action,
-        selected_issue_plan, snapshot,
+        handle_request_step_key, handle_request_step_paste, handle_review_step_key,
+        next_incomplete_question, parse_agent_json, process_pending_plan_job,
+        render_issue_merge_prompt, render_loading_frame, render_plan_session,
+        render_question_prompt, render_questions_form_frame, render_request_form_frame,
+        render_review_form_frame, review_kept_indices, review_marker, review_merge_groups,
+        review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::sync::mpsc;
@@ -2951,6 +2992,7 @@ mod tests {
     #[test]
     fn review_dashboard_lists_generated_issues() {
         let mut app = build_review_app(
+            false,
             "Plan a meta plan command".to_string(),
             vec![],
             vec![],
@@ -3009,6 +3051,7 @@ mod tests {
                 render_plan_session(
                     frame,
                     &PlanSessionApp {
+                        vim_mode: false,
                         stage: PlanStage::Request(RequestApp {
                             request: InputFieldState::multiline(
                                 "Plan a dashboard for multi-ticket backlog work",
@@ -3027,6 +3070,7 @@ mod tests {
                 render_plan_session(
                     frame,
                     &PlanSessionApp {
+                        vim_mode: false,
                         stage: PlanStage::Loading(LoadingApp {
                             message: "Generating suggested tickets".to_string(),
                             detail: "Drafting Linear-ready backlog tickets from the request."
@@ -3082,6 +3126,7 @@ mod tests {
             ],
         };
         let mut review = build_review_app(
+            false,
             "Plan a better `meta plan` workflow".to_string(),
             vec![],
             vec![answered_follow_up("Who uses it?", "CLI maintainers")],
@@ -3152,6 +3197,7 @@ mod tests {
             ],
         };
         let mut review = build_review_app(
+            false,
             "Plan a better `meta plan` workflow".to_string(),
             vec![],
             vec![
@@ -3256,6 +3302,7 @@ mod tests {
         drop(sender);
 
         let mut app = PlanSessionApp {
+            vim_mode: false,
             stage: PlanStage::Loading(LoadingApp {
                 message: "Generating follow-up questions".to_string(),
                 detail: "Reviewing the request.".to_string(),
@@ -3294,6 +3341,7 @@ mod tests {
     #[test]
     fn review_submission_allows_skipping_unchecked_tickets_when_some_are_kept() {
         let mut app = build_review_app(
+            false,
             "Plan a selective backlog batch".to_string(),
             vec![],
             vec![],
@@ -3327,6 +3375,7 @@ mod tests {
     #[test]
     fn review_submission_requires_at_least_one_selected_ticket() {
         let app = build_review_app(
+            false,
             "Plan a selective backlog batch".to_string(),
             vec![],
             vec![],
@@ -3352,8 +3401,45 @@ mod tests {
     }
 
     #[test]
+    fn review_step_vim_keys_navigate_ticket_selection_when_enabled() {
+        let mut app = build_review_app(
+            true,
+            "Plan a selective backlog batch".to_string(),
+            vec![],
+            vec![],
+            PlannedIssueSet {
+                summary: "Keep two tickets.".to_string(),
+                issues: vec![
+                    PlannedIssueDraft {
+                        title: "Keep this ticket".to_string(),
+                        description: "Create this issue.".to_string(),
+                        acceptance_criteria: vec![],
+                        priority: Some(2),
+                    },
+                    PlannedIssueDraft {
+                        title: "Move to this ticket".to_string(),
+                        description: "Create this issue too.".to_string(),
+                        acceptance_criteria: vec![],
+                        priority: Some(3),
+                    },
+                ],
+            },
+            1,
+        );
+
+        let action = handle_review_step_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
     fn selected_issue_plan_filters_out_skipped_tickets() {
         let mut app = build_review_app(
+            false,
             "Plan a selective backlog batch".to_string(),
             vec![],
             vec![],

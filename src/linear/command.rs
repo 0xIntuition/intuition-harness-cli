@@ -56,6 +56,7 @@ pub(crate) async fn run_issues_command(
     cli_default_team: Option<String>,
     command: IssueCommands,
 ) -> Result<()> {
+    let app_config = AppConfig::load()?;
     let LinearCommandContext {
         service,
         default_team,
@@ -104,6 +105,7 @@ pub(crate) async fn run_issues_command(
                         .map(DashboardAction::from)
                         .collect(),
                     initial_state_filter: list_args.state,
+                    vim_mode: app_config.vim_mode_enabled(),
                 };
 
                 if let Some(snapshot) = run_dashboard(data, options)? {
@@ -184,6 +186,7 @@ pub(crate) async fn run_issues_command(
                             .into_iter()
                             .map(IssueCreateAction::from)
                             .collect(),
+                        vim_mode: app_config.vim_mode_enabled(),
                     },
                 )?;
 
@@ -268,6 +271,7 @@ pub(crate) async fn run_issues_command(
                             .into_iter()
                             .map(IssueEditAction::from)
                             .collect(),
+                        vim_mode: app_config.vim_mode_enabled(),
                     },
                 )?;
 
@@ -309,6 +313,7 @@ pub(crate) async fn run_dashboard_command(
     cli_default_team: Option<String>,
     dashboard_args: DashboardCommandArgs,
 ) -> Result<()> {
+    let app_config = AppConfig::load()?;
     let LinearCommandContext {
         service,
         default_team,
@@ -343,6 +348,7 @@ pub(crate) async fn run_dashboard_command(
             .map(DashboardAction::from)
             .collect(),
         initial_state_filter: None,
+        vim_mode: app_config.vim_mode_enabled(),
     };
 
     if let Some(snapshot) = run_dashboard(data, options)? {

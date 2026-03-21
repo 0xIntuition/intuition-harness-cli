@@ -200,6 +200,7 @@ struct GhCli;
 
 pub async fn run_merge(args: &MergeArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
+    let app_config = AppConfig::load()?;
     let _planning_meta = load_required_planning_meta(&root, "merge")?;
     ensure_planning_layout(&root, false)?;
 
@@ -254,6 +255,7 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
                     .copied()
                     .map(MergeDashboardAction::from)
                     .collect(),
+                vim_mode: app_config.vim_mode_enabled(),
             },
         )?;
         let MergeDashboardExit::Snapshot(snapshot) = exit else {
@@ -274,6 +276,7 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
                 width: args.width,
                 height: args.height,
                 actions: Vec::new(),
+                vim_mode: app_config.vim_mode_enabled(),
             },
         )? {
             MergeDashboardExit::Selected(numbers) if numbers.is_empty() => {

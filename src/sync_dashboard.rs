@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -20,6 +20,7 @@ use crate::linear::browser::{
     render_issue_row, search_issues,
 };
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,7 @@ pub struct SyncDashboardOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<SyncDashboardAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +75,7 @@ pub enum SyncDashboardExit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    Query,
     Issues,
     Actions,
 }
@@ -80,6 +83,7 @@ enum Focus {
 #[derive(Debug, Clone)]
 struct SyncDashboardApp {
     data: SyncDashboardData,
+    keybindings: KeybindingPolicy,
     focus: Focus,
     query: InputFieldState,
     issue_index: usize,
@@ -110,7 +114,7 @@ pub fn run_sync_dashboard(
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = SyncDashboardApp::new(data);
+    let mut app = SyncDashboardApp::new(data, options.vim_mode);
 
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
@@ -119,20 +123,26 @@ pub fn run_sync_dashboard(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            if key.code == KeyCode::Char('q') {
+                return Ok(SyncDashboardExit::Cancelled);
+            }
+
             let action = match key.code {
-                KeyCode::Char('q') => return Ok(SyncDashboardExit::Cancelled),
-                KeyCode::Up => Some(SyncDashboardAction::Up),
-                KeyCode::Down => Some(SyncDashboardAction::Down),
+                KeyCode::Tab => Some(match app.focus {
+                    Focus::Query => SyncDashboardAction::Enter,
+                    Focus::Issues => SyncDashboardAction::Enter,
+                    Focus::Actions => SyncDashboardAction::Back,
+                }),
                 KeyCode::Enter => Some(SyncDashboardAction::Enter),
                 KeyCode::Esc => Some(SyncDashboardAction::Back),
-                _ => None,
+                _ => navigation_action(key, &app),
             };
 
             if let Some(action) = action
                 && let Some(selection) = app.apply(action)
             {
                 return Ok(SyncDashboardExit::Selected(selection));
-            } else {
+            } else if app.focus == Focus::Query {
                 let _ = app.handle_query_key(key);
             }
         }
@@ -142,7 +152,7 @@ pub fn run_sync_dashboard(
 fn render_once(data: SyncDashboardData, options: SyncDashboardOptions) -> Result<String> {
     let backend = TestBackend::new(options.width, options.height);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = SyncDashboardApp::new(data);
+    let mut app = SyncDashboardApp::new(data, options.vim_mode);
     for action in options.actions {
         let _ = app.apply(action);
     }
@@ -188,7 +198,15 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
             Line::from(app.summary_line()),
             key_hints(&[
                 ("Type", "search"),
-                ("Up/Down", "move"),
+                ("Tab", "focus"),
+                (
+                    if app.keybindings.vim_mode_enabled() {
+                        "Up/Down/j/k"
+                    } else {
+                        "Up/Down"
+                    },
+                    "move",
+                ),
                 ("Enter", "advance"),
                 ("Esc", "back"),
                 ("q", "exit"),
@@ -200,11 +218,11 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
 
     let rendered_query = app.query.render(
         "Search by backlog slug, linked identifier, title, state, project, or description...",
-        app.focus == Focus::Issues,
+        app.focus == Focus::Query,
     );
     let query_block = Block::default()
         .borders(Borders::ALL)
-        .title(if app.focus == Focus::Issues {
+        .title(if app.focus == Focus::Query {
             "Backlog Search [active]"
         } else {
             "Backlog Search"
@@ -300,10 +318,11 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
 }
 
 impl SyncDashboardApp {
-    fn new(data: SyncDashboardData) -> Self {
+    fn new(data: SyncDashboardData, vim_mode: bool) -> Self {
         Self {
             data,
-            focus: Focus::Issues,
+            keybindings: KeybindingPolicy::new(vim_mode),
+            focus: Focus::Query,
             query: InputFieldState::default(),
             issue_index: 0,
             action_index: 0,
@@ -316,6 +335,7 @@ impl SyncDashboardApp {
 
         match action {
             SyncDashboardAction::Up => match self.focus {
+                Focus::Query => {}
                 Focus::Issues => {
                     let len = self.visible_issue_results().len();
                     shift_index(&mut self.issue_index, len, -1)
@@ -323,19 +343,27 @@ impl SyncDashboardApp {
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), -1),
             },
             SyncDashboardAction::Down => match self.focus {
+                Focus::Query => {}
                 Focus::Issues => {
                     let len = self.visible_issue_results().len();
                     shift_index(&mut self.issue_index, len, 1)
                 }
                 Focus::Actions => shift_index(&mut self.action_index, ACTIONS.len(), 1),
             },
-            SyncDashboardAction::Back => {
-                if self.focus == Focus::Actions {
+            SyncDashboardAction::Back => match self.focus {
+                Focus::Actions => {
                     self.focus = Focus::Issues;
                     self.action_index = 0;
                 }
-            }
+                Focus::Issues => {
+                    self.focus = Focus::Query;
+                }
+                Focus::Query => {}
+            },
             SyncDashboardAction::Enter => match self.focus {
+                Focus::Query => {
+                    self.focus = Focus::Issues;
+                }
                 Focus::Issues => {
                     if self.selected_issue().is_some() {
                         self.focus = Focus::Actions;
@@ -358,7 +386,7 @@ impl SyncDashboardApp {
     }
 
     fn handle_query_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if self.focus != Focus::Issues {
+        if self.focus != Focus::Query {
             return false;
         }
         if self.query.handle_key(key) {
@@ -400,15 +428,21 @@ impl SyncDashboardApp {
         }
 
         match self.focus {
-            Focus::Issues => {
+            Focus::Query => {
                 if self.data.issues.is_empty() {
                     "No backlog entries were discovered under `.metastack/backlog/`.".to_string()
                 } else {
                     format!(
-                        "{} backlog entries loaded from local `.metastack/backlog/`. Search narrows the list before you choose pull or push.",
+                        "{} backlog entries loaded from local `.metastack/backlog/`. Finish editing search, then press Tab or Enter to move into the list.",
                         self.visible_issue_results().len()
                     )
                 }
+            }
+            Focus::Issues => {
+                format!(
+                    "{} backlog entries loaded from local `.metastack/backlog/`. Choose one, then press Enter to choose pull or push.",
+                    self.visible_issue_results().len()
+                )
             }
             Focus::Actions => match self.selected_issue() {
                 Some(issue) if issue.is_linked() => format!(
@@ -443,17 +477,21 @@ impl SyncDashboardApp {
         }
 
         match self.focus {
-            Focus::Issues => {
+            Focus::Query => {
                 if self.data.issues.is_empty() {
                     "Create or link backlog entries under `.metastack/backlog/`, then rerun `meta backlog sync`."
                         .to_string()
                 } else {
-                    "Step 1 of 2: search or choose a backlog entry sourced from local `.metastack/backlog/`."
+                    "Step 1 of 3: edit the backlog search query. j/k/h/l remain literal text while search is focused."
                         .to_string()
                 }
             }
+            Focus::Issues => {
+                "Step 2 of 3: choose a backlog entry sourced from local `.metastack/backlog/`."
+                    .to_string()
+            }
             Focus::Actions => match self.selected_issue() {
-                Some(issue) if issue.is_linked() => "Step 2 of 2: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
+                Some(issue) if issue.is_linked() => "Step 3 of 3: choose pull to refresh local files or push to sync managed attachments. `index.md` only updates the Linear description when you run push with `--update-description`.".to_string(),
                 Some(issue) => format!(
                     "This backlog entry is unlinked. Run `meta backlog sync link <ISSUE> --entry {}` before pull or push becomes available.",
                     issue.entry_slug
@@ -486,6 +524,18 @@ impl SyncDashboardApp {
         } else {
             "Link this backlog entry first; remote sync actions stay disabled until `.linear.json` points at a Linear issue."
         }
+    }
+}
+
+fn navigation_action(key: KeyEvent, app: &SyncDashboardApp) -> Option<SyncDashboardAction> {
+    if app.focus == Focus::Query {
+        return None;
+    }
+
+    match app.keybindings.navigation_direction(key) {
+        Some(NavigationDirection::Up) => Some(SyncDashboardAction::Up),
+        Some(NavigationDirection::Down) => Some(SyncDashboardAction::Down),
+        _ => None,
     }
 }
 
@@ -625,11 +675,12 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         Focus, SyncDashboardAction, SyncDashboardApp, SyncDashboardData, SyncDashboardExit,
-        SyncDashboardIssue, SyncDashboardOptions, run_sync_dashboard,
+        SyncDashboardIssue, SyncDashboardOptions, navigation_action, run_sync_dashboard,
     };
     use crate::backlog::BacklogSyncStatus;
     use crate::linear::{DashboardData, IssueSummary, ProjectRef, WorkflowState};
     use crate::tui::fields::InputFieldState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn demo_data() -> SyncDashboardData {
         let demo = DashboardData::demo();
@@ -697,11 +748,13 @@ mod tests {
                 width: 120,
                 height: 32,
                 actions: vec![
+                    SyncDashboardAction::Enter,
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                 ],
+                vim_mode: false,
             },
         )
         .expect("render once should succeed");
@@ -718,8 +771,10 @@ mod tests {
 
     #[test]
     fn back_returns_focus_to_issue_list() {
-        let mut app = SyncDashboardApp::new(demo_data());
+        let mut app = SyncDashboardApp::new(demo_data(), false);
 
+        assert_eq!(app.focus, Focus::Query);
+        app.apply(SyncDashboardAction::Enter);
         assert_eq!(app.focus, Focus::Issues);
         app.apply(SyncDashboardAction::Enter);
         assert_eq!(app.focus, Focus::Actions);
@@ -729,11 +784,39 @@ mod tests {
 
     #[test]
     fn sync_dashboard_search_can_narrow_to_zero_results() {
-        let mut app = SyncDashboardApp::new(demo_data());
+        let mut app = SyncDashboardApp::new(demo_data(), false);
         app.query = InputFieldState::new("zzz");
 
         assert!(app.visible_issue_results().is_empty());
         assert!(format!("{:?}", app.preview_text()).contains("No backlog entry is available"));
+    }
+
+    #[test]
+    fn sync_dashboard_vim_keys_remain_literal_while_query_is_focused() {
+        let mut app = SyncDashboardApp::new(demo_data(), true);
+
+        assert!(app.handle_query_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.query.value(), "j");
+        assert!(
+            navigation_action(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &app)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn sync_dashboard_vim_keys_navigate_after_leaving_query_focus() {
+        let app = SyncDashboardApp::new(demo_data(), true);
+        let mut app = SyncDashboardApp {
+            focus: Focus::Issues,
+            ..app
+        };
+
+        assert!(matches!(
+            navigation_action(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &app),
+            Some(SyncDashboardAction::Down)
+        ));
+        app.apply(SyncDashboardAction::Down);
+        assert_eq!(app.issue_index, 1);
     }
 
     #[test]
@@ -745,12 +828,14 @@ mod tests {
                 width: 120,
                 height: 32,
                 actions: vec![
+                    SyncDashboardAction::Enter,
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                     SyncDashboardAction::Down,
                     SyncDashboardAction::Enter,
                 ],
+                vim_mode: false,
             },
         )
         .expect("render once should succeed");

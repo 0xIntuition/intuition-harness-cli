@@ -163,6 +163,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
             .copied()
             .map(CronInitAction::from)
             .collect(),
+        vim_mode: config.vim_mode_enabled(),
     };
 
     if args.render_once {

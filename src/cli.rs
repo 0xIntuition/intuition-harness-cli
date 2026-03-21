@@ -741,6 +741,9 @@ pub struct ConfigArgs {
     /// Update the install-scoped plan follow-up question limit.
     #[arg(long)]
     pub plan_follow_up_limit: Option<String>,
+    /// Enable or disable install-scoped vim navigation aliases for supported TUI flows.
+    #[arg(long, value_enum)]
+    pub vim_mode: Option<VimModeArg>,
     /// Update the install-scoped default plan label.
     #[arg(long)]
     pub plan_label: Option<String>,
@@ -1574,6 +1577,12 @@ pub enum ListenAssignmentScopeArg {
 pub enum ListenRefreshPolicyArg {
     ReuseAndRefresh,
     RecreateFromOriginMain,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VimModeArg {
+    Enabled,
+    Disabled,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

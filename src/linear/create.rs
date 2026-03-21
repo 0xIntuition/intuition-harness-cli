@@ -16,6 +16,7 @@ use ratatui::{Frame, Terminal};
 
 use super::WorkflowState;
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 
 #[derive(Debug, Clone)]
 pub struct IssueCreateFormContext {
@@ -39,6 +40,7 @@ pub struct IssueCreateFormOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<IssueCreateAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,6 +114,7 @@ const PRIORITY_OPTIONS: [PriorityOption; 5] = [
 
 #[derive(Debug, Clone)]
 struct IssueCreateApp {
+    keybindings: KeybindingPolicy,
     context: IssueCreateFormContext,
     step: CreateStep,
     step_focus: StatusPriorityFocus,
@@ -128,6 +131,7 @@ pub fn run_issue_create_form(
     options: IssueCreateFormOptions,
 ) -> Result<IssueCreateFormExit> {
     let mut app = IssueCreateApp::new(context, prefill)?;
+    app.keybindings = KeybindingPolicy::new(options.vim_mode);
 
     if options.render_once {
         return render_once(app, options);
@@ -365,7 +369,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui::lay
             "Type the description. Enter advances. Shift+Enter inserts a newline. Tab advances. Shift+Tab goes back."
         }
         CreateStep::StatusPriority => {
-            "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Shift+Tab goes back."
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k in the active list. Left/Right/h/l switches focus. Enter submits. Shift+Tab goes back."
+            } else {
+                "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Shift+Tab goes back."
+            }
         }
     };
 
@@ -398,6 +406,7 @@ impl IssueCreateApp {
             .collect();
 
         Ok(Self {
+            keybindings: KeybindingPolicy::new(false),
             context,
             step: CreateStep::Title,
             step_focus: StatusPriorityFocus::State,
@@ -410,6 +419,23 @@ impl IssueCreateApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<IssueCreateFormExit> {
+        if self.step == CreateStep::StatusPriority {
+            if let Some(delta) = self.keybindings.vertical_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Up
+                } else {
+                    IssueCreateAction::Down
+                });
+            }
+            if let Some(delta) = self.keybindings.horizontal_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Left
+                } else {
+                    IssueCreateAction::Right
+                });
+            }
+        }
+
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(IssueCreateFormExit::Cancelled)
@@ -661,6 +687,7 @@ mod tests {
         IssueCreateFormPrefill,
     };
     use crate::linear::WorkflowState;
+    use crate::tui::keybindings::KeybindingPolicy;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn context() -> IssueCreateFormContext {
@@ -778,5 +805,30 @@ mod tests {
         assert_eq!(exit, None);
         assert_eq!(app.description.value(), "");
         assert_eq!(app.step, CreateStep::StatusPriority);
+    }
+
+    #[test]
+    fn issue_create_app_vim_keys_remain_literal_in_text_inputs() {
+        let mut app = IssueCreateApp::new(context(), IssueCreateFormPrefill::default())
+            .expect("app should build");
+        app.keybindings = KeybindingPolicy::new(true);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.title.value(), "j");
+    }
+
+    #[test]
+    fn issue_create_app_vim_keys_navigate_status_priority_lists() {
+        let mut app = IssueCreateApp::new(context(), IssueCreateFormPrefill::default())
+            .expect("app should build");
+        app.keybindings = KeybindingPolicy::new(true);
+        app.step = CreateStep::StatusPriority;
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.step_focus, super::StatusPriorityFocus::Priority);
+        assert_eq!(app.priority_field.selected(), 1);
     }
 }

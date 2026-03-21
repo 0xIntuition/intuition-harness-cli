@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
+use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
 use crate::tui::theme::{
     Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
     panel_title, paragraph,
@@ -44,6 +45,7 @@ pub struct MergeDashboardOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<MergeDashboardAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +73,7 @@ enum Focus {
 #[derive(Debug, Clone)]
 struct MergeDashboardApp {
     data: MergeDashboardData,
+    keybindings: KeybindingPolicy,
     focus: Focus,
     pr_index: usize,
     selected: BTreeSet<usize>,
@@ -98,7 +101,7 @@ pub fn run_merge_dashboard(
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = MergeDashboardApp::new(data);
+    let mut app = MergeDashboardApp::new(data, options.vim_mode);
 
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
@@ -107,14 +110,15 @@ pub fn run_merge_dashboard(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            let action = match key.code {
-                KeyCode::Char('q') => return Ok(MergeDashboardExit::Cancelled),
-                KeyCode::Up => Some(MergeDashboardAction::Up),
-                KeyCode::Down => Some(MergeDashboardAction::Down),
-                KeyCode::Char(' ') => Some(MergeDashboardAction::Toggle),
-                KeyCode::Enter => Some(MergeDashboardAction::Enter),
-                KeyCode::Esc | KeyCode::Backspace => Some(MergeDashboardAction::Back),
-                _ => None,
+            let action = match navigation_action(key, app.keybindings) {
+                Some(action) => Some(action),
+                None => match key.code {
+                    KeyCode::Char('q') => return Ok(MergeDashboardExit::Cancelled),
+                    KeyCode::Char(' ') => Some(MergeDashboardAction::Toggle),
+                    KeyCode::Enter => Some(MergeDashboardAction::Enter),
+                    KeyCode::Esc | KeyCode::Backspace => Some(MergeDashboardAction::Back),
+                    _ => None,
+                },
             };
 
             if let Some(action) = action
@@ -129,7 +133,7 @@ pub fn run_merge_dashboard(
 fn render_once(data: MergeDashboardData, options: MergeDashboardOptions) -> Result<String> {
     let backend = TestBackend::new(options.width, options.height);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = MergeDashboardApp::new(data);
+    let mut app = MergeDashboardApp::new(data, options.vim_mode);
 
     for action in options.actions {
         if let Some(selection) = app.apply(action) {
@@ -171,7 +175,14 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
                 Span::raw(app.data.base_branch.clone()),
             ]),
             key_hints(&[
-                ("Up/Down", "move"),
+                (
+                    if app.keybindings.vim_mode_enabled() {
+                        "Up/Down/j/k"
+                    } else {
+                        "Up/Down"
+                    },
+                    "move",
+                ),
                 ("Space", "select"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
@@ -255,9 +266,10 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
 }
 
 impl MergeDashboardApp {
-    fn new(data: MergeDashboardData) -> Self {
+    fn new(data: MergeDashboardData, vim_mode: bool) -> Self {
         Self {
             data,
+            keybindings: KeybindingPolicy::new(vim_mode),
             focus: Focus::PullRequests,
             pr_index: 0,
             selected: BTreeSet::new(),
@@ -445,6 +457,14 @@ impl MergeDashboardApp {
     }
 }
 
+fn navigation_action(key: KeyEvent, policy: KeybindingPolicy) -> Option<MergeDashboardAction> {
+    match policy.navigation_direction(key) {
+        Some(NavigationDirection::Up) => Some(MergeDashboardAction::Up),
+        Some(NavigationDirection::Down) => Some(MergeDashboardAction::Down),
+        _ => None,
+    }
+}
+
 fn shift_index(index: &mut usize, len: usize, delta: isize) {
     if len == 0 {
         *index = 0;
@@ -489,8 +509,10 @@ impl Drop for TerminalCleanup {
 mod tests {
     use super::{
         Focus, MergeDashboardAction, MergeDashboardApp, MergeDashboardData, MergeDashboardExit,
-        MergeDashboardOptions, MergeDashboardPullRequest, run_merge_dashboard,
+        MergeDashboardOptions, MergeDashboardPullRequest, navigation_action, run_merge_dashboard,
     };
+    use crate::tui::keybindings::KeybindingPolicy;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn demo_data() -> MergeDashboardData {
         MergeDashboardData {
@@ -532,6 +554,7 @@ mod tests {
                 width: 120,
                 height: 32,
                 actions: Vec::new(),
+                vim_mode: false,
             },
         )
         .expect("render_once should succeed");
@@ -552,6 +575,7 @@ mod tests {
                 width: 120,
                 height: 32,
                 actions: vec![MergeDashboardAction::Toggle, MergeDashboardAction::Enter],
+                vim_mode: false,
             },
         )
         .expect("render_once should succeed");
@@ -577,6 +601,7 @@ mod tests {
                     MergeDashboardAction::Toggle,
                     MergeDashboardAction::Enter,
                 ],
+                vim_mode: false,
             },
         )
         .expect("render_once should succeed");
@@ -591,7 +616,7 @@ mod tests {
 
     #[test]
     fn back_from_confirm_returns_to_pr_list() {
-        let mut app = MergeDashboardApp::new(demo_data());
+        let mut app = MergeDashboardApp::new(demo_data(), false);
         assert_eq!(app.focus, Focus::PullRequests);
         app.apply(MergeDashboardAction::Toggle);
         app.apply(MergeDashboardAction::Enter);
@@ -602,8 +627,26 @@ mod tests {
 
     #[test]
     fn back_from_pr_list_cancels_the_dashboard() {
-        let mut app = MergeDashboardApp::new(demo_data());
+        let mut app = MergeDashboardApp::new(demo_data(), false);
         let exit = app.apply(MergeDashboardAction::Back);
         assert_eq!(exit, Some(Vec::new()));
+    }
+
+    #[test]
+    fn merge_dashboard_vim_navigation_aliases_are_opt_in() {
+        assert!(
+            navigation_action(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                KeybindingPolicy::new(false),
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            navigation_action(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                KeybindingPolicy::new(true),
+            ),
+            Some(MergeDashboardAction::Down)
+        ));
     }
 }

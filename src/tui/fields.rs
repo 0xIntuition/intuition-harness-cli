@@ -721,11 +721,11 @@ impl SelectFieldState {
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.move_by(-1);
                 true
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.move_by(1);
                 true
             }
@@ -900,11 +900,11 @@ impl MultiSelectFieldState {
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 wrap_index(&mut self.cursor, self.options.len(), -1);
                 true
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 wrap_index(&mut self.cursor, self.options.len(), 1);
                 true
             }

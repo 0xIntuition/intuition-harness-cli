@@ -33,6 +33,7 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 
 #[derive(Debug, Clone)]
 struct SetupViewData {
@@ -61,6 +62,7 @@ struct SetupReport {
 
 #[derive(Debug, Clone)]
 struct SetupApp {
+    keybindings: KeybindingPolicy,
     step: SetupStep,
     profile: Option<String>,
     repo_auth_field: SelectFieldState,
@@ -774,6 +776,7 @@ impl SetupApp {
             .unwrap_or(0);
 
         let mut app = Self {
+            keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
             step: SetupStep::LinearAuth,
             profile: view.planning_meta.linear.profile.clone(),
             repo_auth_field: SelectFieldState::new(
@@ -986,6 +989,16 @@ impl SetupApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<SetupExit> {
+        if self.select_step_active()
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            return self.apply_action(if delta < 0 {
+                SetupAction::Up
+            } else {
+                SetupAction::Down
+            });
+        }
+
         match key.code {
             KeyCode::Char(_)
             | KeyCode::Backspace
@@ -1004,6 +1017,18 @@ impl SetupApp {
             KeyCode::Esc => self.apply_action(SetupAction::Esc),
             _ => None,
         }
+    }
+
+    fn select_step_active(&self) -> bool {
+        matches!(
+            self.step,
+            SetupStep::LinearAuth
+                | SetupStep::Provider
+                | SetupStep::Model
+                | SetupStep::Reasoning
+                | SetupStep::AssignmentScope
+                | SetupStep::RefreshPolicy
+        )
     }
 
     fn handle_paste(&mut self, text: &str) {
@@ -1553,7 +1578,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         | SetupStep::Reasoning
         | SetupStep::AssignmentScope
         | SetupStep::RefreshPolicy => {
-            "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            } else {
+                "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            }
         }
         SetupStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",
         _ => "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
@@ -1861,15 +1890,16 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        BacklogTemplateConflictAction, SetupApp, SetupViewData,
+        BacklogTemplateConflictAction, SetupApp, SetupStep, SetupViewData,
         parse_backlog_template_conflict_action, parse_optional_listen_labels_input,
         prompt_backlog_template_conflicts_with_io, render_summary,
     };
     use crate::config::{
-        AgentSettings, AppConfig, ListenAssignmentScope, PlanningAgentSettings,
-        PlanningListenSettings, PlanningMeta,
+        AgentSettings, AppConfig, InstallDefaults, InstallUiSettings, ListenAssignmentScope,
+        PlanningAgentSettings, PlanningListenSettings, PlanningMeta,
     };
     use anyhow::Result;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::io::Cursor;
 
     #[test]
@@ -2013,5 +2043,58 @@ mod tests {
             crate::setup::assignment_scope_label(ListenAssignmentScope::ViewerOrUnassigned),
             "Viewer-assigned issues plus unassigned issues"
         );
+    }
+
+    #[test]
+    fn setup_app_vim_keys_remain_literal_in_text_inputs() {
+        let view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    ui: InstallUiSettings { vim_mode: true },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            app_config_changed: false,
+            planning_meta: PlanningMeta::default(),
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = SetupApp::new(&view);
+        app.step = SetupStep::Team;
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.team.value(), "j");
+    }
+
+    #[test]
+    fn setup_app_vim_keys_navigate_select_steps() {
+        let view = SetupViewData {
+            root: PathBuf::from("/tmp/repo"),
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            metastack_meta_path: PathBuf::from("/tmp/repo/.metastack/meta.json"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    ui: InstallUiSettings { vim_mode: true },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            app_config_changed: false,
+            planning_meta: PlanningMeta::default(),
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = SetupApp::new(&view);
+        app.step = SetupStep::AssignmentScope;
+        let initial = app.assignment_field.selected();
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.assignment_field.selected(), initial + 1);
     }
 }

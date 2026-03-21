@@ -267,6 +267,7 @@ meta runtime config --default-profile work
 meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
 meta runtime config --default-assignee viewer --default-state Backlog --default-priority 2 --default-label platform --default-label cli
 meta runtime config --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
+meta runtime config --vim-mode enabled
 meta runtime config --merge-validation-repair-attempts 8
 meta runtime config --merge-validation-transient-retry-attempts 2
 meta runtime config --merge-publication-retry-attempts 6
@@ -291,6 +292,7 @@ The persisted config can store:
 - install-scoped onboarding completion state
 - install-scoped Linear API key/default team/default project values
 - install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, and plan/technical issue labels
+- install-scoped UI defaults under `[defaults.ui]`, including `vim_mode = true|false` for safe `h/j/k/l` navigation aliases
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
@@ -318,6 +320,11 @@ First-run behavior:
 For the built-in providers, `--reasoning`, `default_reasoning`, and `route_reasoning` are validated
 against the selected provider/model catalog instead of being accepted as free text. The dashboards
 now render reasoning as a select field tied to the current provider/model choice.
+
+When `vim_mode` is enabled, supported TUIs add `h/j/k/l` aliases only while a non-text control is
+focused. Search bars, single-line inputs, and multiline editors continue to insert literal
+characters, and search-first dashboards require leaving query focus before vim navigation takes
+over.
 
 Built-in reasoning options shipped in-repo:
 
@@ -434,6 +441,8 @@ prerelease opt-in, and deliberate downgrades with explicit flags.
 Legacy alias: `meta setup`
 
 `meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+
+Repo setup dashboards automatically honor the install-scoped `vim_mode` toggle from `meta runtime config`, but only for non-text controls such as select lists. Title, label, path, and prompt fields keep literal `h/j/k/l` editing behavior.
 
 For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 Promoted repo-aware settings now resolve as `CLI override -> repo default -> install default` for the shared team/project, listen label/scope/refresh/poll interval, interactive plan follow-up limit, and plan/technical issue labels. Repo-scoped `.metastack/meta.json` still overrides the install-scoped defaults saved by onboarding.
@@ -738,6 +747,7 @@ Legacy alias: `meta sync`
 Side effects:
 
 - bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.metastack/backlog/` state
+- the dashboard starts with query focus; finish editing the search, then press `Tab` or `Enter` to move into the backlog list
 - linked dashboard rows hydrate the mapped Linear issue from `.linear.json`, while unlinked rows stay visible with explicit `unlinked` state
 - unlinked dashboard rows are local-only until you run `meta backlog sync link <ISSUE> --entry <SLUG>`
 - `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
@@ -830,6 +840,9 @@ Legacy alias: `meta listen`
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI, and `--once` / `--render-once` emit terminal-only summary output.
+
+When install-scoped `vim_mode` is enabled, the listen dashboard also accepts `h` / `l` as aliases
+for the existing left/right view-switching controls.
 
 Examples:
 

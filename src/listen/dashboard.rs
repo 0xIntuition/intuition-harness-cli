@@ -95,7 +95,14 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             ),
             key_hints(&[
                 ("Tab", "toggle view"),
-                ("←/→", "switch tabs"),
+                (
+                    if data.vim_mode {
+                        "←/→/h/l"
+                    } else {
+                        "←/→"
+                    },
+                    "switch tabs",
+                ),
                 ("q", "exit"),
             ]),
         ]))
@@ -144,7 +151,14 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         ]),
         key_hints(&[
             ("Tab", "toggle view"),
-            ("←/→", "switch tabs"),
+            (
+                if data.vim_mode {
+                    "←/→/h/l"
+                } else {
+                    "←/→"
+                },
+                "switch tabs",
+            ),
             ("q", "exit"),
         ]),
     ]))
@@ -204,7 +218,14 @@ fn render_sessions(
         session_view_badge(SessionListView::Active, view, counts.active),
         Span::raw(" "),
         session_view_badge(SessionListView::Completed, view, counts.completed),
-        Span::styled("  Tab/←/→ toggles", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            if data.vim_mode {
+                "  Tab/←/→/h/l toggles"
+            } else {
+                "  Tab/←/→ toggles"
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
     ]))
     .wrap(Wrap { trim: true });
     frame.render_widget(controls, sections[0]);
@@ -434,6 +455,7 @@ mod tests {
                 dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
+                vim_mode: false,
             },
         );
 
@@ -471,6 +493,7 @@ mod tests {
                 dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
+                vim_mode: false,
             },
         );
 
@@ -501,6 +524,7 @@ mod tests {
                 dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
+                vim_mode: false,
             },
         );
 
@@ -523,6 +547,7 @@ mod tests {
                 dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: 1,
                 linear_refresh_seconds: 15,
+                vim_mode: false,
             },
         );
 
@@ -530,5 +555,26 @@ mod tests {
             .expect("completed snapshot should render");
 
         assert!(snapshot.contains("No completed agent sessions are currently tracked."));
+    }
+
+    #[test]
+    fn snapshot_surfaces_vim_view_switch_hints_when_enabled() {
+        let cycle = demo_cycle();
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: true,
+            },
+        );
+
+        let snapshot = render_dashboard(&data, 140, 36).expect("snapshot should render");
+
+        assert!(snapshot.contains("←/→/h/l"));
     }
 }

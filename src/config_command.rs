@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
 
-use crate::cli::ConfigArgs;
+use crate::cli::{ConfigArgs, VimModeArg};
 use crate::config::{
     AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
     ListenRefreshPolicy, VelocityAutoAssign, detect_supported_agents, normalize_agent_name,
@@ -29,6 +29,7 @@ use crate::config::{
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 
 #[derive(Debug, Clone)]
 pub struct ConfigReport {
@@ -219,6 +220,14 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
+        "Vim mode: {}",
+        if view.app_config.vim_mode_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+    lines.push(format!(
         "Install plan label: {}",
         display_optional(view.app_config.defaults.issue_labels.plan.as_deref())
     ));
@@ -363,6 +372,7 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
         || args.plan_follow_up_limit.is_some()
+        || args.vim_mode.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
         || args.default_profile.is_some()
@@ -424,6 +434,9 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             "plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
         )?;
+    }
+    if let Some(vim_mode) = args.vim_mode {
+        view.app_config.defaults.ui.vim_mode = matches!(vim_mode, VimModeArg::Enabled);
     }
     if let Some(plan_label) = &args.plan_label {
         view.app_config.defaults.issue_labels.plan = normalize_optional(plan_label);
@@ -729,6 +742,7 @@ enum ConfigStep {
     RefreshPolicy,
     PollInterval,
     PlanFollowUpLimit,
+    VimMode,
     PlanLabel,
     TechnicalLabel,
     DefaultProfile,
@@ -739,7 +753,7 @@ enum ConfigStep {
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 15] {
+    fn all() -> [Self; 16] {
         [
             Self::ApiKey,
             Self::Team,
@@ -749,6 +763,7 @@ impl ConfigStep {
             Self::RefreshPolicy,
             Self::PollInterval,
             Self::PlanFollowUpLimit,
+            Self::VimMode,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::DefaultProfile,
@@ -786,6 +801,7 @@ impl ConfigStep {
             Self::RefreshPolicy => "Refresh policy",
             Self::PollInterval => "Poll interval",
             Self::PlanFollowUpLimit => "Plan follow-ups",
+            Self::VimMode => "Vim mode",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::DefaultProfile => "Default profile",
@@ -806,6 +822,7 @@ impl ConfigStep {
             Self::RefreshPolicy => "Workspace refresh policy",
             Self::PollInterval => "Listen poll interval",
             Self::PlanFollowUpLimit => "Plan follow-up limit",
+            Self::VimMode => "Install-scoped vim navigation",
             Self::PlanLabel => "Default plan label",
             Self::TechnicalLabel => "Default technical label",
             Self::DefaultProfile => "Default Linear profile",
@@ -829,6 +846,7 @@ pub enum ConfigAction {
 
 #[derive(Debug, Clone)]
 struct ConfigApp {
+    keybindings: KeybindingPolicy,
     step: ConfigStep,
     api_key: InputFieldState,
     team: InputFieldState,
@@ -836,6 +854,7 @@ struct ConfigApp {
     listen_label: InputFieldState,
     poll_interval: InputFieldState,
     plan_follow_up_limit: InputFieldState,
+    vim_mode: SelectFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
     assignment_scope: SelectFieldState,
@@ -858,6 +877,7 @@ struct SubmittedConfig {
     refresh_policy: ListenRefreshPolicy,
     poll_interval_seconds: Option<u64>,
     interactive_follow_up_questions: Option<usize>,
+    vim_mode: bool,
     plan_label: Option<String>,
     technical_label: Option<String>,
     default_profile: Option<String>,
@@ -896,6 +916,7 @@ impl ConfigApp {
         ];
 
         let mut app = Self {
+            keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
             step: ConfigStep::ApiKey,
             api_key: InputFieldState::new(
                 view.app_config.linear.api_key.clone().unwrap_or_default(),
@@ -932,6 +953,10 @@ impl ConfigApp {
                     .interactive_follow_up_questions
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
+            ),
+            vim_mode: SelectFieldState::new(
+                vec!["Disabled".to_string(), "Enabled".to_string()],
+                usize::from(view.app_config.vim_mode_enabled()),
             ),
             plan_label: InputFieldState::new(
                 view.app_config
@@ -1090,6 +1115,10 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(-1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(-1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(-1),
+                    ConfigStep::VimMode => {
+                        self.vim_mode.move_by(-1);
+                        self.keybindings = KeybindingPolicy::new(self.vim_mode.selected() == 1);
+                    }
                     _ => self.step = self.step.previous(),
                 }
                 None
@@ -1108,6 +1137,10 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(1),
+                    ConfigStep::VimMode => {
+                        self.vim_mode.move_by(1);
+                        self.keybindings = KeybindingPolicy::new(self.vim_mode.selected() == 1);
+                    }
                     _ => self.step = self.step.next(),
                 }
                 None
@@ -1116,6 +1149,16 @@ impl ConfigApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<ConfigDashboardExit> {
+        if self.select_step_active()
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            return self.apply_action(if delta < 0 {
+                ConfigAction::Up
+            } else {
+                ConfigAction::Down
+            });
+        }
+
         match key.code {
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {
                 self.error = None;
@@ -1138,6 +1181,7 @@ impl ConfigApp {
                     ConfigStep::PlanFollowUpLimit => {
                         let _ = self.plan_follow_up_limit.handle_key(key);
                     }
+                    ConfigStep::VimMode => {}
                     ConfigStep::PlanLabel => {
                         let _ = self.plan_label.handle_key(key);
                     }
@@ -1166,6 +1210,18 @@ impl ConfigApp {
         }
     }
 
+    fn select_step_active(&self) -> bool {
+        matches!(
+            self.step,
+            ConfigStep::AssignmentScope
+                | ConfigStep::RefreshPolicy
+                | ConfigStep::VimMode
+                | ConfigStep::Agent
+                | ConfigStep::Model
+                | ConfigStep::DefaultReasoning
+        )
+    }
+
     fn handle_paste(&mut self, text: &str) {
         self.error = None;
         match self.step {
@@ -1187,6 +1243,7 @@ impl ConfigApp {
             ConfigStep::PlanFollowUpLimit => {
                 let _ = self.plan_follow_up_limit.paste(text);
             }
+            ConfigStep::VimMode => {}
             ConfigStep::PlanLabel => {
                 let _ = self.plan_label.paste(text);
             }
@@ -1252,6 +1309,7 @@ impl ConfigApp {
             },
             poll_interval_seconds,
             interactive_follow_up_questions,
+            vim_mode: self.vim_mode.selected() == 1,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
             default_profile,
@@ -1283,6 +1341,7 @@ impl SubmittedConfig {
             .defaults
             .plan
             .interactive_follow_up_questions = self.interactive_follow_up_questions;
+        view.app_config.defaults.ui.vim_mode = self.vim_mode;
         view.app_config.defaults.issue_labels.plan = self.plan_label.clone();
         view.app_config.defaults.issue_labels.technical = self.technical_label.clone();
         view.app_config.linear.default_profile = self.default_profile.clone();
@@ -1350,6 +1409,7 @@ struct RouteEntry {
 
 #[derive(Debug, Clone)]
 struct AdvancedRoutingApp {
+    keybindings: KeybindingPolicy,
     step: AdvancedRoutingStep,
     route_entries: Vec<RouteEntry>,
     route_field: SelectFieldState,
@@ -1393,6 +1453,7 @@ impl AdvancedRoutingApp {
         let mut agent_options = vec!["Inherit".to_string()];
         agent_options.extend(route_agent_names(view));
         let mut app = Self {
+            keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
             step: AdvancedRoutingStep::Route,
             route_entries,
             route_field: SelectFieldState::new(route_options, 0),
@@ -1511,6 +1572,16 @@ impl AdvancedRoutingApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<ConfigDashboardExit> {
+        if self.step != AdvancedRoutingStep::Save
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            return self.apply_action(if delta < 0 {
+                ConfigAction::Up
+            } else {
+                ConfigAction::Down
+            });
+        }
+
         match key.code {
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => None,
             KeyCode::Up => self.apply_action(ConfigAction::Up),
@@ -1907,12 +1978,22 @@ fn render_advanced_summary_panel(frame: &mut Frame<'_>, app: &AdvancedRoutingApp
 fn render_advanced_footer(frame: &mut Frame<'_>, app: &AdvancedRoutingApp, area: Rect) {
     let controls = match app.step {
         AdvancedRoutingStep::Reasoning => {
-            "Use Up/Down to choose the override. Enter advances. Esc cancels."
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k to choose the override. Enter advances. Esc cancels."
+            } else {
+                "Use Up/Down to choose the override. Enter advances. Esc cancels."
+            }
         }
         AdvancedRoutingStep::Save => {
             "Press Enter to save. Choosing Inherit reasoning clears the selected override."
         }
-        _ => "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+        _ => {
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            } else {
+                "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            }
+        }
     };
     let status = app.error.as_deref().unwrap_or("Ready.");
     let footer = Paragraph::new(Text::from(vec![Line::from(controls), Line::from(status)]))
@@ -2180,6 +2261,7 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             &app.plan_follow_up_limit,
             "Max follow-up questions for interactive `meta backlog plan` (e.g. 10).",
         ),
+        ConfigStep::VimMode => render_select_panel(frame, area, &title, &app.vim_mode),
         ConfigStep::PlanLabel => render_input_panel(
             frame,
             area,
@@ -2233,6 +2315,13 @@ fn render_summary_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             (
                 "Plan follow-ups",
                 summarize_optional_value(&app.plan_follow_up_limit),
+            ),
+            (
+                "Vim mode",
+                app.vim_mode
+                    .selected_label()
+                    .unwrap_or("Disabled")
+                    .to_string(),
             ),
             ("Plan label", summarize_optional_value(&app.plan_label)),
             ("Tech label", summarize_optional_value(&app.technical_label)),
@@ -2289,10 +2378,15 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         }
         ConfigStep::AssignmentScope
         | ConfigStep::RefreshPolicy
+        | ConfigStep::VimMode
         | ConfigStep::Agent
         | ConfigStep::Model
         | ConfigStep::DefaultReasoning => {
-            "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            } else {
+                "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+            }
         }
         ConfigStep::Save => "Press Enter to save. Shift+Tab goes back. Esc cancels.",
     };
@@ -2419,9 +2513,10 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::Result;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{AdvancedRoutingApp, ConfigApp, ConfigViewData};
-    use crate::config::{AgentSettings, AppConfig};
+    use super::{AdvancedRoutingApp, ConfigApp, ConfigStep, ConfigViewData};
+    use crate::config::{AgentSettings, AppConfig, InstallDefaults, InstallUiSettings};
 
     #[test]
     fn config_app_refreshes_reasoning_options_when_provider_changes() {
@@ -2536,5 +2631,50 @@ mod tests {
         assert_eq!(app.reasoning.selected_label(), Some("max"));
 
         Ok(())
+    }
+
+    #[test]
+    fn config_app_vim_keys_remain_literal_in_text_inputs() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    ui: InstallUiSettings { vim_mode: true },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::Team;
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.team.value(), "j");
+    }
+
+    #[test]
+    fn config_app_vim_keys_navigate_select_steps() {
+        let view = ConfigViewData {
+            config_path: PathBuf::from("/tmp/metastack-config.toml"),
+            app_config: AppConfig {
+                defaults: InstallDefaults {
+                    ui: InstallUiSettings { vim_mode: true },
+                    ..InstallDefaults::default()
+                },
+                ..AppConfig::default()
+            },
+            detected_agents: Vec::new(),
+        };
+
+        let mut app = ConfigApp::new(&view);
+        app.step = ConfigStep::AssignmentScope;
+        let initial = app.assignment_scope.selected();
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.assignment_scope.selected(), initial + 1);
     }
 }
