@@ -31,7 +31,7 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::tui::fields::{
     FilterableSelectFieldState, InputFieldRender, InputFieldState, SelectFieldState,
 };
-use crate::tui::scroll::{ScrollState, plain_text, wrapped_rows};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::theme::{Tone, badge, emphasis_style, label_style, tone_style};
 
 const PROJECT_FETCH_LIMIT: usize = 100;
@@ -921,16 +921,16 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
             "technical",
         ),
         OnboardingStep::Review => {
-            let summary = Paragraph::new(app.review_text())
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Review [scroll]")
-                        .border_style(Style::default().add_modifier(Modifier::BOLD))
-                        .padding(Padding::new(1, 1, 1, 0)),
-                )
-                .scroll((app.review_scroll.offset(), 0))
-                .wrap(Wrap { trim: false });
+            let summary = scrollable_paragraph_with_block(
+                app.review_text(),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Review [scroll]")
+                    .border_style(Style::default().add_modifier(Modifier::BOLD))
+                    .padding(Padding::new(1, 1, 1, 0)),
+                &app.review_scroll,
+            )
+            .wrap(Wrap { trim: false });
             frame.render_widget(summary, area);
         }
     }

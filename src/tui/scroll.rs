@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use crate::tui::theme::panel;
@@ -168,8 +168,17 @@ pub(crate) fn scrollable_paragraph(
     title: impl Into<Line<'static>>,
     scroll: &ScrollState,
 ) -> Paragraph<'static> {
+    scrollable_paragraph_with_block(text, panel(title), scroll)
+}
+
+/// Shared scrollable paragraph builder that preserves a caller-provided block.
+pub(crate) fn scrollable_paragraph_with_block(
+    text: impl Into<Text<'static>>,
+    block: Block<'static>,
+    scroll: &ScrollState,
+) -> Paragraph<'static> {
     Paragraph::new(text.into())
-        .block(panel(title))
+        .block(block)
         .scroll((scroll.offset(), 0))
 }
 

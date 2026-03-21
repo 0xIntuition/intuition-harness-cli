@@ -36,7 +36,7 @@ use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
-use crate::tui::scroll::{ScrollState, plain_text, wrapped_rows};
+use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 
 #[derive(Debug, Clone)]
 struct SetupViewData {
@@ -1596,23 +1596,23 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
 
 fn render_summary_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
     let active = app.step == SetupStep::Save;
-    let paragraph = Paragraph::new(app.summary_text(area.width.saturating_sub(2)))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(if active {
-                    "Summary [scroll]"
-                } else {
-                    "Summary"
-                })
-                .border_style(if active {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }),
-        )
-        .scroll((app.summary_scroll.offset(), 0))
-        .wrap(Wrap { trim: false });
+    let paragraph = scrollable_paragraph_with_block(
+        app.summary_text(area.width.saturating_sub(2)),
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if active {
+                "Summary [scroll]"
+            } else {
+                "Summary"
+            })
+            .border_style(if active {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
+        &app.summary_scroll,
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
