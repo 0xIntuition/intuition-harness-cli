@@ -815,6 +815,9 @@ pub struct ConfigArgs {
     /// Update the install-scoped fast planning follow-up batch size.
     #[arg(long)]
     pub plan_fast_questions: Option<String>,
+    /// Enable or disable install-scoped vim navigation aliases for supported TUI flows.
+    #[arg(long, value_enum)]
+    pub vim_mode: Option<VimModeArg>,
     /// Update the install-scoped default plan label.
     #[arg(long)]
     pub plan_label: Option<String>,
@@ -1663,6 +1666,12 @@ pub enum ListenAssignmentScopeArg {
 pub enum ListenRefreshPolicyArg {
     ReuseAndRefresh,
     RecreateFromOriginMain,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VimModeArg {
+    Enabled,
+    Disabled,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

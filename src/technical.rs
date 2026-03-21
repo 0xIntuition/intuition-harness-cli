@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -53,6 +53,7 @@ use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push_for_issue;
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const ISSUE_PICKER_LIMIT: usize = 250;
@@ -80,16 +81,25 @@ struct TechnicalGeneratedBacklog {
 
 #[derive(Debug, Clone)]
 struct IssuePickerApp {
+    keybindings: KeybindingPolicy,
+    focus: IssuePickerFocus,
     query: InputFieldState,
     issues: Vec<IssueSummary>,
     selected: usize,
-    focus: IssuePickerFocus,
     preview_scroll: ScrollState,
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssuePickerFocus {
+    Query,
+    Results,
+    Preview,
+}
+
 #[derive(Debug, Clone)]
 struct TechnicalReviewApp {
+    keybindings: KeybindingPolicy,
     generated: TechnicalGeneratedBacklog,
     selected_file: usize,
     focus: TechnicalReviewFocus,
@@ -99,6 +109,7 @@ struct TechnicalReviewApp {
 
 #[derive(Debug, Clone)]
 struct AcceptanceCriteriaApp {
+    keybindings: KeybindingPolicy,
     parent: IssueSummary,
     criteria: MultiSelectFieldState,
     error: Option<String>,
@@ -121,6 +132,7 @@ enum TechnicalStage {
 }
 
 struct TechnicalSessionApp {
+    vim_mode: bool,
     stage: TechnicalStage,
     pending: Option<PendingTechnicalJob>,
 }
@@ -136,12 +148,6 @@ enum TechnicalAction {
     SelectIssue(IssueSummary),
     Generate(TechnicalGenerationRequest),
     Confirm(TechnicalGeneratedBacklog),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IssuePickerFocus {
-    List,
-    Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +224,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<()> {
             initial_parent,
             available_issues,
             discussion_budgets,
+            app_config.vim_mode_enabled(),
         )? {
             InteractiveTechnicalExit::Cancelled => {
                 println!("Technical generation cancelled.");
@@ -318,11 +325,13 @@ fn run_interactive_technical_session(
     initial_parent: Option<IssueSummary>,
     issues: Vec<IssueSummary>,
     discussion_budgets: TicketDiscussionBudgets,
+    vim_mode: bool,
 ) -> Result<InteractiveTechnicalExit> {
     let mut app = if let Some(parent) = initial_parent {
         let criteria = extract_acceptance_criteria(parent.description.as_deref());
         if criteria.is_empty() {
             let mut app = TechnicalSessionApp {
+                vim_mode,
                 stage: TechnicalStage::Loading(LoadingApp {
                     message: "Generating technical backlog".to_string(),
                     detail: format!(
@@ -346,7 +355,9 @@ fn run_interactive_technical_session(
             app
         } else {
             TechnicalSessionApp {
+                vim_mode,
                 stage: TechnicalStage::SelectCriteria(AcceptanceCriteriaApp {
+                    keybindings: KeybindingPolicy::new(vim_mode),
                     parent,
                     criteria: MultiSelectFieldState::new(criteria.clone(), 0..criteria.len()),
                     error: None,
@@ -356,11 +367,13 @@ fn run_interactive_technical_session(
         }
     } else {
         TechnicalSessionApp {
+            vim_mode,
             stage: TechnicalStage::PickIssue(IssuePickerApp {
+                keybindings: KeybindingPolicy::new(vim_mode),
+                focus: IssuePickerFocus::Query,
                 query: InputFieldState::default(),
                 issues,
                 selected: 0,
-                focus: IssuePickerFocus::List,
                 preview_scroll: ScrollState::default(),
                 error: None,
             }),
@@ -442,6 +455,7 @@ fn run_interactive_technical_session(
                                 );
                             } else {
                                 app.stage = TechnicalStage::SelectCriteria(AcceptanceCriteriaApp {
+                                    keybindings: KeybindingPolicy::new(vim_mode),
                                     parent,
                                     criteria: MultiSelectFieldState::new(
                                         criteria.clone(),
@@ -515,52 +529,66 @@ fn handle_issue_picker_key(
     key: crossterm::event::KeyEvent,
     preview_viewport: Rect,
 ) -> TechnicalAction {
+    if app.focus != IssuePickerFocus::Query
+        && let Some(direction) = app.keybindings.navigation_direction(key)
+    {
+        match direction {
+            NavigationDirection::Up => {
+                if app.focus == IssuePickerFocus::Preview {
+                    let _ = app.preview_scroll.apply_key_code_in_viewport(
+                        KeyCode::Up,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                } else {
+                    let filtered = search_results(app);
+                    if filtered.is_empty() {
+                        app.selected = 0;
+                    } else if app.selected == 0 {
+                        app.selected = filtered.len().saturating_sub(1);
+                    } else {
+                        app.selected -= 1;
+                    }
+                    app.preview_scroll.reset();
+                }
+                app.error = None;
+                return TechnicalAction::None;
+            }
+            NavigationDirection::Down => {
+                if app.focus == IssuePickerFocus::Preview {
+                    let _ = app.preview_scroll.apply_key_code_in_viewport(
+                        KeyCode::Down,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                } else {
+                    let filtered = search_results(app);
+                    if filtered.is_empty() {
+                        app.selected = 0;
+                    } else {
+                        app.selected = (app.selected + 1) % filtered.len();
+                    }
+                    app.preview_scroll.reset();
+                }
+                app.error = None;
+                return TechnicalAction::None;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Tab => {
             app.focus = match app.focus {
-                IssuePickerFocus::List => IssuePickerFocus::Preview,
-                IssuePickerFocus::Preview => IssuePickerFocus::List,
+                IssuePickerFocus::Query => IssuePickerFocus::Results,
+                IssuePickerFocus::Results => IssuePickerFocus::Preview,
+                IssuePickerFocus::Preview => IssuePickerFocus::Results,
             };
             app.error = None;
             TechnicalAction::None
         }
-        KeyCode::Up => {
-            if app.focus == IssuePickerFocus::Preview {
-                let _ = app.preview_scroll.apply_key_code_in_viewport(
-                    KeyCode::Up,
-                    preview_viewport,
-                    app.preview_content_rows(preview_viewport.width.max(1)),
-                );
-            } else {
-                let filtered = search_results(app);
-                if filtered.is_empty() {
-                    app.selected = 0;
-                } else if app.selected == 0 {
-                    app.selected = filtered.len().saturating_sub(1);
-                } else {
-                    app.selected -= 1;
-                }
-                app.preview_scroll.reset();
-            }
-            app.error = None;
-            TechnicalAction::None
-        }
-        KeyCode::Down => {
-            if app.focus == IssuePickerFocus::Preview {
-                let _ = app.preview_scroll.apply_key_code_in_viewport(
-                    KeyCode::Down,
-                    preview_viewport,
-                    app.preview_content_rows(preview_viewport.width.max(1)),
-                );
-            } else {
-                let filtered = search_results(app);
-                if filtered.is_empty() {
-                    app.selected = 0;
-                } else {
-                    app.selected = (app.selected + 1) % filtered.len();
-                }
-                app.preview_scroll.reset();
-            }
+        KeyCode::Enter if app.focus == IssuePickerFocus::Query => {
+            app.focus = IssuePickerFocus::Results;
             app.error = None;
             TechnicalAction::None
         }
@@ -585,19 +613,20 @@ fn handle_issue_picker_key(
             app.error = None;
             TechnicalAction::SelectIssue(app.issues[issue_index].clone())
         }
-        _ => {
-            if app.focus == IssuePickerFocus::List && app.query.handle_key(key) {
+        _ if app.focus == IssuePickerFocus::Query => {
+            if app.query.handle_key(key) {
                 app.selected = 0;
                 app.preview_scroll.reset();
                 app.error = None;
             }
             TechnicalAction::None
         }
+        _ => TechnicalAction::None,
     }
 }
 
 fn handle_issue_picker_paste(app: &mut IssuePickerApp, text: &str) {
-    if app.focus == IssuePickerFocus::List && app.query.paste(text) {
+    if app.focus == IssuePickerFocus::Query && app.query.paste(text) {
         app.selected = 0;
         app.preview_scroll.reset();
         app.error = None;
@@ -632,7 +661,18 @@ fn handle_acceptance_criteria_key(
             })
         }
         _ => {
-            if app.criteria.handle_key(key) {
+            let handled = if let Some(direction) = app.keybindings.navigation_direction(key) {
+                match direction {
+                    NavigationDirection::Up => app.criteria.handle_key(KeyEvent::from(KeyCode::Up)),
+                    NavigationDirection::Down => {
+                        app.criteria.handle_key(KeyEvent::from(KeyCode::Down))
+                    }
+                    _ => false,
+                }
+            } else {
+                app.criteria.handle_key(key)
+            };
+            if handled {
                 app.error = None;
             }
             TechnicalAction::None
@@ -645,6 +685,30 @@ fn handle_technical_review_key(
     key: crossterm::event::KeyEvent,
     preview_viewport: Rect,
 ) -> TechnicalAction {
+    if app.focus == TechnicalReviewFocus::Files
+        && let Some(direction) = app.keybindings.navigation_direction(key)
+    {
+        match direction {
+            NavigationDirection::Up => {
+                if app.selected_file == 0 {
+                    app.selected_file = app.generated.files.len().saturating_sub(1);
+                } else {
+                    app.selected_file -= 1;
+                }
+                app.error = None;
+                return TechnicalAction::None;
+            }
+            NavigationDirection::Down => {
+                if !app.generated.files.is_empty() {
+                    app.selected_file = (app.selected_file + 1) % app.generated.files.len();
+                }
+                app.error = None;
+                return TechnicalAction::None;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Tab => {
             app.focus = match app.focus {
@@ -790,6 +854,7 @@ fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
             match result {
                 Ok(generated) => {
                     app.stage = TechnicalStage::Review(TechnicalReviewApp {
+                        keybindings: KeybindingPolicy::new(app.vim_mode),
                         generated,
                         selected_file: 0,
                         focus: TechnicalReviewFocus::Files,
@@ -1144,12 +1209,19 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
 
     let query_block = Block::default()
         .borders(Borders::ALL)
-        .title("Select Parent Issue [search]")
-        .border_style(Style::default().add_modifier(Modifier::BOLD));
+        .title(match app.focus {
+            IssuePickerFocus::Query => "Select Parent Issue [search]",
+            IssuePickerFocus::Results | IssuePickerFocus::Preview => "Select Parent Issue",
+        })
+        .border_style(if app.focus == IssuePickerFocus::Query {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        });
     let query_inner = query_block.inner(body[0]);
     let rendered_query = app.query.render_with_width(
         "Search by identifier, title, state, project, or description...",
-        true,
+        app.focus == IssuePickerFocus::Query,
         query_inner.width,
     );
     let query = rendered_query.paragraph(query_block);
@@ -1219,7 +1291,11 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type to search issues by identifier, title, state, project, or description. Tab switches between the issue list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter generates the technical backlog draft. Esc cancels.",
+        if app.keybindings.vim_mode_enabled() {
+            "Type to search issues by identifier, title, state, project, or description. Tab or Enter leaves search focus. Once results are focused, Up/Down/j/k moves the selection. Tab also toggles between the result list and preview, where Up/Down plus PgUp/PgDn/Home/End or the mouse wheel scroll. Enter generates the technical backlog draft. Esc cancels."
+        } else {
+            "Type to search issues by identifier, title, state, project, or description. Tab or Enter leaves search focus. Once results are focused, Up/Down moves the selection. Tab also toggles between the result list and preview, where Up/Down plus PgUp/PgDn/Home/End or the mouse wheel scroll. Enter generates the technical backlog draft. Esc cancels."
+        },
     );
 }
 
@@ -1302,7 +1378,11 @@ fn render_acceptance_criteria_frame(frame: &mut Frame<'_>, app: &AcceptanceCrite
         frame,
         layout[1],
         app.error.as_deref(),
-        "Up/Down moves between acceptance criteria. Space toggles each criterion. Enter generates the technical backlog draft from the selected criteria. Esc cancels.",
+        if app.keybindings.vim_mode_enabled() {
+            "Up/Down/j/k moves between acceptance criteria. Space toggles each criterion. Enter generates the technical backlog draft from the selected criteria. Esc cancels."
+        } else {
+            "Up/Down moves between acceptance criteria. Space toggles each criterion. Enter generates the technical backlog draft from the selected criteria. Esc cancels."
+        },
     );
 }
 
@@ -1387,7 +1467,11 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
+        if app.keybindings.vim_mode_enabled() {
+            "Tab switches between the file list and preview. In the file list, Up/Down/j/k moves between generated files. In the preview, Up/Down plus PgUp/PgDn/Home/End or the mouse wheel scroll. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels."
+        } else {
+            "Tab switches between the file list and preview. In the file list, Up/Down moves between generated files. In the preview, Up/Down plus PgUp/PgDn/Home/End or the mouse wheel scroll. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels."
+        },
     );
 }
 
@@ -1821,9 +1905,10 @@ mod tests {
     use super::{
         AcceptanceCriteriaApp, IssuePickerApp, IssuePickerFocus, LoadingApp,
         TechnicalGeneratedBacklog, TechnicalReviewApp, TechnicalReviewFocus,
-        extract_acceptance_criteria, handle_issue_picker_paste, render_acceptance_criteria_frame,
+        handle_issue_picker_key, handle_issue_picker_paste, render_acceptance_criteria_frame,
         render_issue_picker_frame, render_loading_frame, render_review_frame,
         render_technical_prompt, search_results, snapshot,
+        extract_acceptance_criteria,
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
@@ -1833,6 +1918,8 @@ mod tests {
     };
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
     use crate::tui::scroll::ScrollState;
+    use crate::tui::keybindings::KeybindingPolicy;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -1911,13 +1998,14 @@ mod tests {
     #[test]
     fn picker_search_prefers_identifier_and_title_matches() {
         let picker = IssuePickerApp {
+            keybindings: KeybindingPolicy::new(false),
+            focus: IssuePickerFocus::Results,
             query: InputFieldState::new("met-42 terminal"),
             issues: vec![
                 issue("MET-12", "Cleanup docs", "Documentation cleanup"),
                 issue("MET-42", "Terminal experience", "Improve terminal flow"),
             ],
             selected: 0,
-            focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: None,
         };
@@ -1935,6 +2023,8 @@ mod tests {
     #[test]
     fn issue_picker_snapshot_shows_search_and_preview() {
         let snapshot = render_picker_snapshot(&IssuePickerApp {
+            keybindings: KeybindingPolicy::new(false),
+            focus: IssuePickerFocus::Query,
             query: InputFieldState::new("terminal"),
             issues: vec![
                 issue(
@@ -1945,7 +2035,6 @@ mod tests {
                 issue("MET-43", "Sync polish", "Refine sync previews."),
             ],
             selected: 0,
-            focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: None,
         });
@@ -1953,12 +2042,14 @@ mod tests {
         assert!(snapshot.contains("Select Parent Issue [search]"));
         assert!(snapshot.contains("MET-42  Terminal experience"));
         assert!(snapshot.contains("Issue Preview"));
-        assert!(snapshot.contains("mouse wheel scroll the preview"));
+        assert!(snapshot.contains("PgUp/PgDn/Home/End"));
     }
 
     #[test]
     fn issue_picker_paste_updates_the_search_query() {
         let mut app = IssuePickerApp {
+            keybindings: KeybindingPolicy::new(false),
+            focus: IssuePickerFocus::Query,
             query: InputFieldState::new("tech"),
             issues: vec![issue(
                 "MET-42",
@@ -1966,7 +2057,6 @@ mod tests {
                 "Improve planning flow.",
             )],
             selected: 1,
-            focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: Some("stale".to_string()),
         };
@@ -1979,8 +2069,62 @@ mod tests {
     }
 
     #[test]
+    fn issue_picker_vim_keys_remain_literal_while_query_is_focused() {
+        let mut app = IssuePickerApp {
+            keybindings: KeybindingPolicy::new(true),
+            focus: IssuePickerFocus::Query,
+            query: InputFieldState::default(),
+            issues: vec![issue(
+                "MET-42",
+                "Terminal experience",
+                "Improve planning flow.",
+            )],
+            selected: 0,
+            preview_scroll: ScrollState::default(),
+            error: None,
+        };
+
+        let action = handle_issue_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            Rect::new(0, 0, 100, 20),
+        );
+
+        assert!(matches!(action, super::TechnicalAction::None));
+        assert_eq!(app.query.value(), "j");
+        assert_eq!(app.focus, IssuePickerFocus::Query);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn issue_picker_vim_keys_move_selection_when_results_are_focused() {
+        let mut app = IssuePickerApp {
+            keybindings: KeybindingPolicy::new(true),
+            focus: IssuePickerFocus::Results,
+            query: InputFieldState::default(),
+            issues: vec![
+                issue("MET-42", "Terminal experience", "Improve planning flow."),
+                issue("MET-43", "Sync polish", "Refine sync previews."),
+            ],
+            selected: 0,
+            preview_scroll: ScrollState::default(),
+            error: None,
+        };
+
+        let action = handle_issue_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            Rect::new(0, 0, 100, 20),
+        );
+
+        assert!(matches!(action, super::TechnicalAction::None));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
     fn review_snapshot_lists_generated_files_and_preview() {
         let snapshot = render_review_snapshot(&TechnicalReviewApp {
+            keybindings: KeybindingPolicy::new(false),
             generated: TechnicalGeneratedBacklog {
                 parent: issue(
                     "MET-35",
@@ -2026,6 +2170,7 @@ mod tests {
     #[test]
     fn review_preview_scrolls_to_bottom_of_long_file() {
         let mut app = TechnicalReviewApp {
+            keybindings: KeybindingPolicy::new(false),
             generated: TechnicalGeneratedBacklog {
                 parent: issue(
                     "MET-35",
@@ -2080,6 +2225,8 @@ mod tests {
     #[test]
     fn issue_picker_snapshot_shows_zero_results_state() {
         let snapshot = render_picker_snapshot(&IssuePickerApp {
+            keybindings: KeybindingPolicy::new(false),
+            focus: IssuePickerFocus::Query,
             query: InputFieldState::new("zzz"),
             issues: vec![issue(
                 "MET-42",
@@ -2087,7 +2234,6 @@ mod tests {
                 "Improve planning flow.",
             )],
             selected: 0,
-            focus: IssuePickerFocus::List,
             preview_scroll: ScrollState::default(),
             error: None,
         });
@@ -2125,6 +2271,7 @@ Ignored.
     #[test]
     fn acceptance_criteria_selector_snapshot_shows_selected_items() {
         let snapshot = render_criteria_snapshot(&AcceptanceCriteriaApp {
+            keybindings: KeybindingPolicy::new(false),
             parent: issue(
                 "MET-56",
                 "Create a Merry Christmas script",

@@ -20,6 +20,7 @@ use ratatui::{Frame, Terminal};
 use super::WorkflowState;
 use crate::tui::fields::{InputFieldState, SelectFieldState};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::keybindings::KeybindingPolicy;
 
 #[derive(Debug, Clone)]
 pub struct IssueCreateFormContext {
@@ -43,6 +44,7 @@ pub struct IssueCreateFormOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<IssueCreateAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -116,6 +118,7 @@ const PRIORITY_OPTIONS: [PriorityOption; 5] = [
 
 #[derive(Debug, Clone)]
 struct IssueCreateApp {
+    keybindings: KeybindingPolicy,
     context: IssueCreateFormContext,
     step: CreateStep,
     step_focus: StatusPriorityFocus,
@@ -133,6 +136,7 @@ pub fn run_issue_create_form(
     options: IssueCreateFormOptions,
 ) -> Result<IssueCreateFormExit> {
     let mut app = IssueCreateApp::new(context, prefill)?;
+    app.keybindings = KeybindingPolicy::new(options.vim_mode);
 
     if options.render_once {
         return render_once(app, options);
@@ -354,7 +358,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueCreateApp, area: ratatui::lay
             "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the description or summary pane is hovered. Enter advances. Tab advances. Shift+Tab goes back."
         }
         CreateStep::StatusPriority => {
-            "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Shift+Tab goes back."
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k in the active list. Left/Right/h/l switches focus. Enter submits. Shift+Tab goes back."
+            } else {
+                "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Shift+Tab goes back."
+            }
         }
     };
 
@@ -387,6 +395,7 @@ impl IssueCreateApp {
             .collect();
 
         Ok(Self {
+            keybindings: KeybindingPolicy::new(false),
             context,
             step: CreateStep::Title,
             step_focus: StatusPriorityFocus::State,
@@ -412,10 +421,25 @@ impl IssueCreateApp {
         key: KeyEvent,
         viewport: ratatui::layout::Rect,
     ) -> Option<IssueCreateFormExit> {
+        if self.step == CreateStep::StatusPriority {
+            if let Some(delta) = self.keybindings.vertical_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Up
+                } else {
+                    IssueCreateAction::Down
+                });
+            }
+            if let Some(delta) = self.keybindings.horizontal_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueCreateAction::Left
+                } else {
+                    IssueCreateAction::Right
+                });
+            }
+        }
         if self.handle_text_navigation_key(key, viewport) {
             return None;
         }
-
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(IssueCreateFormExit::Cancelled)
@@ -807,6 +831,7 @@ mod tests {
     use crate::linear::WorkflowState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use crate::tui::keybindings::KeybindingPolicy;
 
     fn context() -> IssueCreateFormContext {
         IssueCreateFormContext {
@@ -945,7 +970,6 @@ mod tests {
         assert_eq!(app.description.value(), "");
         assert_eq!(app.step, CreateStep::StatusPriority);
     }
-
     #[test]
     fn issue_create_app_page_down_moves_within_long_description() {
         let mut app = IssueCreateApp::new(
@@ -1096,5 +1120,30 @@ mod tests {
 
         assert!(app.handle_mouse_in_viewport(mouse, Rect::new(0, 0, 40, 8), viewport));
         assert!(app.summary_scroll.offset() > 0);
+    }
+
+    #[test]
+    fn issue_create_app_vim_keys_remain_literal_in_text_inputs() {
+        let mut app = IssueCreateApp::new(context(), IssueCreateFormPrefill::default())
+            .expect("app should build");
+        app.keybindings = KeybindingPolicy::new(true);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.title.value(), "j");
+    }
+
+    #[test]
+    fn issue_create_app_vim_keys_navigate_status_priority_lists() {
+        let mut app = IssueCreateApp::new(context(), IssueCreateFormPrefill::default())
+            .expect("app should build");
+        app.keybindings = KeybindingPolicy::new(true);
+        app.step = CreateStep::StatusPriority;
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.step_focus, super::StatusPriorityFocus::Priority);
+        assert_eq!(app.priority_field.selected(), 1);
     }
 }

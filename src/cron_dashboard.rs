@@ -20,6 +20,7 @@ use ratatui::widgets::{Block, Borders, ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::KeybindingPolicy;
 use crate::tui::theme::{Tone, badge, key_hints, list, panel_title, paragraph};
 
 const NONE_AGENT_LABEL: &str = "None";
@@ -50,6 +51,7 @@ pub(crate) struct CronInitFormOptions {
     pub(crate) width: u16,
     pub(crate) height: u16,
     pub(crate) actions: Vec<CronInitAction>,
+    pub(crate) vim_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +116,7 @@ enum CronField {
 
 #[derive(Debug, Clone)]
 struct CronInitApp {
+    keybindings: KeybindingPolicy,
     focus: CronField,
     name: InputFieldState,
     schedule_preset: SelectFieldState,
@@ -139,6 +142,7 @@ pub(crate) fn run_cron_init_form(
     options: CronInitFormOptions,
 ) -> Result<CronInitFormExit> {
     let mut app = CronInitApp::new(context, prefill);
+    app.keybindings = KeybindingPolicy::new(options.vim_mode);
 
     if options.render_once {
         return render_once(app, options);
@@ -205,7 +209,7 @@ fn render_cron_init_form(frame: &mut Frame<'_>, app: &CronInitApp) {
         .constraints([
             Constraint::Length(if narrow { 5 } else { 4 }),
             Constraint::Min(0),
-            Constraint::Length(4),
+            Constraint::Length(6),
         ])
         .split(frame.area());
     let body = Layout::default()
@@ -382,6 +386,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
         .unwrap_or_else(|| "Ready to create the cron job.".to_string());
     let footer = paragraph(Text::from(vec![
         Line::from("Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections."),
+        Line::from(if app.keybindings.vim_mode_enabled() {
+            "When a non-text control is focused, j/k also moves between fields and h/l changes selections."
+        } else {
+            "Text fields always keep typed characters literal."
+        }),
         Line::from(
             "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline; Up/Down and PgUp/PgDn/Home/End move through wrapped content; mouse wheel scrolls the editor. Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists. Esc cancels.",
         ),
@@ -411,6 +420,7 @@ impl CronInitApp {
             });
 
         Self {
+            keybindings: KeybindingPolicy::new(false),
             focus: CronField::Name,
             name: InputFieldState::new(prefill.name.unwrap_or_default()),
             schedule_preset: SelectFieldState::new(
@@ -453,6 +463,24 @@ impl CronInitApp {
         prompt_viewport: Rect,
     ) -> Option<CronInitFormExit> {
         self.error = None;
+
+        if !self.focus.consumes_typed_text()
+            && let Some(delta) = self.keybindings.vertical_delta(key)
+        {
+            if delta < 0 {
+                self.previous_field();
+            } else {
+                self.next_field();
+            }
+            return None;
+        }
+
+        if self.focus.uses_select_options()
+            && let Some(delta) = self.keybindings.horizontal_delta(key)
+        {
+            self.apply_select_delta(delta);
+            return None;
+        }
 
         match key.code {
             KeyCode::Esc => return Some(CronInitFormExit::Cancelled),
@@ -628,9 +656,13 @@ impl CronInitApp {
             CronField::Name => {
                 self.name.handle_key(key);
             }
-            CronField::SchedulePreset => {
-                Self::apply_select_key(&mut self.schedule_preset, key);
-            }
+            CronField::SchedulePreset => match key.code {
+                KeyCode::Left => self.schedule_preset.move_by(-1),
+                KeyCode::Right => self.schedule_preset.move_by(1),
+                _ => {
+                    let _ = self.schedule_preset.handle_key(key);
+                }
+            },
             CronField::MinutesInterval => {
                 self.minutes_interval.handle_key(key);
             }
@@ -652,9 +684,13 @@ impl CronInitApp {
             CronField::Command => {
                 self.command.handle_key(key);
             }
-            CronField::Agent => {
-                Self::apply_select_key(&mut self.agent, key);
-            }
+            CronField::Agent => match key.code {
+                KeyCode::Left => self.agent.move_by(-1),
+                KeyCode::Right => self.agent.move_by(1),
+                _ => {
+                    let _ = self.agent.handle_key(key);
+                }
+            },
             CronField::Prompt => {
                 self.prompt.handle_key(key);
             }
@@ -667,20 +703,23 @@ impl CronInitApp {
             CronField::TimeoutSeconds => {
                 self.timeout_seconds.handle_key(key);
             }
-            CronField::Enabled => {
-                Self::apply_select_key(&mut self.enabled, key);
-            }
+            CronField::Enabled => match key.code {
+                KeyCode::Left => self.enabled.move_by(-1),
+                KeyCode::Right => self.enabled.move_by(1),
+                _ => {
+                    let _ = self.enabled.handle_key(key);
+                }
+            },
             CronField::Save => {}
         }
     }
 
-    fn apply_select_key(field: &mut SelectFieldState, key: KeyEvent) {
-        match key.code {
-            KeyCode::Left | KeyCode::Char('h') => field.move_by(-1),
-            KeyCode::Right | KeyCode::Char('l') => field.move_by(1),
-            _ => {
-                let _ = field.handle_key(key);
-            }
+    fn apply_select_delta(&mut self, delta: isize) {
+        match self.focus {
+            CronField::SchedulePreset => self.schedule_preset.move_by(delta),
+            CronField::Agent => self.agent.move_by(delta),
+            CronField::Enabled => self.enabled.move_by(delta),
+            _ => {}
         }
     }
 
@@ -795,6 +834,22 @@ impl CronInitApp {
             timeout_seconds,
             enabled: self.enabled.selected() == 0,
         })
+    }
+}
+
+impl CronField {
+    fn consumes_typed_text(self) -> bool {
+        !matches!(
+            self,
+            CronField::SchedulePreset | CronField::Agent | CronField::Enabled | CronField::Save
+        )
+    }
+
+    fn uses_select_options(self) -> bool {
+        matches!(
+            self,
+            CronField::SchedulePreset | CronField::Agent | CronField::Enabled
+        )
     }
 }
 
@@ -1176,6 +1231,7 @@ mod tests {
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
+    use crate::tui::keybindings::KeybindingPolicy;
 
     #[test]
     fn schedule_prefill_detects_hourly_expression() {
@@ -1344,7 +1400,6 @@ mod tests {
             Some(super::CRON_PROMPT_ATTACHMENT_REJECTION)
         );
     }
-
     #[test]
     fn prompt_navigation_keys_scroll_visible_editor() {
         let mut app = CronInitApp::new(
@@ -1412,5 +1467,50 @@ mod tests {
             viewport.height.saturating_sub(2).max(1),
         );
         assert!(rendered.scroll_offset > 0);
+    }
+
+    #[test]
+    fn cron_init_vim_keys_remain_literal_in_text_inputs() {
+        let mut app = CronInitApp::new(
+            CronInitFormContext {
+                agent_options: vec!["codex".to_string()],
+            },
+            CronInitFormPrefill::default(),
+        );
+        app.keybindings = KeybindingPolicy::new(true);
+        app.focus = CronField::Name;
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+
+        let _ = app.handle_key_in_viewport(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            viewport,
+        );
+
+        assert_eq!(app.name.value(), "j");
+    }
+
+    #[test]
+    fn cron_init_vim_keys_only_navigate_on_non_text_controls() {
+        let mut app = CronInitApp::new(
+            CronInitFormContext {
+                agent_options: vec!["codex".to_string()],
+            },
+            CronInitFormPrefill::default(),
+        );
+        app.keybindings = KeybindingPolicy::new(true);
+        app.focus = CronField::SchedulePreset;
+        let viewport = prompt_editor_viewport(Rect::new(0, 0, 120, 32));
+
+        let _ = app.handle_key_in_viewport(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            viewport,
+        );
+        assert_eq!(app.schedule_preset.selected(), 1);
+
+        let _ = app.handle_key_in_viewport(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            viewport,
+        );
+        assert_eq!(app.focus, CronField::MinutesInterval);
     }
 }

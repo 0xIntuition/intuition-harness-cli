@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -22,6 +23,7 @@ use super::browser::{
 use super::{DashboardData, IssueSummary};
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::keybindings::{KeybindingPolicy, NavigationDirection};
 use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
@@ -31,6 +33,7 @@ pub struct DashboardOptions {
     pub height: u16,
     pub actions: Vec<DashboardAction>,
     pub initial_state_filter: Option<String>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +50,7 @@ pub enum DashboardAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    Query,
     Status,
     Estimate,
     Issues,
@@ -70,6 +74,7 @@ struct FilterOption<T> {
 #[derive(Debug, Clone)]
 struct DashboardApp {
     data: DashboardData,
+    keybindings: KeybindingPolicy,
     focus: Focus,
     query: InputFieldState,
     status_options: Vec<FilterOption<Option<String>>>,
@@ -100,7 +105,7 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = DashboardApp::new(data, options.initial_state_filter);
+    let mut app = DashboardApp::new(data, options.initial_state_filter, options.vim_mode);
 
     loop {
         terminal.draw(|frame| render_dashboard(frame, &app))?;
@@ -109,14 +114,6 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Up => app.apply_in_viewport(
-                        DashboardAction::Up,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::Down => app.apply_in_viewport(
-                        DashboardAction::Down,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
                     KeyCode::PageUp => app.apply_in_viewport(
                         DashboardAction::PageUp,
                         preview_viewport(terminal.size()?.into()),
@@ -142,7 +139,11 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
                         preview_viewport(terminal.size()?.into()),
                     ),
                     _ => {
-                        let _ = app.handle_query_key(key);
+                        if let Some(action) = navigation_action(key, &app) {
+                            app.apply_in_viewport(action, preview_viewport(terminal.size()?.into()));
+                        } else {
+                            let _ = app.handle_query_key(key);
+                        }
                     }
                 },
                 Event::Mouse(mouse)
@@ -166,7 +167,7 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
 fn render_once(data: DashboardData, options: DashboardOptions) -> Result<String> {
     let backend = TestBackend::new(options.width, options.height);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = DashboardApp::new(data, options.initial_state_filter);
+    let mut app = DashboardApp::new(data, options.initial_state_filter, options.vim_mode);
     for action in options.actions {
         app.apply_in_viewport(
             action,
@@ -224,7 +225,14 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
             key_hints(&[
                 ("Type", "search"),
                 ("Tab", "focus"),
-                ("Up/Down", "move"),
+                (
+                    if app.keybindings.vim_mode_enabled() {
+                        "Up/Down/j/k"
+                    } else {
+                        "Up/Down"
+                    },
+                    "move",
+                ),
                 ("PgUp/PgDn", "scroll preview"),
                 ("Wheel", "scroll preview"),
                 ("Enter", "apply"),
@@ -237,11 +245,11 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
 
     let rendered_query = app.query.render(
         "Search by identifier, title, state, project, or description...",
-        app.focus == Focus::Issues,
+        app.focus == Focus::Query,
     );
     let query_block = Block::default()
         .borders(Borders::ALL)
-        .title(if app.focus == Focus::Issues {
+        .title(if app.focus == Focus::Query {
             "Issue Search [active]"
         } else {
             "Issue Search"
@@ -350,7 +358,7 @@ fn render_filter_list<T, F>(
 }
 
 impl DashboardApp {
-    fn new(data: DashboardData, initial_state_filter: Option<String>) -> Self {
+    fn new(data: DashboardData, initial_state_filter: Option<String>, vim_mode: bool) -> Self {
         let status_options = build_status_options(&data.issues);
         let estimate_options = build_estimate_options(&data.issues);
         let active_status = initial_state_filter
@@ -359,7 +367,8 @@ impl DashboardApp {
 
         let mut app = Self {
             data,
-            focus: Focus::Issues,
+            keybindings: KeybindingPolicy::new(vim_mode),
+            focus: Focus::Query,
             query: InputFieldState::default(),
             status_options,
             estimate_options,
@@ -416,6 +425,7 @@ impl DashboardApp {
             }
             DashboardAction::Tab => {
                 self.focus = match self.focus {
+                    Focus::Query => Focus::Status,
                     Focus::Status => Focus::Estimate,
                     Focus::Estimate => Focus::Issues,
                     Focus::Issues => Focus::Preview,
@@ -428,6 +438,7 @@ impl DashboardApp {
 
     fn move_selection(&mut self, delta: isize) {
         match self.focus {
+            Focus::Query => {}
             Focus::Status => shift_index(&mut self.status_index, self.status_options.len(), delta),
             Focus::Estimate => {
                 shift_index(&mut self.estimate_index, self.estimate_options.len(), delta)
@@ -442,7 +453,7 @@ impl DashboardApp {
     }
 
     fn handle_query_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if self.focus != Focus::Issues {
+        if self.focus != Focus::Query {
             return false;
         }
         if self.query.handle_key(key) {
@@ -455,6 +466,9 @@ impl DashboardApp {
 
     fn apply_focus_selection(&mut self) {
         match self.focus {
+            Focus::Query => {
+                self.focus = Focus::Issues;
+            }
             Focus::Status => {
                 if let Some(option) = self.status_options.get(self.status_index) {
                     self.active_status = option.value.clone();
@@ -531,7 +545,7 @@ impl DashboardApp {
 
     fn summary_line(&self) -> String {
         format!(
-            "Visible issues: {}/{} | Search: {} | Status: {} | Estimate: {}",
+            "Visible issues: {}/{} | Search: {} | Status: {} | Estimate: {} | Focus: {}",
             self.visible_issue_results().len(),
             self.data.issues.len(),
             if self.query.value().trim().is_empty() {
@@ -544,7 +558,14 @@ impl DashboardApp {
                 EstimateFilter::All => "All estimates".to_string(),
                 EstimateFilter::Unestimated => "Unestimated".to_string(),
                 EstimateFilter::Exact(value) => format!("{value} pts"),
-            }
+            },
+            match self.focus {
+                Focus::Query => "search",
+                Focus::Status => "status",
+                Focus::Estimate => "estimate",
+                Focus::Issues => "issues",
+                Focus::Preview => "preview",
+            },
         )
     }
 
@@ -622,6 +643,18 @@ impl DashboardApp {
         } else {
             self.issue_index = self.issue_index.min(len - 1);
         }
+    }
+}
+
+fn navigation_action(key: KeyEvent, app: &DashboardApp) -> Option<DashboardAction> {
+    if app.focus == Focus::Query {
+        return None;
+    }
+
+    match app.keybindings.navigation_direction(key) {
+        Some(NavigationDirection::Up) => Some(DashboardAction::Up),
+        Some(NavigationDirection::Down) => Some(DashboardAction::Down),
+        _ => None,
     }
 }
 
@@ -807,19 +840,19 @@ mod tests {
     use super::{
         DashboardAction, DashboardApp, DashboardOptions, EstimateFilter, Focus, preview_viewport,
         run_dashboard,
+        navigation_action,
     };
     use crate::linear::DashboardData;
     use crate::tui::fields::InputFieldState;
     use ratatui::layout::Rect;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn dashboard_state_applies_status_and_estimate_filters() {
-        let mut app = DashboardApp::new(DashboardData::demo(), None);
+        let mut app = DashboardApp::new(DashboardData::demo(), None, false);
 
         assert_eq!(visible_issue_ids(&app), vec!["MET-11", "MET-12"]);
 
-        app.apply(DashboardAction::Tab);
-        assert_eq!(app.focus, Focus::Preview);
         app.apply(DashboardAction::Tab);
         assert_eq!(app.focus, Focus::Status);
         app.apply(DashboardAction::Down);
@@ -839,7 +872,11 @@ mod tests {
 
     #[test]
     fn dashboard_honors_initial_state_filter() {
-        let app = DashboardApp::new(DashboardData::demo(), Some("In Progress".to_string()));
+        let app = DashboardApp::new(
+            DashboardData::demo(),
+            Some("In Progress".to_string()),
+            false,
+        );
 
         assert_eq!(app.active_status.as_deref(), Some("In Progress"));
         assert_eq!(visible_issue_ids(&app), vec!["MET-11"]);
@@ -847,7 +884,7 @@ mod tests {
 
     #[test]
     fn dashboard_search_filters_visible_issue_results() {
-        let mut app = DashboardApp::new(DashboardData::demo(), None);
+        let mut app = DashboardApp::new(DashboardData::demo(), None, false);
         app.query = InputFieldState::new("tests");
 
         assert_eq!(visible_issue_ids(&app), vec!["MET-12"]);
@@ -855,7 +892,7 @@ mod tests {
 
     #[test]
     fn dashboard_search_zero_results_updates_preview_copy() {
-        let mut app = DashboardApp::new(DashboardData::demo(), None);
+        let mut app = DashboardApp::new(DashboardData::demo(), None, false);
         app.query = InputFieldState::new("zzz");
 
         assert!(visible_issue_ids(&app).is_empty());
@@ -863,6 +900,32 @@ mod tests {
             format!("{:?}", app.preview_text())
                 .contains("No issues match the current search and filters.")
         );
+    }
+
+    #[test]
+    fn dashboard_vim_keys_remain_literal_while_query_is_focused() {
+        let mut app = DashboardApp::new(DashboardData::demo(), None, true);
+
+        assert!(app.handle_query_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.query.value(), "j");
+        assert!(
+            navigation_action(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &app)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dashboard_vim_keys_navigate_after_leaving_query_focus() {
+        let mut app = DashboardApp::new(DashboardData::demo(), None, true);
+        app.focus = Focus::Issues;
+
+        assert!(matches!(
+            navigation_action(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &app),
+            Some(DashboardAction::Down)
+        ));
+        app.apply(DashboardAction::Down);
+        assert_eq!(visible_issue_ids(&app), vec!["MET-11", "MET-12"]);
+        assert_eq!(app.issue_index, 1);
     }
 
     #[test]
@@ -878,6 +941,7 @@ mod tests {
                 height: 30,
                 actions: Vec::new(),
                 initial_state_filter: None,
+                vim_mode: false,
             },
         )
         .expect("render once should succeed")
@@ -900,7 +964,8 @@ mod tests {
                 .join("\n"),
         );
         let viewport = preview_viewport(Rect::new(0, 0, 120, 20));
-        let mut app = DashboardApp::new(data, None);
+        let mut app = DashboardApp::new(data, None, false);
+        app.apply_in_viewport(DashboardAction::Enter, viewport);
         app.apply_in_viewport(DashboardAction::Tab, viewport);
         app.apply_in_viewport(DashboardAction::End, viewport);
 

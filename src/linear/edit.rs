@@ -20,6 +20,7 @@ use ratatui::{Frame, Terminal};
 use super::WorkflowState;
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
+use crate::tui::keybindings::KeybindingPolicy;
 
 #[derive(Debug, Clone)]
 pub struct IssueEditFormContext {
@@ -45,6 +46,7 @@ pub struct IssueEditFormOptions {
     pub width: u16,
     pub height: u16,
     pub actions: Vec<IssueEditAction>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +120,7 @@ const PRIORITY_OPTIONS: [PriorityOption; 5] = [
 
 #[derive(Debug, Clone)]
 struct IssueEditApp {
+    keybindings: KeybindingPolicy,
     context: IssueEditFormContext,
     step: EditStep,
     step_focus: StatusPriorityFocus,
@@ -135,6 +138,7 @@ pub fn run_issue_edit_form(
     options: IssueEditFormOptions,
 ) -> Result<IssueEditFormExit> {
     let mut app = IssueEditApp::new(context, prefill)?;
+    app.keybindings = KeybindingPolicy::new(options.vim_mode);
 
     if options.render_once {
         return render_once(app, options);
@@ -351,7 +355,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layou
             "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the description or review pane is hovered. Enter advances. Tab/Shift+Tab switches fields."
         }
         EditStep::StatusPriority => {
-            "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Esc cancels."
+            if app.keybindings.vim_mode_enabled() {
+                "Use Up/Down/j/k in the active list. Left/Right/h/l switches focus. Enter submits. Esc cancels."
+            } else {
+                "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Esc cancels."
+            }
         }
     };
 
@@ -378,6 +386,7 @@ impl IssueEditApp {
         let selected_priority = select_priority_index(prefill.priority);
 
         Ok(Self {
+            keybindings: KeybindingPolicy::new(false),
             context,
             step: EditStep::Title,
             step_focus: StatusPriorityFocus::State,
@@ -403,10 +412,25 @@ impl IssueEditApp {
         key: KeyEvent,
         viewport: ratatui::layout::Rect,
     ) -> Option<IssueEditFormExit> {
+        if self.step == EditStep::StatusPriority {
+            if let Some(delta) = self.keybindings.vertical_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueEditAction::Up
+                } else {
+                    IssueEditAction::Down
+                });
+            }
+            if let Some(delta) = self.keybindings.horizontal_delta(key) {
+                return self.apply_action(if delta < 0 {
+                    IssueEditAction::Left
+                } else {
+                    IssueEditAction::Right
+                });
+            }
+        }
         if self.handle_text_navigation_key(key, viewport) {
             return None;
         }
-
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(IssueEditFormExit::Cancelled)
@@ -845,6 +869,7 @@ mod tests {
     use crate::linear::WorkflowState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use crate::tui::keybindings::KeybindingPolicy;
 
     fn context() -> IssueEditFormContext {
         IssueEditFormContext {
@@ -1191,5 +1216,46 @@ mod tests {
 
         assert_eq!(app.title.value(), "Line one Line two");
         assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn issue_edit_app_vim_keys_remain_literal_in_text_inputs() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: String::new(),
+                description: None,
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.keybindings = KeybindingPolicy::new(true);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.title.value(), "j");
+    }
+
+    #[test]
+    fn issue_edit_app_vim_keys_navigate_status_priority_lists() {
+        let mut app = IssueEditApp::new(
+            context(),
+            IssueEditFormPrefill {
+                title: "Add docs".to_string(),
+                description: None,
+                state: Some("Todo".to_string()),
+                priority: Some(1),
+            },
+        )
+        .expect("app should build");
+        app.keybindings = KeybindingPolicy::new(true);
+        app.step = EditStep::StatusPriority;
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(app.step_focus, super::StatusPriorityFocus::Priority);
+        assert_eq!(app.selected_priority, 2);
     }
 }

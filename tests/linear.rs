@@ -704,7 +704,7 @@ fn linear_issue_list_render_once_launches_issue_browser_filters() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Status [focus]"))
+        .stdout(predicate::str::contains("Estimate [focus]"))
         .stdout(predicate::str::contains("Visible issues: 1/2"))
         .stdout(predicate::str::contains("MET-12"))
         .stdout(predicate::str::contains("MET-11").not());
@@ -1206,7 +1206,7 @@ fn dashboard_render_once_uses_ratatui_snapshot_output() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Description Preview [focus]"))
+        .stdout(predicate::str::contains("Status [focus]"))
         .stdout(predicate::str::contains("MET-11"))
         .stdout(predicate::str::contains("Wheel scroll preview"));
 }

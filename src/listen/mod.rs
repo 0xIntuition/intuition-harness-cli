@@ -73,6 +73,7 @@ pub struct ListenDashboardData {
     pub scope: String,
     pub watch_scope: String,
     pub cycle_summary: String,
+    pub vim_mode: bool,
     pub runtime: ListenRuntimeSummary,
     pub pending_issues: Vec<PendingIssue>,
     pub sessions: Vec<AgentSession>,
@@ -325,6 +326,14 @@ struct DashboardRuntimeContext {
     dashboard_label: &'static str,
     dashboard_refresh_seconds: u64,
     linear_refresh_seconds: u64,
+    vim_mode: bool,
+}
+
+struct ListenLoopConfig {
+    poll_interval_seconds: u64,
+    started_at_epoch_seconds: u64,
+    refresh_immediately: bool,
+    vim_mode: bool,
 }
 
 #[derive(Debug, Default)]
@@ -2381,6 +2390,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     dashboard_label: "terminal snapshot",
                     dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
+                    vim_mode: app_config.vim_mode_enabled(),
                 },
             );
             println!(
@@ -2400,6 +2410,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                     dashboard_label: "terminal summary",
                     dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                     linear_refresh_seconds: poll_interval_seconds,
+                    vim_mode: app_config.vim_mode_enabled(),
                 },
             );
             println!("{}", data.render_summary());
@@ -2409,10 +2420,13 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         let initial_cycle = cycle.clone();
         run_live_loop(
             args,
-            poll_interval_seconds,
-            demo_now - 7_351,
+            ListenLoopConfig {
+                poll_interval_seconds,
+                started_at_epoch_seconds: demo_now - 7_351,
+                refresh_immediately: false,
+                vim_mode: app_config.vim_mode_enabled(),
+            },
             initial_cycle,
-            false,
             move || {
                 let cycle = cycle.clone();
                 async move { Ok(cycle) }
@@ -2545,6 +2559,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 dashboard_label: "terminal snapshot",
                 dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
+                vim_mode: daemon.app_config.vim_mode_enabled(),
             },
         );
         println!(
@@ -2566,6 +2581,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 dashboard_label: "terminal summary",
                 dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds: 0,
+                vim_mode: daemon.app_config.vim_mode_enabled(),
             },
         );
         println!("{}", data.render_summary());
@@ -2585,10 +2601,13 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let mut codex_live_tokens = CodexLiveTokenHydrator::new();
     run_live_loop(
         args,
-        poll_interval_seconds,
-        started_at_epoch_seconds,
+        ListenLoopConfig {
+            poll_interval_seconds,
+            started_at_epoch_seconds,
+            refresh_immediately: true,
+            vim_mode: daemon.app_config.vim_mode_enabled(),
+        },
         initial_cycle,
-        true,
         || daemon.run_cycle(),
         |cycle| {
             cycle.apply_state_snapshot(daemon.store.load_state()?);
@@ -2672,10 +2691,8 @@ fn clear_selector(args: &ListenSessionClearArgs) -> SessionSelector {
 
 async fn run_live_loop<F, Fut, S>(
     _args: &ListenRunArgs,
-    poll_interval_seconds: u64,
-    started_at_epoch_seconds: u64,
+    loop_config: ListenLoopConfig,
     initial_cycle: ListenCycleData,
-    refresh_immediately: bool,
     mut next_cycle: F,
     mut refresh_dashboard_state: S,
 ) -> Result<()>
@@ -2687,19 +2704,20 @@ where
     let _initial_data = build_dashboard_data(
         &initial_cycle,
         &DashboardRuntimeContext {
-            started_at_epoch_seconds,
-            now_epoch_seconds: started_at_epoch_seconds,
-            poll_interval_seconds,
+            started_at_epoch_seconds: loop_config.started_at_epoch_seconds,
+            now_epoch_seconds: loop_config.started_at_epoch_seconds,
+            poll_interval_seconds: loop_config.poll_interval_seconds,
             dashboard_label: "terminal dashboard (TUI)",
             dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
-            linear_refresh_seconds: if refresh_immediately {
+            linear_refresh_seconds: if loop_config.refresh_immediately {
                 0
             } else {
-                poll_interval_seconds
+                loop_config.poll_interval_seconds
             },
+            vim_mode: loop_config.vim_mode,
         },
     );
-    let linear_refresh_interval = Duration::from_secs(poll_interval_seconds);
+    let linear_refresh_interval = Duration::from_secs(loop_config.poll_interval_seconds);
     let terminal_refresh_interval = Duration::from_secs(TERMINAL_REFRESH_INTERVAL_SECONDS);
 
     let mut stdout = io::stdout();
@@ -2711,7 +2729,7 @@ where
     let mut terminal = Terminal::new(backend)?;
     let mut cycle = initial_cycle;
     let mut session_view = SessionListView::Active;
-    let mut next_linear_refresh_at = if refresh_immediately {
+    let mut next_linear_refresh_at = if loop_config.refresh_immediately {
         Instant::now()
     } else {
         Instant::now() + linear_refresh_interval
@@ -2727,17 +2745,18 @@ where
         let data = build_dashboard_data(
             &cycle,
             &DashboardRuntimeContext {
-                started_at_epoch_seconds,
+                started_at_epoch_seconds: loop_config.started_at_epoch_seconds,
                 now_epoch_seconds: now,
-                poll_interval_seconds,
+                poll_interval_seconds: loop_config.poll_interval_seconds,
                 dashboard_label: "terminal dashboard (TUI)",
                 dashboard_refresh_seconds: TERMINAL_REFRESH_INTERVAL_SECONDS,
                 linear_refresh_seconds,
+                vim_mode: loop_config.vim_mode,
             },
         );
         terminal.draw(|frame| dashboard::render(frame, &data, session_view))?;
 
-        if drain_dashboard_input(&mut session_view)? {
+        if drain_dashboard_input(&mut session_view, loop_config.vim_mode)? {
             break;
         }
 
@@ -2770,7 +2789,7 @@ where
     Ok(())
 }
 
-fn drain_dashboard_input(session_view: &mut SessionListView) -> Result<bool> {
+fn drain_dashboard_input(session_view: &mut SessionListView, vim_mode: bool) -> Result<bool> {
     while event::poll(Duration::ZERO)? {
         let Event::Key(key) = event::read()? else {
             continue;
@@ -2785,9 +2804,13 @@ fn drain_dashboard_input(session_view: &mut SessionListView) -> Result<bool> {
         }
         if matches!(key.code, KeyCode::Tab) {
             *session_view = session_view.toggle();
-        } else if matches!(key.code, KeyCode::Left) {
+        } else if matches!(key.code, KeyCode::Left)
+            || (vim_mode && matches!(key.code, KeyCode::Char('h')))
+        {
             *session_view = SessionListView::Active;
-        } else if matches!(key.code, KeyCode::Right) {
+        } else if matches!(key.code, KeyCode::Right)
+            || (vim_mode && matches!(key.code, KeyCode::Char('l')))
+        {
             *session_view = SessionListView::Completed;
         }
     }
@@ -2837,6 +2860,7 @@ fn build_dashboard_data(
             session_counts.completed,
             cycle.claimed_this_cycle
         ),
+        vim_mode: runtime.vim_mode,
         runtime: ListenRuntimeSummary {
             agents: format!(
                 "{} active / {} completed / {} queued",
@@ -3597,6 +3621,7 @@ mod tests {
             dashboard_label: "terminal snapshot",
             dashboard_refresh_seconds: 1,
             linear_refresh_seconds: 5,
+            vim_mode: false,
         };
 
         let dashboard = super::build_dashboard_data(&cycle, &runtime);
