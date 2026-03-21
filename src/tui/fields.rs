@@ -654,7 +654,6 @@ impl InputFieldState {
         self.handle_key_with_viewport(key, 1, 1)
     }
 
-    #[cfg(test)]
     pub(crate) fn handle_key_with_width(&mut self, key: KeyEvent, width: u16) -> bool {
         self.handle_key_with_viewport(key, width, 1)
     }

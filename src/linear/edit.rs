@@ -336,12 +336,9 @@ fn render_priorities(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::l
 }
 
 fn render_summary(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layout::Rect) {
-    let paragraph = scrollable_paragraph(
-        app.summary_text(),
-        "Review [scroll]",
-        &app.summary_scroll,
-    )
-        .wrap(Wrap { trim: false });
+    let paragraph =
+        scrollable_paragraph(app.summary_text(), "Review [scroll]", &app.summary_scroll)
+            .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
@@ -468,14 +465,11 @@ impl IssueEditApp {
             return false;
         }
 
-        if self
-            .summary_scroll
-            .apply_mouse_in_viewport(
-                mouse,
-                summary_viewport,
-                self.summary_content_rows(summary_viewport.width),
-            )
-        {
+        if self.summary_scroll.apply_mouse_in_viewport(
+            mouse,
+            summary_viewport,
+            self.summary_content_rows(summary_viewport.width),
+        ) {
             return true;
         }
 

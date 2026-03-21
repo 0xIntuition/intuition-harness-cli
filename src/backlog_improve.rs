@@ -1167,7 +1167,11 @@ fn run_improvement_review_dashboard(
 fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(0), Constraint::Length(9)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(0),
+            Constraint::Length(9),
+        ])
         .split(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1203,19 +1207,22 @@ fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) 
     frame.render_widget(left, body[0]);
 
     let right = if app.questions.is_empty() {
-        paragraph(render_review_preview(app), panel_title("Proposal Preview", false))
-            .wrap(Wrap { trim: false })
+        paragraph(
+            render_review_preview(app),
+            panel_title("Proposal Preview", false),
+        )
+        .wrap(Wrap { trim: false })
     } else {
-        paragraph(render_questions_panel(app), panel_title("Follow-up Questions", true))
-            .wrap(Wrap { trim: false })
+        paragraph(
+            render_questions_panel(app),
+            panel_title("Follow-up Questions", true),
+        )
+        .wrap(Wrap { trim: false })
     };
     frame.render_widget(right, body[1]);
 
-    let footer = paragraph(
-        render_decision_panel(app),
-        panel_title("Decision", false),
-    )
-    .wrap(Wrap { trim: false });
+    let footer = paragraph(render_decision_panel(app), panel_title("Decision", false))
+        .wrap(Wrap { trim: false });
     frame.render_widget(footer, outer[2]);
 }
 
@@ -1234,7 +1241,12 @@ fn review_key_hints(
     } else {
         match route {
             ImprovementRoute::ReadyForUpdate => {
-                vec![("Enter", "apply"), ("s", "skip"), ("r", "reject"), ("q", "exit")]
+                vec![
+                    ("Enter", "apply"),
+                    ("s", "skip"),
+                    ("r", "reject"),
+                    ("q", "exit"),
+                ]
             }
             ImprovementRoute::NeedsQuestions => {
                 vec![
@@ -1285,12 +1297,16 @@ fn render_decision_panel(app: &ImprovementReviewApp) -> Text<'static> {
         Line::from(vec![
             badge("s", Tone::Muted),
             Span::raw(" "),
-            Span::raw("Skip this issue for now. Keep the artifacts, make no local or Linear changes, and move to the next issue."),
+            Span::raw(
+                "Skip this issue for now. Keep the artifacts, make no local or Linear changes, and move to the next issue.",
+            ),
         ]),
         Line::from(vec![
             badge("r", Tone::Danger),
             Span::raw(" "),
-            Span::raw("Reject the recommendation. Record that you chose not to act on this agent guidance and move to the next issue."),
+            Span::raw(
+                "Reject the recommendation. Record that you chose not to act on this agent guidance and move to the next issue.",
+            ),
         ]),
         Line::from(""),
         Line::from(status),
@@ -1422,25 +1438,34 @@ fn render_review_preview(app: &ImprovementReviewApp) -> Text<'static> {
         ]),
         Line::from(""),
         Line::from(Span::styled("Description diff", label_style())),
-        Line::from(
-            render_text_diff(
-                "linear/current",
-                "linear/proposed",
-                app.issue.description.as_deref().unwrap_or_default(),
-                &proposed_description,
-            ),
-        ),
+        Line::from(render_text_diff(
+            "linear/current",
+            "linear/proposed",
+            app.issue.description.as_deref().unwrap_or_default(),
+            &proposed_description,
+        )),
     ])
 }
 
 fn render_questions_panel(app: &ImprovementReviewApp) -> Text<'static> {
     let mut lines = Vec::new();
     for (index, item) in app.questions.iter().enumerate() {
-        let marker = if index == app.selected_question { ">" } else { " " };
+        let marker = if index == app.selected_question {
+            ">"
+        } else {
+            " "
+        };
         let answer = item.answer.display_value();
-        lines.push(Line::from(format!("{marker} Q{}: {}", index + 1, item.question)));
+        lines.push(Line::from(format!(
+            "{marker} Q{}: {}",
+            index + 1,
+            item.question
+        )));
         if answer.trim().is_empty() {
-            lines.push(Line::from(Span::styled("   _No answer yet_", muted_style())));
+            lines.push(Line::from(Span::styled(
+                "   _No answer yet_",
+                muted_style(),
+            )));
         } else {
             lines.push(Line::from(format!("   {}", answer.replace('\n', "\n   "))));
         }
@@ -1476,9 +1501,7 @@ fn render_follow_up_prompt(
     let answers_block = answers
         .iter()
         .enumerate()
-        .map(|(index, (question, answer))| {
-            format!("{}. Q: {}\nA: {}", index + 1, question, answer)
-        })
+        .map(|(index, (question, answer))| format!("{}. Q: {}\nA: {}", index + 1, question, answer))
         .collect::<Vec<_>>()
         .join("\n\n");
     format!(
@@ -1772,14 +1795,7 @@ async fn improve_issue(
     args: &BacklogImproveArgs,
     progress: Option<&UnboundedSender<ImprovementProgressUpdate>>,
 ) -> Result<ImprovementReport> {
-    let issue_run = analyze_issue(
-        root,
-        issue,
-        related_backlog_issues,
-        args,
-        None,
-        progress,
-    )?;
+    let issue_run = analyze_issue(root, issue, related_backlog_issues, args, None, progress)?;
     let apply = if args.apply && issue_run.output.route() == ImprovementRoute::ReadyForUpdate {
         if let Some(progress) = progress {
             send_improvement_progress(
@@ -1989,21 +2005,24 @@ async fn apply_improvement(
     }
 
     if proposal_has_remote_mutation(&issue_run.output.proposal) {
-        let updated_issue = service.edit_issue(IssueEditSpec {
-            identifier: issue_run.issue.identifier.clone(),
-            title: issue_run.output.proposal.title.clone(),
-            description: issue_run.output.proposal.description.clone(),
-            project: None,
-            state: None,
-            priority: issue_run.output.proposal.priority,
-            estimate: issue_run.output.proposal.estimate,
-            labels: issue_run.output.proposal.labels.clone(),
-            parent_identifier: issue_run.output.proposal.parent_issue_identifier.clone(),
-        }).await;
+        let updated_issue = service
+            .edit_issue(IssueEditSpec {
+                identifier: issue_run.issue.identifier.clone(),
+                title: issue_run.output.proposal.title.clone(),
+                description: issue_run.output.proposal.description.clone(),
+                project: None,
+                state: None,
+                priority: issue_run.output.proposal.priority,
+                estimate: issue_run.output.proposal.estimate,
+                labels: issue_run.output.proposal.labels.clone(),
+                parent_identifier: issue_run.output.proposal.parent_issue_identifier.clone(),
+            })
+            .await;
 
         match updated_issue {
             Ok(updated_issue) => {
-                let issue_dir = PlanningPaths::new(root).backlog_issue_dir(&issue_run.issue.identifier);
+                let issue_dir =
+                    PlanningPaths::new(root).backlog_issue_dir(&issue_run.issue.identifier);
                 save_issue_metadata(&issue_dir, &build_issue_metadata(&updated_issue))?;
                 apply.remote_updated = true;
             }
@@ -2933,7 +2952,9 @@ mod tests {
                 recommendation: Some("Ask the engineer one direct question first.".to_string()),
                 findings: ImprovementFindings::default(),
                 context_requirements: Vec::new(),
-                follow_up_questions: vec!["Which subcommand should own the final apply step?".to_string()],
+                follow_up_questions: vec![
+                    "Which subcommand should own the final apply step?".to_string(),
+                ],
                 proposal: ImprovementProposal::default(),
             },
         )
