@@ -139,7 +139,10 @@ impl EffectiveBranding {
 /// This is a convenience helper for callsites that don't already have resolved config
 /// available. It loads the install-scoped `AppConfig` and repo-scoped `PlanningMeta`
 /// to determine the effective state directory, trying the configured directory first
-/// and falling back to `.metastack`.
+/// and falling back to `.metastack`. When both the configured and default state
+/// directories are missing, it probes the repository root for any dot-directory
+/// containing `meta.json` to handle post-migration scenarios where the install-scoped
+/// config hasn't been updated.
 pub fn discover_effective_branding(root: &Path) -> EffectiveBranding {
     let app_config = AppConfig::load().unwrap_or_default();
     let effective_state_dir = app_config
@@ -148,18 +151,60 @@ pub fn discover_effective_branding(root: &Path) -> EffectiveBranding {
         .as_deref()
         .unwrap_or(DEFAULT_STATE_DIRECTORY);
 
-    // Try loading from the configured state dir first, fall back to default
-    let planning_meta = PlanningMeta::load_from_state_dir(root, effective_state_dir)
-        .or_else(|_| {
-            if effective_state_dir != DEFAULT_STATE_DIRECTORY {
-                PlanningMeta::load(root)
-            } else {
-                Ok(PlanningMeta::default())
-            }
-        })
-        .unwrap_or_default();
+    // Try loading from the configured state dir if its directory exists
+    if root.join(effective_state_dir).is_dir() {
+        if let Ok(meta) = PlanningMeta::load_from_state_dir(root, effective_state_dir) {
+            return EffectiveBranding::resolve(&meta, &app_config);
+        }
+    }
 
-    EffectiveBranding::resolve(&planning_meta, &app_config)
+    // If a non-default dir was configured but missing, try the default
+    if effective_state_dir != DEFAULT_STATE_DIRECTORY && root.join(DEFAULT_STATE_DIRECTORY).is_dir()
+    {
+        if let Ok(meta) = PlanningMeta::load(root) {
+            return EffectiveBranding::resolve(&meta, &app_config);
+        }
+    }
+
+    // Neither configured nor default dir exists - probe for a migrated state directory
+    if let Some(meta) = probe_migrated_state_dir(root) {
+        return EffectiveBranding::resolve(&meta, &app_config);
+    }
+
+    EffectiveBranding::resolve(&PlanningMeta::default(), &app_config)
+}
+
+/// Probes the repository root for a dot-directory containing `meta.json` with
+/// `branding.state_directory` set. This handles the post-migration case where
+/// `.metastack` has been renamed but the install-scoped config hasn't been updated.
+///
+/// Returns `Some(meta)` if exactly one such directory is found, `None` otherwise.
+fn probe_migrated_state_dir(root: &Path) -> Option<PlanningMeta> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut found: Option<PlanningMeta> = None;
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Only consider dot-directories that aren't the default
+        if !name_str.starts_with('.') || name_str == DEFAULT_STATE_DIRECTORY {
+            continue;
+        }
+        if !entry.path().join("meta.json").is_file() {
+            continue;
+        }
+        if let Ok(meta) = PlanningMeta::load_from_state_dir(root, &name_str) {
+            if meta.branding.state_directory.is_some() {
+                if found.is_some() {
+                    // Multiple candidates - ambiguous, bail out
+                    return None;
+                }
+                found = Some(meta);
+            }
+        }
+    }
+
+    found
 }
 
 /// Returns the effective `PlanningPaths` for a repository root by discovering branding.
@@ -335,5 +380,54 @@ mod tests {
             state_directory: ".intuition".to_string(),
         };
         assert_eq!(branding.backlog_display(), ".intuition/backlog");
+    }
+
+    #[test]
+    fn probe_finds_migrated_state_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // Set up a migrated state directory with branding
+        let dir = root.join(".intuition");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut meta = PlanningMeta::default();
+        meta.branding.state_directory = Some(".intuition".to_string());
+        meta.save_to_state_dir(root, ".intuition").unwrap();
+
+        let found = probe_migrated_state_dir(root);
+        assert!(found.is_some());
+        assert_eq!(
+            found.unwrap().branding.state_directory.as_deref(),
+            Some(".intuition")
+        );
+    }
+
+    #[test]
+    fn probe_returns_none_when_multiple_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // Set up two migrated directories - should be ambiguous
+        for name in &[".intuition", ".int"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            let mut meta = PlanningMeta::default();
+            meta.branding.state_directory = Some(name.to_string());
+            meta.save_to_state_dir(root, name).unwrap();
+        }
+
+        let found = probe_migrated_state_dir(root);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn probe_ignores_dot_dirs_without_branding() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // Set up a dot-directory with meta.json but no branding
+        let dir = root.join(".other");
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = PlanningMeta::default();
+        meta.save_to_state_dir(root, ".other").unwrap();
+
+        let found = probe_migrated_state_dir(root);
+        assert!(found.is_none());
     }
 }

@@ -212,10 +212,11 @@ fn run_context_doctor(args: &ContextDoctorArgs) -> Result<String> {
 }
 
 fn diagnose_context(root: &Path) -> Result<DoctorReport> {
-    let planning_meta = PlanningMeta::load(root)?;
-    let app_config = AppConfig::load()?;
-    let branding = crate::branding::EffectiveBranding::resolve(&planning_meta, &app_config);
+    let branding = crate::branding::discover_effective_branding(root);
     let paths = branding.planning_paths(root);
+    let app_config = AppConfig::load()?;
+    let planning_meta = PlanningMeta::load_from_state_dir(root, &branding.state_directory)
+        .unwrap_or_default();
     let workflow_bundle = WorkflowInstructionBundle::load(root, RepoTarget::from_root(root))?;
     let mut issues = Vec::new();
     let mut notices = Vec::new();
