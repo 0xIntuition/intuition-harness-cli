@@ -28,7 +28,6 @@ use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::agents::run_agent_capture;
-use crate::branding::effective_planning_paths;
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, RenderedTemplateFile,
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
@@ -38,6 +37,7 @@ use crate::backlog_defaults::{
     TechnicalTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
     resolve_technical_ticket_defaults, save_remembered_backlog_selection,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::{RunAgentArgs, TechnicalArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,

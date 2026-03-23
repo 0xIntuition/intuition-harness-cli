@@ -1694,9 +1694,7 @@ fn resolve_entry_by_slug(root: &Path, entries: &[BacklogSyncEntry], slug: &str) 
     let entry = entries
         .iter()
         .find(|entry| entry.slug == slug)
-        .ok_or_else(|| {
-            anyhow!("backlog entry `{slug}` was not found under `{sd}/backlog/`")
-        })?;
+        .ok_or_else(|| anyhow!("backlog entry `{slug}` was not found under `{sd}/backlog/`"))?;
     if !entry.issue_dir.starts_with(&paths.backlog_dir) {
         bail!("refusing to use backlog entry outside `{sd}/backlog/`");
     }

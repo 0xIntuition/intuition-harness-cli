@@ -156,7 +156,11 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
     }
 
     let scan_path = paths.scan_path();
-    let scan_status = write_text_file(&scan_path, &context.render_scan_manual(&state_dir_name), true)?;
+    let scan_status = write_text_file(
+        &scan_path,
+        &context.render_scan_manual(&state_dir_name),
+        true,
+    )?;
     let scan_display_path = display_path(&scan_path, &root);
     written_files.push(scan_display_path.clone());
     progress.mark_file_complete(&scan_display_path);
@@ -328,7 +332,13 @@ impl ScanReport {
 }
 
 impl ScanProgress {
-    fn new(repo_name: &str, agent: &str, log_path: String, files: Vec<TrackedScanFile>, state_dir: &str) -> Self {
+    fn new(
+        repo_name: &str,
+        agent: &str,
+        log_path: String,
+        files: Vec<TrackedScanFile>,
+        state_dir: &str,
+    ) -> Self {
         Self {
             repo_name: repo_name.to_string(),
             agent: agent.to_string(),
@@ -625,15 +635,23 @@ impl CodebaseContext {
                     || relative.starts_with("src/bin/")
                     || is_script_entrypoint(relative, path)
             })?,
-            key_source_files: collect_files(root, MAX_KEY_FILES, state_dir_name, |relative, path| {
-                relative.starts_with("src/")
-                    && path
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(|extension| {
-                            matches!(extension, "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go")
-                        })
-            })?,
+            key_source_files: collect_files(
+                root,
+                MAX_KEY_FILES,
+                state_dir_name,
+                |relative, path| {
+                    relative.starts_with("src/")
+                        && path
+                            .extension()
+                            .and_then(|value| value.to_str())
+                            .is_some_and(|extension| {
+                                matches!(
+                                    extension,
+                                    "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go"
+                                )
+                            })
+                },
+            )?,
             test_files: collect_files(root, MAX_KEY_FILES, state_dir_name, |relative, path| {
                 relative.starts_with("tests/")
                     || relative.contains("/tests/")
@@ -995,7 +1013,10 @@ fn collect_manifests(root: &Path, state_dir_name: &str) -> Result<Vec<String>> {
     Ok(manifests.into_iter().collect())
 }
 
-fn collect_stats(root: &Path, state_dir_name: &str) -> Result<(usize, usize, BTreeMap<String, usize>)> {
+fn collect_stats(
+    root: &Path,
+    state_dir_name: &str,
+) -> Result<(usize, usize, BTreeMap<String, usize>)> {
     let mut files = 0;
     let mut directories = 0;
     let mut languages = BTreeMap::new();
@@ -1039,7 +1060,12 @@ fn build_tree(root: &Path, max_depth: usize, state_dir_name: &str) -> Result<Vec
     Ok(lines)
 }
 
-fn collect_files<F>(root: &Path, limit: usize, state_dir_name: &str, mut predicate: F) -> Result<Vec<String>>
+fn collect_files<F>(
+    root: &Path,
+    limit: usize,
+    state_dir_name: &str,
+    mut predicate: F,
+) -> Result<Vec<String>>
 where
     F: FnMut(&str, &Path) -> bool,
 {

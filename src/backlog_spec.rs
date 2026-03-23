@@ -25,10 +25,10 @@ use ratatui::{Frame, Terminal};
 use serde::Deserialize;
 
 use crate::agents::run_agent_capture;
+use crate::branding::effective_planning_paths;
 use crate::cli::{BacklogSpecArgs, RunAgentArgs};
 use crate::config::AGENT_ROUTE_BACKLOG_SPEC;
 use crate::context::load_workflow_contract;
-use crate::branding::effective_planning_paths;
 use crate::fs::{canonicalize_existing_dir, display_path, write_text_file};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::tui::fields::InputFieldState;
@@ -95,10 +95,14 @@ impl SpecMode {
     fn request_help(self, state_dir: &str) -> String {
         match self {
             Self::Create => {
-                format!("Capture the core build intent first. The workflow will ask follow-up questions before drafting `{state_dir}/SPEC.md`.")
+                format!(
+                    "Capture the core build intent first. The workflow will ask follow-up questions before drafting `{state_dir}/SPEC.md`."
+                )
             }
             Self::Improve => {
-                format!("Focus on what should change. The workflow will load the current `{state_dir}/SPEC.md` and revise it in place.")
+                format!(
+                    "Focus on what should change. The workflow will load the current `{state_dir}/SPEC.md` and revise it in place."
+                )
             }
         }
     }
@@ -1083,8 +1087,7 @@ fn render_spec_prompt(
     let repository_snapshot = render_repository_snapshot(root)?;
     let follow_up_block = render_follow_up_block(follow_ups);
     let no_spec_msg = format!("_No existing `{state_dir}/SPEC.md` is present._");
-    let existing_spec_block =
-        existing_spec.unwrap_or(&no_spec_msg);
+    let existing_spec_block = existing_spec.unwrap_or(&no_spec_msg);
     Ok(format!(
         "You are writing `{state_dir}/SPEC.md` for the active repository.\n\n\
 Mode: {}\n\n\
@@ -1341,7 +1344,9 @@ fn render_frame(frame: &mut Frame<'_>, app: &BacklogSpecApp) {
         SpecStage::Request(request) => render_request_frame(frame, request, &app.state_dir),
         SpecStage::Questions(questions) => render_questions_frame(frame, questions, &app.state_dir),
         SpecStage::Loading(loading) => render_loading_frame(frame, loading, &app.state_dir),
-        SpecStage::Review(review) => render_review_frame(frame, review, &app.spec_path, &app.state_dir),
+        SpecStage::Review(review) => {
+            render_review_frame(frame, review, &app.spec_path, &app.state_dir)
+        }
     }
 }
 
@@ -1533,9 +1538,8 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &ReviewApp, spec_path: &Path,
 }
 
 fn render_footer(frame: &mut Frame<'_>, error: Option<&str>, state_dir: &str, area: Rect) {
-    let default_text = format!(
-        "The SPEC flow stays repo-local and only targets `{state_dir}/SPEC.md`.",
-    );
+    let default_text =
+        format!("The SPEC flow stays repo-local and only targets `{state_dir}/SPEC.md`.",);
     let text = match error {
         Some(e) => e.to_string(),
         None => default_text,
@@ -1604,7 +1608,9 @@ mod tests {
         let backend = TestBackend::new(120, 32);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_review_frame(frame, app, Path::new(".metastack/SPEC.md"), ".metastack"))
+            .draw(|frame| {
+                render_review_frame(frame, app, Path::new(".metastack/SPEC.md"), ".metastack")
+            })
             .expect("review frame should render");
         snapshot(terminal.backend())
     }

@@ -345,7 +345,10 @@ fn check_repo_config(checks: &mut Vec<CheckResult>) {
 /// Tries the effective state directory first, then falls back to the default
 /// `.metastack` when a non-default directory is configured. Returns the meta.json
 /// path and the state directory name that was found.
-fn find_state_root(start: &Path, effective_state_dir: &str) -> Option<(std::path::PathBuf, String)> {
+fn find_state_root(
+    start: &Path,
+    effective_state_dir: &str,
+) -> Option<(std::path::PathBuf, String)> {
     // Try the effective state directory first
     if let Some(path) = walk_for_meta_json(start, effective_state_dir) {
         return Some((path, effective_state_dir.to_string()));

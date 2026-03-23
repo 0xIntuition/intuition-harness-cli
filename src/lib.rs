@@ -1,10 +1,10 @@
 mod agent_provider;
 mod agents;
 mod backlog;
-pub mod branding;
 mod backlog_defaults;
 mod backlog_improve;
 mod backlog_spec;
+pub mod branding;
 mod cli;
 mod codebase_context;
 mod config;
@@ -305,7 +305,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 let root = crate::fs::canonicalize_existing_dir(&args.root)?;
                 let report = crate::migrate::migrate_state_root(&root, &args.from, &args.to)?;
                 if args.json {
-                    println!("{}", crate::output::render_json_success("migrate-state", &report)?);
+                    println!(
+                        "{}",
+                        crate::output::render_json_success("migrate-state", &report)?
+                    );
                 } else {
                     println!("{}", report.render());
                 }

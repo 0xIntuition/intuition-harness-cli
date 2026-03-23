@@ -25,9 +25,7 @@ use crate::cron_dashboard::{
     CronInitAction, CronInitFormContext, CronInitFormExit, CronInitFormOptions,
     CronInitFormPrefill, CronInitFormValues, run_cron_init_form,
 };
-use crate::fs::{
-    canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
-};
+use crate::fs::{canonicalize_existing_dir, display_path, ensure_dir, write_text_file};
 use crate::output::render_json_success;
 
 const CRON_README: &str = r#"# Cron Jobs
@@ -313,7 +311,14 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     };
 
     if args.render_once {
-        return match run_cron_init_form(CronInitFormContext { agent_options, state_dir: state_dir.clone() }, prefill, options)? {
+        return match run_cron_init_form(
+            CronInitFormContext {
+                agent_options,
+                state_dir: state_dir.clone(),
+            },
+            prefill,
+            options,
+        )? {
             CronInitFormExit::Snapshot(snapshot) => Ok(snapshot),
             CronInitFormExit::Cancelled => Ok("Cancelled cron init.".to_string()),
             CronInitFormExit::Submitted(values) => {
@@ -325,7 +330,14 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     let can_launch_tui = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let interactive = !args.no_interactive && can_launch_tui;
     let values = if interactive {
-        match run_cron_init_form(CronInitFormContext { agent_options, state_dir: state_dir.clone() }, prefill, options)? {
+        match run_cron_init_form(
+            CronInitFormContext {
+                agent_options,
+                state_dir: state_dir.clone(),
+            },
+            prefill,
+            options,
+        )? {
             CronInitFormExit::Cancelled => return Ok("Cancelled cron init.".to_string()),
             CronInitFormExit::Submitted(values) => values,
             CronInitFormExit::Snapshot(snapshot) => return Ok(snapshot),
@@ -639,7 +651,10 @@ fn load_existing_prefill(root: &Path, name: Option<&str>) -> Result<Option<CronI
         CronDefinitionSource {
             kind: CronDefinitionSourceKind::Repository,
             label: "repository".to_string(),
-            path: effective_planning_paths(root).cron_dir.display().to_string(),
+            path: effective_planning_paths(root)
+                .cron_dir
+                .display()
+                .to_string(),
         },
     )?;
     Ok(Some(CronInitFormPrefill {

@@ -75,7 +75,9 @@ pub(crate) fn load_project_rules_bundle(root: &Path) -> Result<String> {
 }
 
 pub(crate) fn render_repo_map(root: &Path) -> Result<String> {
-    let state_dir_name = crate::branding::effective_planning_paths(root).state_dir_name().to_string();
+    let state_dir_name = crate::branding::effective_planning_paths(root)
+        .state_dir_name()
+        .to_string();
     Ok(CodebaseContext::collect(root, &state_dir_name)?.render_prompt_summary())
 }
 
@@ -215,8 +217,8 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
     let branding = crate::branding::discover_effective_branding(root);
     let paths = branding.planning_paths(root);
     let app_config = AppConfig::load()?;
-    let planning_meta = PlanningMeta::load_from_state_dir(root, &branding.state_directory)
-        .unwrap_or_default();
+    let planning_meta =
+        PlanningMeta::load_from_state_dir(root, &branding.state_directory).unwrap_or_default();
     let workflow_bundle = WorkflowInstructionBundle::load(root, RepoTarget::from_root(root))?;
     let mut issues = Vec::new();
     let mut notices = Vec::new();
@@ -293,7 +295,10 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
     .filter_map(|(_, path)| (!path.is_file()).then(|| display_path(&path, root)))
     .collect::<Vec<_>>();
     if missing_codebase.is_empty() {
-        notices.push(format!("All expected `{}/codebase/*.md` files are present.", branding.state_directory));
+        notices.push(format!(
+            "All expected `{}/codebase/*.md` files are present.",
+            branding.state_directory
+        ));
     } else {
         issues.push(format!(
             "Missing codebase context files: {}. Run `{cmd} context reload --root {}` or `{cmd} context scan --root {}`.",

@@ -280,7 +280,8 @@ pub(crate) fn build_scan_agent_prompt(
     for spec in SCAN_DOCUMENT_PROMPTS {
         lines.extend([
             String::new(),
-            spec.instructions.replace(".metastack/", &format!("{state_dir}/")),
+            spec.instructions
+                .replace(".metastack/", &format!("{state_dir}/")),
         ]);
     }
 

@@ -120,8 +120,8 @@ pub(crate) fn load_repo_scoped_instructions_source(
     root: &Path,
 ) -> Result<Option<InstructionSource>> {
     let branding = discover_effective_branding(root);
-    let planning_meta = PlanningMeta::load_from_state_dir(root, &branding.state_directory)
-        .unwrap_or_default();
+    let planning_meta =
+        PlanningMeta::load_from_state_dir(root, &branding.state_directory).unwrap_or_default();
     let Some(relative_path) = planning_meta
         .listen
         .instructions_path

@@ -212,7 +212,10 @@ mod tests {
         let source = root.join(".metastack");
         fs::create_dir_all(source.join("backlog").join("ENG-1"))?;
         fs::write(source.join("meta.json"), "{}")?;
-        fs::write(source.join("backlog").join("ENG-1").join("index.md"), "# ENG-1")?;
+        fs::write(
+            source.join("backlog").join("ENG-1").join("index.md"),
+            "# ENG-1",
+        )?;
 
         let report = migrate_state_root(root, ".metastack", ".intuition")?;
         assert_eq!(report.status, MigrateStatus::Migrated);
@@ -220,17 +223,20 @@ mod tests {
 
         // Verify destination exists with content
         assert!(root.join(".intuition").join("meta.json").is_file());
-        assert!(root.join(".intuition").join("backlog").join("ENG-1").join("index.md").is_file());
+        assert!(
+            root.join(".intuition")
+                .join("backlog")
+                .join("ENG-1")
+                .join("index.md")
+                .is_file()
+        );
 
         // Verify source is gone
         assert!(!root.join(".metastack").exists());
 
         // Verify meta.json was updated with branding
         let meta = PlanningMeta::load_from_state_dir(root, ".intuition")?;
-        assert_eq!(
-            meta.branding.state_directory.as_deref(),
-            Some(".intuition")
-        );
+        assert_eq!(meta.branding.state_directory.as_deref(), Some(".intuition"));
 
         Ok(())
     }
@@ -293,10 +299,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let result = migrate_state_root(temp.path(), ".metastack", "../escape");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("path separators"));
+        assert!(result.unwrap_err().to_string().contains("path separators"));
     }
 
     #[test]

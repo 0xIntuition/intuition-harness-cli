@@ -21,6 +21,7 @@ use ratatui::{Frame, Terminal};
 use serde::Serialize;
 
 use crate::backlog::template_seed_conflicts;
+use crate::branding::effective_planning_paths;
 use crate::cli::{ConfigEventArg, SetupArgs};
 use crate::config::{
     AppConfig, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
@@ -32,7 +33,6 @@ use crate::config::{
     validate_backlog_default_priority, validate_backlog_labels, validate_fast_plan_question_limit,
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
-use crate::branding::effective_planning_paths;
 use crate::fs::canonicalize_existing_dir;
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
@@ -2449,8 +2449,12 @@ mod tests {
         let mut reader = Cursor::new(b"later\noverwrite\n".to_vec());
         let mut writer = Vec::new();
 
-        let action =
-            prompt_backlog_template_conflicts_with_io(&conflicts, ".metastack", &mut reader, &mut writer)?;
+        let action = prompt_backlog_template_conflicts_with_io(
+            &conflicts,
+            ".metastack",
+            &mut reader,
+            &mut writer,
+        )?;
 
         assert_eq!(action, BacklogTemplateConflictAction::Overwrite);
         let output = String::from_utf8(writer)?;

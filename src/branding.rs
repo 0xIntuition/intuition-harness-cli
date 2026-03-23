@@ -2,9 +2,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::config::{
-    AppConfig, DEFAULT_COMMAND_NAME, DEFAULT_STATE_DIRECTORY, PlanningMeta,
-};
+use crate::config::{AppConfig, DEFAULT_COMMAND_NAME, DEFAULT_STATE_DIRECTORY, PlanningMeta};
 use crate::fs::PlanningPaths;
 
 /// Resolved effective branding and layout settings for the current command invocation.
@@ -221,9 +219,7 @@ pub fn effective_planning_paths(root: &Path) -> PlanningPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        AppConfig, InstallBrandingSettings, PlanningMeta, RepoBrandingSettings,
-    };
+    use crate::config::{AppConfig, InstallBrandingSettings, PlanningMeta, RepoBrandingSettings};
 
     #[test]
     fn default_branding_uses_meta_and_metastack() {
@@ -325,10 +321,7 @@ mod tests {
         };
         let paths = branding.planning_paths(Path::new("/tmp/repo"));
         assert_eq!(paths.metastack_dir, Path::new("/tmp/repo/.intuition"));
-        assert_eq!(
-            paths.backlog_dir,
-            Path::new("/tmp/repo/.intuition/backlog")
-        );
+        assert_eq!(paths.backlog_dir, Path::new("/tmp/repo/.intuition/backlog"));
         assert_eq!(paths.state_dir_name(), ".intuition");
     }
 

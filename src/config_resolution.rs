@@ -8,6 +8,7 @@ use crate::agent_provider::{
     builtin_provider_adapter, builtin_provider_model_keys, builtin_provider_names,
     builtin_provider_reasoning_keys,
 };
+use crate::branding::effective_planning_paths;
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AGENT_ROUTE_AGENTS_REVIEW, AGENT_ROUTE_AGENTS_WORKFLOWS_RUN,
     AGENT_ROUTE_BACKLOG_IMPROVE, AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPEC,
@@ -16,7 +17,6 @@ use crate::config::{
     AgentCommandConfig, AgentRouteConfig, AppConfig, DEFAULT_LINEAR_API_URL, LinearProfileSettings,
     LinearSettings, METASTACK_CONFIG_ENV, PlanningMeta,
 };
-use crate::branding::effective_planning_paths;
 use crate::linear::{LinearService, ReqwestLinearClient};
 
 #[derive(Debug, Clone)]

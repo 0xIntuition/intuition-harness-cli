@@ -17,6 +17,7 @@ use crate::agents::{
     command_args_for_invocation, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::{
     CronApprovalsArgs, CronApproveArgs, CronDaemonArgs, CronRejectArgs, CronResumeArgs,
     CronRunArgs, CronStartArgs, RunAgentArgs,
@@ -24,7 +25,6 @@ use crate::cli::{
 use crate::config::{
     AGENT_ROUTE_RUNTIME_CRON_PROMPT, AppConfig, PlanningMeta, normalize_agent_name,
 };
-use crate::branding::effective_planning_paths;
 use crate::fs::{PlanningPaths, display_path, ensure_dir};
 use crate::output::render_json_success;
 

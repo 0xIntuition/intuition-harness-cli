@@ -35,9 +35,7 @@ use crate::backlog::{
 use crate::branding::effective_planning_paths;
 use crate::cli::{BacklogImproveArgs, BacklogImproveModeArg, RunAgentArgs};
 use crate::config::AGENT_ROUTE_BACKLOG_IMPROVE;
-use crate::fs::{
-    canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
-};
+use crate::fs::{canonicalize_existing_dir, display_path, ensure_dir, write_text_file};
 use crate::linear::browser::{
     IssueSearchResult, render_issue_preview, render_issue_row, search_issues,
 };

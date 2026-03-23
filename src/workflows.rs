@@ -37,9 +37,7 @@ use crate::context::{
     load_codebase_context_bundle, load_effective_instructions, load_project_rules_bundle,
     load_workflow_contract, render_repo_map,
 };
-use crate::fs::{
-    FileWriteStatus, canonicalize_existing_dir, display_path, write_text_file,
-};
+use crate::fs::{FileWriteStatus, canonicalize_existing_dir, display_path, write_text_file};
 use crate::linear::IssueSummary;
 use crate::load_linear_command_context;
 use crate::tui::fields::InputFieldState;

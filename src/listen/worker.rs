@@ -21,11 +21,11 @@ use crate::agents::{
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
 use crate::backlog::load_issue_metadata;
+use crate::branding::effective_planning_paths;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport,
 };
-use crate::branding::effective_planning_paths;
 use crate::fs::{canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
@@ -1015,7 +1015,8 @@ fn execute_agent_turn(
         command.env("METASTACK_LINEAR_BACKLOG_ISSUE_URL", &backlog_issue.url);
         command.env(
             "METASTACK_LINEAR_BACKLOG_PATH",
-            effective_planning_paths(context.workspace_path).backlog_issue_dir(&backlog_issue.identifier),
+            effective_planning_paths(context.workspace_path)
+                .backlog_issue_dir(&backlog_issue.identifier),
         );
     }
     let attachment_context_path =

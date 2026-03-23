@@ -5874,7 +5874,9 @@ fn run_remediation_attempt(
         context.linear_identifier,
     );
     let branding = crate::branding::discover_effective_branding(&workspace_path);
-    let body_path = workspace_path.join(&branding.state_directory).join("review-pr-body.md");
+    let body_path = workspace_path
+        .join(&branding.state_directory)
+        .join("review-pr-body.md");
     ensure_dir(&workspace_path.join(&branding.state_directory))?;
     std::fs::write(&body_path, &pr_body).context("failed to write remediation PR body")?;
 

@@ -1123,9 +1123,7 @@ pub fn validate_branding_settings(
             ));
         }
         if trimmed == "." || trimmed == ".." {
-            return Err(anyhow!(
-                "branding state directory cannot be `.` or `..`"
-            ));
+            return Err(anyhow!("branding state directory cannot be `.` or `..`"));
         }
     }
     Ok(())

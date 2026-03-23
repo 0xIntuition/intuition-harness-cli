@@ -13,11 +13,11 @@ use crate::agents::{
     command_args_for_invocation, format_agent_config_source, resolve_agent_invocation_for_planning,
     validate_invocation_command_surface,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::MergeArgs;
 use crate::config::{
     AGENT_ROUTE_MERGE, AgentConfigOverrides, AppConfig, PlanningMeta, load_required_planning_meta,
 };
-use crate::branding::effective_planning_paths;
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, ensure_dir, ensure_workspace_path_is_safe,
     sibling_workspace_root, write_text_file,

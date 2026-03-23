@@ -26,7 +26,6 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-use crate::branding::effective_planning_paths;
 use crate::agents::{
     AgentContinuation, run_agent_capture, run_agent_capture_with_continuation,
     run_agent_streaming_text_with_continuation,
@@ -40,6 +39,7 @@ use crate::backlog_defaults::{
     PlanTicketResolutionInput, TicketOptionOverrides, load_remembered_backlog_selection,
     resolve_plan_ticket_defaults, save_remembered_backlog_selection,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::{PlanArgs, RunAgentArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
@@ -591,7 +591,13 @@ async fn run_reshape_plan(
     service
         .upsert_workpad_comment(
             &issue,
-            render_reshape_workpad_comment(&issue, &updated_issue, &draft, args.velocity, &state_dir),
+            render_reshape_workpad_comment(
+                &issue,
+                &updated_issue,
+                &draft,
+                args.velocity,
+                &state_dir,
+            ),
         )
         .await?;
 
@@ -1293,9 +1299,9 @@ fn render_reshape_workpad_comment(
         "- Metadata preserved: assignee, labels, project, state, priority, and cycle were left unchanged."
             .to_string(),
     );
-    lines.push(
-        format!("- Local `{state_dir}/backlog/` files were not modified by this reshape flow."),
-    );
+    lines.push(format!(
+        "- Local `{state_dir}/backlog/` files were not modified by this reshape flow."
+    ));
 
     lines.join("\n")
 }

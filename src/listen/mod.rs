@@ -33,6 +33,7 @@ use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, TICKET_DISCUSSION_FILE_NAME,
     TemplateContext, render_template_files, save_issue_metadata, write_issue_description,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::{
     ListenDashboardEventArg, ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs,
     ListenSessionListArgs, ListenSessionResumeArgs, ListenWorkerArgs,
@@ -41,7 +42,6 @@ use crate::config::{
     AppConfig, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, LinearConfig, LinearConfigOverrides,
     ListenAssignmentScope, PlanningListenSettings, PlanningMeta, load_required_planning_meta,
 };
-use crate::branding::effective_planning_paths;
 use crate::fs::{canonicalize_existing_dir, display_path};
 use crate::linear::{
     IssueAssigneeFilter, IssueComment, IssueEditSpec, IssueListFilters, IssueSummary, LinearClient,
@@ -1652,8 +1652,11 @@ where
         .ok();
 
         let timestamp = now_timestamp();
-        let state_dir = effective_planning_paths(&workspace.workspace_path).state_dir_name().to_string();
-        let workpad_body = render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp, &state_dir);
+        let state_dir = effective_planning_paths(&workspace.workspace_path)
+            .state_dir_name()
+            .to_string();
+        let workpad_body =
+            render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp, &state_dir);
         let existing_workpad_comment = active_workpad_comment(&detailed_issue);
         let workpad_reused = existing_workpad_comment.is_some();
         let workpad_comment = if let Some(comment) = existing_workpad_comment {
@@ -2622,8 +2625,11 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
     .ok();
 
     let timestamp = now_timestamp();
-    let state_dir = effective_planning_paths(&workspace.workspace_path).state_dir_name().to_string();
-    let workpad_body = workpad::render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp, &state_dir);
+    let state_dir = effective_planning_paths(&workspace.workspace_path)
+        .state_dir_name()
+        .to_string();
+    let workpad_body =
+        workpad::render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp, &state_dir);
     let existing_workpad_comment = active_workpad_comment(&detailed_issue);
     let workpad_reused = existing_workpad_comment.is_some();
     let workpad_comment = if let Some(comment) = existing_workpad_comment {
@@ -3508,8 +3514,8 @@ fn render_agent_prompt(
         )
     });
     let attachment_context = {
-        let manifest_path =
-            effective_planning_paths(workspace_path).agent_issue_context_manifest_path(&issue.identifier);
+        let manifest_path = effective_planning_paths(workspace_path)
+            .agent_issue_context_manifest_path(&issue.identifier);
         if manifest_path.is_file() {
             format!(
                 "\nAttachment context: {}\nAttachment manifest: {}",
@@ -3746,7 +3752,8 @@ fn render_issue_attachment_manifest(
     summary: &AttachmentContextSummary,
     workspace_path: &Path,
 ) -> String {
-    let context_dir = effective_planning_paths(workspace_path).agent_issue_context_dir(&issue.identifier);
+    let context_dir =
+        effective_planning_paths(workspace_path).agent_issue_context_dir(&issue.identifier);
     let mut lines = vec![
         format!("# Attachment Context for {}", issue.identifier),
         String::new(),

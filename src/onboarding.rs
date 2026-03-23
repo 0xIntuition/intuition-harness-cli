@@ -809,7 +809,9 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             Line::from(
                 "This wizard configures install-scoped defaults shared across all repositories.",
             ),
-            Line::from(format!("Repo-level overrides live in the repo metadata file (e.g. `{DEFAULT_STATE_DIRECTORY}/meta.json`).")),
+            Line::from(format!(
+                "Repo-level overrides live in the repo metadata file (e.g. `{DEFAULT_STATE_DIRECTORY}/meta.json`)."
+            )),
         ],
         OnboardingStep::ApiKey => vec![
             Line::from("Paste a personal or workspace Linear API key."),
