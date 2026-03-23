@@ -16,6 +16,7 @@ use crate::agents::{
     command_args_for_invocation, render_invocation_diagnostics,
     resolve_agent_invocation_for_planning, validate_invocation_command_surface,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::{RunAgentArgs, ScanArgs};
 use crate::config::{
     AGENT_ROUTE_CONTEXT_SCAN, AppConfig, PlanningMeta, detect_supported_agents, resolve_agent_route,
@@ -30,6 +31,10 @@ use crate::scaffold::ensure_planning_layout;
 use crate::scan_dashboard::{ScanDashboard, ScanDashboardData, ScanDashboardRow, ScanItemState};
 use crate::scan_prompts::{build_scan_agent_prompt, scan_document_file_names};
 
+/// Directories always excluded from codebase scans.
+///
+/// The effective state directory (e.g. `.metastack` or `.intuition`) is additionally
+/// excluded at scan time via [`is_excluded_dir`].
 const EXCLUDED_DIRS: &[&str] = &[".git", ".metastack", "node_modules", "target"];
 const MAX_KEY_FILES: usize = 12;
 const SCAN_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(80);
@@ -41,6 +46,7 @@ const STEP_VERIFY_OUTPUTS: usize = 3;
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
     root: PathBuf,
+    state_directory: String,
     agent: String,
     log_path: String,
     written_files: Vec<String>,
@@ -110,15 +116,17 @@ pub fn run_scan(args: &ScanArgs) -> Result<ScanReport> {
 pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<ScanReport> {
     let root = canonicalize_existing_dir(&args.root)?;
     ensure_planning_layout(&root, false)?;
-    let paths = PlanningPaths::new(&root);
+    let paths = effective_planning_paths(&root);
     let context = CodebaseContext::collect(&root)?;
     let agent = resolve_scan_agent_name(&root, route_key)?;
     let log_path = display_path(&paths.scan_log_path(), &root);
+    let state_dir_name = paths.state_dir_name().to_string();
     let mut progress = ScanProgress::new(
         &context.repo_name,
         &agent,
         log_path.clone(),
         tracked_scan_files(&paths, &root),
+        &state_dir_name,
     );
     progress.set_step(
         STEP_COLLECT_FACTS,
@@ -265,6 +273,7 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
 
     Ok(ScanReport {
         root,
+        state_directory: paths.state_dir_name().to_string(),
         agent,
         log_path,
         written_files,
@@ -274,16 +283,17 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
 
 impl ScanReport {
     pub fn render(&self) -> String {
+        let codebase_rel = format!("{}/codebase", self.state_directory);
         let mut lines = vec![format!(
             "Codebase scan completed in {} with agent `{}`.",
-            display_path(&self.root.join(".metastack/codebase"), &self.root),
+            display_path(&self.root.join(&codebase_rel), &self.root),
             self.agent,
         )];
 
         lines.push(String::new());
         lines.push("Steps:".to_string());
         lines.push("  [done] Collect repository facts".to_string());
-        lines.push("  [done] Write `.metastack/codebase/SCAN.md`".to_string());
+        lines.push(format!("  [done] Write `{codebase_rel}/SCAN.md`"));
         lines.push(format!(
             "  [done] Refresh reusable codebase docs with agent `{}`",
             self.agent
@@ -317,7 +327,7 @@ impl ScanReport {
 }
 
 impl ScanProgress {
-    fn new(repo_name: &str, agent: &str, log_path: String, files: Vec<TrackedScanFile>) -> Self {
+    fn new(repo_name: &str, agent: &str, log_path: String, files: Vec<TrackedScanFile>, state_dir: &str) -> Self {
         Self {
             repo_name: repo_name.to_string(),
             agent: agent.to_string(),
@@ -329,7 +339,7 @@ impl ScanProgress {
                     state: ScanItemState::Running,
                 },
                 ScanProgressEntry {
-                    label: "Write `.metastack/codebase/SCAN.md`".to_string(),
+                    label: format!("Write `{state_dir}/codebase/SCAN.md`"),
                     detail: "Preparing the deterministic scan snapshot".to_string(),
                     state: ScanItemState::Pending,
                 },

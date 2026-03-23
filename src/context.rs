@@ -12,7 +12,7 @@ use crate::codebase_context::{
 };
 use crate::config::AGENT_ROUTE_CONTEXT_RELOAD;
 use crate::config::{AppConfig, PlanningMeta, detect_supported_agents};
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
+use crate::fs::{canonicalize_existing_dir, display_path};
 use crate::repo_target::RepoTarget;
 use crate::scan::{CodebaseContext, run_scan, run_scan_for_route};
 use crate::workflow_contract::{
@@ -213,14 +213,16 @@ fn run_context_doctor(args: &ContextDoctorArgs) -> Result<String> {
 fn diagnose_context(root: &Path) -> Result<DoctorReport> {
     let planning_meta = PlanningMeta::load(root)?;
     let app_config = AppConfig::load()?;
-    let paths = PlanningPaths::new(root);
+    let branding = crate::branding::EffectiveBranding::resolve(&planning_meta, &app_config);
+    let paths = branding.planning_paths(root);
     let workflow_bundle = WorkflowInstructionBundle::load(root, RepoTarget::from_root(root))?;
     let mut issues = Vec::new();
     let mut notices = Vec::new();
+    let cmd = &branding.command_name;
 
     if !paths.meta_path().is_file() {
         issues.push(format!(
-            "Missing `{}`. Run `meta runtime setup --root {}` to bootstrap repo-scoped defaults.",
+            "Missing `{}`. Run `{cmd} runtime setup --root {}` to bootstrap repo-scoped defaults.",
             display_path(&paths.meta_path(), root),
             root.display()
         ));
@@ -263,8 +265,9 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
             ));
         } else {
             issues.push(format!(
-                "Configured instructions file `{}` is missing. Update `.metastack/meta.json` or create the file.",
-                display_path(&instructions_path, root)
+                "Configured instructions file `{}` is missing. Update `{}` or create the file.",
+                display_path(&instructions_path, root),
+                branding.meta_json_display()
             ));
         }
     } else {
@@ -288,10 +291,10 @@ fn diagnose_context(root: &Path) -> Result<DoctorReport> {
     .filter_map(|(_, path)| (!path.is_file()).then(|| display_path(&path, root)))
     .collect::<Vec<_>>();
     if missing_codebase.is_empty() {
-        notices.push("All expected `.metastack/codebase/*.md` files are present.".to_string());
+        notices.push(format!("All expected `{}/codebase/*.md` files are present.", branding.state_directory));
     } else {
         issues.push(format!(
-            "Missing codebase context files: {}. Run `meta context reload --root {}` or `meta context scan --root {}`.",
+            "Missing codebase context files: {}. Run `{cmd} context reload --root {}` or `{cmd} context scan --root {}`.",
             missing_codebase.join(", "),
             root.display(),
             root.display()
@@ -370,6 +373,7 @@ impl DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::PlanningPaths;
     use std::fs;
 
     #[test]

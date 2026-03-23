@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use crate::cli::DoctorArgs;
 use crate::config::{
-    AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta, detect_supported_agents,
-    resolve_config_path,
+    AppConfig, DEFAULT_STATE_DIRECTORY, LinearConfig, LinearConfigOverrides, PlanningMeta,
+    detect_supported_agents, resolve_config_path,
 };
 
 /// Status of a single doctor check.
@@ -297,12 +297,19 @@ fn check_repo_config(checks: &mut Vec<CheckResult>) {
         Err(_) => return,
     };
 
-    let meta_json = find_metastack_root(&cwd);
-    let Some(meta_json_path) = meta_json else {
+    let app_config = AppConfig::load().unwrap_or_default();
+    let effective_state_dir = app_config
+        .branding
+        .state_directory
+        .as_deref()
+        .unwrap_or(DEFAULT_STATE_DIRECTORY);
+
+    let meta_json = find_state_root(&cwd, effective_state_dir);
+    let Some((meta_json_path, state_dir_name)) = meta_json else {
         checks.push(CheckResult {
             name: "repo_config".to_string(),
             status: CheckStatus::Warn,
-            message: "not inside a repo with `.metastack/meta.json`".to_string(),
+            message: format!("not inside a repo with `{effective_state_dir}/meta.json`"),
         });
         return;
     };
@@ -312,13 +319,13 @@ fn check_repo_config(checks: &mut Vec<CheckResult>) {
         .and_then(Path::parent)
         .unwrap_or(&cwd);
 
-    match PlanningMeta::load(root) {
+    match PlanningMeta::load_from_state_dir(root, &state_dir_name) {
         Ok(_) => {
             checks.push(CheckResult {
                 name: "repo_config".to_string(),
                 status: CheckStatus::Pass,
                 message: format!(
-                    "`.metastack/meta.json` is valid ({})",
+                    "`{state_dir_name}/meta.json` is valid ({})",
                     meta_json_path.display()
                 ),
             });
@@ -327,17 +334,36 @@ fn check_repo_config(checks: &mut Vec<CheckResult>) {
             checks.push(CheckResult {
                 name: "repo_config".to_string(),
                 status: CheckStatus::Fail,
-                message: format!("`.metastack/meta.json` failed to parse: {err}"),
+                message: format!("`{state_dir_name}/meta.json` failed to parse: {err}"),
             });
         }
     }
 }
 
-/// Walk upward from `start` looking for `.metastack/meta.json`.
-fn find_metastack_root(start: &Path) -> Option<std::path::PathBuf> {
+/// Walk upward from `start` looking for `<state_dir>/meta.json`.
+///
+/// Tries the effective state directory first, then falls back to the default
+/// `.metastack` when a non-default directory is configured. Returns the meta.json
+/// path and the state directory name that was found.
+fn find_state_root(start: &Path, effective_state_dir: &str) -> Option<(std::path::PathBuf, String)> {
+    // Try the effective state directory first
+    if let Some(path) = walk_for_meta_json(start, effective_state_dir) {
+        return Some((path, effective_state_dir.to_string()));
+    }
+    // Fall back to default if a custom directory was configured
+    if effective_state_dir != DEFAULT_STATE_DIRECTORY {
+        if let Some(path) = walk_for_meta_json(start, DEFAULT_STATE_DIRECTORY) {
+            return Some((path, DEFAULT_STATE_DIRECTORY.to_string()));
+        }
+    }
+    None
+}
+
+/// Walk upward from `start` looking for `<state_dir>/meta.json`.
+fn walk_for_meta_json(start: &Path, state_dir: &str) -> Option<std::path::PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        let candidate = current.join(".metastack").join("meta.json");
+        let candidate = current.join(state_dir).join("meta.json");
         if candidate.is_file() {
             return Some(candidate);
         }

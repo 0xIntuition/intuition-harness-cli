@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::config::DEFAULT_STATE_DIRECTORY;
+
 #[derive(Debug, Clone)]
 pub struct PlanningPaths {
     pub metastack_dir: PathBuf,
@@ -25,8 +27,17 @@ pub struct PlanningPaths {
 }
 
 impl PlanningPaths {
+    /// Creates planning paths using the default `.metastack` state directory.
     pub fn new(root: &Path) -> Self {
-        let metastack_dir = root.join(".metastack");
+        Self::with_state_dir(root, DEFAULT_STATE_DIRECTORY)
+    }
+
+    /// Creates planning paths using a custom state directory name.
+    ///
+    /// The `state_dir_name` is a single directory name (e.g. `.intuition`) that will be
+    /// joined directly under `root`. It must not contain path separators.
+    pub fn with_state_dir(root: &Path, state_dir_name: &str) -> Self {
+        let metastack_dir = root.join(state_dir_name);
         let agent_dir = metastack_dir.join("agents");
         let backlog_dir = metastack_dir.join("backlog");
         let merge_runs_dir = metastack_dir.join("merge-runs");
@@ -61,6 +72,14 @@ impl PlanningPaths {
             improve_dir,
             improve_sessions_dir,
         }
+    }
+
+    /// Returns the effective state directory name (e.g. `.metastack` or `.intuition`).
+    pub fn state_dir_name(&self) -> &str {
+        self.metastack_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(DEFAULT_STATE_DIRECTORY)
     }
 
     pub fn scan_path(&self) -> PathBuf {

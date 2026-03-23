@@ -1,6 +1,7 @@
 mod agent_provider;
 mod agents;
 mod backlog;
+pub mod branding;
 mod backlog_defaults;
 mod backlog_improve;
 mod backlog_spec;
@@ -20,6 +21,7 @@ mod linear;
 mod listen;
 mod merge;
 mod merge_dashboard;
+mod migrate;
 mod onboarding;
 mod output;
 mod plan;
@@ -297,6 +299,15 @@ async fn dispatch(cli: Cli) -> Result<()> {
             RuntimeCommands::Cron(args) => {
                 if let Some(output) = run_cron(&args)? {
                     println!("{output}");
+                }
+            }
+            RuntimeCommands::MigrateState(args) => {
+                let root = crate::fs::canonicalize_existing_dir(&args.root)?;
+                let report = crate::migrate::migrate_state_root(&root, &args.from, &args.to)?;
+                if args.json {
+                    println!("{}", crate::output::render_json_success("migrate-state", &report)?);
+                } else {
+                    println!("{}", report.render());
                 }
             }
         },

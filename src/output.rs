@@ -186,6 +186,8 @@ fn classify_error_code(
         || combined.contains("default agent")
         || combined.contains("meta runtime config")
         || combined.contains(".metastack/meta.json")
+        || combined.contains("repo metadata file")
+        || combined.contains("/meta.json")
     {
         "configuration_error"
     } else {

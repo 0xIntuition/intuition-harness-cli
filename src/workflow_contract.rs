@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::branding::discover_effective_branding;
 use crate::config::PlanningMeta;
 use crate::fs::display_path;
 use crate::repo_target::RepoTarget;
@@ -11,7 +12,11 @@ const BUILTIN_WORKFLOW_CONTRACT: &str =
     include_str!("artifacts/injected-agent-workflow-contract.md");
 const NO_REPO_OVERLAYS_MESSAGE: &str = "_No repo overlay files were found. `AGENTS.md` and legacy `WORKFLOW.md` are optional additive inputs._";
 const NO_REPO_SCOPED_INSTRUCTIONS_MESSAGE: &str =
-    "_No repo-scoped instructions file is configured in `.metastack/meta.json`._";
+    "_No repo-scoped instructions file is configured in the repo metadata file._";
+
+fn format_no_repo_scoped_instructions_message(meta_json_display: &str) -> String {
+    format!("_No repo-scoped instructions file is configured in `{meta_json_display}`._")
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct InstructionSource {
@@ -78,7 +83,12 @@ impl WorkflowInstructionBundle {
                 lines.push(String::new());
                 lines.push(source.contents.clone());
             }
-            None => lines.push(NO_REPO_SCOPED_INSTRUCTIONS_MESSAGE.to_string()),
+            None => {
+                let branding = discover_effective_branding(self.repo_target.repo_root());
+                lines.push(format_no_repo_scoped_instructions_message(
+                    &branding.meta_json_display(),
+                ));
+            }
         }
 
         lines.join("\n")
@@ -109,7 +119,9 @@ pub(crate) fn load_repo_overlay_sources(root: &Path) -> Result<Vec<InstructionSo
 pub(crate) fn load_repo_scoped_instructions_source(
     root: &Path,
 ) -> Result<Option<InstructionSource>> {
-    let planning_meta = PlanningMeta::load(root)?;
+    let branding = discover_effective_branding(root);
+    let planning_meta = PlanningMeta::load_from_state_dir(root, &branding.state_directory)
+        .unwrap_or_default();
     let Some(relative_path) = planning_meta
         .listen
         .instructions_path
@@ -169,7 +181,12 @@ pub(crate) fn render_repo_overlay_bundle(root: &Path) -> Result<String> {
 pub(crate) fn render_repo_scoped_instructions(root: &Path) -> Result<String> {
     match load_repo_scoped_instructions_source(root)? {
         Some(source) => Ok(source.contents),
-        None => Ok(NO_REPO_SCOPED_INSTRUCTIONS_MESSAGE.to_string()),
+        None => {
+            let branding = discover_effective_branding(root);
+            Ok(format_no_repo_scoped_instructions_message(
+                &branding.meta_json_display(),
+            ))
+        }
     }
 }
 

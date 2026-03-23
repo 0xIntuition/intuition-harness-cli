@@ -808,7 +808,7 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             Line::from(
                 "This wizard configures install-scoped defaults shared across all repositories.",
             ),
-            Line::from("Repo-level overrides live in `.metastack/meta.json`."),
+            Line::from("Repo-level overrides live in the repo metadata file (e.g. `.metastack/meta.json`)."),
         ],
         OnboardingStep::ApiKey => vec![
             Line::from("Paste a personal or workspace Linear API key."),
@@ -824,7 +824,7 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
         ],
         OnboardingStep::Team => vec![
             Line::from("Choose exactly one install default team."),
-            Line::from("Repo-scoped `.metastack/meta.json` can still override this later."),
+            Line::from("Repo-scoped metadata can still override this later."),
         ],
         OnboardingStep::Project => vec![
             Line::from("Choose an install default project, or press Enter to skip."),
@@ -865,7 +865,7 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
         ],
         OnboardingStep::PlanLabel => vec![
             Line::from("Default label for issues created by `meta backlog plan`."),
-            Line::from("Repo defaults still win when `.metastack/meta.json` sets one."),
+            Line::from("Repo defaults still win when the repo metadata file sets one."),
         ],
         OnboardingStep::TechnicalLabel => vec![
             Line::from("Default label for issues created by `meta backlog tech`."),

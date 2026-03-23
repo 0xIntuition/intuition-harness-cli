@@ -32,7 +32,8 @@ use crate::config::{
     validate_backlog_default_priority, validate_backlog_labels, validate_fast_plan_question_limit,
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir};
+use crate::branding::effective_planning_paths;
+use crate::fs::canonicalize_existing_dir;
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
@@ -338,7 +339,7 @@ fn resolve_backlog_template_conflicts(
     args: &SetupArgs,
     can_launch_tui: bool,
 ) -> Result<BacklogTemplateConflictAction> {
-    let conflicts = template_seed_conflicts(&PlanningPaths::new(root).backlog_template_dir)?;
+    let conflicts = template_seed_conflicts(&effective_planning_paths(root).backlog_template_dir)?;
     if conflicts.is_empty() {
         return Ok(BacklogTemplateConflictAction::Skip);
     }
@@ -422,7 +423,7 @@ fn load_view(root: &std::path::Path) -> Result<SetupViewData> {
     Ok(SetupViewData {
         root: root.to_path_buf(),
         config_path: crate::config::resolve_config_path()?,
-        metastack_meta_path: PlanningPaths::new(root).meta_path(),
+        metastack_meta_path: effective_planning_paths(root).meta_path(),
         app_config: AppConfig::load()?,
         app_config_changed: false,
         planning_meta: PlanningMeta::load(root)?,
@@ -531,6 +532,14 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         )
     ));
     lines.push(format!(
+        "Repo command name: {}",
+        display_optional(view.planning_meta.branding.command_name.as_deref())
+    ));
+    lines.push(format!(
+        "Repo state directory: {}",
+        display_optional(view.planning_meta.branding.state_directory.as_deref())
+    ));
+    lines.push(format!(
         "Backlog default assignee: {}",
         display_optional(view.planning_meta.backlog.default_assignee.as_deref())
     ));
@@ -610,6 +619,8 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.plan_fast_questions.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
+        || args.command_name.is_some()
+        || args.state_directory.is_some()
         || args.default_assignee.is_some()
         || args.default_state.is_some()
         || args.default_priority.is_some()
@@ -739,6 +750,12 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     }
     if let Some(label) = &args.technical_label {
         view.planning_meta.issue_labels.technical = normalize_optional(label);
+    }
+    if let Some(command_name) = &args.command_name {
+        view.planning_meta.branding.command_name = normalize_optional(command_name);
+    }
+    if let Some(state_directory) = &args.state_directory {
+        view.planning_meta.branding.state_directory = normalize_optional(state_directory);
     }
     if let Some(assignee) = &args.default_assignee {
         view.planning_meta.backlog.default_assignee = normalize_optional(assignee);
@@ -1573,7 +1590,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
     let header = Paragraph::new(Text::from(vec![
         Line::from("Meta Setup"),
         Line::from(
-            "Configure repo-scoped defaults stored in `.metastack/meta.json` after install onboarding is complete.",
+            "Configure repo-scoped defaults stored in the repo metadata file after install onboarding is complete.",
         ),
         Line::from(format!(
             "Detected supported agents on PATH: {}",
@@ -1886,7 +1903,7 @@ fn render_select_panel(frame: &mut Frame<'_>, area: Rect, title: &str, field: &S
 
 fn render_save_panel(frame: &mut Frame<'_>, area: Rect) {
     let paragraph = Paragraph::new(Text::from(vec![
-        Line::from("Press Enter to save repo-scoped defaults to `.metastack/meta.json`."),
+        Line::from("Press Enter to save repo-scoped defaults to the repo metadata file."),
         Line::from("Project names are resolved before setup is persisted."),
     ]))
     .block(Block::default().borders(Borders::ALL).title("Save"))

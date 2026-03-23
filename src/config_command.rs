@@ -263,6 +263,14 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         display_optional(view.app_config.defaults.issue_labels.technical.as_deref())
     ));
     lines.push(format!(
+        "Install command name: {}",
+        display_optional(view.app_config.branding.command_name.as_deref())
+    ));
+    lines.push(format!(
+        "Install state directory: {}",
+        display_optional(view.app_config.branding.state_directory.as_deref())
+    ));
+    lines.push(format!(
         "Default Linear profile: {}",
         display_optional(view.app_config.linear.default_profile.as_deref())
     ));
@@ -457,6 +465,8 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.vim_mode.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
+        || args.command_name.is_some()
+        || args.state_directory.is_some()
         || args.default_profile.is_some()
         || args.default_agent.is_some()
         || args.default_model.is_some()
@@ -540,6 +550,12 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
     }
     if let Some(technical_label) = &args.technical_label {
         view.app_config.defaults.issue_labels.technical = normalize_optional(technical_label);
+    }
+    if let Some(command_name) = &args.command_name {
+        view.app_config.branding.command_name = normalize_optional(command_name);
+    }
+    if let Some(state_directory) = &args.state_directory {
+        view.app_config.branding.state_directory = normalize_optional(state_directory);
     }
     if let Some(default_profile) = &args.default_profile {
         let normalized = normalize_optional(default_profile);

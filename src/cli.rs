@@ -95,7 +95,7 @@ Interactive dashboard:
   - Use Up/Down (or j/k in vim mode) to navigate, PgUp/PgDn to scroll detail content
   - Press P to pause a running session, R to resume a paused session or retry a blocked one
   - Use --hide-active-issues or --hide-preview to simplify the dashboard layout
-  - Configure defaults in .metastack/meta.json under listen.dashboard_active_issues and listen.dashboard_preview
+  - Configure defaults in the repo metadata file under listen.dashboard_active_issues and listen.dashboard_preview
 
 Terminal-only examples:
   meta agents listen --check --root .
@@ -260,7 +260,7 @@ pub enum Command {
     /// Hidden worker used by `meta listen` to supervise repeated agent turns.
     #[command(hide = true)]
     ListenWorker(ListenWorkerArgs),
-    /// Create the local .metastack workspace and reusable templates.
+    /// Create the local repo-scoped workspace and reusable templates.
     #[command(hide = true)]
     Scaffold(ScaffoldArgs),
     /// Run environment health checks for tools, config, and service connectivity.
@@ -269,7 +269,7 @@ pub enum Command {
 
 #[derive(Debug, Clone, Args)]
 pub struct ScaffoldArgs {
-    /// Repository root where the `.metastack/` workspace should be created.
+    /// Repository root where the repo-local state directory should be created.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     /// Replace any scaffold-managed files that already exist.
@@ -296,7 +296,7 @@ pub struct ScanArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct RepositoryRootArgs {
-    /// Repository root containing the `.metastack/` workspace.
+    /// Repository root containing the repo-local state directory.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
 }
@@ -310,7 +310,7 @@ pub struct BacklogArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum BacklogCommands {
-    /// Create or improve the repo-local `.metastack/SPEC.md` through a staged workflow.
+    /// Create or improve the repo-local SPEC.md through a staged workflow.
     Spec(BacklogSpecArgs),
     /// Plan a backlog request into one or more Linear backlog issues.
     Plan(PlanArgs),
@@ -474,7 +474,7 @@ pub struct ExecuteArgs {
     /// Linear issue identifier to execute, for example MET-45.
     #[arg(value_name = "ISSUE_ID")]
     pub issue: String,
-    /// Repository root containing the `.metastack` workspace.
+    /// Repository root containing the repo-local state directory.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     /// Linear API token. Falls back to LINEAR_API_KEY.
@@ -511,7 +511,7 @@ pub struct ExecuteArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ImproveArgs {
-    /// Repository root containing the `.metastack/` workspace.
+    /// Repository root containing the repo-local state directory.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: std::path::PathBuf,
     /// Render the dashboard once and print a deterministic snapshot.
@@ -725,7 +725,7 @@ pub struct ContextDoctorArgs {
 #[derive(Debug, Clone, Args)]
 #[command(after_help = MERGE_HELP_EXAMPLES)]
 pub struct MergeArgs {
-    /// Repository root containing the `.metastack` workspace.
+    /// Repository root containing the repo-local state directory.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     /// Emit the discovered repository and open pull request metadata as JSON.
@@ -734,7 +734,7 @@ pub struct MergeArgs {
     /// Skip the one-shot dashboard and run the selected pull requests directly.
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
-    /// Resume an existing merge run by run id under `.metastack/merge-runs/<RUN_ID>/`.
+    /// Resume an existing merge run by run id under the repo-local state directory.
     #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["json", "render_once", "pull_requests"])]
     pub resume_run: Option<String>,
     /// Repeatable pull request number used with `--no-interactive`.
@@ -768,7 +768,7 @@ pub struct MergeArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct CronArgs {
-    /// Repository root containing the `.metastack/cron/` workspace.
+    /// Repository root containing the repo-local cron directory.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     #[command(subcommand)]
@@ -786,10 +786,28 @@ pub struct RuntimeArgs {
 pub enum RuntimeCommands {
     /// Configure install-scoped MetaStack CLI defaults.
     Config(ConfigArgs),
-    /// Setup repo-scoped MetaStack defaults and scaffold `.metastack/`.
+    /// Setup repo-scoped MetaStack defaults and scaffold the repo-local state directory.
     Setup(SetupArgs),
     /// Create and supervise repository-local cron jobs.
     Cron(CronArgs),
+    /// Migrate repo-local state from one directory to another (e.g. `.metastack` to `.intuition`).
+    MigrateState(MigrateStateArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MigrateStateArgs {
+    /// Repository root containing the source state directory.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Source state directory name to migrate from.
+    #[arg(long, default_value = ".metastack")]
+    pub from: String,
+    /// Destination state directory name to migrate to.
+    #[arg(long)]
+    pub to: String,
+    /// Emit the result as JSON instead of plain text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -824,7 +842,7 @@ pub enum CronCommands {
 
 #[derive(Debug, Clone, Args)]
 pub struct CronInitArgs {
-    /// Cron job name used for `.metastack/cron/<NAME>.md`. Required with `--no-interactive`.
+    /// Cron job name used for the repo-local cron file. Required with `--no-interactive`.
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
     /// Cron expression using the standard 5-field form. Required with `--no-interactive`.
@@ -1093,6 +1111,12 @@ pub struct ConfigArgs {
     /// Update the install-scoped default technical label.
     #[arg(long)]
     pub technical_label: Option<String>,
+    /// Update the install-scoped default CLI command name shown in help and generated artifacts.
+    #[arg(long)]
+    pub command_name: Option<String>,
+    /// Update the install-scoped default repo-local state directory name (e.g. `.intuition`).
+    #[arg(long)]
+    pub state_directory: Option<String>,
     /// Set or update an advanced agent route override for a family key like `backlog` or a command key like `backlog.plan`.
     #[arg(long)]
     pub route: Option<String>,
@@ -1134,7 +1158,7 @@ pub struct ConfigArgs {
 #[derive(Debug, Clone, Args)]
 #[command(after_help = RUNTIME_SETUP_HELP)]
 pub struct SetupArgs {
-    /// Repository root containing `.metastack/meta.json`.
+    /// Repository root containing repo-scoped metadata.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     /// Update the project-specific Linear API key stored in install-scoped CLI config.
@@ -1194,6 +1218,12 @@ pub struct SetupArgs {
     /// Update the default label applied to issues created by `meta backlog tech`.
     #[arg(long)]
     pub technical_label: Option<String>,
+    /// Update the repo-scoped CLI command name shown in help and generated artifacts.
+    #[arg(long)]
+    pub command_name: Option<String>,
+    /// Update the repo-scoped state directory name (e.g. `.intuition`).
+    #[arg(long)]
+    pub state_directory: Option<String>,
     /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
     pub default_assignee: Option<String>,
@@ -1343,7 +1373,7 @@ pub struct ListenRunArgs {
     /// Filter watched work to a single Linear project.
     #[arg(long)]
     pub project: Option<String>,
-    /// Repository root containing the `.metastack` workspace.
+    /// Repository root containing the repo-local state directory.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     /// Maximum number of Todo issues loaded from Linear per poll.
@@ -1501,9 +1531,9 @@ pub struct SyncArgs {
 pub enum SyncCommands {
     /// Link an existing backlog entry to a Linear issue.
     Link(SyncLinkArgs),
-    /// Show sync state for backlog entries under `.metastack/backlog/`.
+    /// Show sync state for backlog entries under the repo-local backlog directory.
     Status(SyncStatusArgs),
-    /// Pull a Linear issue into `.metastack/backlog/<ISSUE_ID>/`.
+    /// Pull a Linear issue into the repo-local backlog directory.
     Pull(SyncPullArgs),
     /// Push CLI-managed backlog files back to Linear. `index.md` stays local unless `--update-description` is passed.
     Push(SyncPushArgs),
@@ -1514,7 +1544,7 @@ pub struct SyncLinkArgs {
     /// Existing issue identifier, for example MET-35. Prompts in a TTY when omitted.
     #[arg(value_name = "IDENTIFIER")]
     pub issue: Option<String>,
-    /// Existing backlog entry slug under `.metastack/backlog/`. Prompts in a TTY when omitted.
+    /// Existing backlog entry slug under the repo-local backlog directory. Prompts in a TTY when omitted.
     #[arg(long, value_name = "SLUG")]
     pub entry: Option<String>,
     /// Immediately pull the linked issue into the selected backlog entry.
@@ -1549,7 +1579,7 @@ pub struct SyncPushArgs {
     /// Push every linked backlog entry.
     #[arg(long, conflicts_with = "issue")]
     pub all: bool,
-    /// Also update the Linear issue description from `.metastack/backlog/<ISSUE>/index.md`.
+    /// Also update the Linear issue description from the repo-local backlog entry.
     #[arg(long)]
     pub update_description: bool,
 }
@@ -1620,7 +1650,7 @@ pub struct RetroArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ReviewRunArgs {
-    /// Repository root containing the `.metastack` workspace.
+    /// Repository root containing the repo-local state directory.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
     /// Show planned execution and resolved provider/model/reasoning without mutating GitHub or Linear.
@@ -1707,7 +1737,7 @@ pub struct LinearClientArgs {
     /// Override the named Linear profile used for this command.
     #[arg(long)]
     pub profile: Option<String>,
-    /// Repository root containing the `.metastack/meta.json` defaults.
+    /// Repository root containing repo-scoped metadata defaults.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,
 }

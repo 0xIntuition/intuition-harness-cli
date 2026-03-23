@@ -150,12 +150,22 @@ pub fn no_agent_selected_route_key(error: &anyhow::Error) -> Option<&str> {
 pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<PlanningMeta> {
     let meta_path = PlanningPaths::new(root).meta_path();
     if !meta_path.is_file() {
+        let effective_cmd = resolve_effective_command_name(root);
         return Err(anyhow!(
-            "`meta {command_name}` requires repo setup. Run `meta runtime setup --root {}` and rerun.",
+            "`{effective_cmd} {command_name}` requires repo setup. Run `{effective_cmd} runtime setup --root {}` and rerun.",
             root.display()
         ));
     }
     PlanningMeta::load(root)
+}
+
+/// Resolves the effective CLI command name for error messages.
+///
+/// Attempts to load install-scoped config branding, falling back to `"meta"`.
+fn resolve_effective_command_name(root: &Path) -> String {
+    let app_config = AppConfig::load().unwrap_or_default();
+    let planning_meta = PlanningMeta::load(root).unwrap_or_default();
+    planning_meta.effective_command_name(&app_config)
 }
 
 /// Ensures repo-scoped issue labels exist when Linear auth and a default team are available.

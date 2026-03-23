@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::backlog::template_seed_files;
+use crate::branding::effective_planning_paths;
 use crate::cli::ScaffoldArgs;
 use crate::fs::{
     FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir,
@@ -43,7 +44,7 @@ pub fn ensure_planning_layout(root: &Path, force: bool) -> Result<()> {
 }
 
 fn ensure_layout(root: &Path, force: bool, include_cron: bool) -> Result<ScaffoldReport> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     migrate_legacy_agent_layout(&paths)?;
     let mut report = ScaffoldReport {
         root: root.to_path_buf(),
@@ -91,7 +92,7 @@ fn ensure_layout(root: &Path, force: bool, include_cron: bool) -> Result<Scaffol
 pub fn ensure_backlog_templates(root: &Path, force: bool) -> Result<()> {
     ensure_planning_layout(root, false)?;
 
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_dir(&paths.backlog_template_dir)?;
 
     for (path, contents) in template_seed_files(&paths) {

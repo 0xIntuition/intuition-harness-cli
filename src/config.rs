@@ -57,6 +57,11 @@ pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
 pub const AGENT_ROUTE_AGENTS_REVIEW: &str = "agents.review";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
 
+/// The canonical CLI command name used when no branding override is configured.
+pub const DEFAULT_COMMAND_NAME: &str = "meta";
+/// The default repo-local state directory name used when no branding override is configured.
+pub const DEFAULT_STATE_DIRECTORY: &str = ".metastack";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
@@ -71,6 +76,8 @@ pub struct AppConfig {
     pub defaults: InstallDefaults,
     #[serde(default)]
     pub onboarding: OnboardingSettings,
+    #[serde(default)]
+    pub branding: InstallBrandingSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -89,6 +96,8 @@ pub struct PlanningMeta {
     pub plan: PlanningPlanSettings,
     #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
+    #[serde(default)]
+    pub branding: RepoBrandingSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -136,6 +145,34 @@ pub struct InstallUiSettings {
 pub struct OnboardingSettings {
     #[serde(default)]
     pub completed: bool,
+}
+
+/// Install-scoped branding and repo-local layout defaults.
+///
+/// These settings provide fallback values when a repository does not specify its own
+/// branding/layout overrides. The install-scoped config directory and environment
+/// variable naming (`METASTACK_CONFIG`) are not affected by these settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallBrandingSettings {
+    /// The effective CLI command name shown in help text, errors, and generated artifacts.
+    /// Defaults to `"meta"` when unset.
+    pub command_name: Option<String>,
+    /// The repo-local state directory name (e.g. `.intuition`).
+    /// Defaults to `".metastack"` when unset.
+    pub state_directory: Option<String>,
+}
+
+/// Repo-scoped branding and layout overrides persisted in the repo metadata file.
+///
+/// These take precedence over install-scoped branding defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepoBrandingSettings {
+    /// The effective CLI command name for this repository.
+    /// Overrides the install-scoped default when set.
+    pub command_name: Option<String>,
+    /// The repo-local state directory name for this repository (e.g. `.intuition`).
+    /// Overrides the install-scoped default when set.
+    pub state_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -530,6 +567,10 @@ impl AppConfig {
         self.validate_global_agent_defaults()?;
         self.validate_agent_routes()?;
         self.merge.validate()?;
+        validate_branding_settings(
+            self.branding.command_name.as_deref(),
+            self.branding.state_directory.as_deref(),
+        )?;
         Ok(())
     }
 
@@ -627,8 +668,14 @@ impl AppConfig {
 }
 
 impl PlanningMeta {
+    /// Loads repo-scoped planning metadata from the default `.metastack/meta.json` path.
     pub fn load(root: &Path) -> Result<Self> {
-        let path = PlanningPaths::new(root).meta_path();
+        Self::load_from_state_dir(root, DEFAULT_STATE_DIRECTORY)
+    }
+
+    /// Loads repo-scoped planning metadata from a specific state directory.
+    pub fn load_from_state_dir(root: &Path, state_dir: &str) -> Result<Self> {
+        let path = PlanningPaths::with_state_dir(root, state_dir).meta_path();
 
         match fs::read_to_string(&path) {
             Ok(contents) => {
@@ -646,9 +693,15 @@ impl PlanningMeta {
         }
     }
 
+    /// Saves repo-scoped planning metadata under the default `.metastack/meta.json` path.
     pub fn save(&self, root: &Path) -> Result<PathBuf> {
+        self.save_to_state_dir(root, DEFAULT_STATE_DIRECTORY)
+    }
+
+    /// Saves repo-scoped planning metadata under a specific state directory.
+    pub fn save_to_state_dir(&self, root: &Path, state_dir: &str) -> Result<PathBuf> {
         self.validate().context("planning metadata is invalid")?;
-        let path = PlanningPaths::new(root).meta_path();
+        let path = PlanningPaths::with_state_dir(root, state_dir).meta_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create `{}`", parent.display()))?;
@@ -801,6 +854,25 @@ impl PlanningMeta {
             .unwrap_or_else(|| self.issue_labels.technical_label())
     }
 
+    /// Resolves the effective CLI command name using repo defaults before install defaults.
+    ///
+    /// Precedence: repo branding -> install branding -> `"meta"`.
+    pub fn effective_command_name(&self, app_config: &AppConfig) -> String {
+        normalize_optional_ref(self.branding.command_name.as_deref())
+            .or_else(|| normalize_optional_ref(app_config.branding.command_name.as_deref()))
+            .unwrap_or_else(|| DEFAULT_COMMAND_NAME.to_string())
+    }
+
+    /// Resolves the effective repo-local state directory name using repo defaults before
+    /// install defaults.
+    ///
+    /// Precedence: repo branding -> install branding -> `".metastack"`.
+    pub fn effective_state_directory(&self, app_config: &AppConfig) -> String {
+        normalize_optional_ref(self.branding.state_directory.as_deref())
+            .or_else(|| normalize_optional_ref(app_config.branding.state_directory.as_deref()))
+            .unwrap_or_else(|| DEFAULT_STATE_DIRECTORY.to_string())
+    }
+
     /// Validates repo-scoped planning metadata before command execution or persistence.
     ///
     /// Returns an error when agent settings or promoted workflow defaults are invalid.
@@ -815,11 +887,11 @@ impl PlanningMeta {
             )?;
         } else if normalize_optional_ref(self.agent.model.as_deref()).is_some() {
             return Err(anyhow!(
-                "repo default model requires a repo default provider under `.metastack/meta.json`"
+                "repo default model requires a repo default provider in the repo metadata file"
             ));
         } else if normalize_optional_ref(self.agent.reasoning.as_deref()).is_some() {
             return Err(anyhow!(
-                "repo default reasoning requires a repo default provider under `.metastack/meta.json`"
+                "repo default reasoning requires a repo default provider in the repo metadata file"
             ));
         }
         if let Some(interval) = self.listen.poll_interval_seconds {
@@ -832,6 +904,10 @@ impl PlanningMeta {
             validate_fast_plan_question_limit(limit)?;
         }
         self.sync.validate()?;
+        validate_branding_settings(
+            self.branding.command_name.as_deref(),
+            self.branding.state_directory.as_deref(),
+        )?;
         Ok(())
     }
 }
@@ -1016,6 +1092,43 @@ impl VelocityDefaults {
         }
         Ok(())
     }
+}
+
+/// Validates branding settings shared between install-scoped and repo-scoped config.
+///
+/// Returns an error when command name or state directory values are invalid.
+pub fn validate_branding_settings(
+    command_name: Option<&str>,
+    state_directory: Option<&str>,
+) -> Result<()> {
+    if let Some(name) = command_name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("branding command name cannot be empty"));
+        }
+        if trimmed.contains(std::path::MAIN_SEPARATOR) || trimmed.contains('/') {
+            return Err(anyhow!(
+                "branding command name must not contain path separators"
+            ));
+        }
+    }
+    if let Some(dir) = state_directory {
+        let trimmed = dir.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("branding state directory cannot be empty"));
+        }
+        if trimmed.contains(std::path::MAIN_SEPARATOR) || trimmed.contains('/') {
+            return Err(anyhow!(
+                "branding state directory must be a single directory name without path separators"
+            ));
+        }
+        if trimmed == "." || trimmed == ".." {
+            return Err(anyhow!(
+                "branding state directory cannot be `.` or `..`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl From<PromptTransportArg> for PromptTransport {
