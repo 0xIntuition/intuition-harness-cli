@@ -9,8 +9,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::branding::{discover_effective_branding, effective_planning_paths};
 use crate::config::resolve_data_root;
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
+use crate::fs::{canonicalize_existing_dir, ensure_dir};
 use crate::listen::compact_session_summary;
 use crate::session_runtime::{
     ActiveSessionFile, WorkflowRootLayout, read_json, read_optional_json_lossy, write_json,
@@ -769,7 +770,8 @@ fn resolve_project_identity(
 ) -> Result<ListenProjectIdentity> {
     let requested_root = canonicalize_existing_dir(root)?;
     let source_root = resolve_source_root(&requested_root)?;
-    let metastack_root = canonicalize_existing_dir(&source_root.join(".metastack"))?;
+    let branding = discover_effective_branding(&source_root);
+    let metastack_root = canonicalize_existing_dir(&source_root.join(&branding.state_directory))?;
     let source_label = source_root
         .file_name()
         .and_then(OsStr::to_str)
@@ -792,7 +794,7 @@ fn resolve_project_identity(
 }
 
 /// Resolves the source repository root for a requested path, collapsing git worktrees back to the
-/// owning repository when the shared `.metastack/` directory lives there.
+/// owning repository when the shared state directory lives there.
 ///
 /// Returns an error when the requested path cannot be resolved.
 pub(crate) fn resolve_source_project_root(root: &Path) -> Result<PathBuf> {
@@ -809,9 +811,11 @@ fn resolve_source_root(root: &Path) -> Result<PathBuf> {
         let common_dir = PathBuf::from(common_dir);
         if common_dir.file_name() == Some(OsStr::new(".git"))
             && let Some(source_root) = common_dir.parent()
-            && source_root.join(".metastack").is_dir()
         {
-            return canonicalize_existing_dir(source_root);
+            let branding = discover_effective_branding(source_root);
+            if source_root.join(&branding.state_directory).is_dir() {
+                return canonicalize_existing_dir(source_root);
+            }
         }
     }
 
@@ -901,7 +905,7 @@ fn build_prompt_context_references(session: &AgentSession) -> Vec<SessionContext
         });
     }
     if let Some(workspace_path) = session.workspace_path.as_deref() {
-        let paths = PlanningPaths::new(Path::new(workspace_path));
+        let paths = effective_planning_paths(Path::new(workspace_path));
         let issue_identifier = session
             .backlog_issue_identifier
             .as_deref()

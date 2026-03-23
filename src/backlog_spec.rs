@@ -28,7 +28,8 @@ use crate::agents::run_agent_capture;
 use crate::cli::{BacklogSpecArgs, RunAgentArgs};
 use crate::config::AGENT_ROUTE_BACKLOG_SPEC;
 use crate::context::load_workflow_contract;
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, write_text_file};
+use crate::branding::effective_planning_paths;
+use crate::fs::{canonicalize_existing_dir, display_path, write_text_file};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::tui::fields::InputFieldState;
 use crate::tui::scroll::{ScrollState, scrollable_content_paragraph, wrapped_rows};
@@ -243,7 +244,7 @@ impl Drop for TerminalCleanup {
 /// the resulting `.metastack/SPEC.md` cannot be written.
 pub async fn run_backlog_spec(args: &BacklogSpecArgs) -> Result<BacklogSpecOutput> {
     let root = canonicalize_existing_dir(&args.root.root)?;
-    let paths = PlanningPaths::new(&root);
+    let paths = effective_planning_paths(&root);
     let spec_path = paths.spec_path();
     let existing_spec = read_optional_spec(&spec_path)?;
     let mode = if existing_spec.is_some() {
@@ -1036,7 +1037,7 @@ fn build_spec_markdown(
 fn render_question_prompt(root: &Path, mode: SpecMode, request: &str) -> Result<String> {
     let workflow_contract = load_workflow_contract(root)?;
     let context = load_context_bundle(root)?;
-    let existing_spec = read_optional_spec(&PlanningPaths::new(root).spec_path())?
+    let existing_spec = read_optional_spec(&effective_planning_paths(root).spec_path())?
         .unwrap_or_else(|| "_No existing `.metastack/SPEC.md` is present._".to_string());
     Ok(format!(
         "You are preparing a staged SPEC interview for the active repository.\n\n\
@@ -1219,7 +1220,7 @@ fn ensure_required_headings(markdown: &str) -> Result<()> {
 }
 
 fn load_context_bundle(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let sections = [
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),

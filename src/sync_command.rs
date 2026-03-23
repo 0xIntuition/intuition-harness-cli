@@ -15,11 +15,10 @@ use crate::backlog::{
     compute_remote_sync_hash, load_issue_metadata, resolve_backlog_sync_status,
     save_issue_metadata, write_issue_attachment_file,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::{LinearClientArgs, SyncLinkArgs, SyncPullArgs, SyncPushArgs, SyncStatusArgs};
 use crate::config::load_required_planning_meta;
-use crate::fs::{
-    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
-};
+use crate::fs::{canonicalize_existing_dir, display_path, ensure_dir, write_text_file};
 use crate::linear::{
     AttachmentCreateRequest, IssueEditSpec, IssueListFilters, IssueSummary, LinearService,
     ProjectRef, ReqwestLinearClient, TeamRef, TicketDiscussionBudgets, WorkflowState,
@@ -536,7 +535,7 @@ pub async fn run_sync_link(
     Ok(())
 }
 
-/// Show the current sync state for every backlog entry under `.metastack/backlog/`.
+/// Show the current sync state for every backlog entry under the backlog directory.
 ///
 /// Returns an error when planning metadata is missing, backlog entries cannot be scanned, or
 /// `--fetch` is used and Linear issue state cannot be loaded.
@@ -547,6 +546,8 @@ pub async fn run_sync_status(
 ) -> Result<()> {
     let root = canonicalize_existing_dir(&client_args.root)?;
     let _planning_meta = load_required_planning_meta(&root, "sync")?;
+    let paths = effective_planning_paths(&root);
+    let state_dir = paths.state_dir_name().to_string();
     let entries = discover_backlog_entries(&root)?;
 
     if entries.is_empty() {
@@ -566,7 +567,7 @@ pub async fn run_sync_status(
                 )?
             );
         } else {
-            println!("No backlog entries found under .metastack/backlog/.");
+            println!("No backlog entries found under {state_dir}/backlog/.");
         }
         return Ok(());
     }
@@ -824,7 +825,8 @@ async fn run_sync_pull_all(
         if json_output {
             emit_sync_batch_result(json_output, "pull", &summary)?;
         } else {
-            println!("No linked backlog entries found under .metastack/backlog/.");
+            let sd = effective_planning_paths(root).state_dir_name().to_string();
+            println!("No linked backlog entries found under {sd}/backlog/.");
         }
         return Ok(());
     }
@@ -900,7 +902,8 @@ async fn run_sync_push_all(
         if json_output {
             emit_sync_batch_result(json_output, "push", &summary)?;
         } else {
-            println!("No linked backlog entries found under .metastack/backlog/.");
+            let sd = effective_planning_paths(root).state_dir_name().to_string();
+            println!("No linked backlog entries found under {sd}/backlog/.");
         }
         return Ok(());
     }
@@ -1531,7 +1534,7 @@ fn sync_dashboard_title(
 }
 
 fn discover_backlog_entries(root: &Path) -> Result<Vec<BacklogSyncEntry>> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     if !paths.backlog_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -1686,17 +1689,16 @@ fn linked_entry_for_issue<'a>(
 }
 
 fn resolve_entry_by_slug(root: &Path, entries: &[BacklogSyncEntry], slug: &str) -> Result<PathBuf> {
+    let paths = effective_planning_paths(root);
+    let sd = paths.state_dir_name();
     let entry = entries
         .iter()
         .find(|entry| entry.slug == slug)
         .ok_or_else(|| {
-            anyhow!("backlog entry `{slug}` was not found under `.metastack/backlog/`")
+            anyhow!("backlog entry `{slug}` was not found under `{sd}/backlog/`")
         })?;
-    if !entry
-        .issue_dir
-        .starts_with(PlanningPaths::new(root).backlog_dir)
-    {
-        bail!("refusing to use backlog entry outside `.metastack/backlog/`");
+    if !entry.issue_dir.starts_with(&paths.backlog_dir) {
+        bail!("refusing to use backlog entry outside `{sd}/backlog/`");
     }
     Ok(entry.issue_dir.clone())
 }

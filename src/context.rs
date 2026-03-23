@@ -75,7 +75,8 @@ pub(crate) fn load_project_rules_bundle(root: &Path) -> Result<String> {
 }
 
 pub(crate) fn render_repo_map(root: &Path) -> Result<String> {
-    Ok(CodebaseContext::collect(root)?.render_prompt_summary())
+    let state_dir_name = crate::branding::effective_planning_paths(root).state_dir_name().to_string();
+    Ok(CodebaseContext::collect(root, &state_dir_name)?.render_prompt_summary())
 }
 
 fn run_context_show(args: &ContextShowArgs) -> Result<String> {

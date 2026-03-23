@@ -8,6 +8,7 @@ use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 use walkdir::WalkDir;
 
+use crate::branding::effective_planning_paths;
 use crate::fs::{PlanningPaths, write_text_file};
 use crate::linear::load_localized_ticket_context_ignored_paths;
 
@@ -274,7 +275,7 @@ pub fn render_template_files(
     root: &Path,
     context: &TemplateContext,
 ) -> Result<Vec<RenderedTemplateFile>> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let context = resolve_template_context(context)?;
     let source_files = if paths.backlog_template_dir.is_dir() {
         read_template_files(&paths.backlog_template_dir)?
@@ -296,7 +297,7 @@ pub fn write_rendered_backlog_item(
     identifier: &str,
     rendered_files: &[RenderedTemplateFile],
 ) -> Result<PathBuf> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let issue_dir = paths.backlog_issue_dir(identifier);
 
     for file in rendered_files {
@@ -307,7 +308,7 @@ pub fn write_rendered_backlog_item(
 }
 
 pub fn backlog_issue_dir(root: &Path, identifier: &str) -> PathBuf {
-    PlanningPaths::new(root).backlog_issue_dir(identifier)
+    effective_planning_paths(root).backlog_issue_dir(identifier)
 }
 
 pub fn backlog_issue_index_path(root: &Path, identifier: &str) -> PathBuf {

@@ -17,6 +17,7 @@ use crate::cli::MergeArgs;
 use crate::config::{
     AGENT_ROUTE_MERGE, AgentConfigOverrides, AppConfig, PlanningMeta, load_required_planning_meta,
 };
+use crate::branding::effective_planning_paths;
 use crate::fs::{
     PlanningPaths, canonicalize_existing_dir, ensure_dir, ensure_workspace_path_is_safe,
     sibling_workspace_root, write_text_file,
@@ -446,7 +447,7 @@ fn execute_merge_run(
     repository: &GithubRepository,
     selected_pull_requests: Vec<GithubPullRequest>,
 ) -> Result<MergeExecution> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_dir(&paths.merge_runs_dir)?;
 
     let (run_id, run_dir) = reserve_run_dir(&paths)?;
@@ -784,7 +785,7 @@ fn resume_merge_run(
     gh: &GhCli,
     run_id: &str,
 ) -> Result<MergeExecution> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let run_dir = paths.merge_run_dir(run_id);
     if !run_dir.is_dir() {
         bail!(

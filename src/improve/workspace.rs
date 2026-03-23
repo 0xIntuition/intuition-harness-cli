@@ -114,7 +114,9 @@ fn refresh_improve_workspace(
         workspace_path,
         &["reset", "--hard", &format!("origin/{source_branch}")],
     )?;
-    run_git(workspace_path, &["clean", "-fd", "--exclude=.metastack/"])?;
+    let state_dir = crate::branding::discover_effective_branding(workspace_path).state_directory;
+    let exclude_flag = format!("--exclude={state_dir}/");
+    run_git(workspace_path, &["clean", "-fd", &exclude_flag])?;
 
     Ok(())
 }

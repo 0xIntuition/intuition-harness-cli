@@ -16,7 +16,7 @@ use crate::config::{
     AgentCommandConfig, AgentRouteConfig, AppConfig, DEFAULT_LINEAR_API_URL, LinearProfileSettings,
     LinearSettings, METASTACK_CONFIG_ENV, PlanningMeta,
 };
-use crate::fs::PlanningPaths;
+use crate::branding::effective_planning_paths;
 use crate::linear::{LinearService, ReqwestLinearClient};
 
 #[derive(Debug, Clone)]
@@ -148,7 +148,7 @@ pub fn no_agent_selected_route_key(error: &anyhow::Error) -> Option<&str> {
 
 /// Loads repo-scoped planning metadata and returns a setup error when the repository is not bootstrapped.
 pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<PlanningMeta> {
-    let meta_path = PlanningPaths::new(root).meta_path();
+    let meta_path = effective_planning_paths(root).meta_path();
     if !meta_path.is_file() {
         let effective_cmd = resolve_effective_command_name(root);
         return Err(anyhow!(

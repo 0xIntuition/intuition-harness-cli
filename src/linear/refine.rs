@@ -15,10 +15,9 @@ use crate::cli::{IssueRefineArgs, LinearClientArgs, RunAgentArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
 };
+use crate::branding::effective_planning_paths;
 use crate::config::AGENT_ROUTE_LINEAR_ISSUES_REFINE;
-use crate::fs::{
-    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
-};
+use crate::fs::{canonicalize_existing_dir, display_path, ensure_dir, write_text_file};
 use crate::output::render_json_success;
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
@@ -167,7 +166,7 @@ async fn refine_issue(
 ) -> Result<RefinementReport> {
     let started_at = now_rfc3339()?;
     let run_id = refinement_run_id()?;
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let issue_dir = paths.backlog_issue_dir(&issue.identifier);
     ensure_dir(&issue_dir)?;
     save_issue_metadata(&issue_dir, &build_issue_metadata(issue))?;
@@ -716,6 +715,7 @@ fn refinement_run_id() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::PlanningPaths;
     use crate::linear::{IssueLink, ProjectRef, TeamRef, WorkflowState};
 
     #[test]

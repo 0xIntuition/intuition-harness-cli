@@ -25,7 +25,8 @@ use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PromptTransport,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
+use crate::branding::effective_planning_paths;
+use crate::fs::{canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
     PullRequestPublishRequest,
@@ -608,7 +609,7 @@ fn load_worker_backlog_issue(
     identifier: &str,
     parent_issue: &IssueSummary,
 ) -> Result<IssueSummary> {
-    let issue_dir = PlanningPaths::new(workspace_path).backlog_issue_dir(identifier);
+    let issue_dir = effective_planning_paths(workspace_path).backlog_issue_dir(identifier);
     let metadata = load_issue_metadata(&issue_dir).ok();
     Ok(IssueSummary {
         id: metadata
@@ -684,7 +685,7 @@ fn write_listener_pull_request_body(
     workspace_path: &Path,
     issue: &IssueSummary,
 ) -> Result<std::path::PathBuf> {
-    let path = PlanningPaths::new(workspace_path)
+    let path = effective_planning_paths(workspace_path)
         .agent_dir
         .join(format!("{}-pull-request.md", issue.identifier));
     write_text_file(&path, &listener_pull_request_body(issue), true)?;
@@ -1014,11 +1015,11 @@ fn execute_agent_turn(
         command.env("METASTACK_LINEAR_BACKLOG_ISSUE_URL", &backlog_issue.url);
         command.env(
             "METASTACK_LINEAR_BACKLOG_PATH",
-            PlanningPaths::new(context.workspace_path).backlog_issue_dir(&backlog_issue.identifier),
+            effective_planning_paths(context.workspace_path).backlog_issue_dir(&backlog_issue.identifier),
         );
     }
     let attachment_context_path =
-        PlanningPaths::new(context.workspace_path).agent_issue_context_dir(&issue.identifier);
+        effective_planning_paths(context.workspace_path).agent_issue_context_dir(&issue.identifier);
     if attachment_context_path.is_dir() {
         command.env(
             "METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH",
@@ -1411,13 +1412,13 @@ fn build_agent_instructions(
         sections.push(format!(
             "A local backlog exists for `{}` in `{}`. Use those files as the task list source of truth, keep them current as you work, and keep the original Linear issue comment updated in place.",
             backlog_issue.identifier,
-            PlanningPaths::new(context.workspace_path)
+            effective_planning_paths(context.workspace_path)
                 .backlog_issue_dir(&backlog_issue.identifier)
                 .display()
         ));
     }
 
-    let manifest_path = PlanningPaths::new(context.workspace_path)
+    let manifest_path = effective_planning_paths(context.workspace_path)
         .agent_issue_context_manifest_path(&issue.identifier);
     if manifest_path.is_file() {
         sections.push(format!(
@@ -1467,7 +1468,7 @@ fn build_worker_session(
         phase,
         summary,
         brief_path: Some(
-            PlanningPaths::new(context.workspace_path)
+            effective_planning_paths(context.workspace_path)
                 .agent_briefs_dir
                 .join(format!("{}.md", issue.identifier))
                 .display()
@@ -1480,7 +1481,7 @@ fn build_worker_session(
             .backlog_issue
             .map(|backlog_issue| backlog_issue.title.clone()),
         backlog_path: context.backlog_issue.map(|backlog_issue| {
-            PlanningPaths::new(context.workspace_path)
+            effective_planning_paths(context.workspace_path)
                 .backlog_issue_dir(&backlog_issue.identifier)
                 .display()
                 .to_string()

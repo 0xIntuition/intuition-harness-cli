@@ -32,10 +32,11 @@ use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, save_issue_metadata,
     write_issue_description,
 };
+use crate::branding::effective_planning_paths;
 use crate::cli::{BacklogImproveArgs, BacklogImproveModeArg, RunAgentArgs};
 use crate::config::AGENT_ROUTE_BACKLOG_IMPROVE;
 use crate::fs::{
-    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
+    canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
 use crate::linear::browser::{
     IssueSearchResult, render_issue_preview, render_issue_row, search_issues,
@@ -2424,7 +2425,7 @@ fn analyze_issue(
 ) -> Result<ImprovementIssueRun> {
     let started_at = now_rfc3339()?;
     let run_id = improvement_run_id()?;
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let issue_dir = paths.backlog_issue_dir(&issue.identifier);
     ensure_dir(&issue_dir)?;
     save_issue_metadata(&issue_dir, &build_issue_metadata(issue))?;
@@ -2596,7 +2597,7 @@ async fn apply_improvement(
         match updated_issue {
             Ok(updated_issue) => {
                 let issue_dir =
-                    PlanningPaths::new(root).backlog_issue_dir(&issue_run.issue.identifier);
+                    effective_planning_paths(root).backlog_issue_dir(&issue_run.issue.identifier);
                 save_issue_metadata(&issue_dir, &build_issue_metadata(&updated_issue))?;
                 apply.remote_updated = true;
             }
@@ -3172,7 +3173,7 @@ fn max_backtick_run(value: &str) -> usize {
 }
 
 fn load_context_bundle(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let sections = [
         ("SCAN.md", paths.scan_path()),
         ("ARCHITECTURE.md", paths.architecture_path()),
@@ -3279,6 +3280,7 @@ fn improvement_run_id() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::PlanningPaths;
     use crate::linear::{IssueLink, LabelRef, ProjectRef, TeamRef, WorkflowState};
     use crossterm::event::KeyEvent;
 

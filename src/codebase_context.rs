@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::branding::effective_planning_paths;
 use crate::fs::PlanningPaths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +73,7 @@ pub(crate) fn codebase_context_paths(
     root: &Path,
     sections: &[CodebaseContextSection],
 ) -> Vec<(&'static str, PathBuf)> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     sections
         .iter()
         .copied()

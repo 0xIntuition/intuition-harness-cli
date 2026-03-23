@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::branding::effective_planning_paths;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir, write_text_file};
 use crate::scaffold::ensure_planning_layout;
 
@@ -26,7 +27,7 @@ pub(crate) struct AgentBriefRequest {
 pub(crate) fn write_agent_brief(root: &Path, request: AgentBriefRequest) -> Result<PathBuf> {
     let root = canonicalize_existing_dir(root)?;
     ensure_planning_layout(&root, false)?;
-    let paths = PlanningPaths::new(&root);
+    let paths = effective_planning_paths(&root);
     ensure_dir(&paths.agent_briefs_dir)?;
 
     let output_path = request.output.clone().unwrap_or_else(|| {

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
+use crate::branding::effective_planning_paths;
 use crate::cli::{
     CronArgs, CronCommands, CronInitArgs, CronInitEventArg, CronListArgs, CronValidateArgs,
 };
@@ -25,7 +26,7 @@ use crate::cron_dashboard::{
     CronInitFormPrefill, CronInitFormValues, run_cron_init_form,
 };
 use crate::fs::{
-    PlanningPaths, canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
+    canonicalize_existing_dir, display_path, ensure_dir, write_text_file,
 };
 use crate::output::render_json_success;
 
@@ -523,7 +524,7 @@ fn write_cron_job(
     force: bool,
     json_output: bool,
 ) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let path = paths.cron_job_path(&values.name);
     let front_matter = CronJobFrontMatter {
         schedule: values.schedule,
@@ -626,7 +627,7 @@ fn load_existing_prefill(root: &Path, name: Option<&str>) -> Result<Option<CronI
         return Ok(None);
     };
 
-    let path = PlanningPaths::new(root).cron_job_path(name);
+    let path = effective_planning_paths(root).cron_job_path(name);
     if !path.exists() {
         return Ok(None);
     }
@@ -637,7 +638,7 @@ fn load_existing_prefill(root: &Path, name: Option<&str>) -> Result<Option<CronI
         CronDefinitionSource {
             kind: CronDefinitionSourceKind::Repository,
             label: "repository".to_string(),
-            path: PlanningPaths::new(root).cron_dir.display().to_string(),
+            path: effective_planning_paths(root).cron_dir.display().to_string(),
         },
     )?;
     Ok(Some(CronInitFormPrefill {
@@ -816,7 +817,7 @@ fn discover_definition_sources(root: &Path) -> Result<Vec<CronDefinitionSource>>
         });
     }
 
-    let repo_root = PlanningPaths::new(root).cron_dir;
+    let repo_root = effective_planning_paths(root).cron_dir;
     sources.push(CronDefinitionSource {
         kind: CronDefinitionSourceKind::Repository,
         label: "repository".to_string(),
@@ -1228,7 +1229,7 @@ fn validate_job_name(name: &str) -> Result<()> {
 }
 
 fn ensure_cron_layout(root: &Path) -> Result<()> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_dir(&paths.metastack_dir)?;
     ensure_dir(&paths.cron_dir)?;
     write_text_file(&paths.cron_readme_path(), CRON_README, false)?;

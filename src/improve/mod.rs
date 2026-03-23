@@ -19,6 +19,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use serde::Deserialize;
 
+use crate::branding::effective_planning_paths;
 use crate::cli::ImproveArgs;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::github_pr::GhCli;
@@ -57,7 +58,7 @@ struct GhPrAuthor {
 /// or the TUI cannot be initialized.
 pub(crate) async fn run_improve(args: &ImproveArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
-    let paths = PlanningPaths::new(&root);
+    let paths = effective_planning_paths(&root);
     let gh = GhCli;
 
     let open_prs = discover_open_prs(&gh, &root)?;

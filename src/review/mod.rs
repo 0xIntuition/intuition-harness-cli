@@ -5873,8 +5873,9 @@ fn run_remediation_attempt(
         context.review_output,
         context.linear_identifier,
     );
-    let body_path = workspace_path.join(".metastack").join("review-pr-body.md");
-    ensure_dir(&workspace_path.join(".metastack"))?;
+    let branding = crate::branding::discover_effective_branding(&workspace_path);
+    let body_path = workspace_path.join(&branding.state_directory).join("review-pr-body.md");
+    ensure_dir(&workspace_path.join(&branding.state_directory))?;
     std::fs::write(&body_path, &pr_body).context("failed to write remediation PR body")?;
 
     let result = gh.publish_branch_pull_request(

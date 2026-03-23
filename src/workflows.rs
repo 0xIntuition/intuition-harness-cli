@@ -38,7 +38,7 @@ use crate::context::{
     load_workflow_contract, render_repo_map,
 };
 use crate::fs::{
-    FileWriteStatus, PlanningPaths, canonicalize_existing_dir, display_path, write_text_file,
+    FileWriteStatus, canonicalize_existing_dir, display_path, write_text_file,
 };
 use crate::linear::IssueSummary;
 use crate::load_linear_command_context;
@@ -1717,7 +1717,7 @@ fn default_output_path(
     workflow: &WorkflowPlaybook,
     values: &BTreeMap<String, String>,
 ) -> PathBuf {
-    let paths = PlanningPaths::new(root);
+    let paths = crate::branding::effective_planning_paths(root);
     let stem = if let Some(parameter) = workflow.linear_issue_parameter.as_deref() {
         values
             .get(parameter)
@@ -1829,7 +1829,7 @@ impl WorkflowLibrary {
             workflows.insert(workflow.name.clone(), workflow);
         }
 
-        let workflows_dir = PlanningPaths::new(root).workflows_dir;
+        let workflows_dir = crate::branding::effective_planning_paths(root).workflows_dir;
         if workflows_dir.is_dir() {
             for entry in WalkDir::new(&workflows_dir) {
                 let entry = entry?;

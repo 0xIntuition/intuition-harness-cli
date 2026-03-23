@@ -24,6 +24,7 @@ use crate::cli::{
 use crate::config::{
     AGENT_ROUTE_RUNTIME_CRON_PROMPT, AppConfig, PlanningMeta, normalize_agent_name,
 };
+use crate::branding::effective_planning_paths;
 use crate::fs::{PlanningPaths, display_path, ensure_dir};
 use crate::output::render_json_success;
 
@@ -129,7 +130,7 @@ struct RunExecutionOutcome {
 
 pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<String>> {
     super::ensure_cron_layout(root)?;
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_runtime_layout(&paths)?;
 
     if let Some(pid) = read_pid(&paths)? {
@@ -221,7 +222,7 @@ pub(super) fn run_start(root: &Path, args: &CronStartArgs) -> Result<Option<Stri
 }
 
 pub(super) fn run_stop(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let Some(pid) = read_pid(&paths)? else {
         return Ok("Cron scheduler is not running.".to_string());
     };
@@ -280,7 +281,7 @@ pub(super) fn run_stop(root: &Path) -> Result<String> {
 }
 
 pub(super) fn run_status(root: &Path) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     let state = load_scheduler_state(&paths)?;
     let running_pid = state.pid.filter(|pid| pid_is_running(*pid));
     let discovered = discover_jobs(root)?;
@@ -368,7 +369,7 @@ pub(super) fn run_status(root: &Path) -> Result<String> {
 
 pub(super) fn run_job_now(root: &Path, args: &CronRunArgs) -> Result<String> {
     super::ensure_cron_layout(root)?;
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_runtime_layout(&paths)?;
 
     let discovered = discover_jobs(root)?;
@@ -387,7 +388,7 @@ pub(super) fn run_job_now(root: &Path, args: &CronRunArgs) -> Result<String> {
 }
 
 pub(super) fn run_resume(root: &Path, args: &CronResumeArgs) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_runtime_layout(&paths)?;
     let mut state = load_scheduler_state(&paths)?;
     let mut run = load_run(&paths, &args.run_id)?;
@@ -399,7 +400,7 @@ pub(super) fn run_resume(root: &Path, args: &CronResumeArgs) -> Result<String> {
 }
 
 pub(super) fn run_approvals(root: &Path, args: &CronApprovalsArgs) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_runtime_layout(&paths)?;
     let approvals = load_pending_approvals(&paths)?;
 
@@ -454,7 +455,7 @@ pub(super) fn run_approvals(root: &Path, args: &CronApprovalsArgs) -> Result<Str
 }
 
 pub(super) fn run_approve(root: &Path, args: &CronApproveArgs) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_runtime_layout(&paths)?;
     let mut state = load_scheduler_state(&paths)?;
     let mut run = load_run(&paths, &args.run_id)?;
@@ -492,7 +493,7 @@ pub(super) fn run_approve(root: &Path, args: &CronApproveArgs) -> Result<String>
 }
 
 pub(super) fn run_reject(root: &Path, args: &CronRejectArgs) -> Result<String> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_runtime_layout(&paths)?;
     let mut run = load_run(&paths, &args.run_id)?;
     let approval = run
@@ -549,7 +550,7 @@ fn run_scheduler_loop(
     poll_interval_seconds: u64,
     pid_override: Option<u32>,
 ) -> Result<()> {
-    let paths = PlanningPaths::new(root);
+    let paths = effective_planning_paths(root);
     ensure_runtime_layout(&paths)?;
 
     let mut state = load_scheduler_state(&paths)?;
