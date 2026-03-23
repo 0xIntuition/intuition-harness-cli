@@ -296,6 +296,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
         agent_options.push(agent);
     }
 
+    let state_dir = effective_planning_paths(root).state_dir_name().to_string();
     let default_agent = resolve_default_agent_name(&config, &planning_meta, &agent_options);
     let prefill = build_init_prefill(root, args, default_agent.clone())?;
     let options = CronInitFormOptions {
@@ -312,7 +313,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     };
 
     if args.render_once {
-        return match run_cron_init_form(CronInitFormContext { agent_options }, prefill, options)? {
+        return match run_cron_init_form(CronInitFormContext { agent_options, state_dir: state_dir.clone() }, prefill, options)? {
             CronInitFormExit::Snapshot(snapshot) => Ok(snapshot),
             CronInitFormExit::Cancelled => Ok("Cancelled cron init.".to_string()),
             CronInitFormExit::Submitted(values) => {
@@ -324,7 +325,7 @@ fn run_init(root: &Path, args: &CronInitArgs) -> Result<String> {
     let can_launch_tui = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let interactive = !args.no_interactive && can_launch_tui;
     let values = if interactive {
-        match run_cron_init_form(CronInitFormContext { agent_options }, prefill, options)? {
+        match run_cron_init_form(CronInitFormContext { agent_options, state_dir: state_dir.clone() }, prefill, options)? {
             CronInitFormExit::Cancelled => return Ok("Cancelled cron init.".to_string()),
             CronInitFormExit::Submitted(values) => values,
             CronInitFormExit::Snapshot(snapshot) => return Ok(snapshot),

@@ -1652,7 +1652,8 @@ where
         .ok();
 
         let timestamp = now_timestamp();
-        let workpad_body = render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp);
+        let state_dir = effective_planning_paths(&workspace.workspace_path).state_dir_name().to_string();
+        let workpad_body = render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp, &state_dir);
         let existing_workpad_comment = active_workpad_comment(&detailed_issue);
         let workpad_reused = existing_workpad_comment.is_some();
         let workpad_comment = if let Some(comment) = existing_workpad_comment {
@@ -2621,7 +2622,8 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
     .ok();
 
     let timestamp = now_timestamp();
-    let workpad_body = workpad::render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp);
+    let state_dir = effective_planning_paths(&workspace.workspace_path).state_dir_name().to_string();
+    let workpad_body = workpad::render_bootstrap_workpad(&detailed_issue, &workspace, &timestamp, &state_dir);
     let existing_workpad_comment = active_workpad_comment(&detailed_issue);
     let workpad_reused = existing_workpad_comment.is_some();
     let workpad_comment = if let Some(comment) = existing_workpad_comment {

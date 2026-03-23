@@ -92,13 +92,13 @@ impl SpecMode {
         }
     }
 
-    fn request_help(self) -> &'static str {
+    fn request_help(self, state_dir: &str) -> String {
         match self {
             Self::Create => {
-                "Capture the core build intent first. The workflow will ask follow-up questions before drafting `.metastack/SPEC.md`."
+                format!("Capture the core build intent first. The workflow will ask follow-up questions before drafting `{state_dir}/SPEC.md`.")
             }
             Self::Improve => {
-                "Focus on what should change. The workflow will load the current `.metastack/SPEC.md` and revise it in place."
+                format!("Focus on what should change. The workflow will load the current `{state_dir}/SPEC.md` and revise it in place.")
             }
         }
     }
@@ -187,6 +187,7 @@ enum RecoveryStage {
 struct BacklogSpecApp {
     root: PathBuf,
     mode: SpecMode,
+    state_dir: String,
     spec_path: PathBuf,
     existing_spec: Option<String>,
     prefilled_answers: Vec<String>,
@@ -241,10 +242,11 @@ impl Drop for TerminalCleanup {
 /// Run the repo-local SPEC lifecycle flow for the active repository.
 ///
 /// Returns an error when the repository root cannot be resolved, the SPEC worker flow fails, or
-/// the resulting `.metastack/SPEC.md` cannot be written.
+/// the resulting SPEC.md cannot be written.
 pub async fn run_backlog_spec(args: &BacklogSpecArgs) -> Result<BacklogSpecOutput> {
     let root = canonicalize_existing_dir(&args.root.root)?;
     let paths = effective_planning_paths(&root);
+    let state_dir = paths.state_dir_name().to_string();
     let spec_path = paths.spec_path();
     let existing_spec = read_optional_spec(&spec_path)?;
     let mode = if existing_spec.is_some() {
@@ -257,6 +259,7 @@ pub async fn run_backlog_spec(args: &BacklogSpecArgs) -> Result<BacklogSpecOutpu
         let snapshot = render_once_snapshot(
             &root,
             mode,
+            &state_dir,
             &spec_path,
             existing_spec,
             args.request.clone(),
@@ -301,6 +304,7 @@ pub async fn run_backlog_spec(args: &BacklogSpecArgs) -> Result<BacklogSpecOutpu
     match run_interactive_spec_flow(
         &root,
         mode,
+        state_dir,
         spec_path.clone(),
         existing_spec,
         args.request.clone(),
@@ -329,6 +333,7 @@ pub async fn run_backlog_spec(args: &BacklogSpecArgs) -> Result<BacklogSpecOutpu
 fn run_interactive_spec_flow(
     root: &Path,
     mode: SpecMode,
+    state_dir: String,
     spec_path: PathBuf,
     existing_spec: Option<String>,
     initial_request: Option<String>,
@@ -340,6 +345,7 @@ fn run_interactive_spec_flow(
     let mut app = BacklogSpecApp::new(
         root.to_path_buf(),
         mode,
+        state_dir,
         spec_path,
         existing_spec,
         initial_request,
@@ -396,6 +402,7 @@ fn run_interactive_spec_flow(
 fn render_once_snapshot(
     root: &Path,
     mode: SpecMode,
+    state_dir: &str,
     spec_path: &Path,
     existing_spec: Option<String>,
     initial_request: Option<String>,
@@ -410,6 +417,7 @@ fn render_once_snapshot(
     let mut app = BacklogSpecApp::new(
         root.to_path_buf(),
         mode,
+        state_dir.to_string(),
         spec_path.to_path_buf(),
         existing_spec,
         initial_request,
@@ -482,6 +490,7 @@ impl BacklogSpecApp {
     fn new(
         root: PathBuf,
         mode: SpecMode,
+        state_dir: String,
         spec_path: PathBuf,
         existing_spec: Option<String>,
         initial_request: Option<String>,
@@ -493,6 +502,7 @@ impl BacklogSpecApp {
         Self {
             root,
             mode,
+            state_dir,
             spec_path,
             existing_spec,
             prefilled_answers,
@@ -1037,8 +1047,10 @@ fn build_spec_markdown(
 fn render_question_prompt(root: &Path, mode: SpecMode, request: &str) -> Result<String> {
     let workflow_contract = load_workflow_contract(root)?;
     let context = load_context_bundle(root)?;
-    let existing_spec = read_optional_spec(&effective_planning_paths(root).spec_path())?
-        .unwrap_or_else(|| "_No existing `.metastack/SPEC.md` is present._".to_string());
+    let paths = effective_planning_paths(root);
+    let state_dir = paths.state_dir_name();
+    let existing_spec = read_optional_spec(&paths.spec_path())?
+        .unwrap_or_else(|| format!("_No existing `{state_dir}/SPEC.md` is present._"));
     Ok(format!(
         "You are preparing a staged SPEC interview for the active repository.\n\n\
 Mode: {}\n\n\
@@ -1067,12 +1079,14 @@ fn render_spec_prompt(
 ) -> Result<String> {
     let workflow_contract = load_workflow_contract(root)?;
     let context = load_context_bundle(root)?;
+    let state_dir = effective_planning_paths(root).state_dir_name().to_string();
     let repository_snapshot = render_repository_snapshot(root)?;
     let follow_up_block = render_follow_up_block(follow_ups);
+    let no_spec_msg = format!("_No existing `{state_dir}/SPEC.md` is present._");
     let existing_spec_block =
-        existing_spec.unwrap_or("_No existing `.metastack/SPEC.md` is present._");
+        existing_spec.unwrap_or(&no_spec_msg);
     Ok(format!(
-        "You are writing `.metastack/SPEC.md` for the active repository.\n\n\
+        "You are writing `{state_dir}/SPEC.md` for the active repository.\n\n\
 Mode: {}\n\n\
 Injected workflow contract:\n{}\n\n\
 SPEC authoring contract:\n{}\n\n\
@@ -1081,7 +1095,7 @@ Follow-up answers:\n{}\n\n\
 Existing SPEC content:\n{}\n\n\
 Repository context bundle:\n{}\n\n\
 Repository snapshot:\n{}\n\n\
-Return the complete markdown document for `.metastack/SPEC.md` only.",
+Return the complete markdown document for `{state_dir}/SPEC.md` only.",
         mode.title(),
         workflow_contract,
         SPEC_INSTRUCTIONS,
@@ -1324,14 +1338,14 @@ fn advance_loading_spinner(app: &mut BacklogSpecApp) {
 
 fn render_frame(frame: &mut Frame<'_>, app: &BacklogSpecApp) {
     match &app.stage {
-        SpecStage::Request(request) => render_request_frame(frame, request),
-        SpecStage::Questions(questions) => render_questions_frame(frame, questions),
-        SpecStage::Loading(loading) => render_loading_frame(frame, loading),
-        SpecStage::Review(review) => render_review_frame(frame, review, &app.spec_path),
+        SpecStage::Request(request) => render_request_frame(frame, request, &app.state_dir),
+        SpecStage::Questions(questions) => render_questions_frame(frame, questions, &app.state_dir),
+        SpecStage::Loading(loading) => render_loading_frame(frame, loading, &app.state_dir),
+        SpecStage::Review(review) => render_review_frame(frame, review, &app.spec_path, &app.state_dir),
     }
 }
 
-fn render_request_frame(frame: &mut Frame<'_>, app: &RequestApp) {
+fn render_request_frame(frame: &mut Frame<'_>, app: &RequestApp, state_dir: &str) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1345,7 +1359,7 @@ fn render_request_frame(frame: &mut Frame<'_>, app: &RequestApp) {
             badge("spec", Tone::Accent),
             " Repo-local SPEC lifecycle".into(),
         ]),
-        Line::from(app.mode.request_help()),
+        Line::from(app.mode.request_help(state_dir)),
         key_hints(&[
             ("Enter", "continue"),
             ("Shift+Enter", "newline"),
@@ -1378,10 +1392,10 @@ fn render_request_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         inner,
     );
 
-    render_footer(frame, app.error.as_deref(), layout[2]);
+    render_footer(frame, app.error.as_deref(), state_dir, layout[2]);
 }
 
-fn render_questions_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
+fn render_questions_frame(frame: &mut Frame<'_>, app: &QuestionsApp, state_dir: &str) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1462,10 +1476,10 @@ fn render_questions_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         );
     }
 
-    render_footer(frame, app.error.as_deref(), layout[2]);
+    render_footer(frame, app.error.as_deref(), state_dir, layout[2]);
 }
 
-fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
+fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp, _state_dir: &str) {
     render_loading_panel(
         frame,
         frame.area(),
@@ -1479,7 +1493,7 @@ fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
     );
 }
 
-fn render_review_frame(frame: &mut Frame<'_>, app: &ReviewApp, spec_path: &Path) {
+fn render_review_frame(frame: &mut Frame<'_>, app: &ReviewApp, spec_path: &Path, state_dir: &str) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1515,12 +1529,17 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &ReviewApp, spec_path: &Path)
         ),
         layout[1],
     );
-    render_footer(frame, app.error.as_deref(), layout[2]);
+    render_footer(frame, app.error.as_deref(), state_dir, layout[2]);
 }
 
-fn render_footer(frame: &mut Frame<'_>, error: Option<&str>, area: Rect) {
-    let text =
-        error.unwrap_or("The SPEC flow stays repo-local and only targets `.metastack/SPEC.md`.");
+fn render_footer(frame: &mut Frame<'_>, error: Option<&str>, state_dir: &str, area: Rect) {
+    let default_text = format!(
+        "The SPEC flow stays repo-local and only targets `{state_dir}/SPEC.md`.",
+    );
+    let text = match error {
+        Some(e) => e.to_string(),
+        None => default_text,
+    };
     frame.render_widget(
         Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title("Status"))
@@ -1567,7 +1586,7 @@ mod tests {
         let backend = TestBackend::new(120, 32);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_request_frame(frame, app))
+            .draw(|frame| render_request_frame(frame, app, ".metastack"))
             .expect("request frame should render");
         snapshot(terminal.backend())
     }
@@ -1576,7 +1595,7 @@ mod tests {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_loading_frame(frame, app))
+            .draw(|frame| render_loading_frame(frame, app, ".metastack"))
             .expect("loading frame should render");
         snapshot(terminal.backend())
     }
@@ -1585,7 +1604,7 @@ mod tests {
         let backend = TestBackend::new(120, 32);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_review_frame(frame, app, Path::new(".metastack/SPEC.md")))
+            .draw(|frame| render_review_frame(frame, app, Path::new(".metastack/SPEC.md"), ".metastack"))
             .expect("review frame should render");
         snapshot(terminal.backend())
     }
@@ -1641,6 +1660,7 @@ mod tests {
         let mut app = BacklogSpecApp::new(
             PathBuf::from("."),
             SpecMode::Create,
+            ".metastack".to_string(),
             PathBuf::from(".metastack/SPEC.md"),
             None,
             Some("Line 1".to_string()),
@@ -1672,6 +1692,7 @@ mod tests {
         let mut app = BacklogSpecApp {
             root: PathBuf::from("."),
             mode: SpecMode::Create,
+            state_dir: ".metastack".to_string(),
             spec_path: PathBuf::from(".metastack/SPEC.md"),
             existing_spec: None,
             prefilled_answers: Vec::new(),
@@ -1715,6 +1736,7 @@ mod tests {
         let mut app = BacklogSpecApp {
             root: PathBuf::from("."),
             mode: SpecMode::Create,
+            state_dir: ".metastack".to_string(),
             spec_path: PathBuf::from(".metastack/SPEC.md"),
             existing_spec: None,
             prefilled_answers: Vec::new(),

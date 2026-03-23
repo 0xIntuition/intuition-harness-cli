@@ -2931,6 +2931,7 @@ fn render_improvement_prompt(
     related_backlog_issues: &[IssueSummary],
     mode: BacklogImproveModeArg,
 ) -> Result<String> {
+    let state_dir = effective_planning_paths(root).state_dir_name().to_string();
     let repo_target = RepoTarget::from_root(root);
     let planning_context = load_context_bundle(root)?;
     let current_description = issue
@@ -2971,7 +2972,7 @@ Instructions:\n\
 2. Inspect issue hygiene gaps: weak title, weak description, missing acceptance criteria, absent or unclear labels, missing priority/estimate, and opportunities to group work under an existing parent issue.\n\
 3. Stay inside the provided repository scope. Do not invent cross-repo work or new storage models.\n\
 4. When you propose a parent issue, choose only from the provided related backlog issue catalog and only when the relationship is strong.\n\
-5. When you propose description changes, return the full Markdown description ready for `.metastack/backlog/<ISSUE>/index.md`.\n\
+5. When you propose description changes, return the full Markdown description ready for `{state_dir}/backlog/<ISSUE>/index.md`.\n\
 6. In `basic` mode, prefer modest rewrites and safe metadata cleanup. In `advanced` mode, you may rewrite more substantially and use structure changes when justified.\n\
 7. First choose exactly one route:\n\
 - `no_update_needed`: the issue is already strong enough. Do not propose changes.\n\

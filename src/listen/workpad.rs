@@ -6,6 +6,7 @@ pub fn render_bootstrap_workpad(
     issue: &IssueSummary,
     workspace: &TicketWorkspace,
     timestamp: &str,
+    state_dir: &str,
 ) -> String {
     let plan_requirements = extract_requirements(issue.description.as_deref());
     let acceptance = if plan_requirements.is_empty() {
@@ -82,7 +83,7 @@ pub fn render_bootstrap_workpad(
             workspace.workspace_path.display()
         ),
         format!(
-            "- [ ] Local backlog `.metastack/backlog/{}` stays in sync with the work completed for `{}`.",
+            "- [ ] Local backlog `{state_dir}/backlog/{}` stays in sync with the work completed for `{}`.",
             issue.identifier,
             issue.identifier
         ),
@@ -103,7 +104,7 @@ pub fn render_bootstrap_workpad(
             workspace.workspace_path.display()
         ),
         format!(
-            "- {timestamp} Local backlog for `{}` is tracked at `.metastack/backlog/{}`.",
+            "- {timestamp} Local backlog for `{}` is tracked at `{state_dir}/backlog/{}`.",
             issue.identifier,
             issue.identifier
         ),

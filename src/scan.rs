@@ -176,6 +176,7 @@ pub(crate) fn run_scan_for_route(args: &ScanArgs, route_key: &str) -> Result<Sca
         &repo_target,
         &workflow_contract,
         &context.render_prompt_summary(),
+        &state_dir_name,
     );
     let run_args = RunAgentArgs {
         root: Some(root.clone()),

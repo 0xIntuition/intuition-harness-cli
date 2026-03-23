@@ -29,6 +29,7 @@ const CRON_PROMPT_ATTACHMENT_REJECTION: &str = "image attachments are not suppor
 #[derive(Debug, Clone)]
 pub(crate) struct CronInitFormContext {
     pub(crate) agent_options: Vec<String>,
+    pub(crate) state_dir: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,6 +117,7 @@ enum CronField {
 #[derive(Debug, Clone)]
 struct CronInitApp {
     focus: CronField,
+    state_dir: String,
     name: InputFieldState,
     schedule_preset: SelectFieldState,
     minutes_interval: InputFieldState,
@@ -296,7 +298,8 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     let preview = paragraph(
         Text::from(vec![
             Line::from(format!(
-                "Job file: .metastack/cron/{}.md",
+                "Job file: {}/cron/{}.md",
+                app.state_dir,
                 if app.name.value().trim().is_empty() {
                     "<name>"
                 } else {
@@ -329,7 +332,7 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
     frame.render_widget(preview, sections[0]);
 
     let details = paragraph(Text::from(vec![
-        Line::from(app.focus.help_text().to_string()),
+        Line::from(app.focus.help_text(&app.state_dir)),
         Line::from(""),
         Line::from("Execution contract:"),
         Line::from(
@@ -414,6 +417,7 @@ impl CronInitApp {
 
         Self {
             focus: CronField::Name,
+            state_dir: context.state_dir,
             name: InputFieldState::new(prefill.name.unwrap_or_default()),
             schedule_preset: SelectFieldState::new(
                 SchedulePreset::labels(),
@@ -893,45 +897,45 @@ impl CronField {
         }
     }
 
-    fn help_text(self) -> &'static str {
+    fn help_text(self, state_dir: &str) -> String {
         match self {
-            Self::Name => "Repository-local cron jobs are written to .metastack/cron/<NAME>.md.",
+            Self::Name => format!("Repository-local cron jobs are written to {state_dir}/cron/<NAME>.md."),
             Self::SchedulePreset => {
-                "Choose between a minute-based preset, an hour-based preset, a daily time, or a raw cron expression."
+                "Choose between a minute-based preset, an hour-based preset, a daily time, or a raw cron expression.".to_string()
             }
             Self::MinutesInterval => {
-                "Used when the schedule preset is Every N minutes. Valid values: 1-59."
+                "Used when the schedule preset is Every N minutes. Valid values: 1-59.".to_string()
             }
             Self::HourInterval => {
-                "Used when the schedule preset is Every N hours. Valid values: 1-23."
+                "Used when the schedule preset is Every N hours. Valid values: 1-23.".to_string()
             }
             Self::HourlyMinute => {
-                "Used with the hourly preset to pin the minute within each selected hour."
+                "Used with the hourly preset to pin the minute within each selected hour.".to_string()
             }
-            Self::DailyHour => "Used when the preset is Daily at HH:MM. Valid values: 0-23.",
-            Self::DailyMinute => "Used when the preset is Daily at HH:MM. Valid values: 0-59.",
+            Self::DailyHour => "Used when the preset is Daily at HH:MM. Valid values: 0-23.".to_string(),
+            Self::DailyMinute => "Used when the preset is Daily at HH:MM. Valid values: 0-59.".to_string(),
             Self::CustomSchedule => {
-                "Stores a raw 5-field cron expression when the preset is Custom cron."
+                "Stores a raw 5-field cron expression when the preset is Custom cron.".to_string()
             }
             Self::Command => {
-                "Optional shell command. Leave blank to run only the agent prompt on schedule."
+                "Optional shell command. Leave blank to run only the agent prompt on schedule.".to_string()
             }
             Self::Agent => {
-                "When combined with a prompt, the selected agent runs after the optional shell phase."
+                "When combined with a prompt, the selected agent runs after the optional shell phase.".to_string()
             }
             Self::Prompt => {
-                "This recurring prompt is stored as the Markdown body and sent to the agent on every cron run."
+                "This recurring prompt is stored as the Markdown body and sent to the agent on every cron run.".to_string()
             }
             Self::WorkingDirectory => {
-                "Both the optional shell command and the optional agent run from this repository-relative path."
+                "Both the optional shell command and the optional agent run from this repository-relative path.".to_string()
             }
-            Self::Shell => "Shell binary used to execute the cron command.",
+            Self::Shell => "Shell binary used to execute the cron command.".to_string(),
             Self::TimeoutSeconds => {
-                "Maximum number of seconds allowed for the optional shell command phase."
+                "Maximum number of seconds allowed for the optional shell command phase.".to_string()
             }
-            Self::Enabled => "Disabled jobs stay on disk but are skipped by the scheduler.",
+            Self::Enabled => "Disabled jobs stay on disk but are skipped by the scheduler.".to_string(),
             Self::Save => {
-                "Create or update the cron job Markdown file using the current form values."
+                "Create or update the cron job Markdown file using the current form values.".to_string()
             }
         }
     }
@@ -1198,6 +1202,7 @@ mod tests {
     fn prompt_without_text_disables_agent_on_submit() {
         let app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill {
@@ -1216,6 +1221,7 @@ mod tests {
     fn render_actions_move_focus_between_fields() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill::default(),
@@ -1231,6 +1237,7 @@ mod tests {
     fn enter_on_save_submits_the_form() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill {
@@ -1257,6 +1264,7 @@ mod tests {
     fn shift_enter_from_prompt_adds_a_newline_instead_of_submitting() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill {
@@ -1279,6 +1287,7 @@ mod tests {
     fn enter_from_prompt_submits_the_form() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill {
@@ -1307,6 +1316,7 @@ mod tests {
     fn prompt_paste_preserves_multiline_text() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill::default(),
@@ -1332,6 +1342,7 @@ mod tests {
 
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill::default(),
@@ -1351,6 +1362,7 @@ mod tests {
     fn prompt_navigation_keys_scroll_visible_editor() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill {
@@ -1383,6 +1395,7 @@ mod tests {
     fn prompt_mouse_wheel_scrolls_only_when_prompt_is_active() {
         let mut app = CronInitApp::new(
             CronInitFormContext {
+                state_dir: ".metastack".to_string(),
                 agent_options: vec!["codex".to_string()],
             },
             CronInitFormPrefill {

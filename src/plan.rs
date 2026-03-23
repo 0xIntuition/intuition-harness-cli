@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
+use crate::branding::effective_planning_paths;
 use crate::agents::{
     AgentContinuation, run_agent_capture, run_agent_capture_with_continuation,
     run_agent_streaming_text_with_continuation,
@@ -559,7 +560,8 @@ async fn run_reshape_plan(
     let issue = service.load_issue(identifier).await?;
     let draft = generate_issue_reshape(root, &issue, overrides)?;
     let proposed_description = render_reshaped_index_contents(&issue, &draft);
-    let preview = render_reshape_preview(&issue, &draft, &proposed_description);
+    let state_dir = effective_planning_paths(root).state_dir_name().to_string();
+    let preview = render_reshape_preview(&issue, &draft, &proposed_description, &state_dir);
 
     if !args.velocity {
         if args.no_interactive {
@@ -589,7 +591,7 @@ async fn run_reshape_plan(
     service
         .upsert_workpad_comment(
             &issue,
-            render_reshape_workpad_comment(&issue, &updated_issue, &draft, args.velocity),
+            render_reshape_workpad_comment(&issue, &updated_issue, &draft, args.velocity, &state_dir),
         )
         .await?;
 
@@ -1204,6 +1206,7 @@ fn render_reshape_preview(
     issue: &IssueSummary,
     draft: &ReshapedIssueDraft,
     proposed_description: &str,
+    state_dir: &str,
 ) -> String {
     let title_status = if issue.title == draft.title {
         format!("  {}", issue.title)
@@ -1218,7 +1221,7 @@ fn render_reshape_preview(
     );
 
     format!(
-        "`meta backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `.metastack/backlog/` files are unchanged in reshape mode.",
+        "`meta backlog plan {}` prepared an in-place reshape preview:\n\nTitle:\n{}\n\nDescription diff:\n{}\n\nMetadata preserved on apply: assignee, labels, project, state, priority, and cycle.\nLocal `{state_dir}/backlog/` files are unchanged in reshape mode.",
         issue.identifier, title_status, description_diff
     )
 }
@@ -1264,6 +1267,7 @@ fn render_reshape_workpad_comment(
     updated_issue: &IssueSummary,
     draft: &ReshapedIssueDraft,
     velocity: bool,
+    state_dir: &str,
 ) -> String {
     let mut lines = vec![
         "## Codex Workpad".to_string(),
@@ -1290,7 +1294,7 @@ fn render_reshape_workpad_comment(
             .to_string(),
     );
     lines.push(
-        "- Local `.metastack/backlog/` files were not modified by this reshape flow.".to_string(),
+        format!("- Local `{state_dir}/backlog/` files were not modified by this reshape flow."),
     );
 
     lines.join("\n")

@@ -21,8 +21,9 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::config::{
-    AppConfig, DEFAULT_LINEAR_API_URL, ListenAssignmentScope, ListenRefreshPolicy,
-    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    AppConfig, DEFAULT_LINEAR_API_URL, DEFAULT_STATE_DIRECTORY, ListenAssignmentScope,
+    ListenRefreshPolicy, validate_interactive_plan_follow_up_question_limit,
+    validate_listen_poll_interval_seconds,
 };
 use crate::linear::{
     LinearClient, LinearService, ProjectSummary, ReqwestLinearClient, TeamSummary, UserRef,
@@ -808,7 +809,7 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
             Line::from(
                 "This wizard configures install-scoped defaults shared across all repositories.",
             ),
-            Line::from("Repo-level overrides live in the repo metadata file (e.g. `.metastack/meta.json`)."),
+            Line::from(format!("Repo-level overrides live in the repo metadata file (e.g. `{DEFAULT_STATE_DIRECTORY}/meta.json`).")),
         ],
         OnboardingStep::ApiKey => vec![
             Line::from("Paste a personal or workspace Linear API key."),

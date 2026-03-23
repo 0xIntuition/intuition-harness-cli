@@ -243,6 +243,7 @@ pub(crate) fn build_scan_agent_prompt(
     repo_target: &RepoTarget,
     workflow_contract: &str,
     repo_summary: &str,
+    state_dir: &str,
 ) -> String {
     let mut lines = vec![
         format!(
@@ -252,16 +253,16 @@ pub(crate) fn build_scan_agent_prompt(
         "Injected workflow contract:".to_string(),
         workflow_contract.to_string(),
         "Scan only the target repository rooted above. Do not broaden the analysis to parent directories, sibling repositories, or unrelated workspaces.".to_string(),
-        "Refresh the planning context under `.metastack/codebase/`.".to_string(),
-        "Use `.metastack/codebase/SCAN.md` as the deterministic fact base, then inspect the repository as needed to improve accuracy.".to_string(),
+        format!("Refresh the planning context under `{state_dir}/codebase/`."),
+        format!("Use `{state_dir}/codebase/SCAN.md` as the deterministic fact base, then inspect the repository as needed to improve accuracy."),
         "Do not invent missing systems, frameworks, or integrations. If something is absent, say so briefly.".to_string(),
-        "Only edit the required codebase-context files below; leave `.metastack/codebase/SCAN.md` as the generated source-of-truth snapshot from the CLI.".to_string(),
+        format!("Only edit the required codebase-context files below; leave `{state_dir}/codebase/SCAN.md` as the generated source-of-truth snapshot from the CLI."),
         String::new(),
         "Required output files:".to_string(),
     ];
 
     for spec in SCAN_DOCUMENT_PROMPTS {
-        lines.push(format!("- `.metastack/codebase/{}`", spec.file_name));
+        lines.push(format!("- `{state_dir}/codebase/{}`", spec.file_name));
     }
 
     lines.extend([
@@ -277,7 +278,10 @@ pub(crate) fn build_scan_agent_prompt(
     ]);
 
     for spec in SCAN_DOCUMENT_PROMPTS {
-        lines.extend([String::new(), spec.instructions.to_string()]);
+        lines.extend([
+            String::new(),
+            spec.instructions.replace(".metastack/", &format!("{state_dir}/")),
+        ]);
     }
 
     lines.join("\n")
@@ -304,6 +308,7 @@ mod tests {
             &repo_target,
             "## Built-in Workflow Contract\n\nUse local evidence.\n\n## Repository Scope\n\nTarget repository:\n- Backlog rule: create backlog issues only for work inside this repository directory.",
             "- Repository: `demo-cli`\n- Files scanned: `3`\n- Directories scanned: `1`",
+            ".metastack",
         );
 
         assert!(prompt.contains("Injected workflow contract:"));

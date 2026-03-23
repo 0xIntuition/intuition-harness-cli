@@ -508,6 +508,7 @@ fn render_refinement_prompt(
     total_passes: usize,
     previous_pass: Option<&RefinementPassOutput>,
 ) -> Result<String> {
+    let state_dir = effective_planning_paths(root).state_dir_name().to_string();
     let repo_target = RepoTarget::from_root(root);
     let planning_context = load_context_bundle(root)?;
     let current_description = issue
@@ -545,7 +546,7 @@ Repository planning context:\n{planning_context}\n\n\
 Instructions:\n\
 1. Critique the current issue quality for this repository only.\n\
 2. Produce structured findings in these exact categories: `missing_requirements`, `unclear_scope`, `validation_gaps`, `dependency_risks`, and `follow_up_ideas`.\n\
-3. Rewrite the full issue description as polished Markdown ready to save into `.metastack/backlog/<ISSUE>/index.md` and, when explicitly approved, back into Linear.\n\
+3. Rewrite the full issue description as polished Markdown ready to save into `{state_dir}/backlog/<ISSUE>/index.md` and, when explicitly approved, back into Linear.\n\
 4. Keep the rewrite consistent with the configured repository scope. Do not invent a second storage model or work outside this repository.\n\
 5. When the issue changes CLI behavior, include concrete validation commands or command-path checks in the rewrite.\n\
 6. Use the previous pass as critique input when present, but improve it if you find gaps or ambiguity.\n\

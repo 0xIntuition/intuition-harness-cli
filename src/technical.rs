@@ -28,6 +28,7 @@ use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::agents::run_agent_capture;
+use crate::branding::effective_planning_paths;
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, RenderedTemplateFile,
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
@@ -374,6 +375,7 @@ fn run_interactive_technical_session(
     issues: Vec<IssueSummary>,
     discussion_budgets: TicketDiscussionBudgets,
 ) -> Result<InteractiveTechnicalExit> {
+    let state_dir = effective_planning_paths(root).state_dir_name().to_string();
     let mut app = if let Some(parent) = initial_parent {
         let criteria = extract_acceptance_criteria(parent.description.as_deref());
         if criteria.is_empty() {
@@ -381,7 +383,7 @@ fn run_interactive_technical_session(
                 stage: TechnicalStage::Loading(LoadingApp {
                     message: "Generating technical backlog".to_string(),
                     detail: format!(
-                        "Building `.metastack/backlog/_TEMPLATE` for {}.",
+                        "Building `{state_dir}/backlog/_TEMPLATE` for {}.",
                         parent.identifier
                     ),
                     spinner_index: 0,
@@ -800,10 +802,11 @@ fn start_generation(
     request: TechnicalGenerationRequest,
     previous_stage: Option<TechnicalRecoveryStage>,
 ) {
+    let state_dir = effective_planning_paths(root).state_dir_name().to_string();
     app.stage = TechnicalStage::Loading(LoadingApp {
         message: "Generating technical backlog".to_string(),
         detail: format!(
-            "Building `.metastack/backlog/_TEMPLATE` for {}.",
+            "Building `{state_dir}/backlog/_TEMPLATE` for {}.",
             request.parent.identifier
         ),
         spinner_index: 0,
@@ -969,7 +972,8 @@ fn generate_backlog_files(
         attachments: Vec::new(),
     })
     .with_context(|| {
-        "meta backlog tech requires a configured local agent to generate backlog content from `.metastack/backlog/_TEMPLATE`"
+        let sd = effective_planning_paths(root).state_dir_name().to_string();
+        format!("meta backlog tech requires a configured local agent to generate backlog content from `{sd}/backlog/_TEMPLATE`")
     })?;
     let draft: TechnicalBacklogDraft =
         parse_agent_json(&output.stdout, "technical backlog generation")?;

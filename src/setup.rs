@@ -339,14 +339,16 @@ fn resolve_backlog_template_conflicts(
     args: &SetupArgs,
     can_launch_tui: bool,
 ) -> Result<BacklogTemplateConflictAction> {
-    let conflicts = template_seed_conflicts(&effective_planning_paths(root).backlog_template_dir)?;
+    let paths = effective_planning_paths(root);
+    let state_dir = paths.state_dir_name();
+    let conflicts = template_seed_conflicts(&paths.backlog_template_dir)?;
     if conflicts.is_empty() {
         return Ok(BacklogTemplateConflictAction::Skip);
     }
 
     let can_prompt = can_launch_tui && !args.json && !args.render_once && !has_direct_updates(args);
     if can_prompt {
-        return prompt_backlog_template_conflicts(&conflicts);
+        return prompt_backlog_template_conflicts(&conflicts, state_dir);
     }
 
     Err(anyhow!(
@@ -354,7 +356,7 @@ fn resolve_backlog_template_conflicts(
 rerun `meta setup --root {}` in an interactive terminal to choose overwrite, skip, or cancel.",
         conflicts
             .iter()
-            .map(|path| format!("- .metastack/backlog/_TEMPLATE/{path}"))
+            .map(|path| format!("- {state_dir}/backlog/_TEMPLATE/{path}"))
             .collect::<Vec<_>>()
             .join("\n"),
         root.display()
@@ -363,12 +365,13 @@ rerun `meta setup --root {}` in an interactive terminal to choose overwrite, ski
 
 fn prompt_backlog_template_conflicts(
     conflicts: &[String],
+    state_dir: &str,
 ) -> Result<BacklogTemplateConflictAction> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
-    prompt_backlog_template_conflicts_with_io(conflicts, &mut reader, &mut writer)
+    prompt_backlog_template_conflicts_with_io(conflicts, state_dir, &mut reader, &mut writer)
 }
 
 fn parse_backlog_template_conflict_action(input: &str) -> Option<BacklogTemplateConflictAction> {
@@ -382,6 +385,7 @@ fn parse_backlog_template_conflict_action(input: &str) -> Option<BacklogTemplate
 
 fn prompt_backlog_template_conflicts_with_io(
     conflicts: &[String],
+    state_dir: &str,
     reader: &mut impl BufRead,
     writer: &mut impl Write,
 ) -> Result<BacklogTemplateConflictAction> {
@@ -390,7 +394,7 @@ fn prompt_backlog_template_conflicts_with_io(
         "Canonical backlog template files already exist with local changes:"
     )?;
     for path in conflicts {
-        writeln!(writer, "  - .metastack/backlog/_TEMPLATE/{path}")?;
+        writeln!(writer, "  - {state_dir}/backlog/_TEMPLATE/{path}")?;
     }
     writeln!(writer, "Choose [o]verwrite, [s]kip, or [c]ancel:")?;
     writer.flush()?;
@@ -2446,7 +2450,7 @@ mod tests {
         let mut writer = Vec::new();
 
         let action =
-            prompt_backlog_template_conflicts_with_io(&conflicts, &mut reader, &mut writer)?;
+            prompt_backlog_template_conflicts_with_io(&conflicts, ".metastack", &mut reader, &mut writer)?;
 
         assert_eq!(action, BacklogTemplateConflictAction::Overwrite);
         let output = String::from_utf8(writer)?;
