@@ -1434,9 +1434,14 @@ fn parse_resume_handle_line(agent: &str, line: &[u8]) -> Option<LatestResumeHand
 }
 
 fn parse_claude_resume_handle(value: &Value) -> Option<LatestResumeHandle> {
+    // Claude stream-json wraps each event in an array: [{"type":"system","session_id":"..."}]
+    let obj = value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .unwrap_or(value);
     Some(LatestResumeHandle {
         provider: ResumeProvider::Claude,
-        id: value.get("session_id")?.as_str()?.to_string(),
+        id: obj.get("session_id")?.as_str()?.to_string(),
     })
 }
 
@@ -2318,5 +2323,31 @@ mod tests {
             result.instructions.is_some(),
             "turn 1 should always include instructions"
         );
+    }
+
+    #[test]
+    fn parse_claude_resume_handle_from_array_wrapped_stream_json() {
+        // Claude --output-format=stream-json wraps each event in an array
+        let line = r#"[{"type":"system","subtype":"init","session_id":"22ca497e-d7da-4118-9433-1902769c6737","tools":["Bash"]}]"#;
+        let handle = super::parse_resume_handle_line("claude", line.as_bytes());
+        assert!(
+            handle.is_some(),
+            "should parse session_id from array-wrapped JSON"
+        );
+        let handle = handle.unwrap();
+        assert_eq!(handle.id, "22ca497e-d7da-4118-9433-1902769c6737");
+        assert_eq!(handle.provider, super::super::state::ResumeProvider::Claude);
+    }
+
+    #[test]
+    fn parse_claude_resume_handle_from_plain_object() {
+        // Also works with unwrapped objects (e.g. --output-format=json)
+        let line = r#"{"type":"result","session_id":"abc-123"}"#;
+        let handle = super::parse_resume_handle_line("claude", line.as_bytes());
+        assert!(
+            handle.is_some(),
+            "should parse session_id from plain JSON object"
+        );
+        assert_eq!(handle.unwrap().id, "abc-123");
     }
 }
