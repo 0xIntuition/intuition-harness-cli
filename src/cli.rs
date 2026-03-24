@@ -42,7 +42,7 @@ pub enum Command {
     Merge(MergeArgs),
     /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
     Workspace(WorkspaceArgs),
-    /// Securely self-update a GitHub Release install of `meta` on macOS/Linux.
+    /// Securely self-update a GitHub Release install on macOS/Linux.
     Upgrade(UpgradeArgs),
     /// Compatibility alias for `meta backlog plan`.
     #[command(hide = true)]
