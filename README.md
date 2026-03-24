@@ -828,7 +828,7 @@ Machine mode:
 
 `meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
 
-Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
+Interactive reshape runs on a TTY open a ratatui review with side-by-side Current and Proposed description panes, both rendered through the shared markdown renderer. Press `a` to apply or `c`/`Esc` to cancel. When stdin is not a terminal the command falls back to a text diff with a `[a]pply/[c]ancel` prompt. Pass `--velocity` to skip the review entirely and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
 
 `--fast`, `--multi`, and `--questions` do not apply to reshape mode. The command rejects those combinations instead of silently changing reshape behavior.
 

@@ -995,7 +995,7 @@ pub struct PlanArgs {
     /// In fast mode, cap the one-round follow-up batch size between 0 and 10.
     #[arg(long)]
     pub questions: Option<usize>,
-    /// Skip the reshape diff preview and apply the in-place update immediately.
+    /// Skip the reshape TUI review and apply the in-place update immediately.
     #[arg(long)]
     pub velocity: bool,
     /// Skip the ratatui workflow and run directly from flags/stdin context.

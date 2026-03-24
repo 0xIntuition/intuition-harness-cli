@@ -568,7 +568,13 @@ async fn run_reshape_plan(
             );
         }
 
-        if !prompt_reshape_apply(identifier, &preview)? {
+        let can_launch_tui = io::stdin().is_terminal() && io::stdout().is_terminal();
+        let approved = if can_launch_tui {
+            run_reshape_review_session(identifier, &issue, &draft, &proposed_description)?
+        } else {
+            prompt_reshape_apply(identifier, &preview)?
+        };
+        if !approved {
             return Ok(PlanReport::Cancelled);
         }
     }
@@ -1301,6 +1307,269 @@ fn reshape_timestamp() -> String {
     OffsetDateTime::now_utc()
         .format(&format)
         .unwrap_or_else(|_| "unknown time".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Reshape review TUI
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReshapeReviewFocus {
+    Current,
+    Proposed,
+}
+
+#[derive(Debug, Clone)]
+struct ReshapeReviewApp {
+    identifier: String,
+    /// One-line summary of what the reshape changed.
+    summary: String,
+    /// Title change indicator.
+    title_line: String,
+    current_body: String,
+    proposed_body: String,
+    focus: ReshapeReviewFocus,
+    current_scroll: ScrollState,
+    proposed_scroll: ScrollState,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReshapeReviewLayout {
+    header: Rect,
+    current: Rect,
+    proposed: Rect,
+}
+
+/// Interactive ratatui review for a reshape preview.
+///
+/// Returns `true` when the operator chooses to apply, `false` on cancel.
+fn run_reshape_review_session(
+    identifier: &str,
+    issue: &IssueSummary,
+    draft: &ReshapedIssueDraft,
+    proposed_description: &str,
+) -> Result<bool> {
+    let title_line = if issue.title == draft.title {
+        format!("Title (unchanged): {}", issue.title)
+    } else {
+        format!("Title: \"{}\" → \"{}\"", issue.title, draft.title)
+    };
+
+    let mut app = ReshapeReviewApp {
+        identifier: identifier.to_string(),
+        summary: if draft.summary.is_empty() {
+            String::new()
+        } else {
+            draft.summary.clone()
+        },
+        title_line,
+        current_body: issue.description.clone().unwrap_or_default(),
+        proposed_body: proposed_description.to_string(),
+        focus: ReshapeReviewFocus::Current,
+        current_scroll: ScrollState::default(),
+        proposed_scroll: ScrollState::default(),
+    };
+
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
+    let _cleanup = TerminalCleanup;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    loop {
+        terminal.draw(|frame| render_reshape_review_frame(frame, &app))?;
+
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    match handle_reshape_review_key(&mut app, key, terminal.size()?.into()) {
+                        ReshapeReviewAction::None => {}
+                        ReshapeReviewAction::Apply => return Ok(true),
+                        ReshapeReviewAction::Cancel => return Ok(false),
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    handle_reshape_review_mouse(
+                        &mut app,
+                        mouse,
+                        reshape_review_layout(terminal.size()?.into()),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn reshape_review_layout(frame_area: Rect) -> ReshapeReviewLayout {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ])
+        .split(frame_area);
+
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(outer[1]);
+
+    ReshapeReviewLayout {
+        header: outer[0],
+        current: panes[0],
+        proposed: panes[1],
+    }
+}
+
+fn render_reshape_review_frame(frame: &mut Frame<'_>, app: &ReshapeReviewApp) {
+    let footer_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(4)])
+        .split(frame.area());
+    let layout = reshape_review_layout(frame.area());
+
+    // Header
+    let mut header_lines = vec![Line::from(format!(
+        "Reshape review: {}",
+        app.identifier
+    ))];
+    header_lines.push(Line::from(app.title_line.clone()));
+    if !app.summary.is_empty() {
+        header_lines.push(Line::from(format!("Summary: {}", app.summary)));
+    }
+    header_lines.push(Line::from(
+        "Metadata preserved: assignee, labels, project, state, priority, and cycle.",
+    ));
+    let header = Paragraph::new(Text::from(header_lines))
+        .block(content_panel("Reshape Preview"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(header, layout.header);
+
+    // Current pane
+    let current_text = render_markdown(&app.current_body, Style::default(), &[]);
+    let current_pane = scrollable_paragraph_with_block(
+        current_text,
+        content_panel(if app.focus == ReshapeReviewFocus::Current {
+            "Current Description [scroll]"
+        } else {
+            "Current Description"
+        })
+        .border_style(if app.focus == ReshapeReviewFocus::Current {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }),
+        &app.current_scroll,
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(current_pane, layout.current);
+
+    // Proposed pane
+    let proposed_text = render_markdown(&app.proposed_body, Style::default(), &[]);
+    let proposed_pane = scrollable_paragraph_with_block(
+        proposed_text,
+        content_panel(if app.focus == ReshapeReviewFocus::Proposed {
+            "Proposed Description [scroll]"
+        } else {
+            "Proposed Description"
+        })
+        .border_style(if app.focus == ReshapeReviewFocus::Proposed {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }),
+        &app.proposed_scroll,
+    )
+    .wrap(Wrap { trim: false });
+    frame.render_widget(proposed_pane, layout.proposed);
+
+    // Footer
+    render_footer(
+        frame,
+        footer_layout[1],
+        None,
+        "Tab: switch pane. Up/Down/PgUp/PgDn/Home/End or mouse wheel: scroll. [a] Apply. [c] or Esc: Cancel.",
+    );
+}
+
+enum ReshapeReviewAction {
+    None,
+    Apply,
+    Cancel,
+}
+
+fn handle_reshape_review_key(
+    app: &mut ReshapeReviewApp,
+    key: crossterm::event::KeyEvent,
+    frame_size: Rect,
+) -> ReshapeReviewAction {
+    let layout = reshape_review_layout(frame_size);
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('c') => ReshapeReviewAction::Cancel,
+        KeyCode::Char('a') => ReshapeReviewAction::Apply,
+        KeyCode::Tab | KeyCode::BackTab => {
+            app.focus = match app.focus {
+                ReshapeReviewFocus::Current => ReshapeReviewFocus::Proposed,
+                ReshapeReviewFocus::Proposed => ReshapeReviewFocus::Current,
+            };
+            ReshapeReviewAction::None
+        }
+        _ => {
+            match app.focus {
+                ReshapeReviewFocus::Current => {
+                    let text = render_markdown(&app.current_body, Style::default(), &[]);
+                    let rows = wrapped_rows(&plain_text(&text), layout.current.width.max(1));
+                    app.current_scroll
+                        .apply_key_in_viewport(key, layout.current, rows);
+                }
+                ReshapeReviewFocus::Proposed => {
+                    let text = render_markdown(&app.proposed_body, Style::default(), &[]);
+                    let rows = wrapped_rows(&plain_text(&text), layout.proposed.width.max(1));
+                    app.proposed_scroll
+                        .apply_key_in_viewport(key, layout.proposed, rows);
+                }
+            }
+            ReshapeReviewAction::None
+        }
+    }
+}
+
+fn handle_reshape_review_mouse(
+    app: &mut ReshapeReviewApp,
+    mouse: MouseEvent,
+    layout: ReshapeReviewLayout,
+) {
+    if matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        let current_text = render_markdown(&app.current_body, Style::default(), &[]);
+        let current_rows =
+            wrapped_rows(&plain_text(&current_text), layout.current.width.max(1));
+        if app
+            .current_scroll
+            .apply_mouse_in_viewport(mouse, layout.current, current_rows)
+        {
+            return;
+        }
+
+        let proposed_text = render_markdown(&app.proposed_body, Style::default(), &[]);
+        let proposed_rows =
+            wrapped_rows(&plain_text(&proposed_text), layout.proposed.width.max(1));
+        app.proposed_scroll
+            .apply_mouse_in_viewport(mouse, layout.proposed, proposed_rows);
+    }
 }
 
 fn run_interactive_plan_session(
@@ -3956,17 +4225,19 @@ mod tests {
         FollowUpAnswerState, FollowUpQuestions, FollowUpResponse, LoadingApp, PendingPlanJob,
         PlanSessionApp, PlanStage, PlanWorkerOutcome, PlanWorkerReport, PlannedIssueDraft,
         PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
-        ReviewApp, ReviewFocus, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
-        build_review_app, handle_questions_step_key, handle_questions_step_key_with_viewport,
+        ReshapeReviewAction, ReshapeReviewApp, ReshapeReviewFocus, ReviewApp, ReviewFocus,
+        ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app,
+        handle_questions_step_key, handle_questions_step_key_with_viewport,
         handle_questions_step_mouse, handle_questions_step_paste, handle_request_step_key,
         handle_request_step_key_with_viewport, handle_request_step_mouse,
-        handle_request_step_paste, handle_review_step_key, handle_review_step_mouse,
-        next_incomplete_question, parse_agent_json, process_pending_plan_job,
-        questions_answer_input_viewport, render_issue_merge_prompt, render_loading_frame,
-        render_plan_session, render_question_prompt, render_questions_form_frame,
-        render_request_form_frame, render_review_form_frame, request_input_viewport,
-        review_kept_indices, review_layout, review_marker, review_merge_groups,
-        review_submission_action, selected_issue_plan, snapshot,
+        handle_request_step_paste, handle_reshape_review_key, handle_reshape_review_mouse,
+        handle_review_step_key, handle_review_step_mouse, next_incomplete_question,
+        parse_agent_json, process_pending_plan_job, questions_answer_input_viewport,
+        render_issue_merge_prompt, render_loading_frame, render_plan_session,
+        render_question_prompt, render_questions_form_frame, render_request_form_frame,
+        render_reshape_review_frame, render_review_form_frame, request_input_viewport,
+        reshape_review_layout, review_kept_indices, review_layout, review_marker,
+        review_merge_groups, review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::fields::InputFieldState;
@@ -5308,5 +5579,193 @@ mod tests {
         ];
 
         assert_eq!(next_incomplete_question(&questions, 2), Some(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Reshape review TUI tests
+    // -----------------------------------------------------------------------
+
+    fn make_reshape_review_app() -> ReshapeReviewApp {
+        ReshapeReviewApp {
+            identifier: "ENG-10144".to_string(),
+            summary: "Tighten scope and add acceptance criteria.".to_string(),
+            title_line: "Title: \"Old Title\" → \"New Title\"".to_string(),
+            current_body: "# Old Description\n\nSome existing content.".to_string(),
+            proposed_body:
+                "# New Description\n\nImproved content with clearer scope.\n\n## Acceptance Criteria\n\n- Criterion one\n- Criterion two"
+                    .to_string(),
+            focus: ReshapeReviewFocus::Current,
+            current_scroll: Default::default(),
+            proposed_scroll: Default::default(),
+        }
+    }
+
+    fn render_reshape_review_snapshot(app: &ReshapeReviewApp) -> String {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| render_reshape_review_frame(frame, app))
+            .expect("reshape review should render");
+        snapshot(terminal.backend())
+    }
+
+    #[test]
+    fn reshape_review_renders_header_and_both_panes() {
+        let app = make_reshape_review_app();
+        let snap = render_reshape_review_snapshot(&app);
+
+        assert!(snap.contains("Reshape Preview"));
+        assert!(snap.contains("Reshape review: ENG-10144"));
+        assert!(snap.contains("Current Description"));
+        assert!(snap.contains("Proposed Description"));
+        assert!(snap.contains("Metadata preserved"));
+    }
+
+    #[test]
+    fn reshape_review_renders_markdown_content_in_panes() {
+        let app = make_reshape_review_app();
+        let snap = render_reshape_review_snapshot(&app);
+
+        assert!(snap.contains("Old Description"));
+        assert!(snap.contains("New Description"));
+        assert!(snap.contains("Acceptance Criteria"));
+    }
+
+    #[test]
+    fn reshape_review_a_key_returns_apply() {
+        let mut app = make_reshape_review_app();
+        let frame = Rect::new(0, 0, 120, 30);
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('a'));
+
+        let action = handle_reshape_review_key(&mut app, key, frame);
+        assert!(matches!(action, ReshapeReviewAction::Apply));
+    }
+
+    #[test]
+    fn reshape_review_c_key_returns_cancel() {
+        let mut app = make_reshape_review_app();
+        let frame = Rect::new(0, 0, 120, 30);
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('c'));
+
+        let action = handle_reshape_review_key(&mut app, key, frame);
+        assert!(matches!(action, ReshapeReviewAction::Cancel));
+    }
+
+    #[test]
+    fn reshape_review_esc_returns_cancel() {
+        let mut app = make_reshape_review_app();
+        let frame = Rect::new(0, 0, 120, 30);
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc);
+
+        let action = handle_reshape_review_key(&mut app, key, frame);
+        assert!(matches!(action, ReshapeReviewAction::Cancel));
+    }
+
+    #[test]
+    fn reshape_review_tab_toggles_focus() {
+        let mut app = make_reshape_review_app();
+        assert_eq!(app.focus, ReshapeReviewFocus::Current);
+
+        let frame = Rect::new(0, 0, 120, 30);
+        let tab = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab);
+
+        handle_reshape_review_key(&mut app, tab, frame);
+        assert_eq!(app.focus, ReshapeReviewFocus::Proposed);
+
+        handle_reshape_review_key(&mut app, tab, frame);
+        assert_eq!(app.focus, ReshapeReviewFocus::Current);
+    }
+
+    #[test]
+    fn reshape_review_scroll_updates_offset_for_focused_pane() {
+        let mut app = make_reshape_review_app();
+        app.proposed_body = (0..100)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.focus = ReshapeReviewFocus::Proposed;
+
+        let frame = Rect::new(0, 0, 120, 30);
+        let down = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Down);
+
+        handle_reshape_review_key(&mut app, down, frame);
+        assert!(app.proposed_scroll.offset() > 0);
+        assert_eq!(app.current_scroll.offset(), 0);
+    }
+
+    #[test]
+    fn reshape_review_mouse_scroll_affects_hovered_pane() {
+        let mut app = make_reshape_review_app();
+        app.current_body = (0..100)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let frame = Rect::new(0, 0, 120, 30);
+        let layout = reshape_review_layout(frame);
+
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: layout.current.x + 1,
+            row: layout.current.y + 1,
+            modifiers: KeyModifiers::empty(),
+        };
+
+        handle_reshape_review_mouse(&mut app, mouse, layout);
+        assert!(app.current_scroll.offset() > 0);
+        assert_eq!(app.proposed_scroll.offset(), 0);
+    }
+
+    #[test]
+    fn reshape_review_shows_title_change() {
+        let app = make_reshape_review_app();
+        let snap = render_reshape_review_snapshot(&app);
+
+        assert!(snap.contains("Old Title"));
+        assert!(snap.contains("New Title"));
+    }
+
+    #[test]
+    fn reshape_review_unchanged_title_shows_unchanged_label() {
+        let mut app = make_reshape_review_app();
+        app.title_line = "Title (unchanged): Same Title".to_string();
+        let snap = render_reshape_review_snapshot(&app);
+
+        assert!(snap.contains("Title (unchanged)"));
+    }
+
+    #[test]
+    fn reshape_review_shows_summary() {
+        let app = make_reshape_review_app();
+        let snap = render_reshape_review_snapshot(&app);
+
+        assert!(snap.contains("Tighten scope"));
+    }
+
+    #[test]
+    fn reshape_review_footer_shows_controls() {
+        let app = make_reshape_review_app();
+        let snap = render_reshape_review_snapshot(&app);
+
+        assert!(snap.contains("[a] Apply"));
+        assert!(snap.contains("[c]"));
+        assert!(snap.contains("Cancel"));
+        assert!(snap.contains("Tab"));
+    }
+
+    #[test]
+    fn reshape_review_focused_pane_shows_scroll_label() {
+        let mut app = make_reshape_review_app();
+        app.focus = ReshapeReviewFocus::Current;
+        let snap = render_reshape_review_snapshot(&app);
+
+        assert!(snap.contains("Current Description [scroll]"));
+        assert!(!snap.contains("Proposed Description [scroll]"));
+
+        app.focus = ReshapeReviewFocus::Proposed;
+        let snap2 = render_reshape_review_snapshot(&app);
+
+        assert!(!snap2.contains("Current Description [scroll]"));
+        assert!(snap2.contains("Proposed Description [scroll]"));
     }
 }
