@@ -1,0 +1,13 @@
+project_id         = "your-gcp-project-id"
+region             = "us-central1"
+service_name       = "metastack-api"
+image_tag          = "latest"
+min_instance_count = 0
+max_instance_count = 3
+cpu                = "1"
+memory             = "512Mi"
+
+env_vars = {
+  # LINEAR_API_KEY = "lin_api_..."
+  # LOG_LEVEL      = "info"
+}

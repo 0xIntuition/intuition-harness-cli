@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.metastack/
+deploy/
+docs/
+tests/
+scripts/
+*.md
+!README.md
+Makefile
+LICENSE
+validation.md
