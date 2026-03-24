@@ -1439,10 +1439,7 @@ fn render_reshape_review_frame(frame: &mut Frame<'_>, app: &ReshapeReviewApp) {
     let layout = reshape_review_layout(frame.area());
 
     // Header
-    let mut header_lines = vec![Line::from(format!(
-        "Reshape review: {}",
-        app.identifier
-    ))];
+    let mut header_lines = vec![Line::from(format!("Reshape review: {}", app.identifier))];
     header_lines.push(Line::from(app.title_line.clone()));
     if !app.summary.is_empty() {
         header_lines.push(Line::from(format!("Summary: {}", app.summary)));
@@ -1555,8 +1552,7 @@ fn handle_reshape_review_mouse(
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
     ) {
         let current_text = render_markdown(&app.current_body, Style::default(), &[]);
-        let current_rows =
-            wrapped_rows(&plain_text(&current_text), layout.current.width.max(1));
+        let current_rows = wrapped_rows(&plain_text(&current_text), layout.current.width.max(1));
         if app
             .current_scroll
             .apply_mouse_in_viewport(mouse, layout.current, current_rows)
@@ -1565,8 +1561,7 @@ fn handle_reshape_review_mouse(
         }
 
         let proposed_text = render_markdown(&app.proposed_body, Style::default(), &[]);
-        let proposed_rows =
-            wrapped_rows(&plain_text(&proposed_text), layout.proposed.width.max(1));
+        let proposed_rows = wrapped_rows(&plain_text(&proposed_text), layout.proposed.width.max(1));
         app.proposed_scroll
             .apply_mouse_in_viewport(mouse, layout.proposed, proposed_rows);
     }
