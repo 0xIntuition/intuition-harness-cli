@@ -799,7 +799,7 @@ meta backlog plan ENG-10144 --velocity
 
 Legacy alias: `meta plan`
 
-In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
+In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear. Standard review now supports two distinct revision loops before you commit anything: press `F` to add free-form refinement guidance and rebuild the whole draft batch, or keep using numbered merge groups plus `Enter` when you specifically want to regenerate around merge decisions. Each rebuilt preview increments the visible draft-batch counter and keeps the run-scoped built-in continuation handle when the provider returns one.
 
 Fast mode keeps the same downstream issue creation path but switches the interaction model to a single pass. When `--fast` is active, the command captures the request, optionally asks at most one round of follow-up questions, prompts once for `Anything Else To Add?`, streams the draft preview while the agent is still generating it, and then shows an approve-or-reject review screen. Fast review intentionally removes merge groups, skip states, and regeneration controls.
 
@@ -908,14 +908,14 @@ meta backlog improve ENG-10144 --mode advanced --apply
 
 `meta backlog improve` is the repo-scoped backlog triage pass for existing backlog issues. Use it when you want to scan the current backlog for missing labels, weak titles/descriptions, missing acceptance criteria, absent priority or estimate, and parent-child structure opportunities. The default `basic` mode stays conservative and focuses on metadata hygiene. `advanced` mode can rewrite issue content more deeply and propose or apply an existing parent issue when the repository backlog clearly supports that structure.
 
-In a TTY, the command now stays inside one guided dashboard flow after issue selection. For each issue, the configured agent classifies the ticket into one of four states: `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`. The engineer then explicitly accepts, skips, or rejects that recommendation before the command moves on. The decision panel always shows the primary `Enter` action for the current ticket, plus explicit `skip` and `reject` paths. When the agent needs direct follow-up answers, the dashboard captures them inline, reruns the same issue review, and only offers an apply path once the recommendation is concrete enough to mutate local backlog content or Linear.
+In a TTY, the command now stays inside one guided dashboard flow after issue selection. For each issue, the configured agent classifies the ticket into one of four states: `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`. The engineer then explicitly accepts, skips, or rejects that recommendation before the command moves on. The decision panel always shows the primary `Enter` action for the current ticket, plus explicit `skip`, `reject`, and `refine` paths. When the agent needs direct follow-up answers, the dashboard captures them inline, reruns the same issue review, and only offers an apply path once the recommendation is concrete enough to mutate local backlog content or Linear. At any review pass, press `F` to add free-form refinement guidance, rerun the same issue analysis with the accumulated review context, and return to the review screen without applying local or Linear updates early.
 
 Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and the main goal is improving the issue description itself. Use `meta backlog improve` when you want a backlog-quality sweep that evaluates whether existing repo-scoped backlog issues are ready for execution.
 
 Side effects:
 
 - scans either explicit issue identifiers or repo-scoped issues in the configured backlog state
-- writes `original.md`, `issue.json`, `local-index.md` when present, `proposal.json`, `proposal.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/improvement/<RUN_ID>/`
+- writes `original.md`, `issue.json`, `local-index.md` when present, `proposal.json`, `proposal.md`, `summary.json`, and any captured follow-up/refinement notes under `.metastack/backlog/<ISSUE>/artifacts/improvement/<RUN_ID>/`
 - in the interactive dashboard, keeps local and remote changes gated behind an explicit human decision for each issue
 - keeps the default flow proposal-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue
 - with `--apply`, writes the local artifact trail first, then updates `.metastack/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear

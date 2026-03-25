@@ -148,6 +148,7 @@ struct ReviewApp {
     request: String,
     request_attachments: Vec<PromptImageAttachment>,
     follow_ups: Vec<FollowUpResponse>,
+    addenda: Vec<String>,
     plan: PlannedIssueSet,
     selected: usize,
     decisions: Vec<usize>,
@@ -165,6 +166,13 @@ enum ReviewFocus {
     SelectedTicket,
     Overview,
     CombinationPlan,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewRefinementApp {
+    review: ReviewApp,
+    addendum: InputFieldState,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +207,7 @@ enum PlanStage {
     Request(RequestApp),
     Questions(QuestionsApp),
     Review(ReviewApp),
+    Refinement(ReviewRefinementApp),
     Loading(LoadingApp),
 }
 
@@ -207,6 +216,7 @@ enum PlanStageKind {
     Request,
     Questions,
     Review,
+    Refinement,
     Loading,
 }
 
@@ -1052,6 +1062,36 @@ Return JSON only using this exact shape:\n\
     ))
 }
 
+fn render_issue_refinement_prompt(
+    root: &Path,
+    request: &str,
+    follow_ups: &[FollowUpResponse],
+    plan: &PlannedIssueSet,
+    previous_addenda: &[String],
+    addendum: &str,
+) -> Result<String> {
+    let context = load_context_bundle(root)?;
+    let workflow_contract = load_workflow_contract(root)?;
+    let follow_up_block = render_follow_up_block(follow_ups);
+    let current_plan = serde_json::to_string_pretty(plan)
+        .context("failed to serialize the current ticket draft for refinement")?;
+    let refinement_history = render_refinement_history_block(previous_addenda);
+
+    Ok(format!(
+        "You are refining a backlog ticket plan for the active repository with new review guidance.\n\n\
+Injected workflow contract:\n{workflow_contract}\n\n\
+User request:\n{request}\n\n\
+Follow-up answers:\n{follow_up_block}\n\n\
+Previous refinement guidance:\n{refinement_history}\n\n\
+New refinement guidance:\n{addendum}\n\n\
+Repository planning context:\n{context}\n\n\
+Current draft plan JSON:\n{current_plan}\n\n\
+Revise the current draft plan to incorporate the new guidance while keeping the result scoped to this repository only unless the user explicitly asked for a narrower subproject. You may rewrite, merge, split, or reorder tickets when the new guidance requires it. Preserve already-captured follow-up answers and previous refinement guidance when deciding how to reshape the plan. Return 1 to 5 actionable Linear backlog issues.\n\n\
+Return JSON only using this exact shape:\n\
+{{\n  \"summary\":\"One paragraph summary of the overall plan\",\n  \"issues\":[\n    {{\n      \"title\":\"Issue title\",\n      \"description\":\"Short markdown description\",\n      \"acceptance_criteria\":[\"criterion one\",\"criterion two\"],\n      \"priority\": 2\n    }}\n  ]\n}}",
+    ))
+}
+
 fn render_follow_up_block(follow_ups: &[FollowUpResponse]) -> String {
     if follow_ups.is_empty() {
         "No follow-up questions were required.".to_string()
@@ -1067,6 +1107,19 @@ fn render_follow_up_block(follow_ups: &[FollowUpResponse]) -> String {
                 };
                 format!("{}. Q: {}\n   A: {}", index + 1, follow_up.question, answer)
             })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn render_refinement_history_block(addenda: &[String]) -> String {
+    if addenda.is_empty() {
+        "No previous refinement guidance was provided.".to_string()
+    } else {
+        addenda
+            .iter()
+            .enumerate()
+            .map(|(index, addendum)| format!("{}. {}", index + 1, addendum))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1355,6 +1408,12 @@ fn run_interactive_plan_session(
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if key.code == KeyCode::Esc {
+                        if app.pending.is_none()
+                            && let PlanStage::Refinement(refinement_app) = &app.stage
+                        {
+                            app.stage = PlanStage::Review(refinement_app.review.clone());
+                            continue;
+                        }
                         return Ok(InteractivePlanExit::Cancelled);
                     }
 
@@ -1380,6 +1439,11 @@ fn run_interactive_plan_session(
                             review_app,
                             key,
                             review_layout(frame_size.into()),
+                        ),
+                        PlanStage::Refinement(refinement_app) => handle_review_refinement_step_key(
+                            refinement_app,
+                            key,
+                            request_input_width(frame_size.into()),
                         ),
                         PlanStage::Loading(_) => SessionAction::None,
                     };
@@ -1415,6 +1479,12 @@ fn run_interactive_plan_session(
                         SessionAction::RegeneratePlan { review } => {
                             start_plan_revision(&mut app, root, review);
                         }
+                        SessionAction::OpenRefinement { review } => {
+                            app.stage = PlanStage::Refinement(build_review_refinement_app(review));
+                        }
+                        SessionAction::RefinePlan { review, addendum } => {
+                            start_plan_refinement(&mut app, root, review, addendum);
+                        }
                         SessionAction::Confirm(plan) => {
                             if plan.issues.is_empty() {
                                 match &mut app.stage {
@@ -1436,6 +1506,12 @@ fn run_interactive_plan_session(
                                                 .to_string(),
                                         );
                                     }
+                                    PlanStage::Refinement(refinement_app) => {
+                                        refinement_app.error = Some(
+                                            "planning agent returned no issues to create"
+                                                .to_string(),
+                                        );
+                                    }
                                     PlanStage::Loading(_) => {}
                                 }
                             } else {
@@ -1450,6 +1526,10 @@ fn run_interactive_plan_session(
                     }
                     PlanStage::Questions(questions_app) => {
                         handle_questions_step_paste(questions_app, &text);
+                    }
+                    PlanStage::Refinement(refinement_app) => {
+                        refinement_app.addendum.paste(&text);
+                        refinement_app.error = None;
                     }
                     PlanStage::Review(_) | PlanStage::Loading(_) => {}
                 },
@@ -1478,6 +1558,7 @@ fn run_interactive_plan_session(
                                 review_layout(frame_size.into()),
                             );
                         }
+                        PlanStage::Refinement(_) => {}
                         PlanStage::Loading(_) => {}
                     }
                 }
@@ -2460,11 +2541,30 @@ fn build_review_app(
     plan: PlannedIssueSet,
     revision: usize,
 ) -> ReviewApp {
+    build_review_app_with_addenda(
+        request,
+        request_attachments,
+        follow_ups,
+        Vec::new(),
+        plan,
+        revision,
+    )
+}
+
+fn build_review_app_with_addenda(
+    request: String,
+    request_attachments: Vec<PromptImageAttachment>,
+    follow_ups: Vec<FollowUpResponse>,
+    addenda: Vec<String>,
+    plan: PlannedIssueSet,
+    revision: usize,
+) -> ReviewApp {
     let decision_len = plan.issues.len();
     ReviewApp {
         request,
         request_attachments,
         follow_ups,
+        addenda,
         plan,
         selected: 0,
         decisions: vec![0; decision_len],
@@ -2473,6 +2573,14 @@ fn build_review_app(
         overview_scroll: ScrollState::default(),
         selected_ticket_scroll: ScrollState::default(),
         combination_scroll: ScrollState::default(),
+        error: None,
+    }
+}
+
+fn build_review_refinement_app(review: ReviewApp) -> ReviewRefinementApp {
+    ReviewRefinementApp {
+        review,
+        addendum: InputFieldState::new(String::new()),
         error: None,
     }
 }
@@ -2522,7 +2630,7 @@ impl ReviewApp {
             .iter()
             .filter(|follow_up| follow_up.skipped)
             .count();
-        Text::from(vec![
+        let mut lines = vec![
             Line::from("Original request"),
             Line::from(""),
             Line::from(self.request.clone()),
@@ -2532,6 +2640,7 @@ impl ReviewApp {
                 answered_follow_ups, skipped_follow_ups
             )),
             Line::from(format!("Draft batch: {}", self.revision)),
+            Line::from(format!("Refinements: {}", self.addenda.len())),
             Line::from(format!(
                 "Selected: {}/{}",
                 decisions.selected_count,
@@ -2544,7 +2653,14 @@ impl ReviewApp {
             Line::from("Plan Summary"),
             Line::from(""),
             Line::from(self.plan.summary.clone()),
-        ])
+        ];
+        if let Some(latest_addendum) = self.addenda.last() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Latest refinement"));
+            lines.push(Line::from(""));
+            lines.push(Line::from(latest_addendum.clone()));
+        }
+        Text::from(lines)
     }
 
     fn selected_ticket_text(&self) -> Text<'static> {
@@ -2579,6 +2695,7 @@ impl ReviewApp {
         let decisions = review_decision_counts(self);
         let mut merge_lines = vec![
             Line::from("Space cycles the active ticket through review states."),
+            Line::from("F opens the free-form refinement editor for the whole draft batch."),
             Line::from(""),
             Line::from("[ ] Skip the ticket"),
             Line::from("[x] Keep the ticket as-is"),
@@ -2679,6 +2796,13 @@ enum SessionAction {
     },
     RegeneratePlan {
         review: ReviewApp,
+    },
+    OpenRefinement {
+        review: ReviewApp,
+    },
+    RefinePlan {
+        review: ReviewApp,
+        addendum: String,
     },
     Confirm(PlannedIssueSet),
 }
@@ -2980,6 +3104,12 @@ fn handle_review_step_key(
             app.error = None;
             SessionAction::None
         }
+        KeyCode::Char('f') => {
+            app.error = None;
+            SessionAction::OpenRefinement {
+                review: app.clone(),
+            }
+        }
         KeyCode::Enter => match review_submission_action(app) {
             Ok(ReviewSubmissionAction::ConfirmAsIs) => {
                 SessionAction::Confirm(selected_issue_plan(app))
@@ -2996,6 +3126,55 @@ fn handle_review_step_key(
             }
         },
         _ => SessionAction::None,
+    }
+}
+
+fn handle_review_refinement_step_key(
+    app: &mut ReviewRefinementApp,
+    key: crossterm::event::KeyEvent,
+    input_width: u16,
+) -> SessionAction {
+    match key.code {
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let addendum = app.addendum.display_value().trim().to_string();
+            if addendum.is_empty() {
+                app.error = Some("Enter the refinement guidance before continuing.".to_string());
+                SessionAction::None
+            } else {
+                app.error = None;
+                SessionAction::RefinePlan {
+                    review: app.review.clone(),
+                    addendum,
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if app.addendum.insert_newline() {
+                    app.error = None;
+                }
+                SessionAction::None
+            } else {
+                let addendum = app.addendum.display_value().trim().to_string();
+                if addendum.is_empty() {
+                    app.error =
+                        Some("Enter the refinement guidance before continuing.".to_string());
+                    SessionAction::None
+                } else {
+                    app.error = None;
+                    SessionAction::RefinePlan {
+                        review: app.review.clone(),
+                        addendum,
+                    }
+                }
+            }
+        }
+        _ => {
+            if app.addendum.handle_key_with_width(key, input_width) {
+                app.error = None;
+            }
+            SessionAction::None
+        }
     }
 }
 
@@ -3138,6 +3317,9 @@ fn render_plan_session(frame: &mut Frame<'_>, app: &PlanSessionApp) {
         PlanStage::Request(request_app) => render_request_form_frame(frame, request_app),
         PlanStage::Questions(questions_app) => render_questions_form_frame(frame, questions_app),
         PlanStage::Review(review_app) => render_review_form_frame(frame, review_app),
+        PlanStage::Refinement(refinement_app) => {
+            render_review_refinement_frame(frame, refinement_app)
+        }
         PlanStage::Loading(loading_app) => render_loading_frame(frame, loading_app),
     }
 }
@@ -3409,7 +3591,74 @@ fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab/Shift+Tab changes review focus. In [scroll] panes, Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket. Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels.",
+        "Tab/Shift+Tab changes review focus. In [scroll] panes, Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket. Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. F opens the refinement editor. U clears all marks. Esc cancels.",
+    );
+}
+
+fn render_review_refinement_frame(frame: &mut Frame<'_>, app: &ReviewRefinementApp) {
+    let layout = base_layout(frame);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(layout[0]);
+
+    let addendum_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            "Refine Draft Batch {} [editing]",
+            app.review.revision
+        ))
+        .border_style(Style::default().add_modifier(Modifier::BOLD));
+    let addendum_inner = addendum_block.inner(body[0]);
+    let rendered = app.addendum.render_with_width(
+        "Describe what should change in the next draft preview...",
+        true,
+        addendum_inner.width,
+    );
+    let addendum = Paragraph::new(rendered.text.clone())
+        .block(addendum_block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(addendum, body[0]);
+    rendered.set_cursor(frame, addendum_inner);
+
+    let mut summary_lines = vec![
+        Line::from("Current review context"),
+        Line::from(""),
+        Line::from(format!("Revision: {}", app.review.revision)),
+        Line::from(format!(
+            "Suggested tickets: {}",
+            app.review.plan.issues.len()
+        )),
+        Line::from(format!(
+            "Follow-ups captured: {}",
+            app.review.follow_ups.len()
+        )),
+        Line::from(format!("Prior refinements: {}", app.review.addenda.len())),
+        Line::from(""),
+        Line::from("Request"),
+        Line::from(""),
+        Line::from(app.review.request.clone()),
+        Line::from(""),
+        Line::from("Current plan summary"),
+        Line::from(""),
+        Line::from(app.review.plan.summary.clone()),
+    ];
+    if let Some(latest_addendum) = app.review.addenda.last() {
+        summary_lines.push(Line::from(""));
+        summary_lines.push(Line::from("Latest refinement"));
+        summary_lines.push(Line::from(""));
+        summary_lines.push(Line::from(latest_addendum.clone()));
+    }
+    let summary = Paragraph::new(Text::from(summary_lines))
+        .block(Block::default().borders(Borders::ALL).title("Summary"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(summary, body[1]);
+
+    render_footer(
+        frame,
+        layout[1],
+        app.error.as_deref(),
+        "Type the new context for the next draft. Enter rebuilds the preview. Shift+Enter inserts a newline. Ctrl+S also rebuilds. Esc returns to the review screen.",
     );
 }
 
@@ -3426,6 +3675,7 @@ fn stage_kind(stage: &PlanStage) -> PlanStageKind {
         PlanStage::Request(_) => PlanStageKind::Request,
         PlanStage::Questions(_) => PlanStageKind::Questions,
         PlanStage::Review(_) => PlanStageKind::Review,
+        PlanStage::Refinement(_) => PlanStageKind::Refinement,
         PlanStage::Loading(_) => PlanStageKind::Loading,
     }
 }
@@ -3746,6 +3996,34 @@ fn start_plan_revision(app: &mut PlanSessionApp, root: &Path, review: ReviewApp)
     });
 }
 
+fn start_plan_refinement(
+    app: &mut PlanSessionApp,
+    root: &Path,
+    review: ReviewApp,
+    addendum: String,
+) {
+    let previous_stage = app.stage.clone();
+    let next_revision = review.revision + 1;
+    app.stage = PlanStage::Loading(LoadingApp {
+        message: format!("Refining suggested tickets into batch {next_revision}"),
+        detail: "Applying the new review guidance to rebuild the current draft preview."
+            .to_string(),
+        spinner_index: 0,
+        preview: String::new(),
+    });
+    app.pending = Some(PendingPlanJob {
+        receiver: spawn_plan_refinement_job(
+            root.to_path_buf(),
+            review,
+            addendum,
+            next_revision,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
+        ),
+        previous_stage,
+    });
+}
+
 fn spawn_questions_job(
     root: PathBuf,
     request: String,
@@ -3860,11 +4138,57 @@ fn spawn_plan_revision_job(
     receiver
 }
 
+fn spawn_plan_refinement_job(
+    root: PathBuf,
+    review: ReviewApp,
+    addendum: String,
+    revision: usize,
+    agent_overrides: PlanningAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<PlanWorkerReport> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation;
+        let mut addenda = review.addenda.clone();
+        addenda.push(addendum.clone());
+        let outcome = refine_issue_plan_with_addendum(
+            &root,
+            &review.request,
+            &review.request_attachments,
+            &review.follow_ups,
+            &review.plan,
+            &review.addenda,
+            &addendum,
+            &agent_overrides,
+            &mut continuation,
+        )
+        .and_then(|plan| {
+            if plan.issues.is_empty() {
+                bail!("planning agent returned no issues to create");
+            }
+            Ok(PlanWorkerOutcome::Review(build_review_app_with_addenda(
+                review.request,
+                review.request_attachments,
+                review.follow_ups,
+                addenda,
+                plan,
+                revision,
+            )))
+        });
+        let _ = sender.send(PlanWorkerReport {
+            continuation,
+            outcome,
+        });
+    });
+    receiver
+}
+
 fn set_stage_error(stage: &mut PlanStage, error: String) {
     match stage {
         PlanStage::Request(request_app) => request_app.error = Some(error),
         PlanStage::Questions(questions_app) => questions_app.error = Some(error),
         PlanStage::Review(review_app) => review_app.error = Some(error),
+        PlanStage::Refinement(refinement_app) => refinement_app.error = Some(error),
         PlanStage::Loading(_) => {}
     }
 }
@@ -3920,6 +4244,44 @@ fn revise_issue_plan(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn refine_issue_plan_with_addendum(
+    root: &Path,
+    request: &str,
+    request_attachments: &[PromptImageAttachment],
+    follow_ups: &[FollowUpResponse],
+    plan: &PlannedIssueSet,
+    previous_addenda: &[String],
+    addendum: &str,
+    overrides: &PlanningAgentOverrides,
+    continuation: &mut Option<AgentContinuation>,
+) -> Result<PlannedIssueSet> {
+    let prompt = render_issue_refinement_prompt(
+        root,
+        request,
+        follow_ups,
+        plan,
+        previous_addenda,
+        addendum,
+    )?;
+    let output = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_PLAN.to_string()),
+            agent: overrides.agent.clone(),
+            prompt,
+            instructions: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
+            transport: None,
+            attachments: collect_prompt_attachments(request_attachments, follow_ups),
+        },
+        continuation,
+    )?;
+    let parsed: PlannedIssueSet = parse_agent_json(&output.stdout, "issue plan refinement")?;
+    normalize_planned_issue_set(parsed)
+}
+
 struct TerminalCleanup;
 
 impl Drop for TerminalCleanup {
@@ -3956,15 +4318,18 @@ mod tests {
         FollowUpAnswerState, FollowUpQuestions, FollowUpResponse, LoadingApp, PendingPlanJob,
         PlanSessionApp, PlanStage, PlanWorkerOutcome, PlanWorkerReport, PlannedIssueDraft,
         PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
-        ReviewApp, ReviewFocus, ReviewSubmissionAction, SKIPPED_FOLLOW_UP_LABEL, SessionAction,
-        build_review_app, handle_questions_step_key, handle_questions_step_key_with_viewport,
-        handle_questions_step_mouse, handle_questions_step_paste, handle_request_step_key,
+        ReviewApp, ReviewFocus, ReviewRefinementApp, ReviewSubmissionAction,
+        SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app, build_review_app_with_addenda,
+        build_review_refinement_app, handle_questions_step_key,
+        handle_questions_step_key_with_viewport, handle_questions_step_mouse,
+        handle_questions_step_paste, handle_request_step_key,
         handle_request_step_key_with_viewport, handle_request_step_mouse,
-        handle_request_step_paste, handle_review_step_key, handle_review_step_mouse,
-        next_incomplete_question, parse_agent_json, process_pending_plan_job,
-        questions_answer_input_viewport, render_issue_merge_prompt, render_loading_frame,
-        render_plan_session, render_question_prompt, render_questions_form_frame,
-        render_request_form_frame, render_review_form_frame, request_input_viewport,
+        handle_request_step_paste, handle_review_refinement_step_key, handle_review_step_key,
+        handle_review_step_mouse, next_incomplete_question, parse_agent_json,
+        process_pending_plan_job, questions_answer_input_viewport, render_issue_merge_prompt,
+        render_issue_refinement_prompt, render_loading_frame, render_plan_session,
+        render_question_prompt, render_questions_form_frame, render_request_form_frame,
+        render_review_form_frame, render_review_refinement_frame, request_input_viewport,
         review_kept_indices, review_layout, review_marker, review_merge_groups,
         review_submission_action, selected_issue_plan, snapshot,
     };
@@ -4043,6 +4408,15 @@ mod tests {
         terminal
             .draw(|frame| render_review_form_frame(frame, app))
             .expect("review form should render");
+        snapshot(terminal.backend())
+    }
+
+    fn render_review_refinement_snapshot(app: &ReviewRefinementApp) -> String {
+        let backend = TestBackend::new(140, 36);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| render_review_refinement_frame(frame, app))
+            .expect("refinement form should render");
         snapshot(terminal.backend())
     }
 
@@ -4810,6 +5184,117 @@ mod tests {
     }
 
     #[test]
+    fn review_step_opens_the_refinement_editor() {
+        let mut app = build_review_app(
+            "Plan a meta plan command".to_string(),
+            vec![],
+            vec![],
+            PlannedIssueSet {
+                summary: "Split the work into command wiring and dashboard behavior.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Add the review UI".to_string(),
+                    description: "Capture request, follow-up answers, and review.".to_string(),
+                    acceptance_criteria: vec![],
+                    priority: Some(2),
+                }],
+            },
+            1,
+        );
+
+        let action = handle_review_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('f')),
+            review_layout(Rect::new(0, 0, 140, 36)),
+        );
+
+        match action {
+            SessionAction::OpenRefinement { review } => {
+                assert_eq!(review.request, "Plan a meta plan command");
+                assert_eq!(review.revision, 1);
+            }
+            _ => panic!("expected the review step to open refinement"),
+        }
+    }
+
+    #[test]
+    fn refinement_editor_requires_non_empty_guidance() {
+        let review = build_review_app(
+            "Plan a meta plan command".to_string(),
+            vec![],
+            vec![],
+            PlannedIssueSet {
+                summary: "Split the work into command wiring and dashboard behavior.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Add the review UI".to_string(),
+                    description: "Capture request, follow-up answers, and review.".to_string(),
+                    acceptance_criteria: vec![],
+                    priority: Some(2),
+                }],
+            },
+            1,
+        );
+        let mut app = build_review_refinement_app(review);
+
+        let action = handle_review_refinement_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("Enter the refinement guidance before continuing.")
+        );
+    }
+
+    #[test]
+    fn refinement_editor_submits_guidance_and_renders_history() {
+        let review = build_review_app_with_addenda(
+            "Plan a meta plan command".to_string(),
+            vec![],
+            vec![answered_follow_up("Who uses it?", "CLI maintainers")],
+            vec!["Keep onboarding work separate from release tooling.".to_string()],
+            PlannedIssueSet {
+                summary: "Split the work into command wiring and dashboard behavior.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Add the review UI".to_string(),
+                    description: "Capture request, follow-up answers, and review.".to_string(),
+                    acceptance_criteria: vec![],
+                    priority: Some(2),
+                }],
+            },
+            2,
+        );
+        let mut app = build_review_refinement_app(review);
+        app.addendum
+            .paste("Also keep merge-group regeneration as a separate action.");
+
+        let snapshot = render_review_refinement_snapshot(&app);
+        assert!(snapshot.contains("Refine Draft Batch 2 [editing]"));
+        assert!(snapshot.contains("Prior refinements: 1"));
+        assert!(snapshot.contains("Latest refinement"));
+
+        let action = handle_review_refinement_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
+        );
+
+        match action {
+            SessionAction::RefinePlan { addendum, review } => {
+                assert_eq!(
+                    addendum,
+                    "Also keep merge-group regeneration as a separate action."
+                );
+                assert_eq!(review.revision, 2);
+                assert_eq!(review.addenda.len(), 1);
+            }
+            _ => panic!("expected refinement guidance to submit"),
+        }
+    }
+
+    #[test]
     fn review_selected_ticket_snapshot_scrolls_to_visible_bottom_rows() {
         let mut app = build_review_app(
             "Plan a long review".to_string(),
@@ -5082,6 +5567,47 @@ mod tests {
         assert!(prompt.contains("Merge the review UI"));
         assert!(prompt.contains("Merge the create path"));
         assert!(prompt.contains(SKIPPED_FOLLOW_UP_LABEL));
+    }
+
+    #[test]
+    fn refinement_prompt_preserves_previous_guidance() {
+        let temp = tempdir().expect("tempdir should create");
+        let root = temp.path();
+        let metastack_dir = root.join(".metastack");
+        std::fs::create_dir_all(&metastack_dir).expect("planning dir should exist");
+        for file in [
+            "SCAN.md",
+            "ARCHITECTURE.md",
+            "CONVENTIONS.md",
+            "STACK.md",
+            "STRUCTURE.md",
+            "TESTING.md",
+        ] {
+            std::fs::write(metastack_dir.join(file), format!("# {file}\n")).expect("context file");
+        }
+
+        let prompt = render_issue_refinement_prompt(
+            root,
+            "Plan a better `meta plan` workflow",
+            &[answered_follow_up("Who uses it?", "CLI maintainers")],
+            &PlannedIssueSet {
+                summary: "Split command and UI work.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Add CLI wiring".to_string(),
+                    description: "Handle non-interactive creation.".to_string(),
+                    acceptance_criteria: vec!["CLI works".to_string()],
+                    priority: Some(2),
+                }],
+            },
+            &["Keep onboarding work separate.".to_string()],
+            "Also preserve the current review order.",
+        )
+        .expect("prompt should render");
+
+        assert!(prompt.contains("Previous refinement guidance"));
+        assert!(prompt.contains("1. Keep onboarding work separate."));
+        assert!(prompt.contains("New refinement guidance"));
+        assert!(prompt.contains("Also preserve the current review order."));
     }
 
     #[test]
