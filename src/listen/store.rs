@@ -29,6 +29,10 @@ const LISTEN_SESSION_DETAIL_VERSION: u8 = 3;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
+fn listen_turn_log_prefix() -> String {
+    format!("--- {} listen turn ", crate::branding::COMMAND_NAME)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ListenProjectStore {
     identity: ListenProjectIdentity,
@@ -486,7 +490,8 @@ impl ListenProjectStore {
             if let Some(existing) = self.load_active_lock()? {
                 if pid_is_running(existing.pid) {
                     bail!(
-                        "another `meta listen` instance already owns project `{}` (pid {}); active lock: {}",
+                        "another `{} listen` instance already owns project `{}` (pid {}); active lock: {}",
+                        crate::branding::COMMAND_NAME,
                         self.identity.project_label,
                         existing.pid,
                         self.paths.lock_path.display()
@@ -1132,7 +1137,7 @@ fn repair_from_worker_log(path: Option<&Path>) -> Result<WorkerLogRecovery> {
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
-        if line.starts_with("--- meta listen turn ") {
+        if line.starts_with(&listen_turn_log_prefix()) {
             if !current_turn.contents.is_empty() || current_turn.provider.is_some() {
                 turns.push(current_turn);
                 current_turn = WorkerLogTurn::default();
@@ -1362,8 +1367,8 @@ mod tests {
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
         LISTEN_SESSION_DETAIL_VERSION, ListenProjectStore, ListenState, SessionDetailReferences,
-        SessionPhase, SessionSelector, project_key_for_metastack_root, resolve_source_root,
-        write_json,
+        SessionPhase, SessionSelector, listen_turn_log_prefix, project_key_for_metastack_root,
+        resolve_source_root, write_json,
     };
 
     #[test]
@@ -1994,14 +1999,15 @@ mod tests {
         fs::create_dir_all(store.paths().logs_dir.clone())?;
         fs::write(
             store.log_path(issue_identifier),
-            concat!(
-                "--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---\n",
-                "Resolved provider: claude\n",
-                "Resolved model: sonnet\n",
-                "Resolved reasoning: high\n",
-                "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":210}}}\n",
-                "{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":34}}\n",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}\n",
+            format!(
+                "{}1/20 @ 2026-03-23T12:00:00Z ---\n\
+                 Resolved provider: claude\n\
+                 Resolved model: sonnet\n\
+                 Resolved reasoning: high\n\
+                 {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":210}}}}}}\n\
+                 {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":34}}}}\n\
+                 {{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}}\n",
+                listen_turn_log_prefix(),
             ),
         )?;
         seed_state(&store, vec![session])?;
@@ -2094,11 +2100,13 @@ mod tests {
         fs::create_dir_all(store.paths().logs_dir.clone())?;
         fs::write(
             store.log_path(issue_identifier),
-            concat!(
-                "--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---\n",
-                "Resolved provider: codex\n",
-                "--- meta listen turn 2/20 @ 2026-03-23T12:01:00Z ---\n",
-                "Resolved provider: claude\n",
+            format!(
+                "{}1/20 @ 2026-03-23T12:00:00Z ---\n\
+                 Resolved provider: codex\n\
+                 {}2/20 @ 2026-03-23T12:01:00Z ---\n\
+                 Resolved provider: claude\n",
+                listen_turn_log_prefix(),
+                listen_turn_log_prefix(),
             ),
         )?;
         seed_state(&store, vec![session])?;
