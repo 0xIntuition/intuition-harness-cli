@@ -451,7 +451,7 @@ fn plan_fast_no_interactive_accepts_prose_wrapped_plan_json() -> Result<(), Box<
     let (_temp, repo_root, config_path, bin_dir, stub_dir, server) = setup_fast_plan_repo(
         r#"#!/bin/sh
 cat > "$TEST_OUTPUT_DIR/payload.txt"
-printf '%s' 'Context {not json}
+printf '%s' 'Context {{not json}}
 {"summary":"Create one fast ticket.","issues":[{"title":"Wrapped fast plan ticket","description":"Create backlog artifacts through the shared template path.","acceptance_criteria":["wrapped JSON still creates backlog issues"],"priority":2}]}'
 "#,
     )?;

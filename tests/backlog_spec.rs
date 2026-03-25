@@ -38,8 +38,8 @@ case "$METASTACK_AGENT_PROMPT" in
   *"Return JSON only using this exact shape"*)
     case "$METASTACK_AGENT_PROMPT" in
       *"Wrap follow-up questions in prose"*)
-        printf '%s' 'Context {not json}
-{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}'
+        printf '%s' 'Context {{not json}}
+{{"questions":["Who is the primary user for this workflow?","What should stay explicitly out of scope?"]}}'
         ;;
       *"Return empty follow-up output"*)
         printf '%s' ''
