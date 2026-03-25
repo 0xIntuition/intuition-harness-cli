@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["cli", "agents", "linear", "orchestration", "automation"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.85"
-default-run = "meta"
+default-run = "intu"
 autobins = false
 exclude = [
     ".github/",
@@ -25,12 +25,12 @@ exclude = [
 ]
 
 [package.metadata.branding]
-command_name = "meta"
-project_dir = ".metastack"
-display_name = "MetaStack"
+command_name = "intu"
+project_dir = ".intuition"
+display_name = "Intuition"
 
 [[bin]]
-name = "meta"
+name = "intu"
 path = "src/main.rs"
 
 [build-dependencies]
