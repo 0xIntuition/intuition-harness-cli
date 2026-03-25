@@ -774,8 +774,12 @@ fn workspace_prune_discovers_and_removes_merged_improve_workspaces() -> Result<(
     // Create an improve workspace with a pushed branch (simulating merged PR).
     let workspace_root = temp.path().join("repo-workspace");
     let improve_workspace = workspace_root.join("improve-abc123");
-    let improve_clone = create_workspace_clone_checkout(&repo_root, "repo-workspace/improve-abc123")?;
-    git(&improve_clone, &["checkout", "-B", "improve/eng-10175-branch", "origin/main"])?;
+    let improve_clone =
+        create_workspace_clone_checkout(&repo_root, "repo-workspace/improve-abc123")?;
+    git(
+        &improve_clone,
+        &["checkout", "-B", "improve/eng-10175-branch", "origin/main"],
+    )?;
     commit_workspace_file(&improve_clone, "improve.txt", "improve\n", "Improve work")?;
     push_workspace_branch(&improve_clone, "improve/eng-10175-branch")?;
 
@@ -843,8 +847,12 @@ fn workspace_prune_keeps_dirty_improve_workspace() -> Result<(), Box<dyn Error>>
 
     // Create an improve workspace with a merged PR but dirty state.
     let improve_workspace = temp.path().join("repo-workspace").join("improve-dirty1");
-    let improve_clone = create_workspace_clone_checkout(&repo_root, "repo-workspace/improve-dirty1")?;
-    git(&improve_clone, &["checkout", "-B", "improve/dirty-branch", "origin/main"])?;
+    let improve_clone =
+        create_workspace_clone_checkout(&repo_root, "repo-workspace/improve-dirty1")?;
+    git(
+        &improve_clone,
+        &["checkout", "-B", "improve/dirty-branch", "origin/main"],
+    )?;
     commit_workspace_file(&improve_clone, "pushed.txt", "pushed\n", "Pushed work")?;
     push_workspace_branch(&improve_clone, "improve/dirty-branch")?;
     // Add uncommitted changes.
@@ -896,8 +904,12 @@ fn workspace_prune_discovers_and_removes_merged_review_workspaces() -> Result<()
     let review_runs_dir = temp.path().join("repo-workspace").join("review-runs");
     let review_workspace = review_runs_dir.join("pr-42");
     fs::create_dir_all(&review_runs_dir)?;
-    let review_clone = create_workspace_clone_checkout(&repo_root, "repo-workspace/review-runs/pr-42")?;
-    git(&review_clone, &["checkout", "-B", "fix/pr-42-remediation", "origin/main"])?;
+    let review_clone =
+        create_workspace_clone_checkout(&repo_root, "repo-workspace/review-runs/pr-42")?;
+    git(
+        &review_clone,
+        &["checkout", "-B", "fix/pr-42-remediation", "origin/main"],
+    )?;
     commit_workspace_file(&review_clone, "fix.txt", "fix\n", "Remediation fix")?;
     push_workspace_branch(&review_clone, "fix/pr-42-remediation")?;
 

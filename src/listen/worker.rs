@@ -27,6 +27,7 @@ use crate::config::{
     PromptTransport,
 };
 use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resolve_agent_config};
+use crate::fs::sibling_workspace_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
@@ -36,10 +37,9 @@ use crate::linear::{
     AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
     ReqwestLinearClient, WorkflowState,
 };
-use crate::fs::sibling_workspace_root;
 use crate::repo_target::RepoTarget;
-use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 use crate::workflow_contract::render_workflow_contract;
+use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
 use super::{
     BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus,
@@ -723,7 +723,12 @@ fn try_listener_auto_clean(source_root: &Path, workspace_path: &Path, issue_iden
         }
     };
 
-    match try_auto_clean_workspace(source_root, &workspace_root, workspace_path, issue_identifier) {
+    match try_auto_clean_workspace(
+        source_root,
+        &workspace_root,
+        workspace_path,
+        issue_identifier,
+    ) {
         Ok(AutoCleanOutcome::Removed { bytes_reclaimed }) => {
             eprintln!(
                 "listen: auto-cleaned workspace for {issue_identifier} \
@@ -738,9 +743,7 @@ fn try_listener_auto_clean(source_root: &Path, workspace_path: &Path, issue_iden
             );
         }
         Err(error) => {
-            eprintln!(
-                "listen: auto-clean failed for {issue_identifier}: {error:#}"
-            );
+            eprintln!("listen: auto-clean failed for {issue_identifier}: {error:#}");
         }
     }
 }

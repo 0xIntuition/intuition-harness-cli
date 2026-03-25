@@ -191,9 +191,7 @@ pub(crate) enum ManagedWorkspace {
 }
 
 /// Discover improve workspaces under `<workspace-root>/improve-*/`.
-pub(crate) fn discover_improve_workspaces(
-    workspace_root: &Path,
-) -> Result<Vec<ManagedWorkspace>> {
+pub(crate) fn discover_improve_workspaces(workspace_root: &Path) -> Result<Vec<ManagedWorkspace>> {
     let mut results = Vec::new();
     let entries = match fs::read_dir(workspace_root) {
         Ok(entries) => entries,
@@ -207,7 +205,8 @@ pub(crate) fn discover_improve_workspaces(
     for entry in entries {
         let entry =
             entry.with_context(|| format!("failed to read `{}`", workspace_root.display()))?;
-        if !entry.file_type()
+        if !entry
+            .file_type()
             .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?
             .is_dir()
         {
@@ -215,14 +214,17 @@ pub(crate) fn discover_improve_workspaces(
         }
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(session_id) = name.strip_prefix("improve-") else { continue };
+        let Some(session_id) = name.strip_prefix("improve-") else {
+            continue;
+        };
         if session_id.is_empty() || !entry.path().join(".git").exists() {
             continue;
         }
 
         let path = entry.path();
         let branch = git_stdout(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-        let (disk_usage_bytes, _) = scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
+        let (disk_usage_bytes, _) =
+            scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
         let git = evaluate_workspace_git_safety(&path).unwrap_or_default();
 
         results.push(ManagedWorkspace::Improve {
@@ -238,9 +240,7 @@ pub(crate) fn discover_improve_workspaces(
 }
 
 /// Discover review remediation workspaces under `<workspace-root>/review-runs/pr-*/`.
-pub(crate) fn discover_review_workspaces(
-    workspace_root: &Path,
-) -> Result<Vec<ManagedWorkspace>> {
+pub(crate) fn discover_review_workspaces(workspace_root: &Path) -> Result<Vec<ManagedWorkspace>> {
     let mut results = Vec::new();
     let review_runs_dir = workspace_root.join("review-runs");
     let entries = match fs::read_dir(&review_runs_dir) {
@@ -255,7 +255,8 @@ pub(crate) fn discover_review_workspaces(
     for entry in entries {
         let entry =
             entry.with_context(|| format!("failed to read `{}`", review_runs_dir.display()))?;
-        if !entry.file_type()
+        if !entry
+            .file_type()
             .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?
             .is_dir()
         {
@@ -263,15 +264,20 @@ pub(crate) fn discover_review_workspaces(
         }
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(pr_str) = name.strip_prefix("pr-") else { continue };
-        let Ok(pr_number) = pr_str.parse::<u64>() else { continue };
+        let Some(pr_str) = name.strip_prefix("pr-") else {
+            continue;
+        };
+        let Ok(pr_number) = pr_str.parse::<u64>() else {
+            continue;
+        };
         if !entry.path().join(".git").exists() {
             continue;
         }
 
         let path = entry.path();
         let branch = git_stdout(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-        let (disk_usage_bytes, _) = scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
+        let (disk_usage_bytes, _) =
+            scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
         let git = evaluate_workspace_git_safety(&path).unwrap_or_default();
 
         results.push(ManagedWorkspace::ReviewRemediation {
@@ -636,9 +642,8 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
     let improve_workspaces = discover_improve_workspaces(&context.workspace_root)?;
     let review_workspaces = discover_review_workspaces(&context.workspace_root)?;
 
-    let has_any = !entries.is_empty()
-        || !improve_workspaces.is_empty()
-        || !review_workspaces.is_empty();
+    let has_any =
+        !entries.is_empty() || !improve_workspaces.is_empty() || !review_workspaces.is_empty();
 
     if !has_any {
         return Ok(format!(
@@ -753,17 +758,20 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
         }
 
         // Remove follow-up workspaces.
-        for managed in improve_workspaces
-            .iter()
-            .chain(review_workspaces.iter())
-        {
+        for managed in improve_workspaces.iter().chain(review_workspaces.iter()) {
             let (path, _disk_bytes, _git) = match managed {
-                ManagedWorkspace::Improve { path, disk_usage_bytes, git, .. } => {
-                    (path, *disk_usage_bytes, git)
-                }
-                ManagedWorkspace::ReviewRemediation { path, disk_usage_bytes, git, .. } => {
-                    (path, *disk_usage_bytes, git)
-                }
+                ManagedWorkspace::Improve {
+                    path,
+                    disk_usage_bytes,
+                    git,
+                    ..
+                } => (path, *disk_usage_bytes, git),
+                ManagedWorkspace::ReviewRemediation {
+                    path,
+                    disk_usage_bytes,
+                    git,
+                    ..
+                } => (path, *disk_usage_bytes, git),
             };
             let should_remove = followup_decisions.iter().any(|(label, action, _, _)| {
                 *action == PruneAction::Remove && followup_label_matches(label, managed)
@@ -887,7 +895,10 @@ fn evaluate_followup_prune(
     git: &WorkspaceGitSignals,
     pr_status: &PullRequestStatus,
 ) -> (PruneAction, String) {
-    if !matches!(pr_status, PullRequestStatus::Merged | PullRequestStatus::Closed) {
+    if !matches!(
+        pr_status,
+        PullRequestStatus::Merged | PullRequestStatus::Closed
+    ) {
         let reason = match pr_status {
             PullRequestStatus::Open => "branch pull request is still open",
             PullRequestStatus::None => "no associated PR found",
@@ -906,10 +917,7 @@ fn evaluate_followup_prune(
         );
     }
     if git.is_detached {
-        return (
-            PruneAction::Keep,
-            "workspace HEAD is detached".to_string(),
-        );
+        return (PruneAction::Keep, "workspace HEAD is detached".to_string());
     }
 
     let reason = match pr_status {
