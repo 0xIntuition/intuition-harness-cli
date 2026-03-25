@@ -326,9 +326,20 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             },
         ) {
             Ok(result) => result,
-            Err(error) if attempted_resume => {
+            Err(error)
+                if attempted_resume
+                    && resolve_effective_listen_agent(
+                        &app_config,
+                        &planning_meta,
+                        args.agent.as_deref(),
+                    )
+                    .and_then(|agent| crate::agent_provider::builtin_provider_adapter(&agent))
+                    .is_some_and(|provider| {
+                        provider.is_invalid_resume_error(&error.to_string())
+                    }) =>
+            {
                 eprintln!(
-                    "listen: resume failed for {} turn {turn_number}, retrying as cold start: {error}",
+                    "listen: invalid resume for {} turn {turn_number}, retrying as cold start: {error}",
                     issue.identifier,
                 );
                 session_context.latest_resume_handle = None;
@@ -1294,20 +1305,23 @@ fn execute_agent_turn(
             .take()
             .ok_or_else(|| anyhow!("failed to capture stderr for listen turn {turn_number}"))?;
         let stderr_log_path = log_path.clone();
-        let stderr_handle = thread::spawn(move || -> Result<()> {
+        let stderr_handle = thread::spawn(move || -> Result<String> {
             let mut stderr_log = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&stderr_log_path)
                 .with_context(|| format!("failed to open `{}`", stderr_log_path.display()))?;
+            let mut collected = String::new();
             for line in BufReader::new(stderr).lines() {
                 let line = line.with_context(|| {
                     format!("failed to read stderr for `{}`", stderr_log_path.display())
                 })?;
                 writeln!(stderr_log, "{line}")
                     .with_context(|| format!("failed to write `{}`", stderr_log_path.display()))?;
+                collected.push_str(&line);
+                collected.push('\n');
             }
-            Ok(())
+            Ok(collected)
         });
 
         let mut stdout_log = fs::OpenOptions::new()
@@ -1347,7 +1361,7 @@ fn execute_agent_turn(
         let status = child
             .wait()
             .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
-        stderr_handle
+        let stderr_output = stderr_handle
             .join()
             .map_err(|_| anyhow!("stderr drain thread panicked for listen turn {turn_number}"))??;
         if !status.success() {
@@ -1356,8 +1370,9 @@ fn execute_agent_turn(
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "terminated by signal".to_string());
             bail!(
-                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code})",
-                invocation.agent
+                "agent `{}` exited unsuccessfully during listen turn {turn_number} ({code}): {}",
+                invocation.agent,
+                stderr_output.trim()
             );
         }
         let parsed = provider.parse_capture_output(&raw_stdout)?;
