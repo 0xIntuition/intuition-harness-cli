@@ -77,6 +77,7 @@ pub(crate) fn evaluate_workspace_git_safety(workspace_path: &Path) -> Result<Wor
 /// Returns an error only for unexpected I/O or subprocess failures, never for safety-driven skips.
 pub(crate) fn try_auto_clean_workspace(
     source_root: &Path,
+    project_selector: Option<&str>,
     workspace_root: &Path,
     workspace_path: &Path,
     ticket: &str,
@@ -111,7 +112,7 @@ pub(crate) fn try_auto_clean_workspace(
         .with_context(|| format!("failed to remove `{}`", workspace_path.display()))?;
 
     // Remove ticket-scoped listen artifacts (session entry, detail, log).
-    let store = ListenProjectStore::resolve(source_root, None)?;
+    let store = ListenProjectStore::resolve(source_root, project_selector)?;
     store.remove_ticket_artifacts(ticket)?;
 
     Ok(AutoCleanOutcome::Removed {
@@ -225,7 +226,8 @@ pub(crate) fn discover_improve_workspaces(workspace_root: &Path) -> Result<Vec<M
         let branch = git_stdout(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
         let (disk_usage_bytes, _) =
             scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
-        let git = evaluate_workspace_git_safety(&path).unwrap_or_default();
+        let git = evaluate_workspace_git_safety(&path)
+            .unwrap_or_else(|_| WorkspaceGitSignals::unsafe_for_failed_inspection());
 
         results.push(ManagedWorkspace::Improve {
             session_id: session_id.to_string(),
@@ -278,7 +280,8 @@ pub(crate) fn discover_review_workspaces(workspace_root: &Path) -> Result<Vec<Ma
         let branch = git_stdout(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
         let (disk_usage_bytes, _) =
             scan_workspace_usage(&path).unwrap_or((0, SystemTime::UNIX_EPOCH));
-        let git = evaluate_workspace_git_safety(&path).unwrap_or_default();
+        let git = evaluate_workspace_git_safety(&path)
+            .unwrap_or_else(|_| WorkspaceGitSignals::unsafe_for_failed_inspection());
 
         results.push(ManagedWorkspace::ReviewRemediation {
             pr_number,
@@ -300,6 +303,7 @@ pub(crate) fn discover_review_workspaces(workspace_root: &Path) -> Result<Vec<Ma
 struct WorkspaceContext {
     source_root: PathBuf,
     workspace_root: PathBuf,
+    project_selector: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -947,9 +951,13 @@ fn followup_workspace_root(workspace_root: &Path, managed: &ManagedWorkspace) ->
 fn resolve_workspace_context(root: &Path) -> Result<WorkspaceContext> {
     let source_root = resolve_source_project_root(&canonicalize_existing_dir(root)?)?;
     let workspace_root = sibling_workspace_root(&source_root)?;
+    let project_selector = crate::config::PlanningMeta::load(&source_root)
+        .ok()
+        .and_then(|meta| meta.linear.project_id);
     Ok(WorkspaceContext {
         source_root,
         workspace_root,
+        project_selector,
     })
 }
 
@@ -1274,7 +1282,8 @@ fn remove_workspace_clone(context: &WorkspaceContext, entry: &WorkspaceEntry) ->
     let reclaimed = entry.disk_usage_bytes;
     fs::remove_dir_all(&entry.path)
         .with_context(|| format!("failed to remove `{}`", entry.path.display()))?;
-    let store = ListenProjectStore::resolve(&context.source_root, None)?;
+    let store =
+        ListenProjectStore::resolve(&context.source_root, context.project_selector.as_deref())?;
     store.remove_ticket_artifacts(&entry.ticket)?;
     Ok(reclaimed)
 }
@@ -1444,6 +1453,14 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 impl WorkspaceGitSignals {
+    fn unsafe_for_failed_inspection() -> Self {
+        Self {
+            has_uncommitted_changes: true,
+            has_unpushed_commits: true,
+            is_detached: true,
+        }
+    }
+
     fn display_label(&self) -> String {
         let mut labels = Vec::new();
         if self.has_uncommitted_changes {
@@ -1487,6 +1504,7 @@ impl PullRequestStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn cleanup_skip_reason_display_formatting() {
@@ -1570,5 +1588,58 @@ mod tests {
         let (action, reason) = evaluate_followup_prune(&git, &PullRequestStatus::Merged);
         assert_eq!(action, PruneAction::Keep);
         assert!(reason.contains("detached"));
+    }
+
+    #[test]
+    fn failed_git_inspection_is_treated_as_unsafe() {
+        let signals = WorkspaceGitSignals::unsafe_for_failed_inspection();
+        assert!(signals.has_uncommitted_changes);
+        assert!(signals.has_unpushed_commits);
+        assert!(signals.is_detached);
+        assert_eq!(signals.display_label(), "dirty+ahead+detached");
+    }
+
+    #[test]
+    fn discover_improve_workspaces_marks_failed_git_inspection_as_unsafe() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace_root = temp.path();
+        let workspace_path = workspace_root.join("improve-session-1");
+        fs::create_dir_all(&workspace_path)?;
+        fs::write(workspace_path.join(".git"), "not a git dir")?;
+
+        let workspaces = discover_improve_workspaces(workspace_root)?;
+        assert_eq!(workspaces.len(), 1);
+        match &workspaces[0] {
+            ManagedWorkspace::Improve { git, .. } => {
+                assert!(git.has_uncommitted_changes);
+                assert!(git.has_unpushed_commits);
+                assert!(git.is_detached);
+            }
+            other => panic!("expected improve workspace, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn discover_review_workspaces_marks_failed_git_inspection_as_unsafe() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace_root = temp.path();
+        let workspace_path = workspace_root.join("review-runs").join("pr-321");
+        fs::create_dir_all(&workspace_path)?;
+        fs::write(workspace_path.join(".git"), "not a git dir")?;
+
+        let workspaces = discover_review_workspaces(workspace_root)?;
+        assert_eq!(workspaces.len(), 1);
+        match &workspaces[0] {
+            ManagedWorkspace::ReviewRemediation { git, .. } => {
+                assert!(git.has_uncommitted_changes);
+                assert!(git.has_unpushed_commits);
+                assert!(git.is_detached);
+            }
+            other => panic!("expected review remediation workspace, got {other:?}"),
+        }
+
+        Ok(())
     }
 }

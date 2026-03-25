@@ -195,7 +195,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context.canonical,
                 ),
             )?;
-            try_listener_auto_clean(&source_root, &workspace_path, &args.issue);
+            try_listener_auto_clean(&source_root, project_selector, &workspace_path, &args.issue);
             return Ok(());
         }
 
@@ -610,6 +610,12 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &session_context.canonical,
                         ),
                     )?;
+                    try_listener_auto_clean(
+                        &source_root,
+                        project_selector,
+                        &workspace_path,
+                        &args.issue,
+                    );
                     return Ok(());
                 }
 
@@ -711,7 +717,12 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 /// workspace clone and its ticket-scoped listen artifacts (session entry, detail, log). When the
 /// workspace has uncommitted changes, unpushed commits, or other safety risks, logs the skip
 /// reason and leaves the workspace in place for manual cleanup via `meta workspace prune`.
-fn try_listener_auto_clean(source_root: &Path, workspace_path: &Path, issue_identifier: &str) {
+fn try_listener_auto_clean(
+    source_root: &Path,
+    project_selector: Option<&str>,
+    workspace_path: &Path,
+    issue_identifier: &str,
+) {
     let workspace_root = match sibling_workspace_root(source_root) {
         Ok(root) => root,
         Err(error) => {
@@ -725,6 +736,7 @@ fn try_listener_auto_clean(source_root: &Path, workspace_path: &Path, issue_iden
 
     match try_auto_clean_workspace(
         source_root,
+        project_selector,
         &workspace_root,
         workspace_path,
         issue_identifier,
