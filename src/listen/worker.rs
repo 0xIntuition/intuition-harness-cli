@@ -250,6 +250,22 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             ),
         )?;
 
+        // Determine whether this turn will actually attempt a resumed invocation.
+        // Only retry on failure when resume was genuinely attempted (not just "handle exists").
+        let attempted_resume = turn_number > 1
+            && session_context
+                .latest_resume_handle
+                .as_ref()
+                .is_some_and(|h| {
+                    resolve_effective_listen_agent(
+                        &app_config,
+                        &planning_meta,
+                        args.agent.as_deref(),
+                    )
+                    .as_deref()
+                    .is_some_and(|a| h.matches_agent(a))
+                });
+
         // Keep provider-native manual resume handles separate from provider session bookkeeping.
         let provider_session_id_state = RefCell::new(provider_session_id.clone());
         let turn_result = match execute_agent_turn(
@@ -310,7 +326,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             },
         ) {
             Ok(result) => result,
-            Err(error) if session_context.latest_resume_handle.is_some() => {
+            Err(error) if attempted_resume => {
                 eprintln!(
                     "listen: resume failed for {} turn {turn_number}, retrying as cold start: {error}",
                     issue.identifier,
@@ -1115,7 +1131,12 @@ fn execute_agent_turn(
     )?;
     let capture_output = invocation.builtin_provider;
     let command_args = if capture_output {
-        let continuation = continuation_id_for_invocation(&invocation.agent, continuation_handle);
+        // Only pass --resume on turn 2+; turn 1 must always cold-start even with a stale handle.
+        let continuation = if use_continuation {
+            continuation_id_for_invocation(&invocation.agent, continuation_handle)
+        } else {
+            None
+        };
         command_args_for_invocation_with_options(
             &invocation,
             AgentExecutionOptions {
