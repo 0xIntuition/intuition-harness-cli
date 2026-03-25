@@ -1367,8 +1367,8 @@ mod tests {
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
         LISTEN_SESSION_DETAIL_VERSION, ListenProjectStore, ListenState, SessionDetailReferences,
-        SessionPhase, SessionSelector, listen_turn_log_prefix, project_key_for_metastack_root,
-        resolve_source_root, write_json,
+        SessionPhase, SessionSelector, project_key_for_metastack_root, resolve_source_root,
+        write_json,
     };
 
     #[test]
@@ -2007,7 +2007,7 @@ mod tests {
                  {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":210}}}}}}\n\
                  {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":34}}}}\n\
                  {{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}}\n",
-                listen_turn_log_prefix(),
+                super::listen_turn_log_prefix(),
             ),
         )?;
         seed_state(&store, vec![session])?;
@@ -2105,8 +2105,8 @@ mod tests {
                  Resolved provider: codex\n\
                  {}2/20 @ 2026-03-23T12:01:00Z ---\n\
                  Resolved provider: claude\n",
-                listen_turn_log_prefix(),
-                listen_turn_log_prefix(),
+                super::listen_turn_log_prefix(),
+                super::listen_turn_log_prefix(),
             ),
         )?;
         seed_state(&store, vec![session])?;

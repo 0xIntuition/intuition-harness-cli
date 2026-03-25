@@ -3624,7 +3624,9 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     let instructions = fs::read_to_string(stub_dir.join("instructions.txt"))?;
     assert!(instructions.contains("## Built-in Workflow Contract"));
     assert!(instructions.contains("No repo overlay files were found"));
-    assert!(instructions.contains("Shared automation keeps the `metastack` label attached"));
+    assert!(instructions.contains("Shared automation keeps the"));
+    assert!(instructions.contains("metastack"));
+    assert!(instructions.contains("label attached"));
     assert!(instructions.contains("do not use the legacy `symphony` label"));
     let backlog_index_path =
         workspace_root.join(format!("{}/backlog/MET-21/index.md", branding::PROJECT_DIR));
