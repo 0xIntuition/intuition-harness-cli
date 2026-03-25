@@ -9,6 +9,8 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
+use crate::tui::copy::CopyPayload;
+use crate::tui::keybindings::is_select_all_key;
 use crate::tui::prompt_images::{
     ClipboardPromptPaste, MAX_PROMPT_IMAGES, PromptImageAttachment,
     resolve_attachment_from_pasted_text, resolve_clipboard_prompt_paste,
@@ -24,6 +26,7 @@ pub(crate) struct InputFieldState {
     mode: InputFieldMode,
     attachment_mode: AttachmentMode,
     attachments: Vec<PromptImageAttachment>,
+    selection: Option<(usize, usize)>,
     preferred_column: Option<usize>,
     scroll: ScrollState,
 }
@@ -70,6 +73,7 @@ impl InputFieldState {
             mode: InputFieldMode::SingleLine,
             attachment_mode: AttachmentMode::Disabled,
             attachments: Vec::new(),
+            selection: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -83,6 +87,7 @@ impl InputFieldState {
             mode: InputFieldMode::MultiLine,
             attachment_mode: AttachmentMode::Disabled,
             attachments: Vec::new(),
+            selection: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -96,6 +101,7 @@ impl InputFieldState {
             mode: InputFieldMode::MultiLine,
             attachment_mode: AttachmentMode::Enabled,
             attachments: Vec::new(),
+            selection: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -114,6 +120,7 @@ impl InputFieldState {
                 message: message.into(),
             },
             attachments: Vec::new(),
+            selection: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -129,6 +136,24 @@ impl InputFieldState {
 
     pub(crate) fn prompt_attachments(&self) -> &[PromptImageAttachment] {
         &self.attachments
+    }
+
+    pub(crate) fn copy_payload(&self, label: impl Into<String>) -> CopyPayload {
+        let plain_text = self
+            .selected_display_value()
+            .unwrap_or_else(|| self.display_value());
+        CopyPayload::new(label, plain_text)
+    }
+
+    pub(crate) fn select_all(&mut self) -> bool {
+        if self.value.is_empty() {
+            self.selection = None;
+            return false;
+        }
+        self.selection = Some((0, self.value.len()));
+        self.cursor = self.value.len();
+        self.preferred_column = None;
+        true
     }
 
     #[cfg(test)]
@@ -324,12 +349,14 @@ impl InputFieldRender {
 
 impl InputFieldState {
     fn insert(&mut self, ch: char) {
+        self.delete_selection();
         self.value.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
         self.preferred_column = None;
     }
 
     fn insert_attachment(&mut self, attachment: PromptImageAttachment) -> Result<()> {
+        self.delete_selection();
         if self.attachments.len() >= MAX_PROMPT_IMAGES {
             bail!("prompt editors support at most {MAX_PROMPT_IMAGES} image attachments");
         }
@@ -343,6 +370,9 @@ impl InputFieldState {
     }
 
     fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
@@ -358,6 +388,9 @@ impl InputFieldState {
     }
 
     fn delete_forward(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor >= self.value.len() {
             return;
         }
@@ -375,26 +408,31 @@ impl InputFieldState {
         self.value.clear();
         self.cursor = 0;
         self.attachments.clear();
+        self.selection = None;
         self.preferred_column = None;
         self.scroll.reset();
     }
 
     fn move_left(&mut self) {
+        self.selection = None;
         self.cursor = previous_boundary(&self.value, self.cursor);
         self.preferred_column = None;
     }
 
     fn move_right(&mut self) {
+        self.selection = None;
         self.cursor = next_boundary(&self.value, self.cursor);
         self.preferred_column = None;
     }
 
     fn move_home(&mut self) {
+        self.selection = None;
         self.cursor = 0;
         self.preferred_column = None;
     }
 
     fn move_end(&mut self) {
+        self.selection = None;
         self.cursor = self.value.len();
         self.preferred_column = None;
     }
@@ -431,6 +469,7 @@ impl InputFieldState {
             return;
         }
 
+        self.selection = None;
         let points = cursor_points(&self.value, width);
         let Some(current_index) = points.iter().position(|point| point.byte == self.cursor) else {
             return;
@@ -476,6 +515,30 @@ impl InputFieldState {
         let _ = self
             .scroll
             .ensure_row_visible(row, height.max(1), content_rows.max(1));
+    }
+
+    fn selected_display_value(&self) -> Option<String> {
+        self.selection
+            .map(|(start, end)| render_value_range_with_attachments(&self.value, start, end))
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection.take() else {
+            return false;
+        };
+        if start >= end || end > self.value.len() {
+            return false;
+        }
+
+        let attachment_start = attachment_index_before_raw_index(&self.value, start);
+        let attachment_end = attachment_index_before_raw_index(&self.value, end);
+        self.value.drain(start..end);
+        if attachment_start < attachment_end && attachment_end <= self.attachments.len() {
+            self.attachments.drain(attachment_start..attachment_end);
+        }
+        self.cursor = start;
+        self.preferred_column = None;
+        true
     }
 
     pub(crate) fn handle_mouse_scroll(
@@ -580,6 +643,26 @@ fn render_prefix_with_attachments(value: &str) -> String {
     render_value_with_attachments(value, &[])
 }
 
+fn render_value_range_with_attachments(value: &str, start: usize, end: usize) -> String {
+    if start >= end || end > value.len() {
+        return String::new();
+    }
+
+    let mut rendered = String::new();
+    let mut attachment_index = attachment_index_before_raw_index(value, start);
+
+    for ch in value[start..end].chars() {
+        if ch == ATTACHMENT_MARKER {
+            rendered.push_str(&format!("[Image #{}]", attachment_index + 1));
+            attachment_index += 1;
+        } else {
+            rendered.push(ch);
+        }
+    }
+
+    rendered
+}
+
 fn attachment_index_for_cursor(value: &str, cursor: usize) -> usize {
     value[..cursor]
         .chars()
@@ -664,6 +747,14 @@ impl InputFieldState {
         width: u16,
         height: u16,
     ) -> bool {
+        if is_select_all_key(key) {
+            let handled = self.select_all();
+            if handled && self.mode == InputFieldMode::MultiLine {
+                self.sync_cursor_scroll(width, height);
+            }
+            return handled;
+        }
+
         let handled = match key.code {
             KeyCode::Enter
                 if self.mode == InputFieldMode::MultiLine

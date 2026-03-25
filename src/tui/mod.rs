@@ -1,3 +1,4 @@
+pub(crate) mod copy;
 pub(crate) mod fields;
 pub(crate) mod keybindings;
 pub(crate) mod markdown;

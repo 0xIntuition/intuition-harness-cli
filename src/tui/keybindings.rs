@@ -63,6 +63,16 @@ fn plain_char(key: KeyEvent) -> bool {
     key.modifiers.is_empty() || key.modifiers == KeyModifiers::NONE
 }
 
+pub(crate) fn is_copy_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+pub(crate) fn is_select_all_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{KeybindingPolicy, NavigationDirection};
