@@ -3535,9 +3535,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp, copy_statu
         layout[1],
         app.error.as_deref(),
         copy_status,
-        &field_copy_help(
-            "Enter/Ctrl+S continue. Shift+Enter newline. Ctrl+V paste. Esc cancel.",
-        ),
+        &field_copy_help("Enter/Ctrl+S continue. Shift+Enter newline. Ctrl+V paste. Esc cancel."),
     );
 }
 
