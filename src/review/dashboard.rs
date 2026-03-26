@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
 use super::ReviewDashboardData;
 use super::state::ReviewSession;
+use crate::tui::copy::{CopyPayload, CopyUiState, pane_copy_help};
 
 /// Browser state for the review dashboard TUI.
 #[derive(Debug, Clone)]
@@ -15,6 +16,7 @@ pub(super) struct ReviewBrowserState {
     pub(super) view: ReviewListView,
     pub(super) selected_active: usize,
     pub(super) selected_completed: usize,
+    pub(super) copy: CopyUiState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,7 @@ impl Default for ReviewBrowserState {
             view: ReviewListView::Active,
             selected_active: 0,
             selected_completed: 0,
+            copy: CopyUiState::default(),
         }
     }
 }
@@ -95,6 +98,19 @@ impl ReviewBrowserState {
             ReviewListView::Completed => self.selected_completed,
         }
     }
+
+    pub(super) fn copy_payload(&self, data: &ReviewDashboardData) -> CopyPayload {
+        match data
+            .sessions_for_view(self.view)
+            .get(self.selected())
+            .copied()
+        {
+            Some(session) => {
+                CopyPayload::from_text("Review session detail", detail_text(data, Some(session)))
+            }
+            None => CopyPayload::from_text("Review sessions", session_list_text(data, self)),
+        }
+    }
 }
 
 /// Render a deterministic snapshot of the review dashboard for testing.
@@ -133,6 +149,7 @@ pub(super) fn render(
     render_header(frame, chunks[0], data);
     render_sessions(frame, chunks[1], data, state);
     render_footer(frame, chunks[2], data, state);
+    state.copy.render_export_overlay(frame, area);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, data: &ReviewDashboardData) {
@@ -282,9 +299,57 @@ fn render_footer(
     };
     let footer = Line::from(vec![
         Span::raw(tab_label),
-        Span::raw("  Tab to switch  q to quit"),
+        Span::raw("  "),
+        Span::raw(
+            state
+                .copy
+                .status_text()
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    pane_copy_help("Tab switches the active/completed view. Up/Down moves the selected session.")
+                }),
+        ),
     ]);
     frame.render_widget(Paragraph::new(footer), area);
+}
+
+fn session_list_text(data: &ReviewDashboardData, state: &ReviewBrowserState) -> Text<'static> {
+    let sessions = data.sessions_for_view(state.view);
+    let mut lines = vec![
+        Line::from(format!(
+            "Review sessions: {}",
+            match state.view {
+                ReviewListView::Active => "active",
+                ReviewListView::Completed => "completed",
+            }
+        )),
+        Line::from(format!("Count: {}", sessions.len())),
+        Line::from(""),
+    ];
+    if sessions.is_empty() {
+        lines.push(Line::from("No review sessions available."));
+        return Text::from(lines);
+    }
+
+    for (index, session) in sessions.iter().enumerate() {
+        let selected = if index == state.selected() {
+            "> "
+        } else {
+            "  "
+        };
+        lines.push(Line::from(format!(
+            "{selected}#{} [{}] {}",
+            session.pr_number,
+            session.stage_label(),
+            session.pr_title
+        )));
+        lines.push(Line::from(format!(
+            "    remediation={} linear={}",
+            session.remediation_label(),
+            session.linear_identifier.as_deref().unwrap_or("-")
+        )));
+    }
+    Text::from(lines)
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

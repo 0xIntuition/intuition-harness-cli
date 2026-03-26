@@ -22,6 +22,8 @@ use serde::Deserialize;
 use crate::cli::ImproveArgs;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::github_pr::GhCli;
+use crate::tui::copy::copy_overlay_viewport;
+use crate::tui::keybindings::is_copy_key;
 
 use dashboard::{
     ImproveAction, ImproveBrowserState, ImproveDashboardData, ImprovePrEntry, render,
@@ -208,6 +210,13 @@ fn run_interactive_dashboard(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                if browser_state.copy.export_active()
+                    && browser_state
+                        .copy
+                        .handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
+                {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Char('c')
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -216,6 +225,11 @@ fn run_interactive_dashboard(
                     }
                     KeyCode::Char('q') => break,
                     KeyCode::Esc => break,
+                    _ if is_copy_key(key) => {
+                        browser_state
+                            .copy
+                            .copy_payload(browser_state.copy_payload(&data));
+                    }
                     KeyCode::Tab => {
                         browser_state.apply_action(ImproveAction::Tab, &data);
                     }

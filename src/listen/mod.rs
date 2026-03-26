@@ -51,6 +51,8 @@ use crate::listen::workpad::{extract_requirements, render_bootstrap_workpad};
 use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
 use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
+use crate::tui::copy::copy_overlay_viewport;
+use crate::tui::keybindings::is_copy_key;
 pub use state::{
     ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, PendingIssue,
     PullRequestStatus, PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
@@ -3448,10 +3450,20 @@ where
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        if browser_state.copy.export_active()
+                            && browser_state.copy.handle_export_key(
+                                key,
+                                copy_overlay_viewport(terminal.size()?.into()),
+                            )
+                        {
+                            continue;
+                        }
                         let ctrl_c = key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL);
                         if ctrl_c || matches!(key.code, KeyCode::Char('q')) {
                             should_break = true;
+                        } else if is_copy_key(key) {
+                            browser_state.copy.copy_payload(browser_state.copy_payload(&data));
                         } else if matches!(key.code, KeyCode::Char('r' | 'R')) {
                             if let Some(session) = browser_state.selected_session(&data) {
                                 let handled = if session.phase == SessionPhase::Paused {

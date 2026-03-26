@@ -50,7 +50,11 @@ use crate::linear::{
     IssueComment, IssueCreateSpec, IssueSummary, LinearService, ReqwestLinearClient,
 };
 use crate::progress::render_loading_panel;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::is_copy_key;
 use crate::tui::scroll::{ScrollState, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{
     Tone, badge, emphasis_style, empty_state, key_hints, label_style, list, muted_style,
@@ -338,6 +342,7 @@ struct InteractiveReviewApp {
     refresh_requested: bool,
     dialog: Option<InteractiveReviewDialog>,
     ticket_review: Option<FollowUpTicketReviewApp>,
+    copy: CopyUiState,
     /// In-place candidate filter (retro flow only).
     filter: CandidateFilter,
     /// Whether the lightweight filter panel overlay is visible.
@@ -564,6 +569,7 @@ struct FollowUpTicketReviewApp {
     selected_ticket_scroll: ScrollState,
     combination_scroll: ScrollState,
     error: Option<String>,
+    copy: CopyUiState,
 }
 
 struct PendingFollowUpTicketJob {
@@ -827,6 +833,25 @@ fn run_review_interactive(
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if app.stage == InteractiveReviewStage::TicketReview {
+                    if let Some(review) = app.ticket_review.as_mut()
+                        && review.copy.export_active()
+                        && review
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(terminal.size()?))
+                    {
+                        terminal.draw_interactive(&app)?;
+                        continue;
+                    }
+                } else if app.copy.export_active()
+                    && app
+                        .copy
+                        .handle_export_key(key, copy_overlay_viewport(terminal.size()?))
+                {
+                    terminal.draw_interactive(&app)?;
+                    continue;
+                }
+
                 let preview = interactive_preview_viewport(terminal.size()?);
                 let stage_before_key = app.stage;
                 if let Some(action) = app.handle_key(key, preview)? {
@@ -973,6 +998,11 @@ fn run_review_interactive(
                     terminal.draw_interactive(&app)?;
                 } else if app.stage == InteractiveReviewStage::TicketReview {
                     if let Some(review) = app.ticket_review.as_mut() {
+                        if is_copy_key(key) {
+                            review.copy.copy_payload(review.copy_payload());
+                            terminal.draw_interactive(&app)?;
+                            continue;
+                        }
                         match handle_follow_up_ticket_review_key(review, key, terminal.size()?) {
                             FollowUpTicketReviewAction::None => {}
                             FollowUpTicketReviewAction::Close => {
@@ -1020,6 +1050,9 @@ fn run_review_interactive(
                         }
                     }
                     terminal.draw_interactive(&app)?;
+                } else if is_copy_key(key) {
+                    app.copy.copy_payload(app.copy_payload());
+                    terminal.draw_interactive(&app)?;
                 } else if app.should_exit(key.code) {
                     break;
                 }
@@ -1032,12 +1065,28 @@ fn run_review_interactive(
             {
                 if app.stage == InteractiveReviewStage::TicketReview {
                     if let Some(review) = app.ticket_review.as_mut() {
-                        let _ =
-                            handle_follow_up_ticket_review_mouse(review, mouse, terminal.size()?);
+                        if review.copy.export_active() {
+                            let _ = review.copy.handle_export_mouse(
+                                mouse,
+                                copy_overlay_viewport(terminal.size()?),
+                            );
+                        } else {
+                            let _ = handle_follow_up_ticket_review_mouse(
+                                review,
+                                mouse,
+                                terminal.size()?,
+                            );
+                        }
                     }
                 } else {
-                    let viewport = interactive_preview_viewport(terminal.size()?);
-                    let _ = app.handle_preview_mouse(mouse, viewport);
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?));
+                    } else {
+                        let viewport = interactive_preview_viewport(terminal.size()?);
+                        let _ = app.handle_preview_mouse(mouse, viewport);
+                    }
                 }
             }
             _ => {}
@@ -1456,6 +1505,7 @@ impl InteractiveReviewApp {
             refresh_requested: false,
             dialog: None,
             ticket_review: None,
+            copy: CopyUiState::default(),
             filter: CandidateFilter::default(),
             filter_panel_open: false,
             filter_panel_rows: Vec::new(),
@@ -2222,6 +2272,78 @@ impl InteractiveReviewApp {
         self.sessions.get(self.session_index)
     }
 
+    fn copy_payload(&self) -> CopyPayload {
+        match self.tab {
+            InteractiveReviewTab::Candidates => match self.focus {
+                InteractiveReviewFocus::CandidateList => {
+                    if self.query.value().trim().is_empty() {
+                        CopyPayload::from_text("Review candidate list", self.candidate_list_text())
+                    } else {
+                        self.query.copy_payload("Review candidate search")
+                    }
+                }
+                InteractiveReviewFocus::CandidatePreview => CopyPayload::from_text(
+                    "Review candidate preview",
+                    self.selected_candidate_text(),
+                ),
+                InteractiveReviewFocus::SessionList => {
+                    CopyPayload::from_text("Review sessions", self.session_list_text())
+                }
+                InteractiveReviewFocus::SessionPreview => {
+                    CopyPayload::from_text("Review session detail", self.selected_session_text())
+                }
+            },
+            InteractiveReviewTab::Sessions => match self.focus {
+                InteractiveReviewFocus::CandidateList => {
+                    CopyPayload::from_text("Review session summary", self.session_summary_text())
+                }
+                InteractiveReviewFocus::CandidatePreview => CopyPayload::from_text(
+                    "Review candidate preview",
+                    self.selected_candidate_text(),
+                ),
+                InteractiveReviewFocus::SessionList => {
+                    CopyPayload::from_text("Review sessions", self.session_list_text())
+                }
+                InteractiveReviewFocus::SessionPreview => {
+                    CopyPayload::from_text("Review session detail", self.selected_session_text())
+                }
+            },
+        }
+    }
+
+    fn copy_help_text(&self) -> String {
+        match self.tab {
+            InteractiveReviewTab::Candidates => match self.focus {
+                InteractiveReviewFocus::CandidateList => field_copy_help(
+                    "Type to search candidates. Up/Down moves the selection, Space marks PRs, and Enter queues work.",
+                ),
+                InteractiveReviewFocus::CandidatePreview => pane_copy_help(
+                    "Up/Down and PgUp/PgDn scroll the selected PR preview. Tab rotates focus across panes.",
+                ),
+                InteractiveReviewFocus::SessionList => pane_copy_help(
+                    "Up/Down moves the session list. Tab rotates focus across panes.",
+                ),
+                InteractiveReviewFocus::SessionPreview => pane_copy_help(
+                    "Up/Down and PgUp/PgDn scroll the selected session detail. Tab rotates focus across panes.",
+                ),
+            },
+            InteractiveReviewTab::Sessions => match self.focus {
+                InteractiveReviewFocus::CandidateList => pane_copy_help(
+                    "This summary updates as sessions finish. Tab rotates focus across panes.",
+                ),
+                InteractiveReviewFocus::CandidatePreview => pane_copy_help(
+                    "Up/Down and PgUp/PgDn scroll the selected PR preview. Tab rotates focus across panes.",
+                ),
+                InteractiveReviewFocus::SessionList => pane_copy_help(
+                    "Up/Down moves the session list. Tab rotates focus across panes.",
+                ),
+                InteractiveReviewFocus::SessionPreview => pane_copy_help(
+                    "Up/Down and PgUp/PgDn scroll the selected session detail. Tab rotates focus across panes.",
+                ),
+            },
+        }
+    }
+
     fn open_selected_follow_up_ticket_review(&mut self) {
         let Some((candidate, plan)) = self.selected_session().and_then(|session| {
             session
@@ -2519,6 +2641,104 @@ impl InteractiveReviewApp {
         }
 
         Text::from(lines)
+    }
+
+    fn candidate_list_text(&self) -> Text<'static> {
+        let visible = self.visible_candidate_indices();
+        let mut lines = vec![
+            Line::from(format!("Review candidates ({})", visible.len())),
+            Line::from(""),
+        ];
+        if visible.is_empty() {
+            lines.push(Line::from(
+                "No pull requests matched the current candidate query.",
+            ));
+            return Text::from(lines);
+        }
+
+        for (position, index) in visible.iter().enumerate() {
+            if let Some(candidate) = self.candidates.get(*index) {
+                let selected = if position == self.selected_index {
+                    "> "
+                } else {
+                    "  "
+                };
+                let marked = if self.selected_prs.contains(&candidate.pr_number) {
+                    "[selected]"
+                } else {
+                    "[ready]"
+                };
+                lines.push(Line::from(format!(
+                    "{selected}#{} {} {}",
+                    candidate.pr_number, marked, candidate.title
+                )));
+                lines.push(Line::from(format!(
+                    "    author={} review={} linear={}",
+                    candidate.author,
+                    candidate.review_state,
+                    candidate
+                        .linear_identifier
+                        .as_deref()
+                        .unwrap_or("unresolved")
+                )));
+            }
+        }
+        Text::from(lines)
+    }
+
+    fn session_list_text(&self) -> Text<'static> {
+        let mut lines = vec![
+            Line::from(format!("Review sessions ({})", self.sessions.len())),
+            Line::from(""),
+        ];
+        if self.sessions.is_empty() {
+            lines.push(Line::from("No agent sessions have started yet."));
+            return Text::from(lines);
+        }
+
+        for (index, session) in self.sessions.iter().enumerate() {
+            let selected = if index == self.session_index {
+                "> "
+            } else {
+                "  "
+            };
+            lines.push(Line::from(format!(
+                "{selected}#{} [{}] {}",
+                session.candidate.pr_number,
+                session.phase.display_label(),
+                session.candidate.title
+            )));
+            lines.push(Line::from(format!(
+                "    kind={} summary={}",
+                session.kind.label(),
+                session.summary
+            )));
+        }
+        Text::from(lines)
+    }
+
+    fn session_summary_text(&self) -> Text<'static> {
+        Text::from(vec![
+            Line::from(format!("Active sessions: {}", self.active_session_count())),
+            Line::from(format!(
+                "Completed sessions: {}",
+                self.sessions
+                    .iter()
+                    .filter(|session| matches!(session.phase, ReviewPhase::Completed))
+                    .count()
+            )),
+            Line::from(format!(
+                "Blocked sessions: {}",
+                self.sessions
+                    .iter()
+                    .filter(|session| matches!(session.phase, ReviewPhase::Blocked))
+                    .count()
+            )),
+            Line::from(""),
+            Line::from(
+                "Press `A` to start a remediation agent PR from a review report, `D` to delete stored sessions, or Esc to return to candidates.",
+            ),
+        ])
     }
 
     fn preview_rows(&self, width: u16) -> usize {
@@ -2906,6 +3126,7 @@ impl FollowUpTicketReviewApp {
             selected_ticket_scroll: ScrollState::default(),
             combination_scroll: ScrollState::default(),
             error: None,
+            copy: CopyUiState::default(),
         }
     }
 
@@ -3037,6 +3258,63 @@ impl FollowUpTicketReviewApp {
 
     fn combination_plan_rows(&self, width: u16) -> usize {
         wrapped_rows(&self.combination_plan_text().to_string(), width.max(1))
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.focus {
+            FollowUpTicketReviewFocus::Tickets => {
+                CopyPayload::from_text("Follow-up ticket suggestions", self.ticket_list_text())
+            }
+            FollowUpTicketReviewFocus::SelectedTicket => {
+                CopyPayload::from_text("Follow-up selected ticket", self.selected_ticket_text())
+            }
+            FollowUpTicketReviewFocus::Overview => {
+                CopyPayload::from_text("Follow-up ticket overview", self.overview_text())
+            }
+            FollowUpTicketReviewFocus::CombinationPlan => {
+                CopyPayload::from_text("Follow-up combination plan", self.combination_plan_text())
+            }
+        }
+    }
+
+    fn copy_help_text(&self) -> String {
+        match self.focus {
+            FollowUpTicketReviewFocus::Tickets => pane_copy_help(
+                "Up/Down moves the suggested ticket list. Space cycles keep, skip, or merge-group decisions.",
+            ),
+            FollowUpTicketReviewFocus::SelectedTicket => pane_copy_help(
+                "PgUp/PgDn scrolls the selected ticket detail. Tab moves to the next pane.",
+            ),
+            FollowUpTicketReviewFocus::Overview => pane_copy_help(
+                "PgUp/PgDn scrolls the overview summary. Tab moves to the next pane.",
+            ),
+            FollowUpTicketReviewFocus::CombinationPlan => pane_copy_help(
+                "PgUp/PgDn scrolls the merge-group plan. Tab moves to the next pane.",
+            ),
+        }
+    }
+
+    fn ticket_list_text(&self) -> Text<'static> {
+        let mut lines = vec![
+            Line::from(format!("Suggested tickets for PR #{}", self.pr_number)),
+            Line::from(""),
+        ];
+        if self.plan.tickets.is_empty() {
+            lines.push(Line::from("No suggested tickets were generated."));
+            return Text::from(lines);
+        }
+
+        for (index, ticket) in self.plan.tickets.iter().enumerate() {
+            let selected = if index == self.selected { "> " } else { "  " };
+            lines.push(Line::from(format!(
+                "{selected}{} {}",
+                follow_up_ticket_review_marker(
+                    self.decisions.get(index).copied().unwrap_or_default()
+                ),
+                ticket.title
+            )));
+        }
+        Text::from(lines)
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -4561,6 +4839,7 @@ fn render_interactive_review(frame: &mut ratatui::Frame<'_>, app: &InteractiveRe
     if app.filter_panel_open {
         render_filter_panel_overlay(frame, app);
     }
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_follow_up_ticket_review(frame: &mut ratatui::Frame<'_>, app: &FollowUpTicketReviewApp) {
@@ -4644,6 +4923,13 @@ fn render_follow_up_ticket_review(frame: &mut ratatui::Frame<'_>, app: &FollowUp
     let help = paragraph(
         Text::from(vec![
             Line::from(
+                app.copy
+                    .status_text()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| app.copy_help_text()),
+            ),
+            Line::from(""),
+            Line::from(
                 "Tab/Shift-Tab changes review focus. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket.",
             ),
             Line::from(
@@ -4659,6 +4945,7 @@ fn render_follow_up_ticket_review(frame: &mut ratatui::Frame<'_>, app: &FollowUp
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(help, layout.footer);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_interactive_navigation(
@@ -4992,6 +5279,12 @@ fn render_filter_panel_overlay(frame: &mut ratatui::Frame<'_>, app: &Interactive
 }
 
 fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
+    let copy_line = Line::from(
+        app.copy
+            .status_text()
+            .map(str::to_string)
+            .unwrap_or_else(|| app.copy_help_text()),
+    );
     if let Some(error) = app.error.as_deref() {
         return Text::from(vec![
             Line::from(Span::styled(
@@ -5003,6 +5296,8 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
             )),
             Line::from(""),
             Line::from(error.to_string()),
+            Line::from(""),
+            copy_line,
             Line::from(""),
             key_hints(&[("Esc", "back"), ("q", "exit")]),
         ]);
@@ -5023,6 +5318,8 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 "Stay in this screen while MetaStack verifies auth, loads PR metadata, and prepares review previews.",
             ),
             Line::from(""),
+            copy_line,
+            Line::from(""),
             key_hints(&interactive_key_hints(app)),
         ]),
         InteractiveReviewStage::Select => Text::from(match app.command {
@@ -5036,6 +5333,8 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 interactive_action_line(app),
                 Line::from("Use the Navigation strip to track the active view and focused pane."),
                 Line::from(""),
+                copy_line,
+                Line::from(""),
                 key_hints(&interactive_key_hints(app)),
             ],
             ReviewCommandKind::Retro => vec![
@@ -5044,6 +5343,8 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 ),
                 interactive_action_line(app),
                 Line::from("Use the Navigation strip to track the active view and focused pane."),
+                Line::from(""),
+                copy_line,
                 Line::from(""),
                 key_hints(&interactive_key_hints(app)),
             ],
@@ -5073,6 +5374,8 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
             Text::from(vec![
                 Line::from(detail),
                 Line::from(""),
+                copy_line,
+                Line::from(""),
                 key_hints(&interactive_key_hints(app)),
             ])
         }
@@ -5081,6 +5384,8 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
             Line::from(
                 "MetaStack is rebuilding the curated follow-up ticket batch or creating the selected issues in Linear.",
             ),
+            Line::from(""),
+            copy_line,
             Line::from(""),
             key_hints(&[("q", "exit after load")]),
         ]),
@@ -5094,13 +5399,15 @@ fn interactive_footer_text(app: &InteractiveReviewApp) -> Text<'static> {
                 "Press `R` to refresh discovery, or `q` to exit and return when additional PRs are labeled for review.",
             ),
             Line::from(""),
+            copy_line,
+            Line::from(""),
             key_hints(&interactive_key_hints(app)),
         ]),
     }
 }
 
 fn interactive_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static str)> {
-    match app.stage {
+    let mut hints = match app.stage {
         InteractiveReviewStage::Loading => vec![("q", "exit after load")],
         InteractiveReviewStage::Select => match app.tab {
             InteractiveReviewTab::Candidates => match app.command {
@@ -5135,7 +5442,9 @@ fn interactive_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'sta
         InteractiveReviewStage::TicketReview => vec![("Esc", "sessions"), ("q", "exit")],
         InteractiveReviewStage::TicketLoading => vec![("q", "exit after load")],
         InteractiveReviewStage::Empty => vec![("R", "refresh"), ("q", "exit")],
-    }
+    };
+    hints.push(("Ctrl+Y", "copy"));
+    hints
 }
 
 fn session_key_hints(app: &InteractiveReviewApp) -> Vec<(&'static str, &'static str)> {
@@ -6348,10 +6657,22 @@ async fn run_review_daemon(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                if browser_state.copy.export_active()
+                    && browser_state
+                        .copy
+                        .handle_export_key(key, copy_overlay_viewport(terminal.size()?))
+                {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
+                    }
+                    _ if is_copy_key(key) => {
+                        browser_state
+                            .copy
+                            .copy_payload(browser_state.copy_payload(&latest_data));
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         browser_state.apply_action(ReviewBrowserAction::Up, &latest_data);

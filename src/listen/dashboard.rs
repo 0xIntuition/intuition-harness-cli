@@ -9,6 +9,7 @@ use ratatui::{Frame, Terminal};
 use super::state::{explicit_resume_id_label, explicit_resume_provider_label};
 use super::{ActiveIssue, ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
 use crate::session_runtime::{SummaryField, push_optional_summary_field};
+use crate::tui::copy::{CopyPayload, CopyUiState, pane_copy_help};
 use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
 use crate::tui::spaced_list::spaced_list_item;
@@ -31,7 +32,7 @@ impl FocusPane {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionBrowserState {
     pub(crate) focus: FocusPane,
     pub(crate) view: SessionListView,
@@ -40,6 +41,7 @@ pub(crate) struct SessionBrowserState {
     pub(crate) selected_active_issue: usize,
     pub(crate) detail_mode: bool,
     pub(crate) detail_scroll: u16,
+    pub(crate) copy: CopyUiState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,7 @@ impl Default for SessionBrowserState {
             selected_active_issue: 0,
             detail_mode: false,
             detail_scroll: 0,
+            copy: CopyUiState::default(),
         }
     }
 }
@@ -226,6 +229,63 @@ impl SessionBrowserState {
         }
         self.normalize(data);
     }
+
+    pub(crate) fn copy_payload(&self, data: &ListenDashboardData) -> CopyPayload {
+        match self.focus {
+            FocusPane::Sessions => {
+                if self.detail_mode && data.show_preview {
+                    if let Some(session) = self.selected_session(data) {
+                        CopyPayload::from_text(
+                            "Listen session detail",
+                            session_detail_copy_text(
+                                session,
+                                data.detail_for_session(&session.issue_identifier),
+                            ),
+                        )
+                    } else {
+                        CopyPayload::new("Listen session detail", "No session selected.")
+                    }
+                } else {
+                    CopyPayload::from_text("Listen sessions", session_list_copy_text(data, self))
+                }
+            }
+            FocusPane::ActiveIssues => {
+                if self.detail_mode && data.show_preview {
+                    if let Some(issue) = self.selected_active_issue(data) {
+                        CopyPayload::from_text(
+                            "Listen active issue detail",
+                            render_active_issue_detail_text(issue),
+                        )
+                    } else {
+                        CopyPayload::new("Listen active issue detail", "No active issue selected.")
+                    }
+                } else {
+                    CopyPayload::from_text(
+                        "Listen active issues",
+                        active_issue_list_copy_text(data, self),
+                    )
+                }
+            }
+        }
+    }
+
+    fn copy_help_text(&self, data: &ListenDashboardData) -> String {
+        let base = match self.focus {
+            FocusPane::Sessions if self.detail_mode && data.show_preview => {
+                "Tab switches panes or views. Up/Down and PgUp/PgDn scroll the selected session detail."
+            }
+            FocusPane::Sessions => {
+                "Tab switches panes or views. Up/Down moves the session list. Enter toggles detail for the selected session."
+            }
+            FocusPane::ActiveIssues if self.detail_mode && data.show_preview => {
+                "Tab switches panes. Up/Down and PgUp/PgDn scroll the selected issue detail."
+            }
+            FocusPane::ActiveIssues => {
+                "Tab switches panes. Up/Down moves the active issue list. Enter toggles detail for the selected issue."
+            }
+        };
+        pane_copy_help(base)
+    }
 }
 
 pub fn render_dashboard(data: &ListenDashboardData, width: u16, height: u16) -> Result<String> {
@@ -306,8 +366,10 @@ pub(crate) fn render(
         next_section += 1;
     }
     if footer_height > 0 && next_section < sections.len() {
-        render_footer(frame, data, sections[next_section]);
+        render_footer(frame, data, state, sections[next_section]);
     }
+
+    state.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) {
@@ -365,6 +427,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
                 ),
                 ("p", "pause running"),
                 ("r", "resume paused / retry blocked"),
+                ("Ctrl+Y", "copy"),
                 ("q", "exit"),
             ]),
         ]))
@@ -430,6 +493,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             ),
             ("p", "pause running"),
             ("r", "resume paused / retry blocked"),
+            ("Ctrl+Y", "copy"),
             ("q", "exit"),
         ]),
     ]))
@@ -1074,7 +1138,12 @@ fn render_session_detail_text(
     Text::from(lines)
 }
 
-fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) {
+fn render_footer(
+    frame: &mut Frame<'_>,
+    data: &ListenDashboardData,
+    state: &SessionBrowserState,
+    area: Rect,
+) {
     let direction = if area.width >= 110 {
         Direction::Horizontal
     } else {
@@ -1122,15 +1191,116 @@ fn render_footer(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
     let pending = List::new(pending_items).block(panel(panel_title("Todo Queue", false)));
     frame.render_widget(pending, chunks[0]);
 
-    let notes = if data.notes.is_empty() {
+    let notes_body = if data.notes.is_empty() {
         "No daemon notes were recorded for this cycle.".to_string()
     } else {
         data.notes.join("\n")
     };
-    let notes = Paragraph::new(notes)
-        .wrap(Wrap { trim: true })
-        .block(panel(panel_title("Notes", false)));
+    let notes = Paragraph::new(format!(
+        "{}\n\n{}",
+        state
+            .copy
+            .status_text()
+            .map(str::to_string)
+            .unwrap_or_else(|| state.copy_help_text(data)),
+        notes_body
+    ))
+    .wrap(Wrap { trim: true })
+    .block(panel(panel_title("Notes", false)));
     frame.render_widget(notes, chunks[1]);
+}
+
+fn session_list_copy_text(
+    data: &ListenDashboardData,
+    state: &SessionBrowserState,
+) -> Text<'static> {
+    let sessions = data.sessions_for_view(state.view);
+    let selected_identifier = state
+        .selected_session(data)
+        .map(|session| session.issue_identifier.as_str());
+    let mut lines = vec![
+        Line::from(format!("Listen sessions: {}", state.view.label())),
+        Line::from(format!("Count: {}", sessions.len())),
+        Line::from(""),
+    ];
+    if sessions.is_empty() {
+        lines.push(Line::from("No sessions available."));
+        return Text::from(lines);
+    }
+
+    for session in sessions {
+        let selected = if Some(session.issue_identifier.as_str()) == selected_identifier {
+            "> "
+        } else {
+            "  "
+        };
+        lines.push(Line::from(format!(
+            "{selected}{} [{}] {}",
+            session.issue_identifier,
+            session.phase.display_label(),
+            session.issue_title
+        )));
+        lines.push(Line::from(format!(
+            "    branch={} summary={}",
+            session.branch.as_deref().unwrap_or("-"),
+            session.summary
+        )));
+    }
+    Text::from(lines)
+}
+
+fn active_issue_list_copy_text(
+    data: &ListenDashboardData,
+    state: &SessionBrowserState,
+) -> Text<'static> {
+    let selected_identifier = state
+        .selected_active_issue(data)
+        .map(|issue| issue.identifier.as_str());
+    let mut lines = vec![
+        Line::from("Listen active issues"),
+        Line::from(format!("Count: {}", data.active_issues.len())),
+        Line::from(""),
+    ];
+    if data.active_issues.is_empty() {
+        lines.push(Line::from("No active issues available."));
+        return Text::from(lines);
+    }
+
+    for issue in &data.active_issues {
+        let selected = if Some(issue.identifier.as_str()) == selected_identifier {
+            "> "
+        } else {
+            "  "
+        };
+        lines.push(Line::from(format!(
+            "{selected}{} [{}] {}",
+            issue.identifier, issue.team_key, issue.title
+        )));
+        lines.push(Line::from(format!(
+            "    assignee={} state={} pr={} url={}",
+            issue.assignee_label(),
+            issue.state_name,
+            issue.pr_label(),
+            issue.url
+        )));
+    }
+    Text::from(lines)
+}
+
+fn session_detail_copy_text(
+    session: &super::AgentSession,
+    detail: Option<&ListenSessionDetail>,
+) -> Text<'static> {
+    match detail {
+        Some(detail) => render_session_detail_text(session, detail),
+        None => Text::from(vec![
+            Line::from(format!(
+                "Session {} detail is not available yet.",
+                session.issue_identifier
+            )),
+            Line::from("The worker will populate detail artifacts after the next refresh."),
+        ]),
+    }
 }
 
 fn runtime_line(label: &str, value: &str, color: Color) -> Line<'static> {
