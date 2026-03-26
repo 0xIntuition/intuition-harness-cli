@@ -140,8 +140,9 @@ impl CopyUiState {
         if self.mouse_captured {
             execute!(stdout, DisableMouseCapture).context("failed to disable mouse capture")?;
             self.mouse_captured = false;
-            self.status =
-                Some("Mouse released \u{2014} select text normally. F2 to restore.".to_string());
+            self.status = Some(
+                "Mouse released \u{2014} select text normally. Ctrl+G to restore.".to_string(),
+            );
         } else {
             execute!(stdout, EnableMouseCapture).context("failed to enable mouse capture")?;
             self.mouse_captured = true;
@@ -291,13 +292,13 @@ pub(crate) fn is_field_copy_key(key: crossterm::event::KeyEvent, has_selection: 
 
 /// Append shared copy guidance for a read-only pane help line.
 pub(crate) fn pane_copy_help(base: &str) -> String {
-    format!("{base} Ctrl+Y copies the pane. F2 releases the mouse for native text selection.")
+    format!("{base} Ctrl+Y copies the pane. Ctrl+G releases the mouse for native text selection.")
 }
 
 /// Append shared copy guidance for an editable field help line.
 pub(crate) fn field_copy_help(base: &str) -> String {
     format!(
-        "{base} Shift+Arrow selects. Ctrl+A selects all. Ctrl+Y copies. F2 releases mouse for native selection."
+        "{base} Shift+Arrow selects. Ctrl+A selects all. Ctrl+Y copies. Ctrl+G releases mouse for native selection."
     )
 }
 

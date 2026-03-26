@@ -73,9 +73,10 @@ pub(crate) fn is_select_all_key(key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// Returns true for the mouse capture toggle key (F2).
+/// Returns true for the mouse capture toggle key (Ctrl+G).
 pub(crate) fn is_mouse_toggle_key(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::F(2))
+    matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Returns true for Ctrl+C when used as a copy key in editable fields with an
