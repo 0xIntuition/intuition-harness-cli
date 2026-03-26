@@ -16,7 +16,11 @@ use ratatui::widgets::{Block, Borders, ListItem, ListState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::branding;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::is_copy_key;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::{spaced_list, spaced_list_item};
 use crate::tui::theme::{
@@ -107,6 +111,7 @@ struct WorkspaceDashboardApp {
     selected: Vec<bool>,
     completed: Option<WorkspaceSelection>,
     preview_scroll: ScrollState,
+    copy: CopyUiState,
 }
 
 const ACTIONS: [WorkspaceSelectionAction; 4] = [
@@ -161,6 +166,14 @@ pub fn run_workspace_dashboard(
         if event::poll(Duration::from_millis(150))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    let size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(size.into()))
+                    {
+                        continue;
+                    }
                     if key.code == KeyCode::Char('c')
                         && key
                             .modifiers
@@ -169,13 +182,18 @@ pub fn run_workspace_dashboard(
                         return Ok(WorkspaceDashboardExit::Cancelled);
                     }
 
+                    if is_copy_key(key) {
+                        app.copy.copy_payload(app.copy_payload());
+                        continue;
+                    }
+
                     if key.code == KeyCode::Esc {
                         if app.focus == Focus::Workspaces {
                             return Ok(WorkspaceDashboardExit::Cancelled);
                         }
                         let _ = app.apply_in_viewport(
                             WorkspaceDashboardAction::Back,
-                            preview_viewport(terminal.size()?.into()),
+                            preview_viewport(size.into()),
                         );
                         continue;
                     }
@@ -197,7 +215,7 @@ pub fn run_workspace_dashboard(
 
                     if let Some(action) = action
                         && let Some(selection) =
-                            app.apply_in_viewport(action, preview_viewport(terminal.size()?.into()))
+                            app.apply_in_viewport(action, preview_viewport(size.into()))
                     {
                         return Ok(WorkspaceDashboardExit::Selected(selection));
                     } else if action.is_none() {
@@ -205,14 +223,20 @@ pub fn run_workspace_dashboard(
                     }
                 }
                 Event::Mouse(mouse)
-                    if app.focus == Focus::Preview
-                        && matches!(
-                            mouse.kind,
-                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                        ) =>
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
                 {
-                    let viewport = preview_viewport(terminal.size()?.into());
-                    let _ = app.handle_preview_mouse(mouse, viewport);
+                    let size = terminal.size()?;
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                    } else if app.focus == Focus::Preview {
+                        let viewport = preview_viewport(size.into());
+                        let _ = app.handle_preview_mouse(mouse, viewport);
+                    }
                 }
                 _ => {}
             }
@@ -308,6 +332,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &WorkspaceDashboardApp) {
     render_workspace_preview(frame, details[0], app);
     render_action_list(frame, details[1], app);
     render_status(frame, details[2], app);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_workspace_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboardApp) {
@@ -488,11 +513,19 @@ fn render_action_list(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboar
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboardApp) {
-    let text = if let Some(ref note) = app.data.github_note {
-        format!("{}\n\n{}", app.status_text(), note)
-    } else {
-        app.status_text()
+    let base = match app.focus {
+        Focus::Workspaces => field_copy_help(&app.status_text()),
+        Focus::Preview | Focus::Actions => pane_copy_help(&app.status_text()),
     };
+    let mut sections = Vec::new();
+    if let Some(status) = app.copy.status_text() {
+        sections.push(status.to_string());
+    }
+    sections.push(base);
+    if let Some(ref note) = app.data.github_note {
+        sections.push(note.clone());
+    }
+    let text = sections.join("\n\n");
     let status = paragraph(text, panel_title("Status", false));
     frame.render_widget(status, area);
 }
@@ -509,6 +542,7 @@ impl WorkspaceDashboardApp {
             selected: vec![false; entry_count],
             completed: None,
             preview_scroll: ScrollState::default(),
+            copy: CopyUiState::default(),
         }
     }
 
@@ -711,6 +745,22 @@ impl WorkspaceDashboardApp {
         }
     }
 
+    fn copy_payload(&self) -> CopyPayload {
+        match self.focus {
+            Focus::Workspaces => self.query.copy_payload("workspace dashboard search"),
+            Focus::Preview => {
+                CopyPayload::from_text("workspace dashboard preview", self.preview_text())
+            }
+            Focus::Actions => {
+                let action = ACTIONS[self.action_index.min(ACTIONS.len() - 1)];
+                CopyPayload::new(
+                    "workspace dashboard action",
+                    format!("Action: {}\n\n{}", action.label(), action.description()),
+                )
+            }
+        }
+    }
+
     fn total_selected_size(&self) -> String {
         let selected_entries: Vec<&str> = self
             .selected
@@ -749,9 +799,9 @@ impl WorkspaceDashboardApp {
         }
     }
 
-    fn preview_content_rows(&self, width: u16) -> usize {
+    fn preview_text(&self) -> Text<'static> {
         let results = self.visible_results();
-        let text = if let Some(&idx) = results.get(self.workspace_index) {
+        if let Some(&idx) = results.get(self.workspace_index) {
             let entry = &self.data.entries[idx];
             let mut lines = vec![
                 Line::from(format!("Ticket: {}", entry.ticket)),
@@ -777,8 +827,11 @@ impl WorkspaceDashboardApp {
             Text::from(lines)
         } else {
             Text::from("No workspace selected.")
-        };
-        wrapped_rows(&plain_text(&text), width.max(1))
+        }
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.preview_text()), width.max(1))
     }
 
     fn scroll_preview_key(&mut self, key: KeyCode, viewport: Rect) {

@@ -29,9 +29,13 @@ use crate::linear::{
     LinearClient, LinearService, ProjectSummary, ReqwestLinearClient, TeamSummary, UserRef,
 };
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::{
     FilterableSelectFieldState, InputFieldRender, InputFieldState, SelectFieldState,
 };
+use crate::tui::keybindings::is_copy_key;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::theme::{Tone, badge, content_panel, emphasis_style, label_style, tone_style};
 
@@ -198,6 +202,7 @@ struct OnboardingApp {
     validation_state: ValidationState,
     review_scroll: ScrollState,
     error: Option<String>,
+    copy: CopyUiState,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +337,7 @@ impl OnboardingApp {
             validation_state: ValidationState::Idle,
             review_scroll: ScrollState::default(),
             error: None,
+            copy: CopyUiState::default(),
         };
         if !selected_team.is_empty() {
             app.team = SelectFieldState::new(vec![selected_team], 0);
@@ -340,6 +346,11 @@ impl OnboardingApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent, review_viewport: Rect) -> bool {
+        if is_copy_key(key) {
+            self.copy.copy_payload(self.copy_payload());
+            return true;
+        }
+
         if self.step == OnboardingStep::Review
             && matches!(
                 key.code,
@@ -388,6 +399,62 @@ impl OnboardingApp {
 
     fn review_text(&self) -> Text<'static> {
         Text::from(review_lines(self))
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.step {
+            OnboardingStep::Welcome => {
+                CopyPayload::from_text("onboarding welcome", Text::from(step_copy(self)))
+            }
+            OnboardingStep::ApiKey => self.api_key.copy_payload("onboarding Linear API key"),
+            OnboardingStep::Team => CopyPayload::new(
+                "onboarding default team",
+                self.team.selected_label().unwrap_or("unset"),
+            ),
+            OnboardingStep::Project => CopyPayload::new(
+                "onboarding default project",
+                if self.project.filter_value().is_empty() {
+                    format!(
+                        "Selected project: {}",
+                        self.project.selected_label().unwrap_or("unset")
+                    )
+                } else {
+                    format!(
+                        "Filter: {}\nSelected project: {}",
+                        self.project.filter_value(),
+                        self.project.selected_label().unwrap_or("unset")
+                    )
+                },
+            ),
+            OnboardingStep::DefaultIssueStatus => CopyPayload::new(
+                "onboarding default issue status",
+                self.issue_status.selected_label().unwrap_or("unset"),
+            ),
+            OnboardingStep::ListenLabel => {
+                self.listen_label.copy_payload("onboarding listen label")
+            }
+            OnboardingStep::AssignmentScope => CopyPayload::new(
+                "onboarding assignee scope",
+                self.assignment_scope.selected_label().unwrap_or("unset"),
+            ),
+            OnboardingStep::RefreshPolicy => CopyPayload::new(
+                "onboarding refresh policy",
+                self.refresh_policy.selected_label().unwrap_or("unset"),
+            ),
+            OnboardingStep::PollInterval => self
+                .poll_interval
+                .copy_payload("onboarding listen poll interval"),
+            OnboardingStep::PlanFollowUpLimit => self
+                .plan_follow_up_limit
+                .copy_payload("onboarding plan follow-up limit"),
+            OnboardingStep::PlanLabel => self.plan_label.copy_payload("onboarding plan label"),
+            OnboardingStep::TechnicalLabel => self
+                .technical_label
+                .copy_payload("onboarding technical label"),
+            OnboardingStep::Review => {
+                CopyPayload::from_text("onboarding review summary", self.review_text())
+            }
+        }
     }
 
     fn review_content_rows(&self, width: u16) -> usize {
@@ -568,11 +635,24 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 )
             {
-                let _ = app.handle_review_mouse(mouse, review_viewport);
+                if app.copy.export_active() {
+                    let _ = app
+                        .copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?.into()));
+                } else {
+                    let _ = app.handle_review_mouse(mouse, review_viewport);
+                }
             }
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if app.copy.export_active()
+            && app
+                .copy
+                .handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
+        {
             continue;
         }
         if matches!(key.code, KeyCode::Esc) {
@@ -754,6 +834,7 @@ fn render_onboarding(frame: &mut Frame<'_>, app: &OnboardingApp) {
     render_left_panel(frame, app, main[0]);
     render_right_panel(frame, app, main[1]);
     render_footer(frame, app, vertical[2]);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
@@ -1034,26 +1115,33 @@ fn render_footer(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
         | OnboardingStep::AssignmentScope
         | OnboardingStep::RefreshPolicy
         | OnboardingStep::DefaultIssueStatus => {
-            "Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels"
+            pane_copy_help("Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels")
         }
-        OnboardingStep::Project => {
-            "Type to search • Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels"
-        }
-        OnboardingStep::Review => {
-            "Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll • Enter saves install defaults • Shift+Tab goes back • Esc cancels"
-        }
-        OnboardingStep::Welcome => "Enter starts • Esc cancels",
-        _ => "Type or paste • Enter continues • Shift+Tab goes back • Esc cancels",
+        OnboardingStep::Project => pane_copy_help(
+            "Type to search • Up/Down move • Enter accepts • Shift+Tab goes back • Esc cancels",
+        ),
+        OnboardingStep::Review => pane_copy_help(
+            "Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll • Enter saves install defaults • Shift+Tab goes back • Esc cancels",
+        ),
+        OnboardingStep::Welcome => pane_copy_help("Enter starts • Esc cancels"),
+        _ => field_copy_help("Type or paste • Enter continues • Shift+Tab goes back • Esc cancels"),
     };
-    let status = app.error.as_deref().unwrap_or(match app.mode {
-        OnboardingLaunchMode::Intercepted { .. } => {
-            "Complete onboarding once, then your original command continues."
-        }
-        OnboardingLaunchMode::Replay => "Replay mode only updates install-scoped defaults.",
-    });
-    let footer = Paragraph::new(Text::from(vec![Line::from(controls), Line::from(status)]))
-        .block(Block::default().borders(Borders::ALL).title("Hints"))
-        .wrap(Wrap { trim: false });
+    let status = app
+        .error
+        .as_deref()
+        .or(app.copy.status_text())
+        .unwrap_or(match app.mode {
+            OnboardingLaunchMode::Intercepted { .. } => {
+                "Complete onboarding once, then your original command continues."
+            }
+            OnboardingLaunchMode::Replay => "Replay mode only updates install-scoped defaults.",
+        });
+    let footer = Paragraph::new(Text::from(vec![
+        Line::from(controls),
+        Line::from(status.to_string()),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("Hints"))
+    .wrap(Wrap { trim: false });
     frame.render_widget(footer, area);
 }
 

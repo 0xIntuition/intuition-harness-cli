@@ -57,7 +57,11 @@ use crate::output::{MachineIssueSummary, render_json_success};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::is_copy_key;
 use crate::tui::markdown::render_markdown;
 use crate::tui::prompt_images::PromptImageAttachment;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
@@ -218,6 +222,7 @@ enum PlanStageKind {
 
 struct PlanSessionApp {
     stage: PlanStage,
+    copy: CopyUiState,
     agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
     pending: Option<PendingPlanJob>,
@@ -1353,6 +1358,7 @@ fn run_interactive_plan_session(
             error: None,
             sticky_error: false,
         }),
+        copy: CopyUiState::default(),
         agent_overrides,
         continuation: None,
         pending: None,
@@ -1400,21 +1406,31 @@ fn run_interactive_plan_session(
                     }
 
                     let frame_size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(frame_size.into()))
+                    {
+                        continue;
+                    }
                     let action = match &mut app.stage {
                         PlanStage::Request(request_app) => handle_request_step_key_with_viewport(
                             request_app,
+                            &mut app.copy,
                             key,
                             request_input_viewport(frame_size.into()),
                         ),
                         PlanStage::Questions(questions_app) => {
                             handle_questions_step_key_with_viewport(
                                 questions_app,
+                                &mut app.copy,
                                 key,
                                 questions_answer_input_viewport(frame_size.into()),
                             )
                         }
                         PlanStage::Review(review_app) => handle_review_step_key(
                             review_app,
+                            &mut app.copy,
                             key,
                             review_layout(frame_size.into()),
                         ),
@@ -1501,6 +1517,12 @@ fn run_interactive_plan_session(
                         continue;
                     }
                     let frame_size = terminal.size()?;
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(frame_size.into()));
+                        continue;
+                    }
                     match &mut app.stage {
                         PlanStage::Request(request_app) => {
                             let viewport = request_input_viewport(frame_size.into());
@@ -1550,6 +1572,7 @@ enum FastPlanStageKind {
 
 struct FastPlanSessionApp {
     stage: FastPlanStage,
+    copy: CopyUiState,
     agent_overrides: PlanningAgentOverrides,
     continuation: Option<AgentContinuation>,
     pending: Option<PendingFastPlanJob>,
@@ -1615,6 +1638,7 @@ fn run_fast_interactive_plan_session(
             error: None,
             sticky_error: false,
         }),
+        copy: CopyUiState::default(),
         agent_overrides,
         continuation: None,
         pending: None,
@@ -1658,25 +1682,35 @@ fn run_fast_interactive_plan_session(
                     }
 
                     let frame_size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(frame_size.into()))
+                    {
+                        continue;
+                    }
                     let action = match &mut app.stage {
                         FastPlanStage::Request(request_app) => handle_fast_request_step_key(
                             request_app,
+                            &mut app.copy,
                             key,
                             request_input_width(frame_size.into()),
                             app.options.question_limit,
                         ),
                         FastPlanStage::Questions(questions_app) => handle_fast_questions_step_key(
                             questions_app,
+                            &mut app.copy,
                             key,
                             questions_answer_input_width(frame_size.into()),
                         ),
                         FastPlanStage::Addendum(addendum_app) => handle_fast_addendum_step_key(
                             addendum_app,
+                            &mut app.copy,
                             key,
                             request_input_width(frame_size.into()),
                         ),
                         FastPlanStage::Review(review_app) => {
-                            handle_fast_review_step_key(review_app, key)
+                            handle_fast_review_step_key(review_app, &mut app.copy, key)
                         }
                         FastPlanStage::Loading(_) => FastSessionAction::None,
                     };
@@ -1824,6 +1858,7 @@ fn input_key_clears_sticky_error(key: crossterm::event::KeyEvent) -> bool {
 
 fn handle_fast_request_step_key(
     app: &mut RequestApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     input_width: u16,
     question_limit: usize,
@@ -1897,7 +1932,9 @@ fn handle_fast_request_step_key(
             }
         }
         _ => {
-            if app.request.handle_key_with_width(key, input_width) {
+            if is_copy_key(key) {
+                copy.copy_payload(app.request.copy_payload("fast planning request"));
+            } else if app.request.handle_key_with_width(key, input_width) {
                 if input_key_clears_sticky_error(key) {
                     clear_error(&mut app.error, &mut app.sticky_error);
                 } else {
@@ -1911,6 +1948,7 @@ fn handle_fast_request_step_key(
 
 fn handle_fast_questions_step_key(
     app: &mut QuestionsApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     input_width: u16,
 ) -> FastSessionAction {
@@ -2006,7 +2044,9 @@ fn handle_fast_questions_step_key(
             }
         }
         _ => {
-            if let Some(question) = app.questions.get_mut(app.selected)
+            if is_copy_key(key) {
+                copy.copy_payload(fast_questions_copy_payload(app));
+            } else if let Some(question) = app.questions.get_mut(app.selected)
                 && question.answer.handle_key_with_width(key, input_width)
             {
                 question.state = FollowUpAnswerState::Pending;
@@ -2023,6 +2063,7 @@ fn handle_fast_questions_step_key(
 
 fn handle_fast_addendum_step_key(
     app: &mut FastAddendumApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     input_width: u16,
 ) -> FastSessionAction {
@@ -2052,7 +2093,9 @@ fn handle_fast_addendum_step_key(
             }
         }
         _ => {
-            if app.addendum.handle_key_with_width(key, input_width) {
+            if is_copy_key(key) {
+                copy.copy_payload(fast_addendum_copy_payload(app));
+            } else if app.addendum.handle_key_with_width(key, input_width) {
                 if input_key_clears_sticky_error(key) {
                     clear_error(&mut app.error, &mut app.sticky_error);
                 } else {
@@ -2066,6 +2109,7 @@ fn handle_fast_addendum_step_key(
 
 fn handle_fast_review_step_key(
     app: &mut FastReviewApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
 ) -> FastSessionAction {
     match key.code {
@@ -2083,6 +2127,10 @@ fn handle_fast_review_step_key(
         }
         KeyCode::Char('a') | KeyCode::Enter => FastSessionAction::Confirm(app.plan.clone()),
         KeyCode::Char('r') => FastSessionAction::Reject,
+        _ if is_copy_key(key) => {
+            copy.copy_payload(fast_review_copy_payload(app));
+            FastSessionAction::None
+        }
         _ => FastSessionAction::None,
     }
 }
@@ -2090,17 +2138,28 @@ fn handle_fast_review_step_key(
 fn render_fast_plan_session(frame: &mut Frame<'_>, app: &FastPlanSessionApp) {
     frame.render_widget(Clear, frame.area());
     match &app.stage {
-        FastPlanStage::Request(request_app) => render_request_form_frame(frame, request_app),
-        FastPlanStage::Questions(questions_app) => {
-            render_questions_form_frame(frame, questions_app)
+        FastPlanStage::Request(request_app) => {
+            render_request_form_frame(frame, request_app, app.copy.status_text())
         }
-        FastPlanStage::Addendum(addendum_app) => render_fast_addendum_frame(frame, addendum_app),
-        FastPlanStage::Review(review_app) => render_fast_review_frame(frame, review_app),
+        FastPlanStage::Questions(questions_app) => {
+            render_questions_form_frame(frame, questions_app, app.copy.status_text())
+        }
+        FastPlanStage::Addendum(addendum_app) => {
+            render_fast_addendum_frame(frame, addendum_app, app.copy.status_text())
+        }
+        FastPlanStage::Review(review_app) => {
+            render_fast_review_frame(frame, review_app, app.copy.status_text())
+        }
         FastPlanStage::Loading(loading_app) => render_loading_frame(frame, loading_app),
     }
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
-fn render_fast_addendum_frame(frame: &mut Frame<'_>, app: &FastAddendumApp) {
+fn render_fast_addendum_frame(
+    frame: &mut Frame<'_>,
+    app: &FastAddendumApp,
+    copy_status: Option<&str>,
+) {
     let layout = base_layout(frame);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -2154,11 +2213,14 @@ fn render_fast_addendum_frame(frame: &mut Frame<'_>, app: &FastAddendumApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type any final context. Enter drafts the fast plan. Shift+Enter inserts a newline. Esc cancels.",
+        copy_status,
+        &field_copy_help(
+            "Type any final context. Enter drafts the fast plan. Shift+Enter inserts a newline. Esc cancels.",
+        ),
     );
 }
 
-fn render_fast_review_frame(frame: &mut Frame<'_>, app: &FastReviewApp) {
+fn render_fast_review_frame(frame: &mut Frame<'_>, app: &FastReviewApp, copy_status: Option<&str>) {
     let layout = base_layout(frame);
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -2292,7 +2354,10 @@ fn render_fast_review_frame(frame: &mut Frame<'_>, app: &FastReviewApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Up/Down moves through tickets. Enter or A approves. R rejects. Esc cancels.",
+        copy_status,
+        &pane_copy_help(
+            "Up/Down moves through tickets. Enter or A approves. R rejects. Esc cancels.",
+        ),
     );
 }
 
@@ -2761,6 +2826,105 @@ impl ReviewApp {
     }
 }
 
+fn plan_questions_copy_payload(app: &QuestionsApp) -> CopyPayload {
+    let mut lines = vec![format!("Planning request\n\n{}", app.request)];
+    if let Some(selected) = app.questions.get(app.selected) {
+        lines.extend([
+            String::new(),
+            format!("Question {}\n\n{}", app.selected + 1, selected.question),
+            String::new(),
+            format!(
+                "Answer {}\n\n{}",
+                app.selected + 1,
+                selected.answer.copy_payload("planning answer").plain_text
+            ),
+        ]);
+    }
+    CopyPayload::new("planning follow-up", lines.join("\n"))
+}
+
+fn review_ticket_list_text(app: &ReviewApp) -> Text<'static> {
+    Text::from(
+        app.plan
+            .issues
+            .iter()
+            .enumerate()
+            .map(|(index, issue)| {
+                let marker = review_marker(app.decisions.get(index).copied().unwrap_or_default());
+                Line::from(format!("{marker} {}", issue.title))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn plan_review_copy_payload(app: &ReviewApp) -> CopyPayload {
+    match app.focus {
+        ReviewFocus::Tickets => {
+            CopyPayload::from_text("planned ticket list", review_ticket_list_text(app))
+        }
+        ReviewFocus::SelectedTicket => {
+            let selected = app.selected_issue();
+            CopyPayload::with_markdown(
+                "planned ticket detail",
+                plain_text(&app.selected_ticket_text()),
+                selected.description.clone(),
+            )
+        }
+        ReviewFocus::Overview => CopyPayload::from_text("plan overview", app.overview_text()),
+        ReviewFocus::CombinationPlan => {
+            CopyPayload::from_text("plan combination summary", app.combination_plan_text())
+        }
+    }
+}
+
+fn fast_questions_copy_payload(app: &QuestionsApp) -> CopyPayload {
+    let mut payload = plan_questions_copy_payload(app);
+    payload.label = "fast planning follow-up".to_string();
+    payload
+}
+
+fn fast_addendum_copy_payload(app: &FastAddendumApp) -> CopyPayload {
+    app.addendum.copy_payload("fast plan addendum")
+}
+
+fn fast_review_copy_payload(app: &FastReviewApp) -> CopyPayload {
+    let selected = &app.plan.issues[app.selected];
+    let mut lines = vec![
+        format!("Title: {}", selected.title),
+        format!(
+            "Priority: {}",
+            selected
+                .priority
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unset".to_string())
+        ),
+        String::new(),
+        plain_text(&render_markdown(
+            &selected.description,
+            Style::default(),
+            &[],
+        )),
+    ];
+    if !selected.acceptance_criteria.is_empty() {
+        lines.extend([
+            String::new(),
+            "Acceptance Criteria".to_string(),
+            String::new(),
+        ]);
+        lines.extend(
+            selected
+                .acceptance_criteria
+                .iter()
+                .map(|criterion| format!("- {criterion}")),
+        );
+    }
+    CopyPayload::with_markdown(
+        "fast plan draft",
+        lines.join("\n"),
+        selected.description.clone(),
+    )
+}
+
 fn review_layout(frame_area: Rect) -> ReviewLayout {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -2810,11 +2974,17 @@ fn handle_request_step_key(
     key: crossterm::event::KeyEvent,
     input_width: u16,
 ) -> SessionAction {
-    handle_request_step_key_with_viewport(app, key, Rect::new(0, 0, input_width.max(1), 8))
+    handle_request_step_key_with_viewport(
+        app,
+        &mut CopyUiState::default(),
+        key,
+        Rect::new(0, 0, input_width.max(1), 8),
+    )
 }
 
 fn handle_request_step_key_with_viewport(
     app: &mut RequestApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     input_viewport: Rect,
 ) -> SessionAction {
@@ -2872,7 +3042,9 @@ fn handle_request_step_key_with_viewport(
             }
         }
         _ => {
-            if app.request.handle_key_with_viewport(
+            if is_copy_key(key) {
+                copy.copy_payload(app.request.copy_payload("planning request"));
+            } else if app.request.handle_key_with_viewport(
                 key,
                 input_viewport.width,
                 input_viewport.height,
@@ -2921,11 +3093,17 @@ fn handle_questions_step_key(
     key: crossterm::event::KeyEvent,
     input_width: u16,
 ) -> SessionAction {
-    handle_questions_step_key_with_viewport(app, key, Rect::new(0, 0, input_width.max(1), 8))
+    handle_questions_step_key_with_viewport(
+        app,
+        &mut CopyUiState::default(),
+        key,
+        Rect::new(0, 0, input_width.max(1), 8),
+    )
 }
 
 fn handle_questions_step_key_with_viewport(
     app: &mut QuestionsApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     input_viewport: Rect,
 ) -> SessionAction {
@@ -3021,7 +3199,9 @@ fn handle_questions_step_key_with_viewport(
             }
         }
         _ => {
-            if let Some(question) = app.questions.get_mut(app.selected)
+            if is_copy_key(key) {
+                copy.copy_payload(plan_questions_copy_payload(app));
+            } else if let Some(question) = app.questions.get_mut(app.selected)
                 && question.answer.handle_key_with_viewport(
                     key,
                     input_viewport.width,
@@ -3076,6 +3256,7 @@ fn handle_questions_step_mouse(
 
 fn handle_review_step_key(
     app: &mut ReviewApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     layout: ReviewLayout,
 ) -> SessionAction {
@@ -3140,6 +3321,10 @@ fn handle_review_step_key(
                 SessionAction::None
             }
         },
+        _ if is_copy_key(key) => {
+            copy.copy_payload(plan_review_copy_payload(app));
+            SessionAction::None
+        }
         _ => SessionAction::None,
     }
 }
@@ -3280,14 +3465,21 @@ fn next_incomplete_question(questions: &[QuestionAnswer], selected: usize) -> Op
 fn render_plan_session(frame: &mut Frame<'_>, app: &PlanSessionApp) {
     frame.render_widget(Clear, frame.area());
     match &app.stage {
-        PlanStage::Request(request_app) => render_request_form_frame(frame, request_app),
-        PlanStage::Questions(questions_app) => render_questions_form_frame(frame, questions_app),
-        PlanStage::Review(review_app) => render_review_form_frame(frame, review_app),
+        PlanStage::Request(request_app) => {
+            render_request_form_frame(frame, request_app, app.copy.status_text())
+        }
+        PlanStage::Questions(questions_app) => {
+            render_questions_form_frame(frame, questions_app, app.copy.status_text())
+        }
+        PlanStage::Review(review_app) => {
+            render_review_form_frame(frame, review_app, app.copy.status_text())
+        }
         PlanStage::Loading(loading_app) => render_loading_frame(frame, loading_app),
     }
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
-fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
+fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp, copy_status: Option<&str>) {
     let layout = base_layout(frame);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -3327,11 +3519,18 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type the planning request. Up/Down and PgUp/PgDn/Home/End move through wrapped lines, and the mouse wheel scrolls while the editor is focused. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        copy_status,
+        &field_copy_help(
+            "Type the planning request. Up/Down and PgUp/PgDn/Home/End move through wrapped lines, and the mouse wheel scrolls while the editor is focused. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        ),
     );
 }
 
-fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
+fn render_questions_form_frame(
+    frame: &mut Frame<'_>,
+    app: &QuestionsApp,
+    copy_status: Option<&str>,
+) {
     let layout = base_layout(frame);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -3454,11 +3653,14 @@ fn render_questions_form_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab/Shift-Tab moves between questions. Up/Down moves inside the active multiline answer, including wrapped lines. Enter records the current response; a blank answer skips that question. Shift+Enter inserts a newline. Once every question is answered or skipped, Enter generates the ticket plan. Ctrl+S remains available as an alternate submit key. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        copy_status,
+        &field_copy_help(
+            "Tab/Shift-Tab moves between questions. Up/Down moves inside the active multiline answer, including wrapped lines. Enter records the current response; a blank answer skips that question. Shift+Enter inserts a newline. Once every question is answered or skipped, Enter generates the ticket plan. Ctrl+S remains available as an alternate submit key. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+        ),
     );
 }
 
-fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp) {
+fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp, copy_status: Option<&str>) {
     let layout = base_layout(frame);
     let review_layout = review_layout(frame.area());
 
@@ -3554,7 +3756,10 @@ fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab/Shift+Tab changes review focus. In [scroll] panes, Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket. Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels.",
+        copy_status,
+        &pane_copy_help(
+            "Tab/Shift+Tab changes review focus. In [scroll] panes, Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket. Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels.",
+        ),
     );
 }
 
@@ -3646,12 +3851,18 @@ fn render_loading_detail(app: &LoadingApp) -> String {
     }
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, error: Option<&str>, help: &str) {
+fn render_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    error: Option<&str>,
+    status: Option<&str>,
+    help: &str,
+) {
     let mut lines = vec![Line::from(help.to_string())];
-    if let Some(error) = error {
+    if let Some(message) = error.or(status) {
         lines.push(Line::from(""));
         lines.push(Line::styled(
-            format!("Error: {error}"),
+            message.to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         ));
     }
@@ -4122,6 +4333,7 @@ mod tests {
         review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
+    use crate::tui::copy::CopyUiState;
     use crate::tui::fields::InputFieldState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
@@ -4168,7 +4380,7 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_request_form_frame(frame, app))
+            .draw(|frame| render_request_form_frame(frame, app, None))
             .expect("request form should render");
         snapshot(terminal.backend())
     }
@@ -4181,7 +4393,7 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_questions_form_frame(frame, app))
+            .draw(|frame| render_questions_form_frame(frame, app, None))
             .expect("questions form should render");
         snapshot(terminal.backend())
     }
@@ -4194,7 +4406,7 @@ mod tests {
         let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_review_form_frame(frame, app))
+            .draw(|frame| render_review_form_frame(frame, app, None))
             .expect("review form should render");
         snapshot(terminal.backend())
     }
@@ -4405,6 +4617,7 @@ mod tests {
 
         let action = handle_request_step_key_with_viewport(
             &mut app,
+            &mut CopyUiState::default(),
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
             request_input_viewport(Rect::new(0, 0, 120, 16)),
         );
@@ -4664,6 +4877,7 @@ mod tests {
 
         let action = handle_questions_step_key_with_viewport(
             &mut app,
+            &mut CopyUiState::default(),
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
             questions_answer_input_viewport(Rect::new(0, 0, 120, 18)),
         );
@@ -4969,6 +5183,7 @@ mod tests {
 
         let action = handle_review_step_key(
             &mut app,
+            &mut CopyUiState::default(),
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab),
             layout,
         );
@@ -4977,6 +5192,7 @@ mod tests {
 
         let action = handle_review_step_key(
             &mut app,
+            &mut CopyUiState::default(),
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab),
             layout,
         );
@@ -5012,6 +5228,7 @@ mod tests {
 
         let action = handle_review_step_key(
             &mut app,
+            &mut CopyUiState::default(),
             crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End),
             layout,
         );
@@ -5022,7 +5239,7 @@ mod tests {
         let backend = TestBackend::new(100, 18);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_review_form_frame(frame, &app))
+            .draw(|frame| render_review_form_frame(frame, &app, None))
             .expect("review form should render");
         let snapshot = snapshot(terminal.backend());
 
@@ -5096,6 +5313,7 @@ mod tests {
                             error: None,
                             sticky_error: false,
                         }),
+                        copy: CopyUiState::default(),
                         agent_overrides: PlanningAgentOverrides::default(),
                         continuation: None,
                         pending: None,
@@ -5115,6 +5333,7 @@ mod tests {
                             spinner_index: 0,
                             preview: String::new(),
                         }),
+                        copy: CopyUiState::default(),
                         agent_overrides: PlanningAgentOverrides::default(),
                         continuation: None,
                         pending: None,
@@ -5356,6 +5575,7 @@ mod tests {
                 spinner_index: 0,
                 preview: String::new(),
             }),
+            copy: CopyUiState::default(),
             agent_overrides: PlanningAgentOverrides::default(),
             continuation: None,
             pending: Some(PendingPlanJob {
@@ -5512,6 +5732,7 @@ mod tests {
 
         let action = handle_request_step_key_with_viewport(
             &mut app,
+            &mut CopyUiState::default(),
             KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
             request_input_viewport(Rect::new(0, 0, 120, 16)),
         );

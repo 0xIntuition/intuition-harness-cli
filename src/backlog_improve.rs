@@ -47,7 +47,11 @@ use crate::linear::{
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::is_copy_key;
 use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::spaced_list;
@@ -756,11 +760,13 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut app = ImprovementDashboardApp::new(issues);
+    let mut copy = CopyUiState::default();
     let mut preview_viewport = Rect::default();
 
     loop {
         terminal.draw(|frame| {
-            preview_viewport = render_improvement_dashboard(frame, &app);
+            preview_viewport = render_improvement_dashboard(frame, &app, copy.status_text());
+            copy.render_export_overlay(frame, frame.area());
         })?;
 
         if !event::poll(Duration::from_millis(250))? {
@@ -768,61 +774,81 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
         }
 
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    return Ok(ImprovementDashboardExit::Cancelled);
-                }
-                KeyCode::Tab => {
-                    app.focus = match app.focus {
-                        ImprovementPickerFocus::List => ImprovementPickerFocus::Preview,
-                        ImprovementPickerFocus::Preview => ImprovementPickerFocus::List,
-                    };
-                }
-                KeyCode::Up => {
-                    if app.focus == ImprovementPickerFocus::Preview {
-                        let _ = app.preview_scroll.apply_key_code_in_viewport(
-                            KeyCode::Up,
-                            preview_viewport,
-                            app.preview_content_rows(preview_viewport.width.max(1)),
-                        );
-                    } else {
-                        app.move_up();
-                    }
-                }
-                KeyCode::Down => {
-                    if app.focus == ImprovementPickerFocus::Preview {
-                        let _ = app.preview_scroll.apply_key_code_in_viewport(
-                            KeyCode::Down,
-                            preview_viewport,
-                            app.preview_content_rows(preview_viewport.width.max(1)),
-                        );
-                    } else {
-                        app.move_down();
-                    }
-                }
-                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
-                    if app.focus == ImprovementPickerFocus::Preview =>
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if copy.export_active()
+                    && copy.handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
                 {
-                    let _ = app.preview_scroll.apply_key_in_viewport(
-                        key,
-                        preview_viewport,
-                        app.preview_content_rows(preview_viewport.width.max(1)),
-                    );
+                    continue;
                 }
-                KeyCode::Char(' ') if app.focus == ImprovementPickerFocus::List => {
-                    app.toggle();
-                }
-                KeyCode::Enter => {
-                    let selection = app.select();
-                    return Ok(ImprovementDashboardExit::Selected(selection));
-                }
-                _ => {
-                    if app.focus == ImprovementPickerFocus::List && app.query.handle_key(key) {
-                        app.cursor = 0;
-                        app.preview_scroll.reset();
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        return Ok(ImprovementDashboardExit::Cancelled);
+                    }
+                    KeyCode::Tab => {
+                        app.focus = match app.focus {
+                            ImprovementPickerFocus::List => ImprovementPickerFocus::Preview,
+                            ImprovementPickerFocus::Preview => ImprovementPickerFocus::List,
+                        };
+                    }
+                    KeyCode::Up => {
+                        if app.focus == ImprovementPickerFocus::Preview {
+                            let _ = app.preview_scroll.apply_key_code_in_viewport(
+                                KeyCode::Up,
+                                preview_viewport,
+                                app.preview_content_rows(preview_viewport.width.max(1)),
+                            );
+                        } else {
+                            app.move_up();
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.focus == ImprovementPickerFocus::Preview {
+                            let _ = app.preview_scroll.apply_key_code_in_viewport(
+                                KeyCode::Down,
+                                preview_viewport,
+                                app.preview_content_rows(preview_viewport.width.max(1)),
+                            );
+                        } else {
+                            app.move_down();
+                        }
+                    }
+                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                        if app.focus == ImprovementPickerFocus::Preview =>
+                    {
+                        let _ = app.preview_scroll.apply_key_in_viewport(
+                            key,
+                            preview_viewport,
+                            app.preview_content_rows(preview_viewport.width.max(1)),
+                        );
+                    }
+                    KeyCode::Char(' ') if app.focus == ImprovementPickerFocus::List => {
+                        app.toggle();
+                    }
+                    KeyCode::Enter => {
+                        let selection = app.select();
+                        return Ok(ImprovementDashboardExit::Selected(selection));
+                    }
+                    _ => {
+                        if is_copy_key(key) {
+                            match app.focus {
+                                ImprovementPickerFocus::List => {
+                                    copy.copy_payload(
+                                        app.query.copy_payload("backlog improve search"),
+                                    );
+                                }
+                                ImprovementPickerFocus::Preview => {
+                                    copy.copy_payload(improvement_dashboard_preview_payload(&app));
+                                }
+                            }
+                        } else if app.focus == ImprovementPickerFocus::List
+                            && app.query.handle_key(key)
+                        {
+                            app.cursor = 0;
+                            app.preview_scroll.reset();
+                        }
                     }
                 }
-            },
+            }
             Event::Paste(text) => {
                 if app.focus == ImprovementPickerFocus::List && app.query.paste(&text) {
                     app.cursor = 0;
@@ -830,11 +856,16 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
                 }
             }
             Event::Mouse(mouse) => {
-                let _ = app.preview_scroll.apply_mouse_in_viewport(
-                    mouse,
-                    preview_viewport,
-                    app.preview_content_rows(preview_viewport.width.max(1)),
-                );
+                if copy.export_active() {
+                    let _ = copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?.into()));
+                } else {
+                    let _ = app.preview_scroll.apply_mouse_in_viewport(
+                        mouse,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                }
             }
             _ => {}
         }
@@ -851,13 +882,18 @@ fn render_improvement_dashboard_once(
     let mut terminal = Terminal::new(backend)?;
     let app = ImprovementDashboardApp::new(issues);
     terminal.draw(|frame| {
-        render_improvement_dashboard(frame, &app);
+        render_improvement_dashboard(frame, &app, None);
     })?;
     Ok(improvement_dashboard_snapshot(terminal.backend()))
 }
 
 /// Renders the search-first improvement dashboard and returns the preview pane viewport rect.
-fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboardApp) -> Rect {
+fn render_improvement_dashboard(
+    frame: &mut Frame<'_>,
+    app: &ImprovementDashboardApp,
+    copy_status: Option<&str>,
+) -> Rect {
+    let status_line = copy_status.unwrap_or_default().to_string();
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])
@@ -892,6 +928,7 @@ fn render_improvement_dashboard(frame: &mut Frame<'_>, app: &ImprovementDashboar
                 ("Enter", "start review"),
                 ("Esc", "cancel"),
             ]),
+            Line::from(status_line),
         ]),
         panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
@@ -1001,6 +1038,37 @@ fn render_improvement_issue_preview(
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(widget, area);
+}
+
+fn improvement_dashboard_preview_payload(app: &ImprovementDashboardApp) -> CopyPayload {
+    let filtered = dashboard_search_results(app);
+    filtered
+        .get(app.cursor)
+        .and_then(|result| {
+            app.issues.get(result.issue_index).map(|issue| {
+                let status_label = if app.selected.get(result.issue_index).copied().unwrap_or(false) {
+                    Some("selected")
+                } else {
+                    None
+                };
+                CopyPayload::with_markdown(
+                    "backlog improve issue preview",
+                    plain_text(&render_issue_preview(
+                        issue,
+                        Some(result),
+                        status_label,
+                        "_No description provided._",
+                    )),
+                    issue.description.clone().unwrap_or_default(),
+                )
+            })
+        })
+        .unwrap_or_else(|| {
+            CopyPayload::new(
+                "backlog improve issue preview",
+                "No issue is available to preview.\n\nType to search or clear the query to see all issues.",
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1161,11 +1229,13 @@ fn run_improvement_review_dashboard(
         output.clone(),
         question_round,
     );
+    let mut copy = CopyUiState::default();
     let mut review_viewports = ReviewViewports::default();
 
     loop {
         terminal.draw(|frame| {
-            review_viewports = render_improvement_review(frame, &app);
+            review_viewports = render_improvement_review(frame, &app, copy.status_text());
+            copy.render_export_overlay(frame, frame.area());
         })?;
 
         if !event::poll(Duration::from_millis(250))? {
@@ -1173,134 +1243,154 @@ fn run_improvement_review_dashboard(
         }
 
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc if app.questions.is_empty() => {
-                    return Ok(ImprovementReviewExit::Cancelled);
-                }
-                KeyCode::Esc => {
-                    app.error = None;
-                    app.questions.clear();
-                    app.selected_question = 0;
-                }
-                KeyCode::Tab if app.questions.is_empty() => {
-                    app.review_focus = match app.review_focus {
-                        ImprovementReviewFocus::Recommendation => ImprovementReviewFocus::Proposal,
-                        ImprovementReviewFocus::Proposal => ImprovementReviewFocus::Recommendation,
-                    };
-                }
-                KeyCode::Tab if !app.questions.is_empty() => {
-                    app.selected_question = (app.selected_question + 1) % app.questions.len();
-                }
-                KeyCode::BackTab if !app.questions.is_empty() => {
-                    app.selected_question = app
-                        .selected_question
-                        .checked_sub(1)
-                        .unwrap_or(app.questions.len().saturating_sub(1));
-                }
-                KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-                | KeyCode::Home
-                | KeyCode::End
-                    if app.questions.is_empty() =>
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if copy.export_active()
+                    && copy.handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
                 {
-                    match app.review_focus {
-                        ImprovementReviewFocus::Recommendation => {
-                            let _ = app.recommendation_scroll.apply_key_in_viewport(
-                                key,
-                                review_viewports.left,
-                                app.recommendation_content_rows(review_viewports.left.width),
-                            );
-                        }
-                        ImprovementReviewFocus::Proposal => {
-                            let _ = app.proposal_scroll.apply_key_in_viewport(
-                                key,
-                                review_viewports.right,
-                                app.proposal_content_rows(review_viewports.right.width),
-                            );
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc if app.questions.is_empty() => {
+                        return Ok(ImprovementReviewExit::Cancelled);
+                    }
+                    KeyCode::Esc => {
+                        app.error = None;
+                        app.questions.clear();
+                        app.selected_question = 0;
+                    }
+                    KeyCode::Tab if app.questions.is_empty() => {
+                        app.review_focus = match app.review_focus {
+                            ImprovementReviewFocus::Recommendation => {
+                                ImprovementReviewFocus::Proposal
+                            }
+                            ImprovementReviewFocus::Proposal => {
+                                ImprovementReviewFocus::Recommendation
+                            }
+                        };
+                    }
+                    KeyCode::Tab if !app.questions.is_empty() => {
+                        app.selected_question = (app.selected_question + 1) % app.questions.len();
+                    }
+                    KeyCode::BackTab if !app.questions.is_empty() => {
+                        app.selected_question = app
+                            .selected_question
+                            .checked_sub(1)
+                            .unwrap_or(app.questions.len().saturating_sub(1));
+                    }
+                    KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End
+                        if app.questions.is_empty() =>
+                    {
+                        match app.review_focus {
+                            ImprovementReviewFocus::Recommendation => {
+                                let _ = app.recommendation_scroll.apply_key_in_viewport(
+                                    key,
+                                    review_viewports.left,
+                                    app.recommendation_content_rows(review_viewports.left.width),
+                                );
+                            }
+                            ImprovementReviewFocus::Proposal => {
+                                let _ = app.proposal_scroll.apply_key_in_viewport(
+                                    key,
+                                    review_viewports.right,
+                                    app.proposal_content_rows(review_viewports.right.width),
+                                );
+                            }
                         }
                     }
-                }
-                KeyCode::Enter
-                    if !app.questions.is_empty()
-                        && key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    if let Some(answers) = app.collected_answers() {
-                        return Ok(ImprovementReviewExit::FollowUp {
-                            answers,
-                            question_round: app.question_round + 1,
-                        });
-                    }
-                    app.error = Some(
+                    KeyCode::Enter
+                        if !app.questions.is_empty()
+                            && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(answers) = app.collected_answers() {
+                            return Ok(ImprovementReviewExit::FollowUp {
+                                answers,
+                                question_round: app.question_round + 1,
+                            });
+                        }
+                        app.error = Some(
                         "Every follow-up question needs an answer before the agent can continue."
                             .to_string(),
                     );
-                }
-                KeyCode::Enter
-                    if app.questions.is_empty()
-                        && !key.modifiers.contains(KeyModifiers::SHIFT)
-                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    if app.primary_action() == ImprovementPrimaryAction::StartQuestions {
-                        app.begin_questions();
-                    } else {
-                        return app.activate_primary_action();
                     }
-                }
-                KeyCode::Enter
-                    if !app.questions.is_empty()
-                        && !key.modifiers.contains(KeyModifiers::SHIFT)
-                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    if app.record_or_submit_question_answers()? {
-                        return Ok(ImprovementReviewExit::FollowUp {
-                            answers: app.collected_answers().unwrap_or_default(),
-                            question_round: app.question_round + 1,
+                    KeyCode::Enter
+                        if app.questions.is_empty()
+                            && !key.modifiers.contains(KeyModifiers::SHIFT)
+                            && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if app.primary_action() == ImprovementPrimaryAction::StartQuestions {
+                            app.begin_questions();
+                        } else {
+                            return app.activate_primary_action();
+                        }
+                    }
+                    KeyCode::Enter
+                        if !app.questions.is_empty()
+                            && !key.modifiers.contains(KeyModifiers::SHIFT)
+                            && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if app.record_or_submit_question_answers()? {
+                            return Ok(ImprovementReviewExit::FollowUp {
+                                answers: app.collected_answers().unwrap_or_default(),
+                                question_round: app.question_round + 1,
+                            });
+                        }
+                    }
+                    KeyCode::Char('a')
+                        if app.questions.is_empty()
+                            && app.output.route() == ImprovementRoute::ReadyForUpdate =>
+                    {
+                        return Ok(ImprovementReviewExit::Accepted {
+                            decision: "accepted_update".to_string(),
+                            apply_requested: true,
                         });
                     }
-                }
-                KeyCode::Char('a')
-                    if app.questions.is_empty()
-                        && app.output.route() == ImprovementRoute::ReadyForUpdate =>
-                {
-                    return Ok(ImprovementReviewExit::Accepted {
-                        decision: "accepted_update".to_string(),
-                        apply_requested: true,
-                    });
-                }
-                KeyCode::Char('a')
-                    if app.questions.is_empty()
-                        && app.output.route() == ImprovementRoute::NeedsQuestions =>
-                {
-                    app.begin_questions();
-                }
-                KeyCode::Char('a') if app.questions.is_empty() => {
-                    return Ok(ImprovementReviewExit::Accepted {
-                        decision: format!("accepted_{}", app.output.route().as_str()),
-                        apply_requested: false,
-                    });
-                }
-                KeyCode::Char('r') | KeyCode::Char('s') if app.questions.is_empty() => {
-                    return Ok(ImprovementReviewExit::Accepted {
-                        decision: if key.code == KeyCode::Char('s') {
-                            format!("skipped_{}", app.output.route().as_str())
-                        } else {
-                            format!("rejected_{}", app.output.route().as_str())
-                        },
-                        apply_requested: false,
-                    });
-                }
-                _ if !app.questions.is_empty() => {
-                    let input_width = 60;
-                    if let Some(selected) = app.questions.get_mut(app.selected_question) {
-                        let _ = selected.answer.handle_key_with_width(key, input_width);
+                    KeyCode::Char('a')
+                        if app.questions.is_empty()
+                            && app.output.route() == ImprovementRoute::NeedsQuestions =>
+                    {
+                        app.begin_questions();
                     }
+                    KeyCode::Char('a') if app.questions.is_empty() => {
+                        return Ok(ImprovementReviewExit::Accepted {
+                            decision: format!("accepted_{}", app.output.route().as_str()),
+                            apply_requested: false,
+                        });
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('s') if app.questions.is_empty() => {
+                        return Ok(ImprovementReviewExit::Accepted {
+                            decision: if key.code == KeyCode::Char('s') {
+                                format!("skipped_{}", app.output.route().as_str())
+                            } else {
+                                format!("rejected_{}", app.output.route().as_str())
+                            },
+                            apply_requested: false,
+                        });
+                    }
+                    _ if !app.questions.is_empty() => {
+                        if is_copy_key(key) {
+                            copy.copy_payload(improvement_review_copy_payload(&app));
+                        } else if let Some(selected) = app.questions.get_mut(app.selected_question)
+                        {
+                            let input_width = 60;
+                            let _ = selected.answer.handle_key_with_width(key, input_width);
+                        }
+                    }
+                    _ if is_copy_key(key) => {
+                        copy.copy_payload(improvement_review_copy_payload(&app));
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Event::Mouse(mouse) => {
-                if app.questions.is_empty() {
+                if copy.export_active() {
+                    let _ = copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?.into()));
+                } else if app.questions.is_empty() {
                     match app.review_focus {
                         ImprovementReviewFocus::Recommendation => {
                             let _ = app.recommendation_scroll.apply_mouse_in_viewport(
@@ -1331,7 +1421,11 @@ struct ReviewViewports {
 }
 
 /// Renders the improvement review dashboard and returns viewport rects for scroll handling.
-fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) -> ReviewViewports {
+fn render_improvement_review(
+    frame: &mut Frame<'_>,
+    app: &ImprovementReviewApp,
+    copy_status: Option<&str>,
+) -> ReviewViewports {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1394,8 +1488,11 @@ fn render_improvement_review(frame: &mut Frame<'_>, app: &ImprovementReviewApp) 
     };
     frame.render_widget(right, body[1]);
 
-    let footer = paragraph(render_decision_panel(app), panel_title("Decision", false))
-        .wrap(Wrap { trim: false });
+    let footer = paragraph(
+        render_decision_panel(app, copy_status),
+        panel_title("Decision", false),
+    )
+    .wrap(Wrap { trim: false });
     frame.render_widget(footer, outer[2]);
 
     ReviewViewports {
@@ -1447,10 +1544,12 @@ fn review_key_hints(
     }
 }
 
-fn render_decision_panel(app: &ImprovementReviewApp) -> Text<'static> {
+fn render_decision_panel(app: &ImprovementReviewApp, copy_status: Option<&str>) -> Text<'static> {
     let primary = primary_action_copy(app);
     let status = if let Some(error) = app.error.as_deref() {
         error.to_string()
+    } else if let Some(status) = copy_status {
+        status.to_string()
     } else if app.questions.is_empty() {
         format!("Enter will {}.", primary.verb)
     } else {
@@ -1472,7 +1571,11 @@ fn render_decision_panel(app: &ImprovementReviewApp) -> Text<'static> {
             badge("r", Tone::Danger),
             Span::raw(" Reject"),
         ]),
-        Line::from(primary.detail.to_string()),
+        Line::from(if app.questions.is_empty() {
+            pane_copy_help(primary.detail)
+        } else {
+            field_copy_help(primary.detail)
+        }),
         Line::from(""),
         Line::from(Span::styled(status, muted_style())),
     ])
@@ -1731,6 +1834,41 @@ fn render_questions_panel(app: &ImprovementReviewApp) -> Text<'static> {
     Text::from(lines)
 }
 
+fn improvement_review_copy_payload(app: &ImprovementReviewApp) -> CopyPayload {
+    if !app.questions.is_empty() {
+        let mut lines = Vec::new();
+        for (index, item) in app.questions.iter().enumerate() {
+            lines.extend([
+                format!("Question {}\n\n{}", index + 1, item.question),
+                String::new(),
+                format!(
+                    "Answer {}\n\n{}",
+                    index + 1,
+                    item.answer.copy_payload("improvement answer").plain_text
+                ),
+                String::new(),
+            ]);
+        }
+        return CopyPayload::new("backlog improve follow-up", lines.join("\n"));
+    }
+
+    match app.review_focus {
+        ImprovementReviewFocus::Recommendation => CopyPayload::from_text(
+            "backlog improve recommendation",
+            render_review_overview(app),
+        ),
+        ImprovementReviewFocus::Proposal => CopyPayload::with_markdown(
+            "backlog improve proposal",
+            plain_text(&render_review_comparison(app)),
+            app.output
+                .proposal
+                .description
+                .clone()
+                .unwrap_or_else(|| app.issue.description.clone().unwrap_or_default()),
+        ),
+    }
+}
+
 fn render_follow_up_answers_markdown(answers: &[(String, String)]) -> String {
     answers
         .iter()
@@ -1813,11 +1951,13 @@ fn run_instruction_prompt(
     issues: &[IssueSummary],
 ) -> Result<InstructionPromptExit> {
     let mut app = InstructionPromptApp::new(issues.to_vec());
+    let mut copy = CopyUiState::default();
     let mut preview_viewport = Rect::default();
 
     loop {
         terminal.draw(|frame| {
-            preview_viewport = render_instruction_prompt(frame, &app);
+            preview_viewport = render_instruction_prompt(frame, &app, copy.status_text());
+            copy.render_export_overlay(frame, frame.area());
         })?;
 
         if !event::poll(Duration::from_millis(250))? {
@@ -1825,83 +1965,102 @@ fn run_instruction_prompt(
         }
 
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Enter
-                    if !key.modifiers.contains(KeyModifiers::SHIFT)
-                        && app.focus == InstructionPromptFocus::Editor =>
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if copy.export_active()
+                    && copy.handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
                 {
-                    let text = app.input.display_value().trim().to_string();
-                    return Ok(InstructionPromptExit::Continue(if text.is_empty() {
-                        None
-                    } else {
-                        Some(text)
-                    }));
+                    continue;
                 }
-                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let text = app.input.display_value().trim().to_string();
-                    return Ok(InstructionPromptExit::Continue(if text.is_empty() {
-                        None
-                    } else {
-                        Some(text)
-                    }));
+                match key.code {
+                    KeyCode::Enter
+                        if !key.modifiers.contains(KeyModifiers::SHIFT)
+                            && app.focus == InstructionPromptFocus::Editor =>
+                    {
+                        let text = app.input.display_value().trim().to_string();
+                        return Ok(InstructionPromptExit::Continue(if text.is_empty() {
+                            None
+                        } else {
+                            Some(text)
+                        }));
+                    }
+                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let text = app.input.display_value().trim().to_string();
+                        return Ok(InstructionPromptExit::Continue(if text.is_empty() {
+                            None
+                        } else {
+                            Some(text)
+                        }));
+                    }
+                    KeyCode::Esc => return Ok(InstructionPromptExit::Cancelled),
+                    KeyCode::Char('q') if app.focus == InstructionPromptFocus::Preview => {
+                        return Ok(InstructionPromptExit::Cancelled);
+                    }
+                    KeyCode::Tab => {
+                        app.focus = match app.focus {
+                            InstructionPromptFocus::Editor => InstructionPromptFocus::Preview,
+                            InstructionPromptFocus::Preview => InstructionPromptFocus::Editor,
+                        };
+                    }
+                    KeyCode::Left
+                        if app.focus == InstructionPromptFocus::Preview && app.issues.len() > 1 =>
+                    {
+                        app.prev_issue();
+                    }
+                    KeyCode::Right
+                        if app.focus == InstructionPromptFocus::Preview && app.issues.len() > 1 =>
+                    {
+                        app.next_issue();
+                    }
+                    KeyCode::Up if app.focus == InstructionPromptFocus::Preview => {
+                        let _ = app.preview_scroll.apply_key_code_in_viewport(
+                            KeyCode::Up,
+                            preview_viewport,
+                            app.preview_content_rows(preview_viewport.width.max(1)),
+                        );
+                    }
+                    KeyCode::Down if app.focus == InstructionPromptFocus::Preview => {
+                        let _ = app.preview_scroll.apply_key_code_in_viewport(
+                            KeyCode::Down,
+                            preview_viewport,
+                            app.preview_content_rows(preview_viewport.width.max(1)),
+                        );
+                    }
+                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                        if app.focus == InstructionPromptFocus::Preview =>
+                    {
+                        let _ = app.preview_scroll.apply_key_in_viewport(
+                            key,
+                            preview_viewport,
+                            app.preview_content_rows(preview_viewport.width.max(1)),
+                        );
+                    }
+                    _ if app.focus == InstructionPromptFocus::Editor => {
+                        if is_copy_key(key) {
+                            copy.copy_payload(app.input.copy_payload("improvement instructions"));
+                        } else {
+                            app.input.handle_key(key);
+                        }
+                    }
+                    _ if is_copy_key(key) => {
+                        copy.copy_payload(instruction_prompt_preview_payload(&app));
+                    }
+                    _ => {}
                 }
-                KeyCode::Esc => return Ok(InstructionPromptExit::Cancelled),
-                KeyCode::Char('q') if app.focus == InstructionPromptFocus::Preview => {
-                    return Ok(InstructionPromptExit::Cancelled);
-                }
-                KeyCode::Tab => {
-                    app.focus = match app.focus {
-                        InstructionPromptFocus::Editor => InstructionPromptFocus::Preview,
-                        InstructionPromptFocus::Preview => InstructionPromptFocus::Editor,
-                    };
-                }
-                KeyCode::Left
-                    if app.focus == InstructionPromptFocus::Preview && app.issues.len() > 1 =>
-                {
-                    app.prev_issue();
-                }
-                KeyCode::Right
-                    if app.focus == InstructionPromptFocus::Preview && app.issues.len() > 1 =>
-                {
-                    app.next_issue();
-                }
-                KeyCode::Up if app.focus == InstructionPromptFocus::Preview => {
-                    let _ = app.preview_scroll.apply_key_code_in_viewport(
-                        KeyCode::Up,
-                        preview_viewport,
-                        app.preview_content_rows(preview_viewport.width.max(1)),
-                    );
-                }
-                KeyCode::Down if app.focus == InstructionPromptFocus::Preview => {
-                    let _ = app.preview_scroll.apply_key_code_in_viewport(
-                        KeyCode::Down,
-                        preview_viewport,
-                        app.preview_content_rows(preview_viewport.width.max(1)),
-                    );
-                }
-                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
-                    if app.focus == InstructionPromptFocus::Preview =>
-                {
-                    let _ = app.preview_scroll.apply_key_in_viewport(
-                        key,
-                        preview_viewport,
-                        app.preview_content_rows(preview_viewport.width.max(1)),
-                    );
-                }
-                _ if app.focus == InstructionPromptFocus::Editor => {
-                    app.input.handle_key(key);
-                }
-                _ => {}
-            },
+            }
             Event::Paste(text) if app.focus == InstructionPromptFocus::Editor => {
                 app.input.paste(&text);
             }
             Event::Mouse(mouse) => {
-                let _ = app.preview_scroll.apply_mouse_in_viewport(
-                    mouse,
-                    preview_viewport,
-                    app.preview_content_rows(preview_viewport.width.max(1)),
-                );
+                if copy.export_active() {
+                    let _ = copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?.into()));
+                } else {
+                    let _ = app.preview_scroll.apply_mouse_in_viewport(
+                        mouse,
+                        preview_viewport,
+                        app.preview_content_rows(preview_viewport.width.max(1)),
+                    );
+                }
             }
             _ => {}
         }
@@ -1909,7 +2068,12 @@ fn run_instruction_prompt(
 }
 
 /// Renders the instruction prompt as a side-by-side layout and returns the preview pane viewport.
-fn render_instruction_prompt(frame: &mut Frame<'_>, app: &InstructionPromptApp) -> Rect {
+fn render_instruction_prompt(
+    frame: &mut Frame<'_>,
+    app: &InstructionPromptApp,
+    copy_status: Option<&str>,
+) -> Rect {
+    let status_line = copy_status.unwrap_or_default().to_string();
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])
@@ -1946,6 +2110,7 @@ fn render_instruction_prompt(frame: &mut Frame<'_>, app: &InstructionPromptApp) 
                 "{issue_count_label}. Add free-form guidance for the analysis or leave empty for default behavior.",
             )),
             key_hints(&hints),
+            Line::from(status_line),
         ]),
         panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
@@ -1993,7 +2158,7 @@ fn render_instruction_prompt_snapshot(
     let mut terminal = Terminal::new(backend)?;
     let app = InstructionPromptApp::new(issues);
     terminal.draw(|frame| {
-        render_instruction_prompt(frame, &app);
+        render_instruction_prompt(frame, &app, None);
     })?;
     Ok(improvement_dashboard_snapshot(terminal.backend()))
 }
@@ -2071,6 +2236,29 @@ fn render_instruction_issue_preview(frame: &mut Frame<'_>, area: Rect, app: &Ins
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(widget, area);
+}
+
+fn instruction_prompt_preview_payload(app: &InstructionPromptApp) -> CopyPayload {
+    app.issues
+        .get(app.issue_cursor)
+        .map(|issue| {
+            CopyPayload::with_markdown(
+                "improvement ticket preview",
+                plain_text(&render_issue_preview(
+                    issue,
+                    None,
+                    None,
+                    "_No description provided._",
+                )),
+                issue.description.clone().unwrap_or_default(),
+            )
+        })
+        .unwrap_or_else(|| {
+            CopyPayload::new(
+                "improvement ticket preview",
+                "No issues selected.\n\nSelect issues from the dashboard first.",
+            )
+        })
 }
 
 impl ImprovementDashboardApp {
@@ -2345,7 +2533,7 @@ fn review_dashboard_snapshot(app: &ImprovementReviewApp, width: u16, height: u16
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
         .draw(|frame| {
-            render_improvement_review(frame, app);
+            render_improvement_review(frame, app, None);
         })
         .expect("review should render");
     improvement_dashboard_snapshot(terminal.backend())

@@ -33,8 +33,11 @@ use crate::config::{
     validate_fast_plan_question_limit, validate_interactive_plan_follow_up_question_limit,
     validate_listen_poll_interval_seconds,
 };
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
-use crate::tui::keybindings::KeybindingPolicy;
+use crate::tui::keybindings::{KeybindingPolicy, is_copy_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::theme::content_panel;
 
@@ -1006,6 +1009,7 @@ struct ConfigApp {
     summary_scroll: ScrollState,
     detected_agents: Vec<String>,
     error: Option<String>,
+    copy: CopyUiState,
 }
 
 #[derive(Debug, Clone)]
@@ -1192,6 +1196,7 @@ impl ConfigApp {
             summary_scroll: ScrollState::default(),
             detected_agents: view.detected_agents.clone(),
             error: None,
+            copy: CopyUiState::default(),
         };
         app.sync_models(view.app_config.agents.default_model.as_deref());
         app.sync_reasoning(view.app_config.agents.default_reasoning.as_deref());
@@ -1369,6 +1374,10 @@ impl ConfigApp {
                 );
                 None
             }
+            _ if is_copy_key(key) => {
+                self.copy.copy_payload(self.copy_payload());
+                None
+            }
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {
                 self.error = None;
                 match self.step {
@@ -1424,6 +1433,69 @@ impl ConfigApp {
             KeyCode::Enter => self.apply_action(ConfigAction::Enter),
             KeyCode::Esc => self.apply_action(ConfigAction::Esc),
             _ => None,
+        }
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.step {
+            ConfigStep::ApiKey => self.api_key.copy_payload("config Linear API key"),
+            ConfigStep::Team => self.team.copy_payload("config default team"),
+            ConfigStep::ProjectId => self.project_id.copy_payload("config default project ID"),
+            ConfigStep::DefaultIssueStatus => self
+                .default_issue_status
+                .copy_payload("config default issue status"),
+            ConfigStep::ListenLabel => self.listen_label.copy_payload("config listen label"),
+            ConfigStep::PollInterval => self
+                .poll_interval
+                .copy_payload("config listen poll interval"),
+            ConfigStep::PlanFollowUpLimit => self
+                .plan_follow_up_limit
+                .copy_payload("config plan follow-up limit"),
+            ConfigStep::PlanFastQuestions => self
+                .plan_fast_questions
+                .copy_payload("config fast plan questions"),
+            ConfigStep::PlanLabel => self.plan_label.copy_payload("config plan label"),
+            ConfigStep::TechnicalLabel => {
+                self.technical_label.copy_payload("config technical label")
+            }
+            ConfigStep::DefaultProfile => {
+                self.default_profile.copy_payload("config default profile")
+            }
+            ConfigStep::AssignmentScope => CopyPayload::new(
+                "config assignee scope",
+                self.assignment_scope.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::RefreshPolicy => CopyPayload::new(
+                "config refresh policy",
+                self.refresh_policy.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::PlanDefaultMode => CopyPayload::new(
+                "config plan default mode",
+                self.plan_default_mode.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::PlanFastSingleTicket => CopyPayload::new(
+                "config fast single-ticket mode",
+                self.plan_fast_single_ticket
+                    .selected_label()
+                    .unwrap_or("unset"),
+            ),
+            ConfigStep::VimMode => CopyPayload::new(
+                "config vim mode",
+                self.vim_mode.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::Agent => CopyPayload::new(
+                "config default agent",
+                self.agent_field.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::Model => CopyPayload::new(
+                "config default model",
+                self.model_field.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::DefaultReasoning => CopyPayload::new(
+                "config default reasoning",
+                self.default_reasoning.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::Save => CopyPayload::from_text("config summary", self.summary_text(72)),
         }
     }
 
@@ -2119,7 +2191,15 @@ fn run_config_dashboard(app: ConfigApp) -> Result<ConfigDashboardExit> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let viewport = summary_viewport(terminal.size()?.into());
+                    let size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(size.into()))
+                    {
+                        continue;
+                    }
+                    let viewport = summary_viewport(size.into());
                     if let Some(exit) = app.handle_key(key, viewport) {
                         return Ok(exit);
                     }
@@ -2131,8 +2211,15 @@ fn run_config_dashboard(app: ConfigApp) -> Result<ConfigDashboardExit> {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     ) =>
                 {
-                    let viewport = summary_viewport(terminal.size()?.into());
-                    let _ = app.handle_summary_mouse(mouse, viewport);
+                    let size = terminal.size()?;
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                    } else {
+                        let viewport = summary_viewport(size.into());
+                        let _ = app.handle_summary_mouse(mouse, viewport);
+                    }
                 }
                 _ => {}
             }
@@ -2491,6 +2578,7 @@ fn render_config_dashboard(frame: &mut Frame<'_>, app: &ConfigApp) {
         render_summary_panel(frame, app, stacked[2]);
     }
     render_footer(frame, app, layout[2]);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_step_list(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect, columns: usize) {
@@ -2691,9 +2779,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         | ConfigStep::PlanFastQuestions
         | ConfigStep::PlanLabel
         | ConfigStep::TechnicalLabel
-        | ConfigStep::DefaultProfile => {
-            "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
-        }
+        | ConfigStep::DefaultProfile => field_copy_help(
+            "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+        ),
         ConfigStep::AssignmentScope
         | ConfigStep::RefreshPolicy
         | ConfigStep::PlanDefaultMode
@@ -2701,17 +2789,24 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         | ConfigStep::VimMode
         | ConfigStep::Agent
         | ConfigStep::Model
-        | ConfigStep::DefaultReasoning => {
-            "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
-        }
-        ConfigStep::Save => {
-            "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels."
-        }
+        | ConfigStep::DefaultReasoning => pane_copy_help(
+            "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+        ),
+        ConfigStep::Save => pane_copy_help(
+            "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels.",
+        ),
     };
-    let status = app.error.as_deref().unwrap_or("Ready.");
-    let footer = Paragraph::new(Text::from(vec![Line::from(controls), Line::from(status)]))
-        .block(Block::default().borders(Borders::ALL).title("Controls"))
-        .wrap(Wrap { trim: false });
+    let status = app
+        .error
+        .as_deref()
+        .or(app.copy.status_text())
+        .unwrap_or("Ready.");
+    let footer = Paragraph::new(Text::from(vec![
+        Line::from(controls),
+        Line::from(status.to_string()),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("Controls"))
+    .wrap(Wrap { trim: false });
     frame.render_widget(footer, area);
 }
 

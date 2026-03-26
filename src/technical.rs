@@ -56,7 +56,11 @@ use crate::output::{MachineIssueSummary, render_json_success};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push_for_issue;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
+use crate::tui::keybindings::is_copy_key;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::{LinearCommandContext, load_linear_command_context};
 
@@ -129,6 +133,7 @@ enum TechnicalStage {
 
 struct TechnicalSessionApp {
     stage: TechnicalStage,
+    copy: CopyUiState,
     pending: Option<PendingTechnicalJob>,
 }
 
@@ -430,6 +435,7 @@ fn run_interactive_technical_session(
                     ),
                     spinner_index: 0,
                 }),
+                copy: CopyUiState::default(),
                 pending: None,
             };
             start_generation(
@@ -451,6 +457,7 @@ fn run_interactive_technical_session(
                     error: None,
                     sticky_error: false,
                 }),
+                copy: CopyUiState::default(),
                 pending: None,
             }
         }
@@ -465,6 +472,7 @@ fn run_interactive_technical_session(
                 error: None,
                 sticky_error: false,
             }),
+            copy: CopyUiState::default(),
             pending: None,
         }
     };
@@ -502,20 +510,34 @@ fn run_interactive_technical_session(
                         continue;
                     }
 
+                    let terminal_area = terminal.size()?.into();
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(terminal_area))
+                    {
+                        continue;
+                    }
+
                     let action = match &mut app.stage {
                         TechnicalStage::PickIssue(picker) => handle_issue_picker_key(
                             picker,
+                            &mut app.copy,
                             key,
-                            issue_picker_preview_viewport(terminal.size()?.into()),
+                            issue_picker_preview_viewport(terminal_area),
                         ),
-                        TechnicalStage::SelectCriteria(criteria) => {
-                            handle_acceptance_criteria_key(criteria, key, discussion_budgets)
-                        }
+                        TechnicalStage::SelectCriteria(criteria) => handle_acceptance_criteria_key(
+                            criteria,
+                            key,
+                            &mut app.copy,
+                            discussion_budgets,
+                        ),
                         TechnicalStage::Loading(_) => TechnicalAction::None,
                         TechnicalStage::Review(review) => handle_technical_review_key(
                             review,
+                            &mut app.copy,
                             key,
-                            technical_review_preview_viewport(terminal.size()?.into()),
+                            technical_review_preview_viewport(terminal_area),
                         ),
                     };
 
@@ -575,37 +597,46 @@ fn run_interactive_technical_session(
                         handle_issue_picker_paste(picker, &text);
                     }
                 }
-                Event::Mouse(mouse) => match &mut app.stage {
-                    TechnicalStage::PickIssue(picker)
-                        if picker.focus == IssuePickerFocus::Preview
-                            && matches!(
-                                mouse.kind,
-                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                            ) =>
-                    {
-                        let viewport = issue_picker_preview_viewport(terminal.size()?.into());
-                        let _ = picker.preview_scroll.apply_mouse_in_viewport(
-                            mouse,
-                            viewport,
-                            picker.preview_content_rows(viewport.width.max(1)),
-                        );
+                Event::Mouse(mouse) => {
+                    let terminal_area = terminal.size()?.into();
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(terminal_area));
+                        continue;
                     }
-                    TechnicalStage::Review(review)
-                        if review.focus == TechnicalReviewFocus::Preview
-                            && matches!(
-                                mouse.kind,
-                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                            ) =>
-                    {
-                        let viewport = technical_review_preview_viewport(terminal.size()?.into());
-                        let _ = review.preview_scroll.apply_mouse_in_viewport(
-                            mouse,
-                            viewport,
-                            review.preview_content_rows(viewport.width.max(1)),
-                        );
+                    match &mut app.stage {
+                        TechnicalStage::PickIssue(picker)
+                            if picker.focus == IssuePickerFocus::Preview
+                                && matches!(
+                                    mouse.kind,
+                                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                                ) =>
+                        {
+                            let viewport = issue_picker_preview_viewport(terminal_area);
+                            let _ = picker.preview_scroll.apply_mouse_in_viewport(
+                                mouse,
+                                viewport,
+                                picker.preview_content_rows(viewport.width.max(1)),
+                            );
+                        }
+                        TechnicalStage::Review(review)
+                            if review.focus == TechnicalReviewFocus::Preview
+                                && matches!(
+                                    mouse.kind,
+                                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                                ) =>
+                        {
+                            let viewport = technical_review_preview_viewport(terminal_area);
+                            let _ = review.preview_scroll.apply_mouse_in_viewport(
+                                mouse,
+                                viewport,
+                                review.preview_content_rows(viewport.width.max(1)),
+                            );
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -614,6 +645,7 @@ fn run_interactive_technical_session(
 
 fn handle_issue_picker_key(
     app: &mut IssuePickerApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     preview_viewport: Rect,
 ) -> TechnicalAction {
@@ -692,7 +724,16 @@ fn handle_issue_picker_key(
             TechnicalAction::SelectIssue(app.issues[issue_index].clone())
         }
         _ => {
-            if app.focus == IssuePickerFocus::List && app.query.handle_key(key) {
+            if is_copy_key(key) {
+                match app.focus {
+                    IssuePickerFocus::List => {
+                        copy.copy_payload(app.query.copy_payload("technical parent issue search"));
+                    }
+                    IssuePickerFocus::Preview => {
+                        copy.copy_payload(issue_picker_preview_payload(app));
+                    }
+                }
+            } else if app.focus == IssuePickerFocus::List && app.query.handle_key(key) {
                 app.selected = 0;
                 app.preview_scroll.reset();
                 if input_key_clears_sticky_error(key) {
@@ -717,6 +758,7 @@ fn handle_issue_picker_paste(app: &mut IssuePickerApp, text: &str) {
 fn handle_acceptance_criteria_key(
     app: &mut AcceptanceCriteriaApp,
     key: crossterm::event::KeyEvent,
+    copy: &mut CopyUiState,
     discussion_budgets: TicketDiscussionBudgets,
 ) -> TechnicalAction {
     match key.code {
@@ -743,6 +785,10 @@ fn handle_acceptance_criteria_key(
                 discussion_budgets,
             })
         }
+        _ if is_copy_key(key) => {
+            copy.copy_payload(acceptance_criteria_copy_payload(app));
+            TechnicalAction::None
+        }
         _ => {
             if app.criteria.handle_key(key) {
                 if matches!(key.code, KeyCode::Char(' ')) {
@@ -758,6 +804,7 @@ fn handle_acceptance_criteria_key(
 
 fn handle_technical_review_key(
     app: &mut TechnicalReviewApp,
+    copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     preview_viewport: Rect,
 ) -> TechnicalAction {
@@ -812,6 +859,10 @@ fn handle_technical_review_key(
             TechnicalAction::None
         }
         KeyCode::Enter => TechnicalAction::Confirm(app.generated.clone()),
+        _ if is_copy_key(key) => {
+            copy.copy_payload(technical_review_copy_payload(app));
+            TechnicalAction::None
+        }
         _ => TechnicalAction::None,
     }
 }
@@ -852,6 +903,77 @@ impl TechnicalReviewApp {
             .map(|file| file.contents.as_str())
             .unwrap_or_default();
         wrapped_rows(contents, width.max(1))
+    }
+}
+
+fn issue_picker_preview_payload(app: &IssuePickerApp) -> CopyPayload {
+    let preview = search_results(app).get(app.selected).and_then(|result| {
+        app.issues.get(result.issue_index).map(|issue| {
+            let plain_text = plain_text(&render_issue_preview(
+                issue,
+                Some(result),
+                None,
+                "_No Linear description was provided._",
+            ));
+            CopyPayload::with_markdown(
+                "technical parent issue preview",
+                plain_text,
+                issue.description.clone().unwrap_or_default(),
+            )
+        })
+    });
+
+    preview.unwrap_or_else(|| {
+        CopyPayload::new(
+            "technical parent issue preview",
+            "Search results appear here.\n\nType to narrow the ticket list, then press Enter to generate the technical backlog draft.",
+        )
+    })
+}
+
+fn acceptance_criteria_copy_payload(app: &AcceptanceCriteriaApp) -> CopyPayload {
+    let mut lines = vec![
+        format!("Parent: {}", app.parent.identifier),
+        app.parent.title.clone(),
+        String::new(),
+        "Selected criteria".to_string(),
+    ];
+    if app.criteria.selected_labels().is_empty() {
+        lines.push("_No acceptance criteria selected yet._".to_string());
+    } else {
+        lines.extend(
+            app.criteria
+                .selected_labels()
+                .into_iter()
+                .map(|criterion| format!("- {criterion}")),
+        );
+    }
+    CopyPayload::new("technical criteria summary", lines.join("\n"))
+}
+
+fn technical_review_file_list_text(app: &TechnicalReviewApp) -> Text<'static> {
+    Text::from(
+        app.generated
+            .files
+            .iter()
+            .map(|file| Line::from(file.relative_path.clone()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn technical_review_copy_payload(app: &TechnicalReviewApp) -> CopyPayload {
+    match app.focus {
+        TechnicalReviewFocus::Files => CopyPayload::from_text(
+            "technical generated file list",
+            technical_review_file_list_text(app),
+        ),
+        TechnicalReviewFocus::Preview => {
+            let selected = &app.generated.files[app.selected_file];
+            CopyPayload::markdown(
+                format!("technical preview {}", selected.relative_path),
+                selected.contents.clone(),
+            )
+        }
     }
 }
 
@@ -1251,16 +1373,25 @@ fn validate_generated_files(
 
 fn render_technical_session(frame: &mut Frame<'_>, app: &TechnicalSessionApp) {
     match &app.stage {
-        TechnicalStage::PickIssue(picker) => render_issue_picker_frame(frame, picker),
+        TechnicalStage::PickIssue(picker) => {
+            render_issue_picker_frame(frame, picker, app.copy.status_text())
+        }
         TechnicalStage::SelectCriteria(criteria) => {
-            render_acceptance_criteria_frame(frame, criteria)
+            render_acceptance_criteria_frame(frame, criteria, app.copy.status_text())
         }
         TechnicalStage::Loading(loading) => render_loading_frame(frame, loading),
-        TechnicalStage::Review(review) => render_review_frame(frame, review),
+        TechnicalStage::Review(review) => {
+            render_review_frame(frame, review, app.copy.status_text())
+        }
     }
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
-fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
+fn render_issue_picker_frame(
+    frame: &mut Frame<'_>,
+    app: &IssuePickerApp,
+    copy_status: Option<&str>,
+) {
     let layout = base_layout(frame);
     let body = Layout::default()
         .direction(Direction::Vertical)
@@ -1348,11 +1479,18 @@ fn render_issue_picker_frame(frame: &mut Frame<'_>, app: &IssuePickerApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type to search issues by identifier, title, state, project, or description. Tab switches between the issue list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter generates the technical backlog draft. Esc cancels.",
+        copy_status,
+        &field_copy_help(
+            "Type to search issues by identifier, title, state, project, or description. Tab switches between the issue list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter generates the technical backlog draft. Esc cancels.",
+        ),
     );
 }
 
-fn render_acceptance_criteria_frame(frame: &mut Frame<'_>, app: &AcceptanceCriteriaApp) {
+fn render_acceptance_criteria_frame(
+    frame: &mut Frame<'_>,
+    app: &AcceptanceCriteriaApp,
+    copy_status: Option<&str>,
+) {
     let layout = base_layout(frame);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1431,11 +1569,14 @@ fn render_acceptance_criteria_frame(frame: &mut Frame<'_>, app: &AcceptanceCrite
         frame,
         layout[1],
         app.error.as_deref(),
-        "Up/Down moves between acceptance criteria. Space toggles each criterion. Enter generates the technical backlog draft from the selected criteria. Esc cancels.",
+        copy_status,
+        &pane_copy_help(
+            "Up/Down moves between acceptance criteria. Space toggles each criterion. Enter generates the technical backlog draft from the selected criteria. Esc cancels.",
+        ),
     );
 }
 
-fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
+fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp, copy_status: Option<&str>) {
     let layout = base_layout(frame);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1516,7 +1657,10 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp) {
         frame,
         layout[1],
         app.error.as_deref(),
-        "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
+        copy_status,
+        &pane_copy_help(
+            "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
+        ),
     );
 }
 
@@ -1552,12 +1696,18 @@ fn base_layout_for_area(area: Rect) -> Vec<Rect> {
         .to_vec()
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, error: Option<&str>, help: &str) {
+fn render_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    error: Option<&str>,
+    status: Option<&str>,
+    help: &str,
+) {
     let mut lines = vec![Line::from(help.to_string())];
-    if let Some(error) = error {
+    if let Some(message) = error.or(status) {
         lines.push(Line::from(""));
         lines.push(Line::styled(
-            format!("Error: {error}"),
+            message.to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         ));
     }
@@ -1962,6 +2112,7 @@ mod tests {
         IssueSummary, ProjectRef, TeamRef, TicketDiscussionBudgets, WorkflowState,
         prepare_issue_context,
     };
+    use crate::tui::copy::CopyUiState;
     use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
     use crate::tui::scroll::ScrollState;
     use anyhow::anyhow;
@@ -2009,7 +2160,7 @@ mod tests {
         let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_issue_picker_frame(frame, app))
+            .draw(|frame| render_issue_picker_frame(frame, app, None))
             .expect("picker should render");
         snapshot(terminal.backend())
     }
@@ -2018,7 +2169,7 @@ mod tests {
         let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_review_frame(frame, app))
+            .draw(|frame| render_review_frame(frame, app, None))
             .expect("review should render");
         snapshot(terminal.backend())
     }
@@ -2027,7 +2178,7 @@ mod tests {
         let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
-            .draw(|frame| render_acceptance_criteria_frame(frame, app))
+            .draw(|frame| render_acceptance_criteria_frame(frame, app, None))
             .expect("criteria selector should render");
         snapshot(terminal.backend())
     }
@@ -2266,6 +2417,7 @@ mod tests {
 
         let action = handle_issue_picker_key(
             &mut app,
+            &mut CopyUiState::default(),
             crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Tab,
                 crossterm::event::KeyModifiers::NONE,
@@ -2305,6 +2457,7 @@ mod tests {
                 detail: "Building backlog files.".to_string(),
                 spinner_index: 0,
             }),
+            copy: CopyUiState::default(),
             pending: Some(PendingTechnicalJob {
                 receiver,
                 previous_stage: Some(TechnicalRecoveryStage::PickIssue(picker)),

@@ -20,8 +20,7 @@ const WSL_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE: &str =
     "clipboard copy is not supported on WSL yet; the terminal export is ready instead";
 const GENERIC_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE: &str =
     "clipboard copy is not supported on this platform yet; the terminal export is ready instead";
-const LINUX_CLIPBOARD_COPY_UNAVAILABLE_MESSAGE: &str =
-    "clipboard copy requires `wl-copy` on Wayland or `xclip` on X11; the terminal export is ready instead";
+const LINUX_CLIPBOARD_COPY_UNAVAILABLE_MESSAGE: &str = "clipboard copy requires `wl-copy` on Wayland or `xclip` on X11; the terminal export is ready instead";
 
 /// Shared copy payload for read-only panes and editable fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,13 +40,31 @@ impl CopyPayload {
         }
     }
 
+    /// Build a payload from already-rendered TUI text while preserving wrapped line breaks.
+    pub(crate) fn from_text(label: impl Into<String>, text: Text<'_>) -> Self {
+        Self::new(label, plain_text(&text))
+    }
+
     /// Build a payload for markdown-authored content while preserving both markdown and plain text.
     pub(crate) fn markdown(label: impl Into<String>, markdown: impl Into<String>) -> Self {
         let markdown = markdown.into();
+        Self::with_markdown(
+            label,
+            plain_text(&render_markdown(&markdown, Style::default(), &[])),
+            markdown,
+        )
+    }
+
+    /// Build a payload when the caller already has a plain-text preview plus markdown source.
+    pub(crate) fn with_markdown(
+        label: impl Into<String>,
+        plain_text: impl Into<String>,
+        markdown: impl Into<String>,
+    ) -> Self {
         Self {
             label: label.into(),
-            plain_text: plain_text(&render_markdown(&markdown, Style::default(), &[])),
-            markdown: Some(markdown),
+            plain_text: plain_text.into(),
+            markdown: Some(markdown.into()),
         }
     }
 
@@ -87,7 +104,9 @@ pub(crate) struct CopyExportView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CopyOutcome {
-    Copied { status: String },
+    Copied {
+        status: String,
+    },
     Failed {
         status: String,
         export: CopyExportView,
@@ -120,7 +139,8 @@ impl CopyUiState {
                 self.export = None;
                 self.export_scroll.reset();
             }
-            CopyOutcome::Failed { status, export } | CopyOutcome::FallbackReady { status, export } => {
+            CopyOutcome::Failed { status, export }
+            | CopyOutcome::FallbackReady { status, export } => {
                 self.status = Some(status);
                 self.export = Some(export);
                 self.export_scroll.reset();
@@ -154,8 +174,11 @@ impl CopyUiState {
         let Some(export) = &self.export else {
             return false;
         };
-        self.export_scroll
-            .apply_key_in_viewport(key, viewport, wrapped_rows(&export.text, viewport.width.max(1)))
+        self.export_scroll.apply_key_in_viewport(
+            key,
+            viewport,
+            wrapped_rows(&export.text, viewport.width.max(1)),
+        )
     }
 
     /// Handle mouse scrolling for the shared export overlay.
@@ -287,9 +310,7 @@ enum ClipboardWriteOutcome {
 fn write_plain_text_to_clipboard(text: &str) -> ClipboardWriteOutcome {
     let backend = resolve_clipboard_backend();
     match backend {
-        ClipboardBackend::MacOs => {
-            command_copy_outcome("pbcopy", Command::new("pbcopy"), text)
-        }
+        ClipboardBackend::MacOs => command_copy_outcome("pbcopy", Command::new("pbcopy"), text),
         ClipboardBackend::Wayland => {
             let mut command = Command::new("wl-copy");
             command.arg("--type").arg("text/plain");
@@ -303,23 +324,19 @@ fn write_plain_text_to_clipboard(text: &str) -> ClipboardWriteOutcome {
         ClipboardBackend::Windows => ClipboardWriteOutcome::Unavailable(
             WINDOWS_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE.to_string(),
         ),
-        ClipboardBackend::Wsl => ClipboardWriteOutcome::Unavailable(
-            WSL_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE.to_string(),
-        ),
+        ClipboardBackend::Wsl => {
+            ClipboardWriteOutcome::Unavailable(WSL_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE.to_string())
+        }
         ClipboardBackend::Unsupported => ClipboardWriteOutcome::Unavailable(
             GENERIC_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE.to_string(),
         ),
-        ClipboardBackend::LinuxUnavailable => ClipboardWriteOutcome::Unavailable(
-            LINUX_CLIPBOARD_COPY_UNAVAILABLE_MESSAGE.to_string(),
-        ),
+        ClipboardBackend::LinuxUnavailable => {
+            ClipboardWriteOutcome::Unavailable(LINUX_CLIPBOARD_COPY_UNAVAILABLE_MESSAGE.to_string())
+        }
     }
 }
 
-fn command_copy_outcome(
-    label: &str,
-    mut command: Command,
-    text: &str,
-) -> ClipboardWriteOutcome {
+fn command_copy_outcome(label: &str, mut command: Command, text: &str) -> ClipboardWriteOutcome {
     match run_clipboard_command(&mut command, text) {
         Ok(()) => ClipboardWriteOutcome::Copied,
         Err(error) => ClipboardWriteOutcome::Failed(format!("{label}: {error}")),
@@ -350,10 +367,7 @@ fn run_clipboard_command(command: &mut Command, text: &str) -> Result<()> {
         return Ok(());
     }
 
-    Err(anyhow!(
-        "{}",
-        String::from_utf8_lossy(&output.stderr).trim().to_string()
-    ))
+    Err(anyhow!(String::from_utf8_lossy(&output.stderr).trim().to_owned()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,10 +449,10 @@ fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
-    use super::{CopyOutcome, CopyPayload, CopyUiState, ClipboardWriteOutcome, copy_payload};
+    use super::{ClipboardWriteOutcome, CopyOutcome, CopyPayload, CopyUiState, copy_payload};
 
     #[test]
     fn markdown_payload_preserves_plain_text_and_source() {

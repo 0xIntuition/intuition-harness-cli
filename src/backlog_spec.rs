@@ -595,32 +595,33 @@ impl BacklogSpecApp {
                     }
                 }
                 match key.code {
-                KeyCode::Esc => return Ok(Some(InteractiveExit::Cancelled)),
-                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    let request = app.request.value().trim();
-                    if request.is_empty() {
-                        set_transient_error(
-                            &mut app.error,
-                            &mut app.sticky_error,
-                            "Enter what this repository should build before continuing."
-                                .to_string(),
-                        );
-                    } else {
-                        clear_error(&mut app.error, &mut app.sticky_error);
-                        next = NextStep::StartQuestions(request.to_string());
-                    }
-                }
-                _ => {
-                    if is_copy_key(key) {
-                        app.copy.copy_payload(app.request.copy_payload("SPEC request"));
-                    } else if app.request.handle_key(key) {
-                        if input_key_clears_sticky_error(key) {
-                            clear_error(&mut app.error, &mut app.sticky_error);
+                    KeyCode::Esc => return Ok(Some(InteractiveExit::Cancelled)),
+                    KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        let request = app.request.value().trim();
+                        if request.is_empty() {
+                            set_transient_error(
+                                &mut app.error,
+                                &mut app.sticky_error,
+                                "Enter what this repository should build before continuing."
+                                    .to_string(),
+                            );
                         } else {
-                            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                            clear_error(&mut app.error, &mut app.sticky_error);
+                            next = NextStep::StartQuestions(request.to_string());
                         }
                     }
-                }
+                    _ => {
+                        if is_copy_key(key) {
+                            app.copy
+                                .copy_payload(app.request.copy_payload("SPEC request"));
+                        } else if app.request.handle_key(key) {
+                            if input_key_clears_sticky_error(key) {
+                                clear_error(&mut app.error, &mut app.sticky_error);
+                            } else {
+                                clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                            }
+                        }
+                    }
                 }
             }
             SpecStage::Questions(app) => {
@@ -631,59 +632,59 @@ impl BacklogSpecApp {
                     }
                 }
                 match key.code {
-                KeyCode::Esc => {
-                    next = NextStep::ShowRequest {
-                        mode: app.mode,
-                        request: app.request.clone(),
-                    };
-                }
-                KeyCode::Up => {
-                    if !app.questions.is_empty() {
-                        if app.selected == 0 {
-                            app.selected = app.questions.len().saturating_sub(1);
-                        } else {
-                            app.selected -= 1;
-                        }
-                        clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                    KeyCode::Esc => {
+                        next = NextStep::ShowRequest {
+                            mode: app.mode,
+                            request: app.request.clone(),
+                        };
                     }
-                }
-                KeyCode::Down | KeyCode::Tab => {
-                    if !app.questions.is_empty() {
-                        app.selected = (app.selected + 1) % app.questions.len();
-                        clear_error_for_navigation(&mut app.error, &app.sticky_error);
-                    }
-                }
-                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    let has_empty = app
-                        .questions
-                        .iter()
-                        .any(|q| q.answer.value().trim().is_empty());
-                    if has_empty {
-                        set_transient_error(
-                            &mut app.error,
-                            &mut app.sticky_error,
-                            "Answer each follow-up question before generating the SPEC."
-                                .to_string(),
-                        );
-                    } else {
-                        clear_error(&mut app.error, &mut app.sticky_error);
-                        let follow_ups = collect_follow_up_answers(&app.questions)?;
-                        next = NextStep::StartGeneration(app.request.clone(), follow_ups);
-                    }
-                }
-                _ => {
-                    if is_copy_key(key) {
-                        app.copy.copy_payload(questions_copy_payload(app));
-                    } else if let Some(current) = app.questions.get_mut(app.selected) {
-                        if current.answer.handle_key(key) {
-                            if input_key_clears_sticky_error(key) {
-                                clear_error(&mut app.error, &mut app.sticky_error);
+                    KeyCode::Up => {
+                        if !app.questions.is_empty() {
+                            if app.selected == 0 {
+                                app.selected = app.questions.len().saturating_sub(1);
                             } else {
-                                clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                                app.selected -= 1;
+                            }
+                            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Tab => {
+                        if !app.questions.is_empty() {
+                            app.selected = (app.selected + 1) % app.questions.len();
+                            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                        }
+                    }
+                    KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        let has_empty = app
+                            .questions
+                            .iter()
+                            .any(|q| q.answer.value().trim().is_empty());
+                        if has_empty {
+                            set_transient_error(
+                                &mut app.error,
+                                &mut app.sticky_error,
+                                "Answer each follow-up question before generating the SPEC."
+                                    .to_string(),
+                            );
+                        } else {
+                            clear_error(&mut app.error, &mut app.sticky_error);
+                            let follow_ups = collect_follow_up_answers(&app.questions)?;
+                            next = NextStep::StartGeneration(app.request.clone(), follow_ups);
+                        }
+                    }
+                    _ => {
+                        if is_copy_key(key) {
+                            app.copy.copy_payload(questions_copy_payload(app));
+                        } else if let Some(current) = app.questions.get_mut(app.selected) {
+                            if current.answer.handle_key(key) {
+                                if input_key_clears_sticky_error(key) {
+                                    clear_error(&mut app.error, &mut app.sticky_error);
+                                } else {
+                                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                                }
                             }
                         }
                     }
-                }
                 }
             }
             SpecStage::Loading(_) => {
@@ -699,40 +700,41 @@ impl BacklogSpecApp {
                     }
                 }
                 match key.code {
-                KeyCode::Esc => {
-                    next = if app.follow_ups.is_empty() {
-                        NextStep::ShowRequest {
-                            mode: app.mode,
-                            request: app.request.clone(),
-                        }
-                    } else {
-                        NextStep::ShowQuestions {
-                            mode: app.mode,
-                            request: app.request.clone(),
-                            follow_ups: app.follow_ups.clone(),
-                        }
-                    };
-                }
-                KeyCode::Enter => {
-                    next = NextStep::Exit(InteractiveExit::Confirmed(app.spec_markdown.clone()));
-                }
-                _ if is_copy_key(key) => {
-                    app.copy.copy_payload(review_copy_payload(app));
-                }
-                KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-                | KeyCode::Home
-                | KeyCode::End => {
-                    let viewport = review_viewport(Rect::new(0, 0, 120, 32));
-                    let _ = app.preview_scroll.apply_key_in_viewport(
-                        key,
-                        viewport,
-                        app.preview_rows(viewport.width.max(1)),
-                    );
-                }
-                _ => {}
+                    KeyCode::Esc => {
+                        next = if app.follow_ups.is_empty() {
+                            NextStep::ShowRequest {
+                                mode: app.mode,
+                                request: app.request.clone(),
+                            }
+                        } else {
+                            NextStep::ShowQuestions {
+                                mode: app.mode,
+                                request: app.request.clone(),
+                                follow_ups: app.follow_ups.clone(),
+                            }
+                        };
+                    }
+                    KeyCode::Enter => {
+                        next =
+                            NextStep::Exit(InteractiveExit::Confirmed(app.spec_markdown.clone()));
+                    }
+                    _ if is_copy_key(key) => {
+                        app.copy.copy_payload(review_copy_payload(app));
+                    }
+                    KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End => {
+                        let viewport = review_viewport(Rect::new(0, 0, 120, 32));
+                        let _ = app.preview_scroll.apply_key_in_viewport(
+                            key,
+                            viewport,
+                            app.preview_rows(viewport.width.max(1)),
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1521,7 +1523,9 @@ fn render_frame(frame: &mut Frame<'_>, app: &BacklogSpecApp) {
 
     match &app.stage {
         SpecStage::Request(request) => request.copy.render_export_overlay(frame, frame.area()),
-        SpecStage::Questions(questions) => questions.copy.render_export_overlay(frame, frame.area()),
+        SpecStage::Questions(questions) => {
+            questions.copy.render_export_overlay(frame, frame.area())
+        }
         SpecStage::Review(review) => review.copy.render_export_overlay(frame, frame.area()),
         SpecStage::Loading(_) => {}
     }
@@ -1578,9 +1582,7 @@ fn render_request_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         app.error.as_deref(),
         app.copy.status_text(),
         layout[2],
-        &field_copy_help(
-            "The SPEC flow stays repo-local and only targets `.metastack/SPEC.md`.",
-        ),
+        &field_copy_help("The SPEC flow stays repo-local and only targets `.metastack/SPEC.md`."),
     );
 }
 
@@ -1669,9 +1671,7 @@ fn render_questions_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         app.error.as_deref(),
         app.copy.status_text(),
         layout[2],
-        &field_copy_help(
-            "Follow-up answers stay repo-local until the generated SPEC is accepted.",
-        ),
+        &field_copy_help("Follow-up answers stay repo-local until the generated SPEC is accepted."),
     );
 }
 
