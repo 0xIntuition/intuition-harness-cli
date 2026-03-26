@@ -54,15 +54,16 @@ use crate::linear::{
     IssueCreateSpec, IssueEditSpec, IssueSummary, LinearService, ReqwestLinearClient,
 };
 use crate::output::{MachineIssueSummary, render_json_success};
-use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
+use crate::progress::{
+    LoadingPanelData, SPINNER_FRAMES, agent_loading_status_line, render_loading_panel,
+};
 use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
 use crate::tui::copy::{
-    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, is_field_copy_key,
-    pane_copy_help,
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key, top_level_cancel};
 use crate::tui::markdown::render_markdown;
 use crate::tui::prompt_images::PromptImageAttachment;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
@@ -1398,6 +1399,10 @@ fn run_interactive_plan_session(
         }))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.pending.is_some() && top_level_cancel(key) {
+                        return Ok(InteractivePlanExit::Cancelled);
+                    }
+
                     if key.code == KeyCode::Esc {
                         return Ok(InteractivePlanExit::Cancelled);
                     }
@@ -1679,6 +1684,10 @@ fn run_fast_interactive_plan_session(
         }))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.pending.is_some() && top_level_cancel(key) {
+                        return Ok(InteractivePlanExit::Cancelled);
+                    }
+
                     if key.code == KeyCode::Esc {
                         return Ok(InteractivePlanExit::Cancelled);
                     }
@@ -1943,7 +1952,7 @@ fn handle_fast_request_step_key(
             }
         }
         _ => {
-            if is_field_copy_key(key, app.request.has_selection()) {
+            if is_copy_key(key) {
                 copy.copy_payload(app.request.copy_payload("fast planning request"));
             } else if app.request.handle_key_with_width(key, input_width) {
                 if input_key_clears_sticky_error(key) {
@@ -2055,11 +2064,7 @@ fn handle_fast_questions_step_key(
             }
         }
         _ => {
-            let field_has_selection = app
-                .questions
-                .get(app.selected)
-                .is_some_and(|q| q.answer.has_selection());
-            if is_field_copy_key(key, field_has_selection) {
+            if is_copy_key(key) {
                 copy.copy_payload(fast_questions_copy_payload(app));
             } else if let Some(question) = app.questions.get_mut(app.selected)
                 && question.answer.handle_key_with_width(key, input_width)
@@ -2108,7 +2113,7 @@ fn handle_fast_addendum_step_key(
             }
         }
         _ => {
-            if is_field_copy_key(key, app.addendum.has_selection()) {
+            if is_copy_key(key) {
                 copy.copy_payload(fast_addendum_copy_payload(app));
             } else if app.addendum.handle_key_with_width(key, input_width) {
                 if input_key_clears_sticky_error(key) {
@@ -3849,9 +3854,7 @@ fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
             message: app.message.clone(),
             detail: render_loading_detail(app),
             spinner_index: app.spinner_index,
-            status_line:
-                "State: loading. The dashboard advances automatically when the agent responds."
-                    .to_string(),
+            status_line: agent_loading_status_line().to_string(),
         },
     );
 }

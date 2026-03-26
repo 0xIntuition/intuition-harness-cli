@@ -59,6 +59,13 @@ impl KeybindingPolicy {
     }
 }
 
+/// Returns whether the key matches the shared top-level cancel contract used by
+/// agent-loading TUI states.
+pub(crate) fn top_level_cancel(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Esc)
+        || (matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 fn plain_char(key: KeyEvent) -> bool {
     key.modifiers.is_empty() || key.modifiers == KeyModifiers::NONE
 }
@@ -79,17 +86,11 @@ pub(crate) fn is_mouse_toggle_key(key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// Returns true for Ctrl+C when used as a copy key in editable fields with an
-/// active selection. Callers should check `field.has_selection()` before
-/// treating this as copy (otherwise Ctrl+C should remain cancel/quit).
-pub(crate) fn is_ctrl_c(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{KeybindingPolicy, NavigationDirection, is_copy_key, is_ctrl_c, is_select_all_key};
+    use super::{
+        KeybindingPolicy, NavigationDirection, is_copy_key, is_select_all_key, top_level_cancel,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
@@ -163,12 +164,16 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_detected_for_field_copy() {
-        assert!(is_ctrl_c(KeyEvent::new(
+    fn top_level_cancel_accepts_escape_and_ctrl_c() {
+        assert!(top_level_cancel(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(top_level_cancel(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL
         )));
-        assert!(!is_ctrl_c(KeyEvent::new(
+        assert!(!top_level_cancel(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::NONE
         )));

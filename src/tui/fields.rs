@@ -164,6 +164,7 @@ impl InputFieldState {
     }
 
     /// Returns true when there is an active text selection.
+    #[allow(dead_code)]
     pub(crate) fn has_selection(&self) -> bool {
         self.selection.is_some()
     }

@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -13,8 +15,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::Frame;
-use ratatui::Terminal;
+use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 #[cfg(test)]
 use ratatui::backend::TestBackend;
@@ -22,6 +23,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{ListItem, ListState, Wrap};
+use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::macros::format_description;
@@ -44,14 +46,16 @@ use crate::linear::browser::{
 use crate::linear::{
     IssueEditSpec, IssueListFilters, IssueSummary, LinearService, ReqwestLinearClient,
 };
-use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
+use crate::progress::{
+    LoadingPanelData, SPINNER_FRAMES, agent_loading_status_line, render_loading_panel,
+};
 use crate::repo_target::RepoTarget;
 use crate::scaffold::ensure_planning_layout;
 use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key, top_level_cancel};
 use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::spaced_list;
@@ -292,6 +296,56 @@ struct ImprovementLoadingState {
     spinner_index: usize,
 }
 
+enum ImprovementLoadingOutcome<T> {
+    Completed(T),
+    Cancelled,
+}
+
+fn read_improvement_loading_event(timeout: Duration) -> Result<Option<Event>> {
+    if !event::poll(timeout).context("failed to poll backlog improvement loading input")? {
+        return Ok(None);
+    }
+
+    Ok(Some(event::read().context(
+        "failed to read backlog improvement loading input",
+    )?))
+}
+
+fn wait_for_improvement_loading_job<B, T, F>(
+    terminal: &mut Terminal<B>,
+    loading: &mut LoadingPanelData,
+    receiver: &Receiver<Result<T>>,
+    mut read_event: F,
+) -> Result<ImprovementLoadingOutcome<T>>
+where
+    B: Backend,
+    B::Error: Send + Sync + 'static,
+    F: FnMut(Duration) -> Result<Option<Event>>,
+{
+    loop {
+        terminal.draw(|frame| {
+            render_loading_panel(frame, frame.area(), loading);
+        })?;
+
+        if let Some(Event::Key(key)) = read_event(Duration::from_millis(120))?
+            && key.kind == KeyEventKind::Press
+            && top_level_cancel(key)
+        {
+            return Ok(ImprovementLoadingOutcome::Cancelled);
+        }
+
+        match receiver.try_recv() {
+            Ok(result) => return Ok(ImprovementLoadingOutcome::Completed(result?)),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                bail!("backlog improvement loading worker exited before returning a result");
+            }
+        }
+
+        loading.spinner_index = (loading.spinner_index + 1) % SPINNER_FRAMES.len();
+    }
+}
+
 enum ImprovementLoadingDisplay {
     Tui(Terminal<CrosstermBackend<io::Stdout>>),
     Text {
@@ -327,7 +381,7 @@ impl ImprovementLoadingDisplay {
                             message: state.message.clone(),
                             detail: state.detail.clone(),
                             spinner_index: state.spinner_index,
-                            status_line: "State: loading. The dashboard advances automatically as Linear and the agent respond.".to_string(),
+                            status_line: agent_loading_status_line().to_string(),
                         },
                     );
                 })?;
@@ -544,7 +598,7 @@ async fn run_interactive_improvement_session(
     for (index, issue) in issues.iter().enumerate() {
         let mut continuation = None;
         let mut question_round = 0usize;
-        let mut issue_run = analyze_issue_with_loading(
+        let Some(mut issue_run) = analyze_issue_with_loading(
             &mut terminal,
             root,
             issue,
@@ -557,8 +611,10 @@ async fn run_interactive_improvement_session(
                 issue_total: issues.len(),
                 question_round,
             },
-        )
-        .await?;
+        )?
+        else {
+            return Ok(render_improvement_reports(root, &reports));
+        };
 
         loop {
             match run_improvement_review_dashboard(
@@ -630,7 +686,7 @@ async fn run_interactive_improvement_session(
                     question_round: next_question_round,
                 } => {
                     question_round = next_question_round;
-                    issue_run = continue_issue_with_follow_up_loading(
+                    let Some(next_issue_run) = continue_issue_with_follow_up_loading(
                         &mut terminal,
                         root,
                         issue_run,
@@ -643,7 +699,11 @@ async fn run_interactive_improvement_session(
                             issue_total: issues.len(),
                             question_round: next_question_round,
                         },
-                    )?;
+                    )?
+                    else {
+                        return Ok(render_improvement_reports(root, &reports));
+                    };
+                    issue_run = next_issue_run;
                 }
             }
         }
@@ -1076,7 +1136,7 @@ fn improvement_dashboard_preview_payload(app: &ImprovementDashboardApp) -> CopyP
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn analyze_issue_with_loading(
+fn analyze_issue_with_loading(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     root: &Path,
     issue: &IssueSummary,
@@ -1085,7 +1145,8 @@ async fn analyze_issue_with_loading(
     continuation: &mut Option<AgentContinuation>,
     instructions: Option<&str>,
     progress: ImprovementReviewProgress,
-) -> Result<ImprovementIssueRun> {
+) -> Result<Option<ImprovementIssueRun>> {
+    let issue_identifier = issue.identifier.clone();
     let detail = if progress.question_round == 0 {
         format!(
             "Issue {}/{}: analyzing {} and preparing the guided recommendation.",
@@ -1100,35 +1161,111 @@ async fn analyze_issue_with_loading(
             progress.question_round
         )
     };
-    terminal.draw(|frame| {
-        render_loading_panel(
-            frame,
-            frame.area(),
-            &LoadingPanelData {
-                title: "Backlog Improve [analysis]".to_string(),
-                message: format!("Reviewing {}", issue.identifier),
-                detail,
-                spinner_index: progress.question_round % SPINNER_FRAMES.len(),
-                status_line:
-                    "State: agent analysis in progress. The dashboard stays in review mode once the turn completes."
-                        .to_string(),
-            },
-        );
-    })?;
-    analyze_issue(
-        root,
-        issue,
-        related_backlog_issues,
-        args,
-        Some(continuation),
-        instructions,
-        None,
-    )
+    let root = root.to_path_buf();
+    let issue = issue.clone();
+    let related_backlog_issues = related_backlog_issues.to_vec();
+    let args = args.clone();
+    let instructions = instructions.map(str::to_string);
+    let continuation_for_job = continuation.take();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation_for_job;
+        let result = analyze_issue(
+            &root,
+            &issue,
+            &related_backlog_issues,
+            &args,
+            Some(&mut continuation),
+            instructions.as_deref(),
+            None,
+        )
+        .map(|issue_run| (issue_run, continuation));
+        let _ = sender.send(result);
+    });
+
+    let mut loading = LoadingPanelData {
+        title: "Backlog Improve [analysis]".to_string(),
+        message: format!("Reviewing {issue_identifier}"),
+        detail,
+        spinner_index: progress.question_round % SPINNER_FRAMES.len(),
+        status_line: agent_loading_status_line().to_string(),
+    };
+
+    match wait_for_improvement_loading_job(
+        terminal,
+        &mut loading,
+        &receiver,
+        read_improvement_loading_event,
+    )? {
+        ImprovementLoadingOutcome::Completed((issue_run, next_continuation)) => {
+            *continuation = next_continuation;
+            Ok(Some(issue_run))
+        }
+        ImprovementLoadingOutcome::Cancelled => Ok(None),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn continue_issue_with_follow_up_loading(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    root: &Path,
+    issue_run: ImprovementIssueRun,
+    args: &BacklogImproveArgs,
+    answers: &[(String, String)],
+    continuation: &mut Option<AgentContinuation>,
+    instructions: Option<&str>,
+    progress: ImprovementReviewProgress,
+) -> Result<Option<ImprovementIssueRun>> {
+    let issue_identifier = issue_run.issue.identifier.clone();
+    let root = root.to_path_buf();
+    let args = args.clone();
+    let answers = answers.to_vec();
+    let answered_count = answers.len();
+    let instructions = instructions.map(str::to_string);
+    let continuation_for_job = continuation.take();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation_for_job;
+        let result = continue_issue_with_follow_up(
+            &root,
+            issue_run,
+            &args,
+            &answers,
+            &mut continuation,
+            instructions.as_deref(),
+            progress,
+        )
+        .map(|issue_run| (issue_run, continuation));
+        let _ = sender.send(result);
+    });
+
+    let mut loading = LoadingPanelData {
+        title: "Backlog Improve [follow-up]".to_string(),
+        message: format!("Continuing {issue_identifier}"),
+        detail: format!(
+            "Issue {}/{}: rerunning the recommendation with {} answered follow-up question(s).",
+            progress.issue_position, progress.issue_total, answered_count
+        ),
+        spinner_index: progress.question_round % SPINNER_FRAMES.len(),
+        status_line: agent_loading_status_line().to_string(),
+    };
+
+    match wait_for_improvement_loading_job(
+        terminal,
+        &mut loading,
+        &receiver,
+        read_improvement_loading_event,
+    )? {
+        ImprovementLoadingOutcome::Completed((issue_run, next_continuation)) => {
+            *continuation = next_continuation;
+            Ok(Some(issue_run))
+        }
+        ImprovementLoadingOutcome::Cancelled => Ok(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continue_issue_with_follow_up(
     root: &Path,
     mut issue_run: ImprovementIssueRun,
     args: &BacklogImproveArgs,
@@ -1137,27 +1274,6 @@ fn continue_issue_with_follow_up_loading(
     instructions: Option<&str>,
     progress: ImprovementReviewProgress,
 ) -> Result<ImprovementIssueRun> {
-    terminal.draw(|frame| {
-        render_loading_panel(
-            frame,
-            frame.area(),
-            &LoadingPanelData {
-                title: "Backlog Improve [follow-up]".to_string(),
-                message: format!("Continuing {}", issue_run.issue.identifier),
-                detail: format!(
-                    "Issue {}/{}: rerunning the recommendation with {} answered follow-up question(s).",
-                    progress.issue_position,
-                    progress.issue_total,
-                    answers.len()
-                ),
-                spinner_index: progress.question_round % SPINNER_FRAMES.len(),
-                status_line:
-                    "State: waiting for the agent to turn answers into a concrete recommendation."
-                        .to_string(),
-            },
-        );
-    })?;
-
     let answers_path = issue_run.run_dir.join(FOLLOW_UP_ANSWERS_FILE);
     write_text_file(
         &answers_path,
@@ -3644,6 +3760,39 @@ mod tests {
             attachments: Vec::new(),
             parent: None,
             children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn loading_job_cancel_wins_over_a_ready_result_for_escape_and_ctrl_c() {
+        for key in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let backend = TestBackend::new(100, 20);
+            let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+            let mut loading = LoadingPanelData {
+                title: "Backlog Improve [analysis]".to_string(),
+                message: "Reviewing ENG-10422".to_string(),
+                detail: "Analyzing the selected backlog issue.".to_string(),
+                spinner_index: 0,
+                status_line: agent_loading_status_line().to_string(),
+            };
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Ok::<_, anyhow::Error>("completed"))
+                .expect("worker result should send");
+
+            let outcome =
+                wait_for_improvement_loading_job(&mut terminal, &mut loading, &receiver, |_| {
+                    Ok(Some(Event::Key(key)))
+                })
+                .expect("loading helper should return");
+
+            assert!(
+                matches!(outcome, ImprovementLoadingOutcome::Cancelled),
+                "cancel key should win for {key:?}"
+            );
         }
     }
 
