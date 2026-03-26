@@ -1278,7 +1278,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         .success()
         .stdout(predicate::str::contains("Generated Markdown [focus]"))
         .stdout(predicate::str::contains("# Snapshot"))
-        .stdout(predicate::str::contains("Status: Accepted Markdown edits."));
+        .stdout(predicate::str::contains(
+            "Review the generated Markdown. Tab switches panes, e edits, s saves, and Esc exits without saving.",
+        ));
 
     Ok(())
 }
@@ -1373,9 +1375,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Status: Workflow `render-once-proof` artifact created at `custom-output.md`.",
-        ));
+        .stdout(predicate::str::contains("Generated Markdown [focus]"))
+        .stdout(predicate::str::contains("Edited line"));
 
     assert_eq!(
         fs::read_to_string(output_path)?,
@@ -1473,7 +1474,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         .success()
         .stdout(predicate::str::contains("Generated Markdown [focus]"))
         .stdout(predicate::str::contains("# Snapshot"))
-        .stdout(predicate::str::contains("Ready."))
+        .stdout(predicate::str::contains(
+            "Review the generated Markdown. Tab switches panes, e edits, s saves, and Esc exits without saving.",
+        ))
         .stdout(predicate::str::contains("Accepted Markdown edits.").not());
 
     Ok(())
@@ -1569,9 +1572,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Status: Workflow `render-once-proof` artifact created at `custom-output.md`.",
-        ))
+        .stdout(predicate::str::contains("Generated Markdown [focus]"))
         .stdout(predicate::str::contains("Edited line").not());
 
     assert_eq!(
@@ -1675,7 +1676,9 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         .assert()
         .success()
         .stdout(predicate::str::contains("Confirm Overwrite"))
-        .stdout(predicate::str::contains("custom-output.md"));
+        .stdout(predicate::str::contains(
+            "Enter confirms overwrite. Esc returns to the save prompt.",
+        ));
 
     assert_eq!(fs::read_to_string(output_path)?, "# Existing\n");
     Ok(())
@@ -1773,9 +1776,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"#
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Status: Workflow `render-once-proof` artifact updated at `custom-output.md`.",
-        ));
+        .stdout(predicate::str::contains("Generated Markdown [focus]"))
+        .stdout(predicate::str::contains("# Snapshot"));
 
     assert_eq!(
         fs::read_to_string(output_path)?,
