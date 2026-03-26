@@ -1,0 +1,19 @@
+
+--- meta listen preflight failed @ 2026-03-23T11:58:00Z ---
+missing LINEAR_API_KEY
+
+--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---
+Resolved provider: claude
+Resolved model: sonnet
+Resolved reasoning: high
+{"type":"message_start","message":{"usage":{"input_tokens":210}}}
+{"type":"message_delta","usage":{"output_tokens":34}}
+{"type":"result","subtype":"success","result":"ok","session_id":"session-123"}
+
+--- intu listen turn 2/20 @ 2026-03-23T12:01:00Z ---
+Resolved provider: claude
+Resolved model: sonnet
+Resolved reasoning: high
+{"type":"message_start","message":{"usage":{"input_tokens":80}}}
+{"type":"message_delta","usage":{"output_tokens":13}}
+{"type":"result","subtype":"success","result":"ok","session_id":"session-123"}

@@ -126,6 +126,16 @@ fn listen_detail_path(
 }
 
 #[cfg(unix)]
+fn read_listen_fixture(name: &str) -> Result<String, Box<dyn Error>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("listen")
+        .join(name);
+    Ok(fs::read_to_string(path)?)
+}
+
+#[cfg(unix)]
 fn listen_session_json(
     issue_identifier: &str,
     phase: &str,
@@ -1026,6 +1036,119 @@ fn listen_sessions_inspect_surfaces_structured_detail_fields() -> Result<(), Box
         .stdout(predicate::str::contains(
             "turn 2 tokens: in 80 | out 13 | prompt_mode=continuation",
         ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_inspect_repairs_canonical_metadata_from_mixed_historical_log()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "ENG-10184-id",
+            "issue_identifier": "ENG-10184",
+            "issue_title": "Repair canonical state from mixed historical log",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/ENG-10184",
+            "phase": "blocked",
+            "summary": "Historical repair needed",
+            "brief_path": null,
+            "workspace_path": "/tmp/ENG-10184",
+            "workpad_comment_id": "comment-10184",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": "session-10184",
+            "turns": 2,
+            "tokens": {},
+            "log_path": "logs/ENG-10184.log"
+        })],
+    )?;
+    fs::write(
+        listen_log_path(&config_path, &repo_root, "ENG-10184")?,
+        read_listen_fixture("mixed-legacy-and-branded.log")?,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  - Tokens: in 290 | out 47 | total 337",
+        ))
+        .stdout(predicate::str::contains("  - Provider: claude"))
+        .stdout(predicate::str::contains("  - Model: sonnet"))
+        .stdout(predicate::str::contains("  - Reasoning: high"))
+        .stdout(predicate::str::contains("  - Detail provider: claude"))
+        .stdout(predicate::str::contains("  - Detail model: sonnet"))
+        .stdout(predicate::str::contains("  - Detail reasoning: high"))
+        .stdout(predicate::str::contains(
+            "  - Detail tokens: in 290 | out 47 | total 337",
+        ));
+
+    let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(listen_state_path(
+        &config_path,
+        &repo_root,
+    )?)?)?;
+    let detail: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        listen_detail_path(&config_path, &repo_root, "ENG-10184")?,
+    )?)?;
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/model"),
+        Some(&json!("sonnet"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/reasoning"),
+        Some(&json!("high"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/tokens/input"),
+        Some(&json!(290))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/tokens/output"),
+        Some(&json!(47))
+    );
+    assert_eq!(
+        detail.pointer("/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(detail.pointer("/canonical/model"), Some(&json!("sonnet")));
+    assert_eq!(detail.pointer("/canonical/reasoning"), Some(&json!("high")));
+    assert_eq!(detail.pointer("/canonical/tokens/input"), Some(&json!(290)));
+    assert_eq!(detail.pointer("/canonical/tokens/output"), Some(&json!(47)));
 
     Ok(())
 }
