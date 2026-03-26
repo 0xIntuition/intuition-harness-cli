@@ -18,8 +18,11 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::{Frame, Terminal};
 
 use super::WorkflowState;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::KeybindingPolicy;
+use crate::tui::keybindings::{KeybindingPolicy, is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph, wrapped_rows};
 
 #[derive(Debug, Clone)]
@@ -130,6 +133,7 @@ struct IssueEditApp {
     selected_state: usize,
     selected_priority: usize,
     error: Option<String>,
+    copy: CopyUiState,
 }
 
 pub fn run_issue_edit_form(
@@ -158,7 +162,18 @@ pub fn run_issue_edit_form(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
                     let size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(size.into()))
+                    {
+                        continue;
+                    }
                     let viewport = step_input_viewport(size.into());
                     if let Some(exit) = app.handle_key_in_viewport(key, viewport) {
                         return Ok(exit);
@@ -167,11 +182,17 @@ pub fn run_issue_edit_form(
                 Event::Paste(text) => app.handle_paste(&text),
                 Event::Mouse(mouse) => {
                     let size = terminal.size()?;
-                    let _ = app.handle_mouse_in_viewport(
-                        mouse,
-                        step_input_viewport(size.into()),
-                        summary_viewport(size.into()),
-                    );
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                    } else {
+                        let _ = app.handle_mouse_in_viewport(
+                            mouse,
+                            step_input_viewport(size.into()),
+                            summary_viewport(size.into()),
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -228,6 +249,7 @@ fn render_issue_edit_form(frame: &mut Frame<'_>, app: &IssueEditApp) {
     render_step_panel(frame, app, body[1]);
     render_summary(frame, app, body[2]);
     render_footer(frame, app, layout[2]);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_step_list(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layout::Rect) {
@@ -348,28 +370,27 @@ fn render_summary(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layo
 
 fn render_footer(frame: &mut Frame<'_>, app: &IssueEditApp, area: ratatui::layout::Rect) {
     let controls = match app.step {
-        EditStep::Title => {
-            "Type the title. Tab/Shift+Tab or Up/Down switches fields. Enter moves to Description."
-        }
-        EditStep::Description => {
-            "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the description or review pane is hovered. Enter advances. Tab/Shift+Tab switches fields."
-        }
-        EditStep::StatusPriority => {
-            "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Esc cancels."
-        }
+        EditStep::Title => field_copy_help(
+            "Type the title. Tab/Shift+Tab or Up/Down switches fields. Enter moves to Description.",
+        ),
+        EditStep::Description => field_copy_help(
+            "Type the description. Up/Down and PgUp/PgDn/Home/End move through wrapped content. Shift+Enter inserts a newline. Mouse wheel scrolls when the description or review pane is hovered. Enter advances. Tab/Shift+Tab switches fields.",
+        ),
+        EditStep::StatusPriority => pane_copy_help(
+            "Use Up/Down in the active list. Left/Right switches focus. Enter submits. Esc cancels.",
+        ),
     };
 
-    let footer = if let Some(error) = &app.error {
-        Text::from(vec![
-            Line::from(controls),
-            Line::from(format!("Error: {error}")),
-        ])
-    } else {
-        Text::from(vec![
-            Line::from(controls),
-            Line::from("Esc cancels without updating the issue."),
-        ])
-    };
+    let footer = Text::from(vec![
+        Line::from(controls),
+        Line::from(
+            app.error
+                .as_deref()
+                .or(app.copy.status_text())
+                .unwrap_or("Esc cancels without updating the issue.")
+                .to_string(),
+        ),
+    ]);
 
     let paragraph =
         Paragraph::new(footer).block(Block::default().borders(Borders::ALL).title("Controls"));
@@ -392,6 +413,7 @@ impl IssueEditApp {
             selected_state,
             selected_priority,
             error: None,
+            copy: CopyUiState::default(),
         })
     }
 
@@ -435,6 +457,10 @@ impl IssueEditApp {
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.apply_shift_enter();
+                None
+            }
+            _ if is_copy_key(key) => {
+                self.copy.copy_payload(self.copy_payload());
                 None
             }
             KeyCode::Char(_) | KeyCode::Backspace => {
@@ -649,6 +675,16 @@ impl IssueEditApp {
 
     fn selected_priority_label(&self) -> &'static str {
         PRIORITY_OPTIONS[self.selected_priority].label
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.step {
+            EditStep::Title => self.title.copy_payload("Linear issue title"),
+            EditStep::Description => self.description.copy_payload("Linear issue description"),
+            EditStep::StatusPriority => {
+                CopyPayload::from_text("Linear issue edit summary", self.summary_text())
+            }
+        }
     }
 
     fn summary_text(&self) -> Text<'static> {

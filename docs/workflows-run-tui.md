@@ -52,6 +52,7 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
   - resolved provider diagnostics
 - Review actions:
   - `Tab` switches pane focus
+  - `Ctrl+Y` copies the focused field or pane through the shared copy/export layer
   - `e` enters multiline edit mode
   - `s` opens the save-path prompt
   - `Esc` exits without saving

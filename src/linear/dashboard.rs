@@ -20,10 +20,14 @@ use super::browser::{
     render_issue_row, search_issues,
 };
 use super::{DashboardData, IssueSummary};
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::spaced_list;
-use crate::tui::theme::{Tone, badge, empty_state, key_hints, list, panel_title, paragraph};
+use crate::tui::theme::{Tone, badge, empty_state, list, panel_title, paragraph};
 
 #[derive(Debug, Clone)]
 pub struct DashboardOptions {
@@ -82,6 +86,7 @@ struct DashboardApp {
     active_status: Option<String>,
     active_estimate: EstimateFilter,
     preview_scroll: ScrollState,
+    copy: CopyUiState,
 }
 
 pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<Option<String>> {
@@ -110,53 +115,73 @@ pub fn run_dashboard(data: DashboardData, options: DashboardOptions) -> Result<O
 
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Up => app.apply_in_viewport(
-                        DashboardAction::Up,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::Down => app.apply_in_viewport(
-                        DashboardAction::Down,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::PageUp => app.apply_in_viewport(
-                        DashboardAction::PageUp,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::PageDown => app.apply_in_viewport(
-                        DashboardAction::PageDown,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::Home => app.apply_in_viewport(
-                        DashboardAction::Home,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::End => app.apply_in_viewport(
-                        DashboardAction::End,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::Tab => app.apply_in_viewport(
-                        DashboardAction::Tab,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    KeyCode::Enter => app.apply_in_viewport(
-                        DashboardAction::Enter,
-                        preview_viewport(terminal.size()?.into()),
-                    ),
-                    _ => {
-                        let _ = app.handle_query_key(key);
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
                     }
-                },
+                    let size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(size.into()))
+                    {
+                        continue;
+                    }
+
+                    if is_copy_key(key) {
+                        app.copy.copy_payload(app.copy_payload());
+                        continue;
+                    }
+
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Up => app
+                            .apply_in_viewport(DashboardAction::Up, preview_viewport(size.into())),
+                        KeyCode::Down => app.apply_in_viewport(
+                            DashboardAction::Down,
+                            preview_viewport(size.into()),
+                        ),
+                        KeyCode::PageUp => app.apply_in_viewport(
+                            DashboardAction::PageUp,
+                            preview_viewport(size.into()),
+                        ),
+                        KeyCode::PageDown => app.apply_in_viewport(
+                            DashboardAction::PageDown,
+                            preview_viewport(size.into()),
+                        ),
+                        KeyCode::Home => app.apply_in_viewport(
+                            DashboardAction::Home,
+                            preview_viewport(size.into()),
+                        ),
+                        KeyCode::End => app
+                            .apply_in_viewport(DashboardAction::End, preview_viewport(size.into())),
+                        KeyCode::Tab => app
+                            .apply_in_viewport(DashboardAction::Tab, preview_viewport(size.into())),
+                        KeyCode::Enter => app.apply_in_viewport(
+                            DashboardAction::Enter,
+                            preview_viewport(size.into()),
+                        ),
+                        _ => {
+                            let _ = app.handle_query_key(key);
+                        }
+                    }
+                }
                 Event::Mouse(mouse)
-                    if app.focus == Focus::Preview
-                        && matches!(
-                            mouse.kind,
-                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                        ) =>
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
                 {
-                    let viewport = preview_viewport(terminal.size()?.into());
-                    let _ = app.handle_preview_mouse(mouse, viewport);
+                    let size = terminal.size()?;
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                    } else if app.focus == Focus::Preview {
+                        let viewport = preview_viewport(size.into());
+                        let _ = app.handle_preview_mouse(mouse, viewport);
+                    }
                 }
                 _ => {}
             }
@@ -224,15 +249,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
         Text::from(vec![
             Line::from(app.data.title.clone()),
             Line::from(app.summary_line()),
-            key_hints(&[
-                ("Type", "search"),
-                ("Tab", "focus"),
-                ("Up/Down", "move"),
-                ("PgUp/PgDn", "scroll preview"),
-                ("Wheel", "scroll preview"),
-                ("Enter", "apply"),
-                ("q", "exit"),
-            ]),
+            Line::from(app.detail_line()),
         ]),
         panel_title("Linear Issues", false),
     );
@@ -314,6 +331,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &DashboardApp) {
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(preview, body[2]);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_filter_list<T, F>(
@@ -372,6 +390,7 @@ impl DashboardApp {
             active_status,
             active_estimate: EstimateFilter::All,
             preview_scroll: ScrollState::default(),
+            copy: CopyUiState::default(),
         };
 
         app.status_index = app.selected_status_index();
@@ -530,6 +549,48 @@ impl DashboardApp {
             None,
             "No description provided.",
         )
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.focus {
+            Focus::Status => {
+                let option =
+                    &self.status_options[self.status_index.min(self.status_options.len() - 1)];
+                CopyPayload::new(
+                    "Linear status filter",
+                    format!(
+                        "Selected status filter: {} ({})",
+                        option.label, option.count
+                    ),
+                )
+            }
+            Focus::Estimate => {
+                let option = &self.estimate_options
+                    [self.estimate_index.min(self.estimate_options.len() - 1)];
+                CopyPayload::new(
+                    "Linear estimate filter",
+                    format!(
+                        "Selected estimate filter: {} ({})",
+                        option.label, option.count
+                    ),
+                )
+            }
+            Focus::Issues => self.query.copy_payload("Linear issue search"),
+            Focus::Preview => CopyPayload::from_text("Linear issue preview", self.preview_text()),
+        }
+    }
+
+    fn detail_line(&self) -> String {
+        self.copy.status_text().map(str::to_string).unwrap_or_else(|| {
+            match self.focus {
+                Focus::Issues => field_copy_help(
+                    "Type to search. Tab switches focus. Up/Down moves the issue list. Enter applies the current sidebar filter.",
+                ),
+                Focus::Status | Focus::Estimate | Focus::Preview => pane_copy_help(
+                    "Tab switches focus. Up/Down moves the active pane. PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused.",
+                ),
+            }
+        })
     }
 
     fn summary_line(&self) -> String {

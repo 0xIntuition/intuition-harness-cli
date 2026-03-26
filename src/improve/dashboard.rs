@@ -6,6 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use crate::tui::copy::{CopyPayload, CopyUiState, pane_copy_help};
 use crate::tui::theme::{emphasis_style, empty_state, muted_style, panel_title};
 
 use super::state::ImproveSession;
@@ -60,6 +61,7 @@ pub(super) struct ImproveBrowserState {
     pub(super) view: ImproveView,
     pub(super) selected_pr: usize,
     pub(super) selected_session: usize,
+    pub(super) copy: CopyUiState,
 }
 
 impl Default for ImproveBrowserState {
@@ -68,6 +70,7 @@ impl Default for ImproveBrowserState {
             view: ImproveView::PrList,
             selected_pr: 0,
             selected_session: 0,
+            copy: CopyUiState::default(),
         }
     }
 }
@@ -127,6 +130,46 @@ impl ImproveBrowserState {
             ImproveView::PrDetail | ImproveView::SessionDetail => None,
         }
     }
+
+    pub(super) fn copy_payload(&self, data: &ImproveDashboardData) -> CopyPayload {
+        match self.view {
+            ImproveView::PrList => {
+                CopyPayload::from_text("Improve PR list", pr_list_copy_text(data, self))
+            }
+            ImproveView::Sessions => {
+                CopyPayload::from_text("Improve sessions", session_list_copy_text(data, self))
+            }
+            ImproveView::PrDetail => data
+                .prs
+                .get(self.selected_pr)
+                .map(|pr| CopyPayload::from_text("Improve PR detail", pr_detail_text(pr)))
+                .unwrap_or_else(|| {
+                    CopyPayload::new("Improve PR detail", "No pull request selected.")
+                }),
+            ImproveView::SessionDetail => data
+                .sessions
+                .get(self.selected_session)
+                .map(|session| {
+                    CopyPayload::from_text(
+                        "Improve session detail",
+                        session_detail_text(session, data.now_epoch_seconds),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    CopyPayload::new("Improve session detail", "No improve session selected.")
+                }),
+        }
+    }
+
+    pub(super) fn copy_help_text(&self) -> String {
+        let base = match self.view {
+            ImproveView::PrList => "Tab: Sessions | Up/Down: Navigate | Enter: Select PR | q: Quit",
+            ImproveView::Sessions => "Tab: PRs | Up/Down: Navigate | Enter: View Session | q: Quit",
+            ImproveView::PrDetail => "Backspace: Back to PRs | q: Quit",
+            ImproveView::SessionDetail => "Backspace: Back to Sessions | q: Quit",
+        };
+        pane_copy_help(base)
+    }
 }
 
 #[allow(dead_code)]
@@ -181,6 +224,7 @@ pub(super) fn render(
     render_header(frame, chunks[0], data);
     render_body(frame, chunks[1], data, state);
     render_footer(frame, chunks[2], state);
+    state.copy.render_export_overlay(frame, area);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, data: &ImproveDashboardData) {
@@ -365,36 +409,14 @@ fn render_session_list(
 
 fn render_pr_detail(frame: &mut Frame<'_>, area: Rect, pr: &ImprovePrEntry) {
     let title = format!(" PR #{}: {} ", pr.number, pr.title);
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Author: ", emphasis_style()),
-            Span::raw(&pr.author),
-        ]),
-        Line::from(vec![
-            Span::styled("Branch: ", emphasis_style()),
-            Span::raw(format!("{} -> {}", pr.head_branch, pr.base_branch)),
-        ]),
-        Line::from(vec![
-            Span::styled("URL:    ", emphasis_style()),
-            Span::raw(&pr.url),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("Body Preview:", emphasis_style())),
-        Line::from(if pr.body_preview.is_empty() {
-            "(no description)".to_string()
-        } else {
-            pr.body_preview.clone()
-        }),
-    ];
+    let lines = pr_detail_text(pr);
 
     let block = Block::default()
         .title(panel_title(&title, true))
         .borders(Borders::ALL)
         .border_style(emphasis_style());
 
-    let p = Paragraph::new(Text::from(lines))
-        .block(block)
-        .wrap(Wrap { trim: true });
+    let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
     frame.render_widget(p, area);
 }
 
@@ -409,10 +431,58 @@ fn render_session_detail(
         session.source_pr.number,
         session.phase.display_label()
     );
+    let lines = session_detail_text(session, now_epoch_seconds);
+
+    let block = Block::default()
+        .title(panel_title(&title, true))
+        .borders(Borders::ALL)
+        .border_style(emphasis_style());
+
+    let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
+    frame.render_widget(p, area);
+}
+
+fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &ImproveBrowserState) {
+    let footer = Paragraph::new(Line::from(Span::styled(
+        state
+            .copy
+            .status_text()
+            .map(str::to_string)
+            .unwrap_or_else(|| state.copy_help_text()),
+        muted_style(),
+    )));
+    frame.render_widget(footer, area);
+}
+
+fn pr_detail_text(pr: &ImprovePrEntry) -> Text<'static> {
+    Text::from(vec![
+        Line::from(vec![
+            Span::styled("Author: ", emphasis_style()),
+            Span::raw(pr.author.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("Branch: ", emphasis_style()),
+            Span::raw(format!("{} -> {}", pr.head_branch, pr.base_branch)),
+        ]),
+        Line::from(vec![
+            Span::styled("URL:    ", emphasis_style()),
+            Span::raw(pr.url.clone()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Body Preview:", emphasis_style())),
+        Line::from(if pr.body_preview.is_empty() {
+            "(no description)".to_string()
+        } else {
+            pr.body_preview.clone()
+        }),
+    ])
+}
+
+fn session_detail_text(session: &ImproveSession, now_epoch_seconds: u64) -> Text<'static> {
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Session ID:  ", emphasis_style()),
-            Span::raw(&session.session_id),
+            Span::raw(session.session_id.clone()),
         ]),
         Line::from(vec![
             Span::styled("Source PR:   ", emphasis_style()),
@@ -430,7 +500,7 @@ fn render_session_detail(
         ]),
         Line::from(vec![
             Span::styled("Phase:       ", emphasis_style()),
-            Span::raw(session.phase.display_label()),
+            Span::raw(session.phase.display_label().to_string()),
         ]),
         Line::from(vec![
             Span::styled("Age:         ", emphasis_style()),
@@ -441,45 +511,83 @@ fn render_session_detail(
     if let Some(branch) = &session.improve_branch {
         lines.push(Line::from(vec![
             Span::styled("Imp. Branch: ", emphasis_style()),
-            Span::raw(branch),
+            Span::raw(branch.clone()),
         ]));
     }
     if let Some(pr_url) = &session.stacked_pr_url {
         lines.push(Line::from(vec![
             Span::styled("Stacked PR:  ", emphasis_style()),
-            Span::raw(pr_url),
+            Span::raw(pr_url.clone()),
         ]));
     }
     if let Some(err) = &session.error_summary {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("Error:", emphasis_style())));
-        lines.push(Line::from(err.as_str()));
+        lines.push(Line::from(err.clone()));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("Instructions:", emphasis_style())));
-    lines.push(Line::from(session.instructions.as_str()));
-
-    let block = Block::default()
-        .title(panel_title(&title, true))
-        .borders(Borders::ALL)
-        .border_style(emphasis_style());
-
-    let p = Paragraph::new(Text::from(lines))
-        .block(block)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(p, area);
+    lines.push(Line::from(session.instructions.clone()));
+    Text::from(lines)
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &ImproveBrowserState) {
-    let hints = match state.view {
-        ImproveView::PrList => "Tab: Sessions | Up/Down: Navigate | Enter: Select PR | q: Quit",
-        ImproveView::Sessions => "Tab: PRs | Up/Down: Navigate | Enter: View Session | q: Quit",
-        ImproveView::PrDetail => "Backspace: Back to PRs | q: Quit",
-        ImproveView::SessionDetail => "Backspace: Back to Sessions | q: Quit",
-    };
-    let footer = Paragraph::new(Line::from(Span::styled(hints, muted_style())));
-    frame.render_widget(footer, area);
+fn pr_list_copy_text(data: &ImproveDashboardData, state: &ImproveBrowserState) -> Text<'static> {
+    let mut lines = vec![
+        Line::from("Improve open PRs"),
+        Line::from(format!("Count: {}", data.prs.len())),
+        Line::from(""),
+    ];
+    if data.prs.is_empty() {
+        lines.push(Line::from("No open PRs discovered."));
+        return Text::from(lines);
+    }
+    for (index, pr) in data.prs.iter().enumerate() {
+        let selected = if index == state.selected_pr {
+            "> "
+        } else {
+            "  "
+        };
+        lines.push(Line::from(format!(
+            "{selected}#{} {} ({})",
+            pr.number, pr.title, pr.author
+        )));
+        lines.push(Line::from(format!(
+            "    branch={} -> {} url={}",
+            pr.head_branch, pr.base_branch, pr.url
+        )));
+    }
+    Text::from(lines)
+}
+
+fn session_list_copy_text(
+    data: &ImproveDashboardData,
+    state: &ImproveBrowserState,
+) -> Text<'static> {
+    let mut lines = vec![
+        Line::from("Improve sessions"),
+        Line::from(format!("Count: {}", data.sessions.len())),
+        Line::from(""),
+    ];
+    if data.sessions.is_empty() {
+        lines.push(Line::from("No improve sessions."));
+        return Text::from(lines);
+    }
+    for (index, session) in data.sessions.iter().enumerate() {
+        let selected = if index == state.selected_session {
+            "> "
+        } else {
+            "  "
+        };
+        lines.push(Line::from(format!(
+            "{selected}#{} [{}] {} ({})",
+            session.source_pr.number,
+            session.phase.display_label(),
+            session.source_pr.title,
+            session.age_label(data.now_epoch_seconds)
+        )));
+    }
+    Text::from(lines)
 }
 
 #[cfg(test)]

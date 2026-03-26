@@ -63,9 +63,33 @@ fn plain_char(key: KeyEvent) -> bool {
     key.modifiers.is_empty() || key.modifiers == KeyModifiers::NONE
 }
 
+pub(crate) fn is_copy_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+pub(crate) fn is_select_all_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// Returns true for the mouse capture toggle key (Ctrl+G).
+pub(crate) fn is_mouse_toggle_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// Returns true for Ctrl+C when used as a copy key in editable fields with an
+/// active selection. Callers should check `field.has_selection()` before
+/// treating this as copy (otherwise Ctrl+C should remain cancel/quit).
+pub(crate) fn is_ctrl_c(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{KeybindingPolicy, NavigationDirection};
+    use super::{KeybindingPolicy, NavigationDirection, is_copy_key, is_ctrl_c, is_select_all_key};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
@@ -112,5 +136,41 @@ mod tests {
             policy.navigation_direction(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
             None
         );
+    }
+
+    #[test]
+    fn ctrl_y_is_copy_key() {
+        assert!(is_copy_key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_copy_key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn ctrl_a_is_select_all_key() {
+        assert!(is_select_all_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_select_all_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn ctrl_c_detected_for_field_copy() {
+        assert!(is_ctrl_c(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_ctrl_c(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
     }
 }

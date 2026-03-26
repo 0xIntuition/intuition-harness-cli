@@ -42,7 +42,11 @@ use crate::fs::{
 };
 use crate::linear::IssueSummary;
 use crate::load_linear_command_context;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, scrollable_paragraph, wrapped_rows};
 
 const BUILTIN_WORKFLOWS: [(&str, &str); 4] = [
@@ -183,6 +187,7 @@ struct WorkflowRunApp {
     preferred_output: Option<PathBuf>,
     save_message: Option<String>,
     error: Option<String>,
+    copy: CopyUiState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +326,10 @@ async fn run_workflow_tui(
 
         match event::read().context("failed to read workflow TUI input")? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if is_mouse_toggle_key(key) {
+                    app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                    continue;
+                }
                 let command = app.handle_key(key)?;
                 if let Some(message) =
                     apply_workflow_ui_command(&root, args, &mut app, command, false).await?
@@ -866,6 +875,7 @@ impl WorkflowRunApp {
             preferred_output: output,
             save_message: None,
             error: None,
+            copy: CopyUiState::default(),
         }
     }
 
@@ -940,6 +950,14 @@ impl WorkflowRunApp {
             return Ok(WorkflowUiCommand::Cancel);
         }
 
+        if self.copy.export_active()
+            && self
+                .copy
+                .handle_export_key(key, copy_overlay_viewport(Rect::new(0, 0, 120, 34)))
+        {
+            return Ok(WorkflowUiCommand::None);
+        }
+
         match self.screen {
             WorkflowRunScreen::Wizard => self.handle_wizard_key(key),
             WorkflowRunScreen::Review => self.handle_review_key(key),
@@ -981,6 +999,11 @@ impl WorkflowRunApp {
                     Ok(WorkflowUiCommand::Generate)
                 }
             }
+            _ if is_copy_key(key) => {
+                let payload = self.current_input_mut().copy_payload("workflow parameter");
+                self.copy.copy_payload(payload);
+                Ok(WorkflowUiCommand::None)
+            }
             _ if self
                 .current_input_mut()
                 .handle_key_with_viewport(key, width, height) =>
@@ -1011,6 +1034,10 @@ impl WorkflowRunApp {
             KeyCode::Char('s') if key.modifiers.is_empty() => {
                 self.clear_status();
                 self.screen = WorkflowRunScreen::SavePath;
+                Ok(WorkflowUiCommand::None)
+            }
+            _ if is_copy_key(key) => {
+                self.copy.copy_payload(self.review_copy_payload());
                 Ok(WorkflowUiCommand::None)
             }
             _ => {
@@ -1051,6 +1078,13 @@ impl WorkflowRunApp {
                 self.save_message = Some("Accepted Markdown edits.".to_string());
                 Ok(WorkflowUiCommand::None)
             }
+            _ if is_copy_key(key) => {
+                self.copy.copy_payload(
+                    self.markdown_editor
+                        .copy_payload("workflow markdown editor"),
+                );
+                Ok(WorkflowUiCommand::None)
+            }
             _ if self.markdown_editor.handle_key_with_viewport(
                 key,
                 viewport.width,
@@ -1073,6 +1107,11 @@ impl WorkflowRunApp {
             KeyCode::Enter => Ok(WorkflowUiCommand::Save {
                 overwrite: self.overwrite,
             }),
+            _ if is_copy_key(key) => {
+                self.copy
+                    .copy_payload(self.save_path_input.copy_payload("workflow save path"));
+                Ok(WorkflowUiCommand::None)
+            }
             _ if self.save_path_input.handle_key_with_viewport(
                 key,
                 viewport.width,
@@ -1117,6 +1156,12 @@ impl WorkflowRunApp {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
         ) {
             return false;
+        }
+
+        if self.copy.export_active() {
+            return self
+                .copy
+                .handle_export_mouse(mouse, copy_overlay_viewport(area));
         }
 
         match self.screen {
@@ -1207,6 +1252,18 @@ impl WorkflowRunApp {
         }
 
         lines.join("\n")
+    }
+
+    fn review_copy_payload(&self) -> CopyPayload {
+        match self.review_focus {
+            ReviewFocus::Artifact => CopyPayload::markdown(
+                "workflow generated markdown",
+                self.artifact_markdown().unwrap_or_default().to_string(),
+            ),
+            ReviewFocus::Details => {
+                CopyPayload::new("workflow review details", self.review_details_text())
+            }
+        }
     }
 }
 
@@ -1323,6 +1380,7 @@ fn render_workflow_run(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp) {
     }
 
     render_footer(frame, app, layout[2]);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_wizard(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp, area: Rect) {
@@ -1517,20 +1575,20 @@ fn render_overwrite_prompt(frame: &mut ratatui::Frame<'_>, _app: &WorkflowRunApp
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp, area: Rect) {
     let controls = match app.screen {
-        WorkflowRunScreen::Wizard => {
-            "Type each required input. Enter advances, Shift+Enter inserts a newline, Shift+Tab goes back, and the last Enter generates the workflow."
-        }
-        WorkflowRunScreen::Review => {
-            "Review the generated Markdown. Tab switches panes, e edits, s saves, and Esc exits without saving."
-        }
-        WorkflowRunScreen::Edit => {
-            "Edit mode supports multiline navigation. Ctrl+S accepts edits, Esc discards them."
-        }
-        WorkflowRunScreen::SavePath => {
-            "Enter saves to the shown path. Esc returns to review. Paths must stay inside the repository root."
-        }
+        WorkflowRunScreen::Wizard => field_copy_help(
+            "Type each required input. Enter advances, Shift+Enter inserts a newline, Shift+Tab goes back, and the last Enter generates the workflow.",
+        ),
+        WorkflowRunScreen::Review => pane_copy_help(
+            "Review the generated Markdown. Tab switches panes, e edits, s saves, and Esc exits without saving.",
+        ),
+        WorkflowRunScreen::Edit => field_copy_help(
+            "Edit mode supports multiline navigation. Ctrl+S accepts edits, Esc discards them.",
+        ),
+        WorkflowRunScreen::SavePath => field_copy_help(
+            "Enter saves to the shown path. Esc returns to review. Paths must stay inside the repository root.",
+        ),
         WorkflowRunScreen::ConfirmOverwrite => {
-            "Enter confirms overwrite. Esc returns to the save prompt."
+            pane_copy_help("Enter confirms overwrite. Esc returns to the save prompt.")
         }
     };
     let mut lines = vec![Line::from(controls)];
@@ -1538,6 +1596,8 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, app: &WorkflowRunApp, area: Rec
         lines.push(Line::from(format!("Status: {message}")));
     } else if let Some(error) = app.error.as_ref() {
         lines.push(Line::from(format!("Error: {error}")));
+    } else if let Some(status) = app.copy.status_text() {
+        lines.push(Line::from(format!("Status: {status}")));
     } else {
         lines.push(Line::from("Ready."));
     }

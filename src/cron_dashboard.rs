@@ -20,7 +20,11 @@ use ratatui::widgets::{Block, Borders, ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
 use crate::branding;
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::theme::{Tone, badge, key_hints, list, panel_title, paragraph};
 
 const NONE_AGENT_LABEL: &str = "None";
@@ -133,6 +137,7 @@ struct CronInitApp {
     timeout_seconds: InputFieldState,
     enabled: SelectFieldState,
     error: Option<String>,
+    copy: CopyUiState,
 }
 
 pub(crate) fn run_cron_init_form(
@@ -161,10 +166,21 @@ pub(crate) fn run_cron_init_form(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(exit) = app.handle_key_in_viewport(
-                        key,
-                        prompt_editor_viewport(terminal.size()?.into()),
-                    ) {
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
+                    let size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(size.into()))
+                    {
+                        continue;
+                    }
+                    if let Some(exit) =
+                        app.handle_key_in_viewport(key, prompt_editor_viewport(size.into()))
+                    {
                         return Ok(exit);
                     }
                 }
@@ -175,10 +191,14 @@ pub(crate) fn run_cron_init_form(
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     ) =>
                 {
-                    let _ = app.handle_prompt_mouse(
-                        mouse,
-                        prompt_editor_viewport(terminal.size()?.into()),
-                    );
+                    let size = terminal.size()?;
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                    } else {
+                        let _ = app.handle_prompt_mouse(mouse, prompt_editor_viewport(size.into()));
+                    }
                 }
                 _ => {}
             }
@@ -247,6 +267,7 @@ fn render_cron_init_form(frame: &mut Frame<'_>, app: &CronInitApp) {
     render_form_fields(frame, app, body[0]);
     render_preview(frame, app, body[1]);
     render_footer(frame, app, layout[2]);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_form_fields(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
@@ -380,17 +401,33 @@ fn render_preview(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &CronInitApp, area: Rect) {
+    let controls = if matches!(
+        app.focus,
+        CronField::SchedulePreset | CronField::Agent | CronField::Enabled | CronField::Save
+    ) {
+        pane_copy_help(
+            "Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections.",
+        )
+    } else {
+        field_copy_help(
+            "Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections.",
+        )
+    };
     let footer_message = app
         .error
-        .clone()
-        .unwrap_or_else(|| "Ready to create the cron job.".to_string());
-    let footer = paragraph(Text::from(vec![
-        Line::from("Tab/Shift+Tab or Up/Down moves between fields. Left/Right changes selections."),
-        Line::from(
-            "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline; Up/Down and PgUp/PgDn/Home/End move through wrapped content; mouse wheel scrolls the editor. Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists. Esc cancels.",
-        ),
-        Line::from(footer_message),
-    ]), panel_title("Controls", false))
+        .as_deref()
+        .or(app.copy.status_text())
+        .unwrap_or("Ready to create the cron job.");
+    let footer = paragraph(
+        Text::from(vec![
+            Line::from(controls),
+            Line::from(
+                "Type to edit text fields. Enter creates the job from any row. In Prompt, Shift+Enter inserts a newline; Up/Down and PgUp/PgDn/Home/End move through wrapped content; mouse wheel scrolls the editor. Ctrl+V pastes text, but image attachments are rejected until saved-prompt persistence exists. Esc cancels.",
+            ),
+            Line::from(footer_message.to_string()),
+        ]),
+        panel_title("Controls", false),
+    )
     .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(footer, area);
 }
@@ -448,6 +485,7 @@ impl CronInitApp {
                 usize::from(prefill.disabled),
             ),
             error: None,
+            copy: CopyUiState::default(),
         }
     }
 
@@ -505,6 +543,10 @@ impl CronInitApp {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.submit();
             }
+            _ if is_copy_key(key) => {
+                self.copy.copy_payload(self.copy_payload());
+                return None;
+            }
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.focus == CronField::Prompt {
                     match self.prompt.paste_clipboard_with_prompt_attachments() {
@@ -519,6 +561,56 @@ impl CronInitApp {
 
         self.handle_field_key(key);
         None
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.focus {
+            CronField::Name => self.name.copy_payload("cron job name"),
+            CronField::MinutesInterval => {
+                self.minutes_interval.copy_payload("cron minutes interval")
+            }
+            CronField::HourInterval => self.hour_interval.copy_payload("cron hours interval"),
+            CronField::HourlyMinute => self.hourly_minute.copy_payload("cron hourly minute"),
+            CronField::DailyHour => self.daily_hour.copy_payload("cron daily hour"),
+            CronField::DailyMinute => self.daily_minute.copy_payload("cron daily minute"),
+            CronField::CustomSchedule => self.custom_schedule.copy_payload("cron schedule"),
+            CronField::Command => self.command.copy_payload("cron command"),
+            CronField::Prompt => self.prompt.copy_payload("cron prompt"),
+            CronField::WorkingDirectory => self
+                .working_directory
+                .copy_payload("cron working directory"),
+            CronField::Shell => self.shell.copy_payload("cron shell"),
+            CronField::TimeoutSeconds => self.timeout_seconds.copy_payload("cron timeout seconds"),
+            CronField::SchedulePreset => CopyPayload::new(
+                "cron schedule preset",
+                self.schedule_preset.selected_label().unwrap_or("unset"),
+            ),
+            CronField::Agent => {
+                CopyPayload::new("cron agent", self.agent.selected_label().unwrap_or("unset"))
+            }
+            CronField::Enabled => CopyPayload::new(
+                "cron enabled state",
+                self.enabled.selected_label().unwrap_or("unset"),
+            ),
+            CronField::Save => CopyPayload::new(
+                "cron preview",
+                format!(
+                    "Job file: {}/cron/{}.md\nSchedule: {}\nCommand: {}\nAgent: {}\nEnabled: {}",
+                    crate::branding::PROJECT_DIR,
+                    if self.name.value().trim().is_empty() {
+                        "<name>"
+                    } else {
+                        self.name.value().trim()
+                    },
+                    self.resolved_schedule()
+                        .unwrap_or_else(|error| format!("Invalid schedule: {error}")),
+                    empty_placeholder(self.command.value(), "<optional>"),
+                    self.selected_agent()
+                        .unwrap_or_else(|| NONE_AGENT_LABEL.to_string()),
+                    self.enabled.selected_label().unwrap_or("Enabled")
+                ),
+            ),
+        }
     }
 
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent, prompt_viewport: Rect) -> bool {

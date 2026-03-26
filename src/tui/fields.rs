@@ -5,10 +5,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
+use crate::tui::copy::CopyPayload;
+use crate::tui::keybindings::is_select_all_key;
 use crate::tui::prompt_images::{
     ClipboardPromptPaste, MAX_PROMPT_IMAGES, PromptImageAttachment,
     resolve_attachment_from_pasted_text, resolve_clipboard_prompt_paste,
@@ -24,6 +26,8 @@ pub(crate) struct InputFieldState {
     mode: InputFieldMode,
     attachment_mode: AttachmentMode,
     attachments: Vec<PromptImageAttachment>,
+    selection: Option<(usize, usize)>,
+    selection_anchor: Option<usize>,
     preferred_column: Option<usize>,
     scroll: ScrollState,
 }
@@ -70,6 +74,8 @@ impl InputFieldState {
             mode: InputFieldMode::SingleLine,
             attachment_mode: AttachmentMode::Disabled,
             attachments: Vec::new(),
+            selection: None,
+            selection_anchor: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -83,6 +89,8 @@ impl InputFieldState {
             mode: InputFieldMode::MultiLine,
             attachment_mode: AttachmentMode::Disabled,
             attachments: Vec::new(),
+            selection: None,
+            selection_anchor: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -96,6 +104,8 @@ impl InputFieldState {
             mode: InputFieldMode::MultiLine,
             attachment_mode: AttachmentMode::Enabled,
             attachments: Vec::new(),
+            selection: None,
+            selection_anchor: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -114,6 +124,8 @@ impl InputFieldState {
                 message: message.into(),
             },
             attachments: Vec::new(),
+            selection: None,
+            selection_anchor: None,
             preferred_column: None,
             scroll: ScrollState::default(),
         }
@@ -129,6 +141,31 @@ impl InputFieldState {
 
     pub(crate) fn prompt_attachments(&self) -> &[PromptImageAttachment] {
         &self.attachments
+    }
+
+    pub(crate) fn copy_payload(&self, label: impl Into<String>) -> CopyPayload {
+        let plain_text = self
+            .selected_display_value()
+            .unwrap_or_else(|| self.display_value());
+        CopyPayload::new(label, plain_text)
+    }
+
+    pub(crate) fn select_all(&mut self) -> bool {
+        if self.value.is_empty() {
+            self.selection = None;
+            self.selection_anchor = None;
+            return false;
+        }
+        self.selection_anchor = Some(0);
+        self.selection = Some((0, self.value.len()));
+        self.cursor = self.value.len();
+        self.preferred_column = None;
+        true
+    }
+
+    /// Returns true when there is an active text selection.
+    pub(crate) fn has_selection(&self) -> bool {
+        self.selection.is_some()
     }
 
     #[cfg(test)]
@@ -180,10 +217,29 @@ impl InputFieldState {
             };
         }
 
+        let text = match self.selection_display_range() {
+            Some((sel_start, sel_end)) if sel_start < sel_end => {
+                styled_text_with_selection(&display_value, sel_start, sel_end)
+            }
+            _ => Text::from(display_value),
+        };
+
         InputFieldRender {
-            text: Text::from(display_value),
+            text,
             cursor_prefix: Some(render_prefix_with_attachments(&self.value[..self.cursor])),
             scroll_offset,
+        }
+    }
+
+    /// Map raw-value selection range to display-value byte range. Returns `None`
+    /// when attachments make the mapping non-trivial (selection still works, just
+    /// no visual highlight).
+    fn selection_display_range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.selection?;
+        if self.attachments.is_empty() {
+            Some((start, end))
+        } else {
+            None
         }
     }
 
@@ -324,12 +380,14 @@ impl InputFieldRender {
 
 impl InputFieldState {
     fn insert(&mut self, ch: char) {
+        self.delete_selection();
         self.value.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
         self.preferred_column = None;
     }
 
     fn insert_attachment(&mut self, attachment: PromptImageAttachment) -> Result<()> {
+        self.delete_selection();
         if self.attachments.len() >= MAX_PROMPT_IMAGES {
             bail!("prompt editors support at most {MAX_PROMPT_IMAGES} image attachments");
         }
@@ -343,6 +401,9 @@ impl InputFieldState {
     }
 
     fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
@@ -358,6 +419,9 @@ impl InputFieldState {
     }
 
     fn delete_forward(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor >= self.value.len() {
             return;
         }
@@ -375,26 +439,36 @@ impl InputFieldState {
         self.value.clear();
         self.cursor = 0;
         self.attachments.clear();
+        self.selection = None;
+        self.selection_anchor = None;
         self.preferred_column = None;
         self.scroll.reset();
     }
 
     fn move_left(&mut self) {
+        self.selection = None;
+        self.selection_anchor = None;
         self.cursor = previous_boundary(&self.value, self.cursor);
         self.preferred_column = None;
     }
 
     fn move_right(&mut self) {
+        self.selection = None;
+        self.selection_anchor = None;
         self.cursor = next_boundary(&self.value, self.cursor);
         self.preferred_column = None;
     }
 
     fn move_home(&mut self) {
+        self.selection = None;
+        self.selection_anchor = None;
         self.cursor = 0;
         self.preferred_column = None;
     }
 
     fn move_end(&mut self) {
+        self.selection = None;
+        self.selection_anchor = None;
         self.cursor = self.value.len();
         self.preferred_column = None;
     }
@@ -431,6 +505,8 @@ impl InputFieldState {
             return;
         }
 
+        self.selection = None;
+        self.selection_anchor = None;
         let points = cursor_points(&self.value, width);
         let Some(current_index) = points.iter().position(|point| point.byte == self.cursor) else {
             return;
@@ -476,6 +552,123 @@ impl InputFieldState {
         let _ = self
             .scroll
             .ensure_row_visible(row, height.max(1), content_rows.max(1));
+    }
+
+    // ── Shift+Arrow selection extension ──────────────────────────────
+
+    fn begin_or_continue_selection(&mut self) {
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor);
+        }
+    }
+
+    fn update_selection_from_anchor(&mut self) {
+        if let Some(anchor) = self.selection_anchor {
+            let start = anchor.min(self.cursor);
+            let end = anchor.max(self.cursor);
+            self.selection = if start == end {
+                None
+            } else {
+                Some((start, end))
+            };
+        }
+    }
+
+    fn extend_selection_left(&mut self) {
+        self.begin_or_continue_selection();
+        self.cursor = previous_boundary(&self.value, self.cursor);
+        self.preferred_column = None;
+        self.update_selection_from_anchor();
+    }
+
+    fn extend_selection_right(&mut self) {
+        self.begin_or_continue_selection();
+        self.cursor = next_boundary(&self.value, self.cursor);
+        self.preferred_column = None;
+        self.update_selection_from_anchor();
+    }
+
+    fn extend_selection_home(&mut self) {
+        self.begin_or_continue_selection();
+        self.cursor = 0;
+        self.preferred_column = None;
+        self.update_selection_from_anchor();
+    }
+
+    fn extend_selection_end(&mut self) {
+        self.begin_or_continue_selection();
+        self.cursor = self.value.len();
+        self.preferred_column = None;
+        self.update_selection_from_anchor();
+    }
+
+    fn extend_selection_vertical(&mut self, width: u16, delta: isize) {
+        if self.mode != InputFieldMode::MultiLine {
+            return;
+        }
+        self.begin_or_continue_selection();
+        // Reuse the vertical cursor movement logic without clearing selection.
+        let points = cursor_points(&self.value, width);
+        let Some(current_index) = points.iter().position(|point| point.byte == self.cursor) else {
+            return;
+        };
+        let current = &points[current_index];
+        let preferred_column = self.preferred_column.unwrap_or(current.column);
+        let target_row = current.row as isize + delta;
+        if target_row < 0 {
+            self.cursor = points
+                .iter()
+                .find(|point| point.row == 0)
+                .map(|point| point.byte)
+                .unwrap_or(0);
+        } else {
+            let target_row = target_row as usize;
+            let mut best_match = None;
+            for point in points.iter().filter(|point| point.row == target_row) {
+                match best_match {
+                    None => best_match = Some(point),
+                    Some(best)
+                        if point.column <= preferred_column && point.column >= best.column =>
+                    {
+                        best_match = Some(point);
+                    }
+                    Some(best) if best.column > preferred_column && point.column < best.column => {
+                        best_match = Some(point);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(target) = best_match {
+                self.cursor = target.byte;
+            }
+        }
+        self.preferred_column = Some(preferred_column);
+        self.update_selection_from_anchor();
+    }
+
+    fn selected_display_value(&self) -> Option<String> {
+        self.selection
+            .map(|(start, end)| render_value_range_with_attachments(&self.value, start, end))
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection.take() else {
+            return false;
+        };
+        self.selection_anchor = None;
+        if start >= end || end > self.value.len() {
+            return false;
+        }
+
+        let attachment_start = attachment_index_before_raw_index(&self.value, start);
+        let attachment_end = attachment_index_before_raw_index(&self.value, end);
+        self.value.drain(start..end);
+        if attachment_start < attachment_end && attachment_end <= self.attachments.len() {
+            self.attachments.drain(attachment_start..attachment_end);
+        }
+        self.cursor = start;
+        self.preferred_column = None;
+        true
     }
 
     pub(crate) fn handle_mouse_scroll(
@@ -560,6 +753,42 @@ fn normalize_multi_line_paste(text: &str) -> String {
     normalized
 }
 
+/// Build `Text` with the selected byte range highlighted using `REVERSED` style.
+fn styled_text_with_selection(display: &str, sel_start: usize, sel_end: usize) -> Text<'static> {
+    let sel_style = Style::default().add_modifier(Modifier::REVERSED);
+    let mut lines = Vec::new();
+    let mut byte_pos: usize = 0;
+
+    for raw_line in display.split('\n') {
+        let line_start = byte_pos;
+        let line_end = byte_pos + raw_line.len();
+
+        let overlap_start = sel_start.clamp(line_start, line_end);
+        let overlap_end = sel_end.clamp(line_start, line_end);
+
+        if overlap_start < overlap_end {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let before = &raw_line[..overlap_start - line_start];
+            if !before.is_empty() {
+                spans.push(Span::raw(before.to_string()));
+            }
+            let selected = &raw_line[overlap_start - line_start..overlap_end - line_start];
+            spans.push(Span::styled(selected.to_string(), sel_style));
+            let after = &raw_line[overlap_end - line_start..];
+            if !after.is_empty() {
+                spans.push(Span::raw(after.to_string()));
+            }
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(raw_line.to_string()));
+        }
+
+        byte_pos = line_end + 1; // +1 for the '\n' delimiter
+    }
+
+    Text::from(lines)
+}
+
 fn render_value_with_attachments(value: &str, _attachments: &[PromptImageAttachment]) -> String {
     let mut rendered = String::new();
     let mut attachment_index = 0usize;
@@ -578,6 +807,26 @@ fn render_value_with_attachments(value: &str, _attachments: &[PromptImageAttachm
 
 fn render_prefix_with_attachments(value: &str) -> String {
     render_value_with_attachments(value, &[])
+}
+
+fn render_value_range_with_attachments(value: &str, start: usize, end: usize) -> String {
+    if start >= end || end > value.len() {
+        return String::new();
+    }
+
+    let mut rendered = String::new();
+    let mut attachment_index = attachment_index_before_raw_index(value, start);
+
+    for ch in value[start..end].chars() {
+        if ch == ATTACHMENT_MARKER {
+            rendered.push_str(&format!("[Image #{}]", attachment_index + 1));
+            attachment_index += 1;
+        } else {
+            rendered.push(ch);
+        }
+    }
+
+    rendered
 }
 
 fn attachment_index_for_cursor(value: &str, cursor: usize) -> usize {
@@ -664,6 +913,51 @@ impl InputFieldState {
         width: u16,
         height: u16,
     ) -> bool {
+        if is_select_all_key(key) {
+            let handled = self.select_all();
+            if handled && self.mode == InputFieldMode::MultiLine {
+                self.sync_cursor_scroll(width, height);
+            }
+            return handled;
+        }
+
+        // Shift+Arrow: extend selection instead of moving cursor.
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            let handled = match key.code {
+                KeyCode::Left => {
+                    self.extend_selection_left();
+                    true
+                }
+                KeyCode::Right => {
+                    self.extend_selection_right();
+                    true
+                }
+                KeyCode::Home => {
+                    self.extend_selection_home();
+                    true
+                }
+                KeyCode::End => {
+                    self.extend_selection_end();
+                    true
+                }
+                KeyCode::Up if self.mode == InputFieldMode::MultiLine => {
+                    self.extend_selection_vertical(width, -1);
+                    true
+                }
+                KeyCode::Down if self.mode == InputFieldMode::MultiLine => {
+                    self.extend_selection_vertical(width, 1);
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                if self.mode == InputFieldMode::MultiLine {
+                    self.sync_cursor_scroll(width, height);
+                }
+                return true;
+            }
+        }
+
         let handled = match key.code {
             KeyCode::Enter
                 if self.mode == InputFieldMode::MultiLine
@@ -1050,6 +1344,7 @@ mod tests {
     use super::{InputFieldState, MultiSelectFieldState, SelectFieldState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use image::{ImageBuffer, Rgba};
+    use ratatui::style::Modifier;
     use tempfile::tempdir;
 
     #[test]
@@ -1373,5 +1668,184 @@ mod tests {
         assert!(field.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         assert!(field.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
         assert_eq!(field.selected_labels(), vec!["three"]);
+    }
+
+    // ── Selection tests ──────────────────────────────────────────────
+
+    #[test]
+    fn select_all_sets_selection_range_and_cursor() {
+        let mut field = InputFieldState::new("hello");
+
+        assert!(field.select_all());
+        assert!(field.has_selection());
+        assert_eq!(field.cursor(), 5);
+    }
+
+    #[test]
+    fn select_all_on_empty_returns_false() {
+        let mut field = InputFieldState::new("");
+
+        assert!(!field.select_all());
+        assert!(!field.has_selection());
+    }
+
+    #[test]
+    fn typing_after_select_all_replaces_text() {
+        let mut field = InputFieldState::new("hello");
+
+        field.select_all();
+        field.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+
+        assert_eq!(field.value(), "X");
+        assert!(!field.has_selection());
+    }
+
+    #[test]
+    fn delete_selection_removes_selected_range() {
+        let mut field = InputFieldState::new("abcde");
+
+        field.select_all();
+        field.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert_eq!(field.value(), "");
+        assert!(!field.has_selection());
+    }
+
+    #[test]
+    fn copy_payload_returns_selected_text() {
+        let mut field = InputFieldState::new("hello world");
+
+        field.select_all();
+        let payload = field.copy_payload("test");
+
+        assert_eq!(payload.plain_text, "hello world");
+    }
+
+    #[test]
+    fn copy_payload_returns_full_value_when_no_selection() {
+        let field = InputFieldState::new("hello world");
+        let payload = field.copy_payload("test");
+
+        assert_eq!(payload.plain_text, "hello world");
+    }
+
+    #[test]
+    fn shift_right_extends_selection() {
+        let mut field = InputFieldState::new("abcde");
+
+        // Move cursor to start
+        field.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(field.cursor(), 0);
+
+        // Shift+Right twice — should select "ab"
+        field.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        field.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+
+        assert!(field.has_selection());
+        assert_eq!(field.cursor(), 2);
+        let payload = field.copy_payload("test");
+        assert_eq!(payload.plain_text, "ab");
+    }
+
+    #[test]
+    fn shift_left_extends_selection_backward() {
+        let mut field = InputFieldState::new("abcde");
+        // Cursor starts at end (5)
+
+        field.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        field.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+
+        assert!(field.has_selection());
+        assert_eq!(field.cursor(), 3);
+        let payload = field.copy_payload("test");
+        assert_eq!(payload.plain_text, "de");
+    }
+
+    #[test]
+    fn shift_home_selects_to_start() {
+        let mut field = InputFieldState::new("abcde");
+
+        field.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+
+        assert!(field.has_selection());
+        assert_eq!(field.cursor(), 0);
+        let payload = field.copy_payload("test");
+        assert_eq!(payload.plain_text, "abcde");
+    }
+
+    #[test]
+    fn shift_end_selects_to_end() {
+        let mut field = InputFieldState::new("abcde");
+
+        field.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        field.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
+
+        assert!(field.has_selection());
+        let payload = field.copy_payload("test");
+        assert_eq!(payload.plain_text, "abcde");
+    }
+
+    #[test]
+    fn plain_arrow_clears_selection() {
+        let mut field = InputFieldState::new("abcde");
+
+        field.select_all();
+        assert!(field.has_selection());
+
+        field.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(!field.has_selection());
+    }
+
+    #[test]
+    fn shift_right_then_shift_left_shrinks_selection() {
+        let mut field = InputFieldState::new("abcde");
+
+        field.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        // Select "abc"
+        field.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        field.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        field.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        // Shrink back to "ab"
+        field.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+
+        assert!(field.has_selection());
+        let payload = field.copy_payload("test");
+        assert_eq!(payload.plain_text, "ab");
+    }
+
+    #[test]
+    fn selection_highlight_produces_reversed_spans() {
+        let field = InputFieldState::new("abcde");
+        let text = super::styled_text_with_selection("abcde", 1, 3);
+
+        // Should have 3 spans: "a", "bc" (reversed), "de"
+        assert_eq!(text.lines.len(), 1);
+        let spans: Vec<_> = text.lines[0].spans.iter().collect();
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), "a");
+        assert_eq!(spans[1].content.as_ref(), "bc");
+        assert!(spans[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(spans[2].content.as_ref(), "de");
+        let _ = field; // suppress unused warning
+    }
+
+    #[test]
+    fn selection_highlight_multiline() {
+        let text = super::styled_text_with_selection("abc\ndef\nghi", 2, 7);
+
+        // Line 0: "ab" + "c" (reversed)
+        // Line 1: "def" (fully reversed)
+        // Line 2: "ghi" (not selected)
+        assert_eq!(text.lines.len(), 3);
+        let line0: Vec<_> = text.lines[0].spans.iter().collect();
+        assert_eq!(line0.len(), 2);
+        assert_eq!(line0[0].content.as_ref(), "ab");
+        assert_eq!(line0[1].content.as_ref(), "c");
+        assert!(line0[1].style.add_modifier.contains(Modifier::REVERSED));
+
+        let line1: Vec<_> = text.lines[1].spans.iter().collect();
+        assert_eq!(line1.len(), 1);
+        assert_eq!(line1[0].content.as_ref(), "def");
+        assert!(line1[0].style.add_modifier.contains(Modifier::REVERSED));
     }
 }

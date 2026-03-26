@@ -36,8 +36,11 @@ use crate::config::{
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::{InputFieldState, SelectFieldState};
-use crate::tui::keybindings::KeybindingPolicy;
+use crate::tui::keybindings::{KeybindingPolicy, is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::theme::content_panel;
 
@@ -93,6 +96,7 @@ struct SetupApp {
     summary_scroll: ScrollState,
     detected_agents: Vec<String>,
     error: Option<String>,
+    copy: CopyUiState,
 }
 
 #[derive(Debug, Clone)]
@@ -979,6 +983,7 @@ impl SetupApp {
             summary_scroll: ScrollState::default(),
             detected_agents: view.detected_agents.clone(),
             error: None,
+            copy: CopyUiState::default(),
         };
         app.sync_models(view.planning_meta.agent.model.as_deref());
         app.sync_reasoning(view.planning_meta.agent.reasoning.as_deref());
@@ -1127,6 +1132,10 @@ impl SetupApp {
                     summary_viewport,
                     self.summary_content_rows(summary_viewport.width),
                 );
+                None
+            }
+            _ if is_copy_key(key) => {
+                self.copy.copy_payload(self.copy_payload());
                 None
             }
             KeyCode::Char(_)
@@ -1397,6 +1406,71 @@ impl SetupApp {
         ))
     }
 
+    fn copy_payload(&self) -> CopyPayload {
+        match self.step {
+            SetupStep::LinearApiKey => self.api_key.copy_payload("repo setup Linear API key"),
+            SetupStep::Team => self.team.copy_payload("repo setup default team"),
+            SetupStep::Project => self.project.copy_payload("repo setup project selector"),
+            SetupStep::DefaultIssueStatus => self
+                .default_issue_status
+                .copy_payload("repo setup default issue status"),
+            SetupStep::ListenLabel => self.listen_label.copy_payload("repo setup listen labels"),
+            SetupStep::InstructionsPath => self
+                .instructions_path
+                .copy_payload("repo setup instructions path"),
+            SetupStep::ListenPollInterval => self
+                .listen_poll_interval
+                .copy_payload("repo setup listen poll interval"),
+            SetupStep::InteractivePlanLimit => self
+                .interactive_plan_limit
+                .copy_payload("repo setup interactive plan limit"),
+            SetupStep::PlanFastQuestions => self
+                .plan_fast_questions
+                .copy_payload("repo setup fast plan questions"),
+            SetupStep::PlanLabel => self.plan_label.copy_payload("repo setup plan label"),
+            SetupStep::TechnicalLabel => self
+                .technical_label
+                .copy_payload("repo setup technical label"),
+            SetupStep::LinearAuth => CopyPayload::new(
+                "repo setup Linear auth",
+                self.repo_auth_field.selected_label().unwrap_or("unset"),
+            ),
+            SetupStep::Provider => CopyPayload::new(
+                "repo setup provider",
+                self.provider_field.selected_label().unwrap_or("unset"),
+            ),
+            SetupStep::Model => CopyPayload::new(
+                "repo setup model",
+                self.model_field.selected_label().unwrap_or("unset"),
+            ),
+            SetupStep::Reasoning => CopyPayload::new(
+                "repo setup reasoning",
+                self.reasoning.selected_label().unwrap_or("unset"),
+            ),
+            SetupStep::AssignmentScope => CopyPayload::new(
+                "repo setup assignee scope",
+                self.assignment_field.selected_label().unwrap_or("unset"),
+            ),
+            SetupStep::RefreshPolicy => CopyPayload::new(
+                "repo setup refresh policy",
+                self.refresh_policy_field
+                    .selected_label()
+                    .unwrap_or("unset"),
+            ),
+            SetupStep::PlanDefaultMode => CopyPayload::new(
+                "repo setup plan mode",
+                self.plan_default_mode.selected_label().unwrap_or("unset"),
+            ),
+            SetupStep::PlanFastSingleTicket => CopyPayload::new(
+                "repo setup fast single-ticket mode",
+                self.plan_fast_single_ticket
+                    .selected_label()
+                    .unwrap_or("unset"),
+            ),
+            SetupStep::Save => CopyPayload::from_text("repo setup summary", self.summary_text(72)),
+        }
+    }
+
     fn summary_content_rows(&self, width: u16) -> usize {
         wrapped_rows(&plain_text(&self.summary_text(width.max(1))), width.max(1))
     }
@@ -1533,7 +1607,19 @@ fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let viewport = summary_viewport(terminal.size()?.into());
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
+                    let size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(size.into()))
+                    {
+                        continue;
+                    }
+                    let viewport = summary_viewport(size.into());
                     if let Some(exit) = app.handle_key(key, viewport) {
                         return Ok(exit);
                     }
@@ -1545,8 +1631,15 @@ fn run_setup_dashboard(app: SetupApp) -> Result<SetupExit> {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     ) =>
                 {
-                    let viewport = summary_viewport(terminal.size()?.into());
-                    let _ = app.handle_summary_mouse(mouse, viewport);
+                    let size = terminal.size()?;
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                    } else {
+                        let viewport = summary_viewport(size.into());
+                        let _ = app.handle_summary_mouse(mouse, viewport);
+                    }
                 }
                 _ => {}
             }
@@ -1645,6 +1738,7 @@ fn render_setup_dashboard(frame: &mut Frame<'_>, app: &SetupApp) {
         render_summary_panel(frame, app, stacked[2]);
     }
     render_footer(frame, app, layout[2]);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_step_list(frame: &mut Frame<'_>, app: &SetupApp, area: Rect, columns: usize) {
@@ -1852,20 +1946,33 @@ fn render_footer(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
         | SetupStep::PlanDefaultMode
         | SetupStep::PlanFastSingleTicket => {
             if app.keybindings.vim_mode_enabled() {
-                "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+                pane_copy_help(
+                    "Use Up/Down/j/k to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+                )
             } else {
-                "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels."
+                pane_copy_help(
+                    "Use Up/Down to choose. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+                )
             }
         }
-        SetupStep::Save => {
-            "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels."
-        }
-        _ => "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+        SetupStep::Save => pane_copy_help(
+            "Review the summary. Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Enter saves. Shift+Tab goes back. Esc cancels.",
+        ),
+        _ => field_copy_help(
+            "Type or paste the value. Enter or Tab advances. Shift+Tab goes back. Esc cancels.",
+        ),
     };
-    let status = app.error.as_deref().unwrap_or("Ready.");
-    let footer = Paragraph::new(Text::from(vec![Line::from(controls), Line::from(status)]))
-        .block(Block::default().borders(Borders::ALL).title("Controls"))
-        .wrap(Wrap { trim: false });
+    let status = app
+        .error
+        .as_deref()
+        .or(app.copy.status_text())
+        .unwrap_or("Ready.");
+    let footer = Paragraph::new(Text::from(vec![
+        Line::from(controls),
+        Line::from(status.to_string()),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("Controls"))
+    .wrap(Wrap { trim: false });
     frame.render_widget(footer, area);
 }
 

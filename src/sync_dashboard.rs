@@ -25,7 +25,11 @@ use crate::linear::browser::{
     IssueSearchResult, empty_search_result, render_issue_preview as render_linear_issue_preview,
     render_issue_row_with_prefix as render_sync_issue_row, search_issues,
 };
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::{spaced_list, spaced_list_item};
 use crate::tui::theme::{Tone, badge, empty_state, panel_title, paragraph};
@@ -126,6 +130,7 @@ struct SyncDashboardApp {
     preview_scroll: ScrollState,
     status_filter: Option<String>,
     label_filter: Option<String>,
+    copy: CopyUiState,
 }
 
 const ACTIONS: [SyncSelectionAction; 2] = [SyncSelectionAction::Pull, SyncSelectionAction::Push];
@@ -171,11 +176,29 @@ pub fn run_sync_dashboard(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
+                    let size = terminal.size()?;
+                    if app.copy.export_active()
+                        && app
+                            .copy
+                            .handle_export_key(key, copy_overlay_viewport(size.into()))
+                    {
+                        continue;
+                    }
+
                     // Ctrl+C always exits.
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         return Ok(SyncDashboardExit::Cancelled);
+                    }
+
+                    if is_copy_key(key) {
+                        app.copy.copy_payload(app.copy_payload());
+                        continue;
                     }
 
                     // When the search field has focus, route all character
@@ -192,10 +215,8 @@ pub fn run_sync_dashboard(
                         };
 
                         if let Some(action) = action {
-                            let result = app.apply_in_viewport(
-                                action,
-                                preview_viewport(terminal.size()?.into()),
-                            );
+                            let result =
+                                app.apply_in_viewport(action, preview_viewport(size.into()));
                             if !result.is_empty() {
                                 return Ok(SyncDashboardExit::Selected(result));
                             }
@@ -251,10 +272,8 @@ pub fn run_sync_dashboard(
                         };
 
                         if let Some(action) = action {
-                            let result = app.apply_in_viewport(
-                                action,
-                                preview_viewport(terminal.size()?.into()),
-                            );
+                            let result =
+                                app.apply_in_viewport(action, preview_viewport(size.into()));
                             if !result.is_empty() {
                                 return Ok(SyncDashboardExit::Selected(result));
                             }
@@ -262,14 +281,20 @@ pub fn run_sync_dashboard(
                     }
                 }
                 Event::Mouse(mouse)
-                    if app.focus == Focus::Preview
-                        && matches!(
-                            mouse.kind,
-                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                        ) =>
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
                 {
-                    let viewport = preview_viewport(terminal.size()?.into());
-                    let _ = app.handle_preview_mouse(mouse, viewport);
+                    let size = terminal.size()?;
+                    if app.copy.export_active() {
+                        let _ = app
+                            .copy
+                            .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                    } else if app.focus == Focus::Preview {
+                        let viewport = preview_viewport(size.into());
+                        let _ = app.handle_preview_mouse(mouse, viewport);
+                    }
                 }
                 _ => {}
             }
@@ -356,6 +381,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &SyncDashboardApp) {
     render_status(frame, details[2], app);
 
     render_footer(frame, outer[3], app);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_issue_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
@@ -465,7 +491,16 @@ fn render_action_list(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp)
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
-    let status = paragraph(app.status_text(), panel_title("Selection", false));
+    let base = match app.focus {
+        Focus::Search => field_copy_help(&app.status_text()),
+        Focus::List | Focus::Preview | Focus::Actions => pane_copy_help(&app.status_text()),
+    };
+    let text = if let Some(status) = app.copy.status_text() {
+        format!("{status}\n\n{base}")
+    } else {
+        base
+    };
+    let status = paragraph(text, panel_title("Selection", false));
     frame.render_widget(status, area);
 }
 
@@ -517,6 +552,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SyncDashboardApp) {
         spans.push(Span::raw(format!(" {desc}")));
     }
     spans.push(Span::raw("  |  Ctrl+C quit"));
+    spans.push(Span::raw("  |  Ctrl+Y copy"));
     let footer = paragraph(
         Text::from(vec![Line::from(spans)]),
         panel_title("Keys", false),
@@ -537,6 +573,7 @@ impl SyncDashboardApp {
             preview_scroll: ScrollState::default(),
             status_filter: None,
             label_filter: None,
+            copy: CopyUiState::default(),
         }
     }
 
@@ -745,6 +782,39 @@ impl SyncDashboardApp {
             return true;
         }
         false
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.focus {
+            Focus::Search => self.query.copy_payload("backlog sync search"),
+            Focus::List => {
+                let selected = self
+                    .selected_issue()
+                    .map(|issue| {
+                        issue
+                            .linked_issue_identifier
+                            .clone()
+                            .unwrap_or_else(|| issue.entry_slug.clone())
+                    })
+                    .unwrap_or_else(|| "none".to_string());
+                CopyPayload::new(
+                    "backlog sync selection",
+                    format!(
+                        "Selected entry: {selected}\nStatus filter: {}\nLabel filter: {}",
+                        self.status_filter.as_deref().unwrap_or("all"),
+                        self.label_filter.as_deref().unwrap_or("all")
+                    ),
+                )
+            }
+            Focus::Preview => CopyPayload::from_text("backlog sync preview", self.preview_text()),
+            Focus::Actions => {
+                let action = ACTIONS[self.action_index.min(ACTIONS.len() - 1)];
+                CopyPayload::new(
+                    "backlog sync action",
+                    format!("Action: {}\n\n{}", action.label(), action.description()),
+                )
+            }
+        }
     }
 
     fn visible_issue_results(&self) -> Vec<IssueSearchResult> {

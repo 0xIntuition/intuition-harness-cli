@@ -31,7 +31,11 @@ use crate::config::AGENT_ROUTE_BACKLOG_SPEC;
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, write_text_file};
 use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
+use crate::tui::copy::{
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+};
 use crate::tui::fields::InputFieldState;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, key_hints, panel_title};
 
@@ -135,6 +139,7 @@ struct FollowUpResponse {
 struct RequestApp {
     mode: SpecMode,
     request: InputFieldState,
+    copy: CopyUiState,
     error: Option<String>,
     sticky_error: bool,
 }
@@ -151,6 +156,7 @@ struct QuestionsApp {
     request: String,
     questions: Vec<QuestionAnswer>,
     selected: usize,
+    copy: CopyUiState,
     error: Option<String>,
     sticky_error: bool,
 }
@@ -162,6 +168,7 @@ struct ReviewApp {
     follow_ups: Vec<FollowUpResponse>,
     spec_markdown: String,
     preview_scroll: ScrollState,
+    copy: CopyUiState,
     error: Option<String>,
 }
 
@@ -415,6 +422,12 @@ fn run_interactive_spec_flow(
         if event::poll(Duration::from_millis(120)).context("failed to poll SPEC terminal events")? {
             match event::read().context("failed to read SPEC terminal event")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        if let Some(copy) = app.active_copy_state() {
+                            copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        }
+                        continue;
+                    }
                     if let Some(exit) = app.handle_key(root, key, &agent, &model, &reasoning)? {
                         return Ok(exit);
                     }
@@ -426,8 +439,7 @@ fn run_interactive_spec_flow(
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     ) =>
                 {
-                    let viewport = review_viewport(terminal.size()?.into());
-                    app.handle_review_mouse(mouse, viewport);
+                    app.handle_mouse(mouse, terminal.size()?.into());
                 }
                 _ => {}
             }
@@ -547,10 +559,20 @@ impl BacklogSpecApp {
             stage: SpecStage::Request(RequestApp {
                 mode,
                 request: InputFieldState::multiline(initial_request.unwrap_or_default()),
+                copy: CopyUiState::default(),
                 error: None,
                 sticky_error: false,
             }),
             pending: None,
+        }
+    }
+
+    fn active_copy_state(&mut self) -> Option<&mut CopyUiState> {
+        match &mut self.stage {
+            SpecStage::Request(app) => Some(&mut app.copy),
+            SpecStage::Questions(app) => Some(&mut app.copy),
+            SpecStage::Review(app) => Some(&mut app.copy),
+            SpecStage::Loading(_) => None,
         }
     }
 
@@ -580,76 +602,34 @@ impl BacklogSpecApp {
 
         let mut next = NextStep::None;
         match &mut self.stage {
-            SpecStage::Request(app) => match key.code {
-                KeyCode::Esc => return Ok(Some(InteractiveExit::Cancelled)),
-                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    let request = app.request.value().trim();
-                    if request.is_empty() {
-                        set_transient_error(
-                            &mut app.error,
-                            &mut app.sticky_error,
-                            "Enter what this repository should build before continuing."
-                                .to_string(),
-                        );
-                    } else {
-                        clear_error(&mut app.error, &mut app.sticky_error);
-                        next = NextStep::StartQuestions(request.to_string());
+            SpecStage::Request(app) => {
+                if app.copy.export_active() {
+                    let viewport = copy_overlay_viewport(Rect::new(0, 0, 120, 32));
+                    if app.copy.handle_export_key(key, viewport) {
+                        return Ok(None);
                     }
                 }
-                _ => {
-                    if app.request.handle_key(key) {
-                        if input_key_clears_sticky_error(key) {
+                match key.code {
+                    KeyCode::Esc => return Ok(Some(InteractiveExit::Cancelled)),
+                    KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        let request = app.request.value().trim();
+                        if request.is_empty() {
+                            set_transient_error(
+                                &mut app.error,
+                                &mut app.sticky_error,
+                                "Enter what this repository should build before continuing."
+                                    .to_string(),
+                            );
+                        } else {
                             clear_error(&mut app.error, &mut app.sticky_error);
-                        } else {
-                            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                            next = NextStep::StartQuestions(request.to_string());
                         }
                     }
-                }
-            },
-            SpecStage::Questions(app) => match key.code {
-                KeyCode::Esc => {
-                    next = NextStep::ShowRequest {
-                        mode: app.mode,
-                        request: app.request.clone(),
-                    };
-                }
-                KeyCode::Up => {
-                    if !app.questions.is_empty() {
-                        if app.selected == 0 {
-                            app.selected = app.questions.len().saturating_sub(1);
-                        } else {
-                            app.selected -= 1;
-                        }
-                        clear_error_for_navigation(&mut app.error, &app.sticky_error);
-                    }
-                }
-                KeyCode::Down | KeyCode::Tab => {
-                    if !app.questions.is_empty() {
-                        app.selected = (app.selected + 1) % app.questions.len();
-                        clear_error_for_navigation(&mut app.error, &app.sticky_error);
-                    }
-                }
-                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    let has_empty = app
-                        .questions
-                        .iter()
-                        .any(|q| q.answer.value().trim().is_empty());
-                    if has_empty {
-                        set_transient_error(
-                            &mut app.error,
-                            &mut app.sticky_error,
-                            "Answer each follow-up question before generating the SPEC."
-                                .to_string(),
-                        );
-                    } else {
-                        clear_error(&mut app.error, &mut app.sticky_error);
-                        let follow_ups = collect_follow_up_answers(&app.questions)?;
-                        next = NextStep::StartGeneration(app.request.clone(), follow_ups);
-                    }
-                }
-                _ => {
-                    if let Some(current) = app.questions.get_mut(app.selected) {
-                        if current.answer.handle_key(key) {
+                    _ => {
+                        if is_copy_key(key) {
+                            app.copy
+                                .copy_payload(app.request.copy_payload("SPEC request"));
+                        } else if app.request.handle_key(key) {
                             if input_key_clears_sticky_error(key) {
                                 clear_error(&mut app.error, &mut app.sticky_error);
                             } else {
@@ -658,45 +638,120 @@ impl BacklogSpecApp {
                         }
                     }
                 }
-            },
+            }
+            SpecStage::Questions(app) => {
+                if app.copy.export_active() {
+                    let viewport = copy_overlay_viewport(Rect::new(0, 0, 120, 32));
+                    if app.copy.handle_export_key(key, viewport) {
+                        return Ok(None);
+                    }
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        next = NextStep::ShowRequest {
+                            mode: app.mode,
+                            request: app.request.clone(),
+                        };
+                    }
+                    KeyCode::Up => {
+                        if !app.questions.is_empty() {
+                            if app.selected == 0 {
+                                app.selected = app.questions.len().saturating_sub(1);
+                            } else {
+                                app.selected -= 1;
+                            }
+                            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Tab => {
+                        if !app.questions.is_empty() {
+                            app.selected = (app.selected + 1) % app.questions.len();
+                            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                        }
+                    }
+                    KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        let has_empty = app
+                            .questions
+                            .iter()
+                            .any(|q| q.answer.value().trim().is_empty());
+                        if has_empty {
+                            set_transient_error(
+                                &mut app.error,
+                                &mut app.sticky_error,
+                                "Answer each follow-up question before generating the SPEC."
+                                    .to_string(),
+                            );
+                        } else {
+                            clear_error(&mut app.error, &mut app.sticky_error);
+                            let follow_ups = collect_follow_up_answers(&app.questions)?;
+                            next = NextStep::StartGeneration(app.request.clone(), follow_ups);
+                        }
+                    }
+                    _ => {
+                        if is_copy_key(key) {
+                            app.copy.copy_payload(questions_copy_payload(app));
+                        } else if let Some(current) = app.questions.get_mut(app.selected) {
+                            if current.answer.handle_key(key) {
+                                if input_key_clears_sticky_error(key) {
+                                    clear_error(&mut app.error, &mut app.sticky_error);
+                                } else {
+                                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             SpecStage::Loading(_) => {
                 if key.code == KeyCode::Esc {
                     return Ok(Some(InteractiveExit::Cancelled));
                 }
             }
-            SpecStage::Review(app) => match key.code {
-                KeyCode::Esc => {
-                    next = if app.follow_ups.is_empty() {
-                        NextStep::ShowRequest {
-                            mode: app.mode,
-                            request: app.request.clone(),
-                        }
-                    } else {
-                        NextStep::ShowQuestions {
-                            mode: app.mode,
-                            request: app.request.clone(),
-                            follow_ups: app.follow_ups.clone(),
-                        }
-                    };
+            SpecStage::Review(app) => {
+                if app.copy.export_active() {
+                    let viewport = copy_overlay_viewport(Rect::new(0, 0, 120, 32));
+                    if app.copy.handle_export_key(key, viewport) {
+                        return Ok(None);
+                    }
                 }
-                KeyCode::Enter => {
-                    next = NextStep::Exit(InteractiveExit::Confirmed(app.spec_markdown.clone()));
+                match key.code {
+                    KeyCode::Esc => {
+                        next = if app.follow_ups.is_empty() {
+                            NextStep::ShowRequest {
+                                mode: app.mode,
+                                request: app.request.clone(),
+                            }
+                        } else {
+                            NextStep::ShowQuestions {
+                                mode: app.mode,
+                                request: app.request.clone(),
+                                follow_ups: app.follow_ups.clone(),
+                            }
+                        };
+                    }
+                    KeyCode::Enter => {
+                        next =
+                            NextStep::Exit(InteractiveExit::Confirmed(app.spec_markdown.clone()));
+                    }
+                    _ if is_copy_key(key) => {
+                        app.copy.copy_payload(review_copy_payload(app));
+                    }
+                    KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End => {
+                        let viewport = review_viewport(Rect::new(0, 0, 120, 32));
+                        let _ = app.preview_scroll.apply_key_in_viewport(
+                            key,
+                            viewport,
+                            app.preview_rows(viewport.width.max(1)),
+                        );
+                    }
+                    _ => {}
                 }
-                KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-                | KeyCode::Home
-                | KeyCode::End => {
-                    let viewport = review_viewport(Rect::new(0, 0, 120, 32));
-                    let _ = app.preview_scroll.apply_key_in_viewport(
-                        key,
-                        viewport,
-                        app.preview_rows(viewport.width.max(1)),
-                    );
-                }
-                _ => {}
-            },
+            }
         }
 
         match next {
@@ -728,6 +783,7 @@ impl BacklogSpecApp {
                 self.stage = SpecStage::Request(RequestApp {
                     mode,
                     request: InputFieldState::multiline(request),
+                    copy: CopyUiState::default(),
                     error: None,
                     sticky_error: false,
                 });
@@ -749,6 +805,7 @@ impl BacklogSpecApp {
                         })
                         .collect(),
                     selected: 0,
+                    copy: CopyUiState::default(),
                     error: None,
                     sticky_error: false,
                 });
@@ -776,13 +833,37 @@ impl BacklogSpecApp {
         }
     }
 
-    fn handle_review_mouse(&mut self, mouse: crossterm::event::MouseEvent, viewport: Rect) {
-        if let SpecStage::Review(app) = &mut self.stage {
-            let _ = app.preview_scroll.apply_mouse_in_viewport(
-                mouse,
-                viewport,
-                app.preview_rows(viewport.width.max(1)),
-            );
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent, area: Rect) {
+        match &mut self.stage {
+            SpecStage::Request(app) => {
+                if app.copy.export_active() {
+                    let _ = app
+                        .copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(area));
+                }
+            }
+            SpecStage::Questions(app) => {
+                if app.copy.export_active() {
+                    let _ = app
+                        .copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(area));
+                }
+            }
+            SpecStage::Review(app) => {
+                if app.copy.export_active() {
+                    let _ = app
+                        .copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(area));
+                } else {
+                    let viewport = review_viewport(area);
+                    let _ = app.preview_scroll.apply_mouse_in_viewport(
+                        mouse,
+                        viewport,
+                        app.preview_rows(viewport.width.max(1)),
+                    );
+                }
+            }
+            SpecStage::Loading(_) => {}
         }
     }
 }
@@ -791,6 +872,28 @@ impl ReviewApp {
     fn preview_rows(&self, width: u16) -> usize {
         wrapped_rows(&self.spec_markdown, width.max(1))
     }
+}
+
+fn questions_copy_payload(app: &QuestionsApp) -> CopyPayload {
+    let mut lines = vec![format!("Request\n\n{}", app.request)];
+    if let Some(current) = app.questions.get(app.selected) {
+        lines.extend([
+            String::new(),
+            format!("Question {}\n\n{}", app.selected + 1, current.question),
+            String::new(),
+            format!(
+                "Answer {}\n\n{}",
+                app.selected + 1,
+                current.answer.copy_payload("SPEC answer").plain_text
+            ),
+        ]);
+    }
+
+    CopyPayload::new("SPEC follow-up", lines.join("\n"))
+}
+
+fn review_copy_payload(app: &ReviewApp) -> CopyPayload {
+    CopyPayload::markdown("SPEC preview", app.spec_markdown.clone())
 }
 
 fn start_questions(
@@ -804,6 +907,7 @@ fn start_questions(
     let recovery_stage = RecoveryStage::Request(RequestApp {
         mode: app.mode,
         request: InputFieldState::multiline(request.clone()),
+        copy: CopyUiState::default(),
         error: None,
         sticky_error: false,
     });
@@ -847,6 +951,7 @@ fn start_generation(
             })
             .collect(),
         selected: 0,
+        copy: CopyUiState::default(),
         error: None,
         sticky_error: false,
     });
@@ -947,6 +1052,7 @@ fn finish_pending(app: &mut BacklogSpecApp, result: Result<PendingResult>) -> Re
                 request,
                 questions: question_answers,
                 selected: 0,
+                copy: CopyUiState::default(),
                 error: None,
                 sticky_error: false,
             });
@@ -969,6 +1075,7 @@ fn finish_pending(app: &mut BacklogSpecApp, result: Result<PendingResult>) -> Re
                 follow_ups,
                 spec_markdown,
                 preview_scroll: ScrollState::default(),
+                copy: CopyUiState::default(),
                 error: None,
             });
             Ok(())
@@ -1428,6 +1535,15 @@ fn render_frame(frame: &mut Frame<'_>, app: &BacklogSpecApp) {
         SpecStage::Loading(loading) => render_loading_frame(frame, loading),
         SpecStage::Review(review) => render_review_frame(frame, review, &app.spec_path),
     }
+
+    match &app.stage {
+        SpecStage::Request(request) => request.copy.render_export_overlay(frame, frame.area()),
+        SpecStage::Questions(questions) => {
+            questions.copy.render_export_overlay(frame, frame.area())
+        }
+        SpecStage::Review(review) => review.copy.render_export_overlay(frame, frame.area()),
+        SpecStage::Loading(_) => {}
+    }
 }
 
 fn render_request_frame(frame: &mut Frame<'_>, app: &RequestApp) {
@@ -1476,7 +1592,13 @@ fn render_request_frame(frame: &mut Frame<'_>, app: &RequestApp) {
         inner,
     );
 
-    render_footer(frame, app.error.as_deref(), layout[2]);
+    render_footer(
+        frame,
+        app.error.as_deref(),
+        app.copy.status_text(),
+        layout[2],
+        &field_copy_help("The SPEC flow stays repo-local and only targets `.metastack/SPEC.md`."),
+    );
 }
 
 fn render_questions_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
@@ -1559,7 +1681,13 @@ fn render_questions_frame(frame: &mut Frame<'_>, app: &QuestionsApp) {
         );
     }
 
-    render_footer(frame, app.error.as_deref(), layout[2]);
+    render_footer(
+        frame,
+        app.error.as_deref(),
+        app.copy.status_text(),
+        layout[2],
+        &field_copy_help("Follow-up answers stay repo-local until the generated SPEC is accepted."),
+    );
 }
 
 fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
@@ -1611,15 +1739,25 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &ReviewApp, spec_path: &Path)
         ),
         layout[1],
     );
-    render_footer(frame, app.error.as_deref(), layout[2]);
+    render_footer(
+        frame,
+        app.error.as_deref(),
+        app.copy.status_text(),
+        layout[2],
+        &pane_copy_help(
+            "The preview stays repo-local and only writes `.metastack/SPEC.md` after Enter.",
+        ),
+    );
 }
 
-fn render_footer(frame: &mut Frame<'_>, error: Option<&str>, area: Rect) {
-    let default_text = format!(
-        "The SPEC flow stays repo-local and only targets `{}/SPEC.md`.",
-        branding::PROJECT_DIR
-    );
-    let text = error.unwrap_or(&default_text);
+fn render_footer(
+    frame: &mut Frame<'_>,
+    error: Option<&str>,
+    status: Option<&str>,
+    area: Rect,
+    default_text: &str,
+) {
+    let text = error.or(status).unwrap_or(default_text);
     frame.render_widget(
         Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title("Status"))
@@ -1700,6 +1838,7 @@ mod tests {
         let snapshot = render_request_snapshot(&RequestApp {
             mode: SpecMode::Create,
             request: InputFieldState::multiline("Add a repo-local feature spec workflow"),
+            copy: CopyUiState::default(),
             error: None,
             sticky_error: false,
         });
@@ -1730,6 +1869,7 @@ mod tests {
             follow_ups: Vec::new(),
             spec_markdown: "# OVERVIEW\n\n## GOALS\n\n## FEATURES\n\n## NON-GOALS".to_string(),
             preview_scroll: ScrollState::default(),
+            copy: CopyUiState::default(),
             error: None,
         });
         assert!(snapshot.contains("SPEC Preview"));
@@ -1847,6 +1987,7 @@ mod tests {
                     answer: InputFieldState::multiline("CLI maintainers"),
                 }],
                 selected: 0,
+                copy: CopyUiState::default(),
                 error: None,
                 sticky_error: false,
             }),
@@ -1894,6 +2035,7 @@ mod tests {
                 recovery_stage: RecoveryStage::Request(RequestApp {
                     mode: SpecMode::Create,
                     request: InputFieldState::multiline("Draft a repo-local spec"),
+                    copy: CopyUiState::default(),
                     error: None,
                     sticky_error: false,
                 }),
