@@ -51,7 +51,7 @@ use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::spaced_list;
@@ -775,6 +775,10 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if is_mouse_toggle_key(key) {
+                    copy.toggle_mouse_capture(terminal.backend_mut())?;
+                    continue;
+                }
                 if copy.export_active()
                     && copy.handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
                 {
@@ -1244,6 +1248,10 @@ fn run_improvement_review_dashboard(
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if is_mouse_toggle_key(key) {
+                    copy.toggle_mouse_capture(terminal.backend_mut())?;
+                    continue;
+                }
                 if copy.export_active()
                     && copy.handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
                 {
@@ -1966,6 +1974,10 @@ fn run_instruction_prompt(
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if is_mouse_toggle_key(key) {
+                    copy.toggle_mouse_capture(terminal.backend_mut())?;
+                    continue;
+                }
                 if copy.export_active()
                     && copy.handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
                 {

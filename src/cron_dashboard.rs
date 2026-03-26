@@ -24,7 +24,7 @@ use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::{InputFieldState, SelectFieldState};
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::theme::{Tone, badge, key_hints, list, panel_title, paragraph};
 
 const NONE_AGENT_LABEL: &str = "None";
@@ -166,6 +166,10 @@ pub(crate) fn run_cron_init_form(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
                     let size = terminal.size()?;
                     if app.copy.export_active()
                         && app

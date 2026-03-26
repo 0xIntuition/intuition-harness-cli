@@ -35,7 +35,7 @@ use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, key_hints, panel_title};
 
@@ -422,6 +422,12 @@ fn run_interactive_spec_flow(
         if event::poll(Duration::from_millis(120)).context("failed to poll SPEC terminal events")? {
             match event::read().context("failed to read SPEC terminal event")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        if let Some(copy) = app.active_copy_state() {
+                            copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        }
+                        continue;
+                    }
                     if let Some(exit) = app.handle_key(root, key, &agent, &model, &reasoning)? {
                         return Ok(exit);
                     }
@@ -558,6 +564,15 @@ impl BacklogSpecApp {
                 sticky_error: false,
             }),
             pending: None,
+        }
+    }
+
+    fn active_copy_state(&mut self) -> Option<&mut CopyUiState> {
+        match &mut self.stage {
+            SpecStage::Request(app) => Some(&mut app.copy),
+            SpecStage::Questions(app) => Some(&mut app.copy),
+            SpecStage::Review(app) => Some(&mut app.copy),
+            SpecStage::Loading(_) => None,
         }
     }
 

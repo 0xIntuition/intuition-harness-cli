@@ -62,7 +62,7 @@ use crate::tui::copy::{
     pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::markdown::render_markdown;
 use crate::tui::prompt_images::PromptImageAttachment;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
@@ -1406,6 +1406,11 @@ fn run_interactive_plan_session(
                         continue;
                     }
 
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
+
                     let frame_size = terminal.size()?;
                     if app.copy.export_active()
                         && app
@@ -1679,6 +1684,11 @@ fn run_fast_interactive_plan_session(
                     }
 
                     if app.pending.is_some() {
+                        continue;
+                    }
+
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
                         continue;
                     }
 

@@ -73,6 +73,11 @@ pub(crate) fn is_select_all_key(key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+/// Returns true for the mouse capture toggle key (F2).
+pub(crate) fn is_mouse_toggle_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::F(2))
+}
+
 /// Returns true for Ctrl+C when used as a copy key in editable fields with an
 /// active selection. Callers should check `field.has_selection()` before
 /// treating this as copy (otherwise Ctrl+C should remain cancel/quit).

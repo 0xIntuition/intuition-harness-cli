@@ -29,7 +29,7 @@ use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::{spaced_list, spaced_list_item};
 use crate::tui::theme::{Tone, badge, empty_state, panel_title, paragraph};
@@ -176,6 +176,10 @@ pub fn run_sync_dashboard(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
                     let size = terminal.size()?;
                     if app.copy.export_active()
                         && app

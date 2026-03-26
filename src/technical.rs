@@ -60,7 +60,7 @@ use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::{LinearCommandContext, load_linear_command_context};
 
@@ -507,6 +507,11 @@ fn run_interactive_technical_session(
                     }
 
                     if app.pending.is_some() {
+                        continue;
+                    }
+
+                    if is_mouse_toggle_key(key) {
+                        app.copy.toggle_mouse_capture(terminal.backend_mut())?;
                         continue;
                     }
 

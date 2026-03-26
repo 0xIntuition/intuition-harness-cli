@@ -35,7 +35,7 @@ use crate::tui::copy::{
 use crate::tui::fields::{
     FilterableSelectFieldState, InputFieldRender, InputFieldState, SelectFieldState,
 };
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_paragraph_with_block, wrapped_rows};
 use crate::tui::theme::{Tone, badge, content_panel, emphasis_style, label_style, tone_style};
 
@@ -646,6 +646,10 @@ fn run_dashboard(mut app: OnboardingApp, app_config: &AppConfig) -> Result<Dashb
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if is_mouse_toggle_key(key) {
+            app.copy.toggle_mouse_capture(terminal.backend_mut())?;
             continue;
         }
         if app.copy.export_active()

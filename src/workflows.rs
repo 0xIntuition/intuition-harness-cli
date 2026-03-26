@@ -46,7 +46,7 @@ use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::is_copy_key;
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, scrollable_paragraph, wrapped_rows};
 
 const BUILTIN_WORKFLOWS: [(&str, &str); 4] = [
@@ -326,6 +326,10 @@ async fn run_workflow_tui(
 
         match event::read().context("failed to read workflow TUI input")? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if is_mouse_toggle_key(key) {
+                    app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                    continue;
+                }
                 let command = app.handle_key(key)?;
                 if let Some(message) =
                     apply_workflow_ui_command(&root, args, &mut app, command, false).await?

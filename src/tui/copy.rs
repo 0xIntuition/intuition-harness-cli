@@ -3,7 +3,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, MouseEvent};
+use crossterm::execute;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -13,14 +14,6 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{badge, key_hints, panel_title};
-
-const WINDOWS_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE: &str =
-    "clipboard copy is not supported on Windows yet; the terminal export is ready instead";
-const WSL_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE: &str =
-    "clipboard copy is not supported on WSL yet; the terminal export is ready instead";
-const GENERIC_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE: &str =
-    "clipboard copy is not supported on this platform yet; the terminal export is ready instead";
-const LINUX_CLIPBOARD_COPY_UNAVAILABLE_MESSAGE: &str = "clipboard copy requires `wl-copy` on Wayland or `xclip` on X11; the terminal export is ready instead";
 
 /// Shared copy payload for read-only panes and editable fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,15 +110,53 @@ pub(crate) enum CopyOutcome {
     },
 }
 
-/// Shared UI state for copy/export status and fallback overlays.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Shared UI state for copy/export status, fallback overlays, and mouse capture toggle.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyUiState {
     status: Option<String>,
     export: Option<CopyExportView>,
     export_scroll: ScrollState,
+    /// Whether the TUI currently owns mouse capture. When `false`, the terminal
+    /// handles mouse events natively so users can select text with click-drag.
+    mouse_captured: bool,
+}
+
+impl Default for CopyUiState {
+    fn default() -> Self {
+        Self {
+            status: None,
+            export: None,
+            export_scroll: ScrollState::default(),
+            mouse_captured: true,
+        }
+    }
 }
 
 impl CopyUiState {
+    /// Toggle mouse capture on or off, writing the crossterm escape sequence to
+    /// `stdout`. Returns the new capture state. When mouse capture is off, the
+    /// terminal handles mouse events natively so users can select and copy text.
+    pub(crate) fn toggle_mouse_capture(&mut self, stdout: &mut impl Write) -> Result<bool> {
+        if self.mouse_captured {
+            execute!(stdout, DisableMouseCapture).context("failed to disable mouse capture")?;
+            self.mouse_captured = false;
+            self.status =
+                Some("Mouse released \u{2014} select text normally. F2 to restore.".to_string());
+        } else {
+            execute!(stdout, EnableMouseCapture).context("failed to enable mouse capture")?;
+            self.mouse_captured = true;
+            self.status = Some("Mouse capture restored.".to_string());
+        }
+        Ok(self.mouse_captured)
+    }
+
+    /// Returns `true` when mouse capture is active. Surfaces should skip mouse
+    /// event processing when this returns `false`.
+    #[allow(dead_code)]
+    pub(crate) fn mouse_captured(&self) -> bool {
+        self.mouse_captured
+    }
+
     /// Attempt to copy the provided payload and retain any resulting status or fallback export.
     pub(crate) fn copy_payload(&mut self, payload: CopyPayload) {
         self.apply(copy_payload(&payload));
@@ -260,15 +291,13 @@ pub(crate) fn is_field_copy_key(key: crossterm::event::KeyEvent, has_selection: 
 
 /// Append shared copy guidance for a read-only pane help line.
 pub(crate) fn pane_copy_help(base: &str) -> String {
-    format!(
-        "{base} Ctrl+Y copies the full pane. When the clipboard is unavailable, a terminal export opens."
-    )
+    format!("{base} Ctrl+Y copies the pane. F2 releases the mouse for native text selection.")
 }
 
 /// Append shared copy guidance for an editable field help line.
 pub(crate) fn field_copy_help(base: &str) -> String {
     format!(
-        "{base} Shift+Arrow selects text. Ctrl+A selects all. Ctrl+Y copies the selection or full field."
+        "{base} Shift+Arrow selects. Ctrl+A selects all. Ctrl+Y copies. F2 releases mouse for native selection."
     )
 }
 
@@ -314,6 +343,8 @@ fn copy_payload(payload: &CopyPayload) -> CopyOutcome {
 enum ClipboardWriteOutcome {
     Copied,
     Failed(String),
+    /// Retained for test coverage; production paths fall through to OSC 52.
+    #[allow(dead_code)]
     Unavailable(String),
 }
 
@@ -331,18 +362,40 @@ fn write_plain_text_to_clipboard(text: &str) -> ClipboardWriteOutcome {
             command.args(["-selection", "clipboard"]);
             command_copy_outcome("xclip", command, text)
         }
-        ClipboardBackend::Windows => ClipboardWriteOutcome::Unavailable(
-            WINDOWS_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE.to_string(),
-        ),
+        ClipboardBackend::Windows => try_osc52_fallback(text),
         ClipboardBackend::Wsl => {
-            ClipboardWriteOutcome::Unavailable(WSL_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE.to_string())
+            // Try powershell.exe clip.exe first, then fall back to OSC 52.
+            let command = Command::new("clip.exe");
+            match command_copy_outcome("clip.exe", command, text) {
+                ClipboardWriteOutcome::Copied => ClipboardWriteOutcome::Copied,
+                _ => try_osc52_fallback(text),
+            }
         }
-        ClipboardBackend::Unsupported => ClipboardWriteOutcome::Unavailable(
-            GENERIC_CLIPBOARD_COPY_UNSUPPORTED_MESSAGE.to_string(),
-        ),
-        ClipboardBackend::LinuxUnavailable => {
-            ClipboardWriteOutcome::Unavailable(LINUX_CLIPBOARD_COPY_UNAVAILABLE_MESSAGE.to_string())
+        ClipboardBackend::Unsupported => try_osc52_fallback(text),
+        ClipboardBackend::LinuxUnavailable => try_osc52_fallback(text),
+    }
+}
+
+/// Attempt to copy text using the OSC 52 terminal escape sequence. This works
+/// over SSH, inside tmux, and in most modern terminals (Ghostty, iTerm2,
+/// WezTerm, Kitty, Alacritty, Windows Terminal).
+fn try_osc52_fallback(text: &str) -> ClipboardWriteOutcome {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+
+    // Detect tmux and wrap with the DCS passthrough envelope.
+    let sequence = if env::var("TMUX").is_ok() {
+        format!("\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\")
+    } else {
+        format!("\x1b]52;c;{encoded}\x07")
+    };
+
+    match std::io::stdout().write_all(sequence.as_bytes()) {
+        Ok(()) => {
+            let _ = std::io::stdout().flush();
+            ClipboardWriteOutcome::Copied
         }
+        Err(error) => ClipboardWriteOutcome::Failed(format!("OSC 52: {error}")),
     }
 }
 
