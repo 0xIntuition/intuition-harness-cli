@@ -15,6 +15,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{ListItem, ListState};
 use ratatui::{Frame, Terminal};
 
+use crate::tui::copy::{CopyPayload, CopyUiState, copy_overlay_viewport, pane_copy_help};
+use crate::tui::keybindings::is_copy_key;
 use crate::tui::markdown::render_markdown;
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::spaced_list::{render_github_pr_row, spaced_list};
@@ -87,6 +89,7 @@ struct MergeDashboardApp {
     preview_scroll: ScrollState,
     selected: BTreeSet<usize>,
     completed: Option<Vec<u64>>,
+    copy: CopyUiState,
 }
 
 pub fn run_merge_dashboard(
@@ -123,7 +126,19 @@ pub fn run_merge_dashboard(
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let viewport = preview_viewport(terminal.size()?.into());
+                let size = terminal.size()?;
+                if app.copy.export_active()
+                    && app
+                        .copy
+                        .handle_export_key(key, copy_overlay_viewport(size.into()))
+                {
+                    continue;
+                }
+                if is_copy_key(key) {
+                    app.copy.copy_payload(app.copy_payload());
+                    continue;
+                }
+                let viewport = preview_viewport(size.into());
                 let action = match key.code {
                     KeyCode::Char('q') => return Ok(MergeDashboardExit::Cancelled),
                     KeyCode::Up => Some(MergeDashboardAction::Up),
@@ -146,8 +161,15 @@ pub fn run_merge_dashboard(
                 }
             }
             Event::Mouse(mouse) => {
-                let viewport = preview_viewport(terminal.size()?.into());
-                let _ = app.handle_mouse(mouse, viewport);
+                let size = terminal.size()?;
+                if app.copy.export_active() {
+                    let _ = app
+                        .copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
+                } else {
+                    let viewport = preview_viewport(size.into());
+                    let _ = app.handle_mouse(mouse, viewport);
+                }
             }
             _ => {}
         }
@@ -174,7 +196,7 @@ fn render_once(data: MergeDashboardData, options: MergeDashboardOptions) -> Resu
 fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(0)])
+        .constraints([Constraint::Length(7), Constraint::Min(0)])
         .split(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -199,12 +221,23 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
                 Span::styled("  Base ", label_style()),
                 Span::raw(app.data.base_branch.clone()),
             ]),
+            Line::from(
+                app.copy
+                    .status_text()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        pane_copy_help(
+                            "Tab changes focus. Up/Down moves the queue, PgUp/PgDn/Home/End or the mouse wheel scroll the preview, and Space toggles selection.",
+                        )
+                    }),
+            ),
             key_hints(&[
                 ("Up/Down", "move/scroll"),
                 ("Tab", "focus"),
                 ("PgUp/PgDn", "scroll preview"),
                 ("Wheel", "scroll preview"),
                 ("Space", "select"),
+                ("Ctrl+Y", "copy"),
                 ("Enter", "advance"),
                 ("Esc", "back"),
                 ("q", "exit"),
@@ -217,6 +250,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
     render_pr_list(frame, body[0], app);
     render_selection_summary(frame, sidebar[0], app);
     render_details(frame, sidebar[1], app);
+    app.copy.render_export_overlay(frame, frame.area());
 }
 
 fn render_pr_list(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
@@ -266,8 +300,13 @@ fn render_pr_list(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
 }
 
 fn render_selection_summary(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
+    let text = if let Some(status) = app.copy.status_text() {
+        format!("{status}\n\n{}", pane_copy_help(&app.selection_text()))
+    } else {
+        pane_copy_help(&app.selection_text())
+    };
     let summary = paragraph(
-        app.selection_text(),
+        text,
         panel_title("Selected Batch Review", app.focus == Focus::Confirm),
     );
     frame.render_widget(summary, area);
@@ -292,6 +331,7 @@ impl MergeDashboardApp {
             preview_scroll: ScrollState::default(),
             selected: BTreeSet::new(),
             completed: None,
+            copy: CopyUiState::default(),
         }
     }
 
@@ -380,6 +420,29 @@ impl MergeDashboardApp {
             .filter_map(|index| self.data.pull_requests.get(*index))
             .map(|pr| pr.number)
             .collect()
+    }
+
+    fn copy_payload(&self) -> CopyPayload {
+        match self.focus {
+            Focus::PullRequests => {
+                let text = self
+                    .data
+                    .pull_requests
+                    .get(self.pr_index)
+                    .map(|pr| {
+                        format!(
+                            "Focused PR: #{} {}\nAuthor: {}\nBranch: {}\nUpdated: {}",
+                            pr.number, pr.title, pr.author, pr.head_ref, pr.updated_at
+                        )
+                    })
+                    .unwrap_or_else(|| "No pull request is available.".to_string());
+                CopyPayload::new("merge dashboard PR selection", text)
+            }
+            Focus::Preview => CopyPayload::from_text("merge dashboard preview", self.detail_text()),
+            Focus::Confirm => {
+                CopyPayload::new("merge dashboard batch summary", self.selection_text())
+            }
+        }
     }
 
     fn selected_prs(&self) -> Vec<&MergeDashboardPullRequest> {
@@ -584,7 +647,7 @@ fn shift_index(index: &mut usize, len: usize, delta: isize) {
 fn preview_viewport(area: Rect) -> Rect {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(0)])
+        .constraints([Constraint::Length(7), Constraint::Min(0)])
         .split(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)

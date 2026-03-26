@@ -367,7 +367,9 @@ fn run_clipboard_command(command: &mut Command, text: &str) -> Result<()> {
         return Ok(());
     }
 
-    Err(anyhow!(String::from_utf8_lossy(&output.stderr).trim().to_owned()))
+    Err(anyhow!(
+        String::from_utf8_lossy(&output.stderr).trim().to_owned()
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
