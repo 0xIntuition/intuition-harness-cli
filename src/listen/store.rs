@@ -29,12 +29,27 @@ const LISTEN_SESSION_DETAIL_VERSION: u8 = 3;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
+#[cfg(test)]
 fn listen_turn_log_prefix() -> String {
     format!("--- {} listen turn ", crate::branding::COMMAND_NAME)
 }
 
+fn is_supported_listen_log_header(line: &str, suffix: &str) -> bool {
+    line.strip_prefix("--- ")
+        .and_then(|value| {
+            value
+                .strip_prefix(crate::branding::COMMAND_NAME)
+                .or_else(|| value.strip_prefix("meta"))
+        })
+        .is_some_and(|value| value.starts_with(suffix))
+}
+
 fn is_listen_turn_log_header(line: &str) -> bool {
-    line.starts_with(&listen_turn_log_prefix()) || line.starts_with("--- meta listen turn ")
+    is_supported_listen_log_header(line, " listen turn ")
+}
+
+fn is_listen_preflight_failure_log_header(line: &str) -> bool {
+    is_supported_listen_log_header(line, " listen preflight failed @ ")
 }
 
 #[derive(Debug, Clone)]
@@ -1139,9 +1154,12 @@ fn repair_from_worker_log(path: Option<&Path>) -> Result<WorkerLogRecovery> {
     let mut turns = Vec::new();
     let mut current_turn = WorkerLogTurn::default();
 
+    // Persisted listen logs are a compatibility surface for session repair. Only the current
+    // branded and legacy `meta` turn headers plus the corresponding preflight-failure headers are
+    // treated as explicit historical block boundaries.
     for raw_line in contents.lines() {
         let line = raw_line.trim();
-        if is_listen_turn_log_header(line) {
+        if is_listen_turn_log_header(line) || is_listen_preflight_failure_log_header(line) {
             if !current_turn.contents.is_empty() || current_turn.provider.is_some() {
                 turns.push(current_turn);
                 current_turn = WorkerLogTurn::default();
@@ -1357,6 +1375,7 @@ fn now_epoch_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
 
     use anyhow::{Context, Result};
@@ -1374,6 +1393,88 @@ mod tests {
         SessionPhase, SessionSelector, project_key_for_metastack_root, resolve_source_root,
         write_json,
     };
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RepairedCanonicalSnapshot {
+        provider: Option<String>,
+        model: Option<String>,
+        reasoning: Option<String>,
+        tokens: TokenUsage,
+        repair_status: Option<super::CanonicalRepairStatus>,
+    }
+
+    fn listen_fixture_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("listen")
+            .join(name)
+    }
+
+    fn read_listen_fixture(name: &str) -> Result<String> {
+        let path = listen_fixture_path(name);
+        fs::read_to_string(&path).with_context(|| format!("failed to read `{}`", path.display()))
+    }
+
+    fn seed_worker_log_fixture(
+        store: &ListenProjectStore,
+        issue_identifier: &str,
+        fixture_name: &str,
+    ) -> Result<()> {
+        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
+        session.tokens = TokenUsage::default();
+        session.latest_resume_handle = None;
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+        fs::create_dir_all(store.paths().logs_dir.clone())?;
+        fs::write(
+            store.log_path(issue_identifier),
+            read_listen_fixture(fixture_name)?,
+        )
+        .with_context(|| {
+            format!(
+                "failed to seed `{fixture_name}` into `{}`",
+                store.log_path(issue_identifier).display()
+            )
+        })?;
+        seed_state(store, vec![session])
+    }
+
+    fn load_repaired_snapshot(
+        fixture_name: &str,
+        issue_identifier: &str,
+    ) -> Result<(RepairedCanonicalSnapshot, ListenSessionDetail)> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        seed_worker_log_fixture(&store, issue_identifier, fixture_name)?;
+
+        let state = store.load_state()?;
+        let repaired = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_identifier == issue_identifier)
+            .context("expected repaired session to be present")?;
+        let detail = store
+            .load_session_detail(issue_identifier)?
+            .context("expected repaired detail artifact")?;
+
+        Ok((
+            RepairedCanonicalSnapshot {
+                provider: repaired.canonical.provider.clone(),
+                model: repaired.canonical.model.clone(),
+                reasoning: repaired.canonical.reasoning.clone(),
+                tokens: repaired.canonical.tokens.clone(),
+                repair_status: repaired
+                    .canonical
+                    .repair
+                    .as_ref()
+                    .map(|repair| repair.status),
+            },
+            detail,
+        ))
+    }
 
     #[test]
     fn project_store_uses_git_common_dir_source_root_for_worktrees() -> Result<()> {
@@ -1989,63 +2090,28 @@ mod tests {
     }
 
     #[test]
-    fn load_state_repairs_canonical_metadata_from_worker_log() -> Result<()> {
-        let temp = tempdir()?;
-        let repo_root = temp.path().join("repo");
-        let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
-        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+    fn load_state_repairs_equivalent_canonical_metadata_from_branded_and_legacy_turn_fixtures()
+    -> Result<()> {
+        let (branded, branded_detail) =
+            load_repaired_snapshot("turn-branded-intu.log", "ENG-10170")?;
+        let (legacy, legacy_detail) = load_repaired_snapshot("turn-legacy-meta.log", "ENG-10171")?;
 
-        let issue_identifier = "ENG-10170";
-        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
-        session.tokens = TokenUsage::default();
-        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
-        fs::create_dir_all(store.paths().logs_dir.clone())?;
-        fs::write(
-            store.log_path(issue_identifier),
-            format!(
-                "{}1/20 @ 2026-03-23T12:00:00Z ---\n\
-                 Resolved provider: claude\n\
-                 Resolved model: sonnet\n\
-                 Resolved reasoning: high\n\
-                 {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":210}}}}}}\n\
-                 {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":34}}}}\n\
-                 {{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}}\n",
-                super::listen_turn_log_prefix(),
-            ),
-        )?;
-        seed_state(&store, vec![session])?;
-
-        let state = store.load_state()?;
-        let repaired = state
-            .sessions
-            .iter()
-            .find(|session| session.issue_identifier == issue_identifier)
-            .context("expected repaired session to be present")?;
-        assert_eq!(repaired.tokens.input, Some(210));
-        assert_eq!(repaired.tokens.output, Some(34));
-        assert_eq!(repaired.canonical.provider.as_deref(), Some("claude"));
-        assert_eq!(repaired.canonical.model.as_deref(), Some("sonnet"));
-        assert_eq!(repaired.canonical.reasoning.as_deref(), Some("high"));
-        assert_eq!(repaired.canonical.tokens.input, Some(210));
-        assert_eq!(repaired.canonical.tokens.output, Some(34));
-        assert_eq!(
-            repaired
-                .canonical
-                .repair
-                .as_ref()
-                .map(|repair| repair.status),
-            Some(super::CanonicalRepairStatus::Recovered)
-        );
-
-        let detail = store
-            .load_session_detail(issue_identifier)?
-            .context("expected repaired detail artifact")?;
-        assert_eq!(detail.canonical.provider.as_deref(), Some("claude"));
-        assert_eq!(detail.canonical.model.as_deref(), Some("sonnet"));
-        assert_eq!(detail.canonical.reasoning.as_deref(), Some("high"));
-        assert_eq!(detail.canonical.tokens.input, Some(210));
-        assert_eq!(detail.canonical.tokens.output, Some(34));
+        let expected = RepairedCanonicalSnapshot {
+            provider: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("high".to_string()),
+            tokens: TokenUsage {
+                input: Some(210),
+                output: Some(34),
+            },
+            repair_status: Some(super::CanonicalRepairStatus::Recovered),
+        };
+        assert_eq!(branded, expected);
+        assert_eq!(legacy, expected);
+        assert_eq!(branded_detail.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(legacy_detail.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(branded_detail.canonical.tokens.input, Some(210));
+        assert_eq!(legacy_detail.canonical.tokens.output, Some(34));
 
         Ok(())
     }
@@ -2144,43 +2210,71 @@ mod tests {
     }
 
     #[test]
-    fn load_state_repairs_canonical_metadata_from_legacy_meta_worker_log() -> Result<()> {
-        let temp = tempdir()?;
-        let repo_root = temp.path().join("repo");
-        let data_root = temp.path().join("data");
-        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
-        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+    fn load_state_treats_branded_and_legacy_preflight_only_fixtures_as_skipped_repair() -> Result<()>
+    {
+        let (branded, _) = load_repaired_snapshot("preflight-only-branded-intu.log", "ENG-10172")?;
+        let (legacy, _) = load_repaired_snapshot("preflight-only-legacy-meta.log", "ENG-10173")?;
 
-        let issue_identifier = "ENG-10172";
-        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
-        session.tokens = TokenUsage::default();
-        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
-        fs::create_dir_all(store.paths().logs_dir.clone())?;
-        fs::write(
-            store.log_path(issue_identifier),
-            concat!(
-                "--- meta listen turn 1/20 @ 2026-03-23T12:00:00Z ---\n",
-                "Resolved provider: claude\n",
-                "Resolved model: sonnet\n",
-                "Resolved reasoning: high\n",
-                "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":210}}}\n",
-                "{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":34}}\n",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"session-123\"}\n",
-            ),
-        )?;
-        seed_state(&store, vec![session])?;
+        let expected = RepairedCanonicalSnapshot {
+            provider: None,
+            model: None,
+            reasoning: None,
+            tokens: TokenUsage::default(),
+            repair_status: Some(super::CanonicalRepairStatus::Skipped),
+        };
+        assert_eq!(branded, expected);
+        assert_eq!(legacy, expected);
 
-        let state = store.load_state()?;
-        let repaired = state
-            .sessions
-            .iter()
-            .find(|session| session.issue_identifier == issue_identifier)
-            .context("expected repaired session to be present")?;
-        assert_eq!(repaired.tokens.input, Some(210));
-        assert_eq!(repaired.tokens.output, Some(34));
-        assert_eq!(repaired.canonical.provider.as_deref(), Some("claude"));
-        assert_eq!(repaired.canonical.model.as_deref(), Some("sonnet"));
-        assert_eq!(repaired.canonical.reasoning.as_deref(), Some("high"));
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_keeps_preflight_boundaries_from_corrupting_later_valid_turn_repair() -> Result<()>
+    {
+        let (branded, _) =
+            load_repaired_snapshot("preflight-then-turn-branded-intu.log", "ENG-10174")?;
+        let (legacy, _) =
+            load_repaired_snapshot("preflight-then-turn-legacy-meta.log", "ENG-10175")?;
+
+        let expected = RepairedCanonicalSnapshot {
+            provider: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("high".to_string()),
+            tokens: TokenUsage {
+                input: Some(210),
+                output: Some(34),
+            },
+            repair_status: Some(super::CanonicalRepairStatus::Recovered),
+        };
+        assert_eq!(branded, expected);
+        assert_eq!(legacy, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_repairs_mixed_legacy_and_branded_worker_log_fixture() -> Result<()> {
+        let (repaired, detail) =
+            load_repaired_snapshot("mixed-legacy-and-branded.log", "ENG-10176")?;
+
+        assert_eq!(
+            repaired,
+            RepairedCanonicalSnapshot {
+                provider: Some("claude".to_string()),
+                model: Some("sonnet".to_string()),
+                reasoning: Some("high".to_string()),
+                tokens: TokenUsage {
+                    input: Some(290),
+                    output: Some(47),
+                },
+                repair_status: Some(super::CanonicalRepairStatus::Recovered),
+            }
+        );
+        assert_eq!(detail.canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(detail.canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(detail.canonical.reasoning.as_deref(), Some("high"));
+        assert_eq!(detail.canonical.tokens.input, Some(290));
+        assert_eq!(detail.canonical.tokens.output, Some(47));
 
         Ok(())
     }

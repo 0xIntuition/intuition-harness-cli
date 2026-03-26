@@ -27,7 +27,11 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
    `listen/projects/<PROJECT_KEY>/session-details/<TICKET>.json`, and agent stdout/stderr are
    appended to `listen/projects/<PROJECT_KEY>/logs/<TICKET>.log`.
    Built-in provider-native manual resume metadata is stored as the same `{ provider, id }`
-   record in both persisted artifacts.
+   record in both persisted artifacts. Historical repair intentionally keeps reading the current
+   branded `--- intu listen turn ...` / `--- intu listen preflight failed @ ...` headers plus the
+   legacy `--- meta ...` equivalents from those per-issue logs; preflight-failure blocks are valid
+   persisted content, but they only delimit repair boundaries and do not themselves recover
+   canonical provider/model/reasoning/tokens.
 10. Session and workspace cleanup is two-tiered:
     - **Immediate auto-clean**: when a listener worker session completes (the ticket leaves active
       states), the worker attempts to remove the workspace clone and its ticket-scoped listen
