@@ -30,12 +30,14 @@ use crate::cli::{BacklogSpecArgs, RunAgentArgs};
 use crate::config::AGENT_ROUTE_BACKLOG_SPEC;
 use crate::context::load_workflow_contract;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, write_text_file};
-use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
+use crate::progress::{
+    LoadingPanelData, SPINNER_FRAMES, agent_loading_status_line, render_loading_panel,
+};
 use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
-use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key, top_level_cancel};
 use crate::tui::scroll::{ScrollState, scrollable_content_paragraph, wrapped_rows};
 use crate::tui::theme::{Tone, badge, key_hints, panel_title};
 
@@ -703,7 +705,7 @@ impl BacklogSpecApp {
                 }
             }
             SpecStage::Loading(_) => {
-                if key.code == KeyCode::Esc {
+                if top_level_cancel(key) {
                     return Ok(Some(InteractiveExit::Cancelled));
                 }
             }
@@ -1699,7 +1701,7 @@ fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
             message: app.mode.loading_message(app.phase).to_string(),
             detail: app.detail.clone(),
             spinner_index: app.spinner_index,
-            status_line: "Waiting on the local SPEC worker...".to_string(),
+            status_line: agent_loading_status_line().to_string(),
         },
     );
 }
@@ -1858,7 +1860,39 @@ mod tests {
             spinner_index: 1,
         });
         assert!(snapshot.contains("Revising repo-local SPEC"));
-        assert!(snapshot.contains("local SPEC worker"));
+        assert!(snapshot.contains("Esc or Ctrl+C cancels."));
+    }
+
+    #[test]
+    fn loading_stage_accepts_escape_and_ctrl_c_cancel() {
+        for key in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            let mut app = BacklogSpecApp {
+                root: PathBuf::from("."),
+                mode: SpecMode::Improve,
+                spec_path: PathBuf::from(format!("{}/SPEC.md", branding::PROJECT_DIR)),
+                existing_spec: None,
+                prefilled_answers: Vec::new(),
+                agent: None,
+                model: None,
+                reasoning: None,
+                stage: SpecStage::Loading(LoadingApp {
+                    mode: SpecMode::Improve,
+                    phase: PendingKind::Generate,
+                    detail: "Waiting for the SPEC worker".to_string(),
+                    spinner_index: 0,
+                }),
+                pending: None,
+            };
+
+            let exit = app
+                .handle_key(Path::new("."), key, &None, &None, &None)
+                .expect("loading cancel should not fail");
+
+            assert!(matches!(exit, Some(InteractiveExit::Cancelled)));
+        }
     }
 
     #[test]

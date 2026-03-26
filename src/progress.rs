@@ -35,6 +35,11 @@ pub(crate) struct LoadingPanelData {
     pub(crate) status_line: String,
 }
 
+/// Returns the shared status copy for cancelable agent-loading dashboards.
+pub(crate) fn agent_loading_status_line() -> &'static str {
+    "State: loading. Esc or Ctrl+C cancels. The dashboard advances automatically when the agent responds."
+}
+
 pub(crate) fn render_loading_panel(frame: &mut Frame<'_>, area: Rect, data: &LoadingPanelData) {
     let panel_height = if area.height < 14 { 10 } else { 11 };
     let [outer] = Layout::default()

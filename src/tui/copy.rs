@@ -280,16 +280,6 @@ impl CopyUiState {
     }
 }
 
-/// Returns true when `key` should trigger a copy action in an editable field
-/// that has an active selection. This accepts both `Ctrl+Y` (the canonical TUI
-/// copy key) and `Ctrl+C` (familiar to most users). For read-only panes, use
-/// [`is_copy_key`](crate::tui::keybindings::is_copy_key) instead — `Ctrl+C`
-/// should remain cancel/quit there.
-pub(crate) fn is_field_copy_key(key: crossterm::event::KeyEvent, has_selection: bool) -> bool {
-    use crate::tui::keybindings::{is_copy_key, is_ctrl_c};
-    is_copy_key(key) || (has_selection && is_ctrl_c(key))
-}
-
 /// Append shared copy guidance for a read-only pane help line.
 pub(crate) fn pane_copy_help(base: &str) -> String {
     format!("{base} Ctrl+Y copy. Ctrl+G grab/release mouse.")

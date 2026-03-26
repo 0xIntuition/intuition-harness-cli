@@ -53,14 +53,16 @@ use crate::linear::{
     materialize_issue_context, prepare_issue_context, render_ticket_image_summary,
 };
 use crate::output::{MachineIssueSummary, render_json_success};
-use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
+use crate::progress::{
+    LoadingPanelData, SPINNER_FRAMES, agent_loading_status_line, render_loading_panel,
+};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::sync_command::run_sync_push_for_issue;
 use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
 };
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
-use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
+use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key, top_level_cancel};
 use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
 use crate::{LinearCommandContext, load_linear_command_context};
 
@@ -502,6 +504,10 @@ fn run_interactive_technical_session(
         }))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.pending.is_some() && top_level_cancel(key) {
+                        return Ok(InteractiveTechnicalExit::Cancelled);
+                    }
+
                     if key.code == KeyCode::Esc {
                         return Ok(InteractiveTechnicalExit::Cancelled);
                     }
@@ -1678,9 +1684,7 @@ fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
             message: app.message.clone(),
             detail: app.detail.clone(),
             spinner_index: app.spinner_index,
-            status_line:
-                "State: loading. The dashboard advances automatically when the agent responds."
-                    .to_string(),
+            status_line: agent_loading_status_line().to_string(),
         },
     );
 }
