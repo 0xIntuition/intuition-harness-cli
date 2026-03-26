@@ -789,14 +789,16 @@ mod tests {
             .find(|file| file.relative_path == "validation.md")
             .expect("canonical validation template should exist");
 
-        assert!(readme.contents.contains(&format!(
-            "`{} setup`",
-            crate::branding::COMMAND_NAME
-        )));
-        assert!(readme.contents.contains(&format!(
-            "`{} backlog tech`",
-            crate::branding::COMMAND_NAME
-        )));
+        assert!(
+            readme
+                .contents
+                .contains(&format!("`{} setup`", crate::branding::COMMAND_NAME))
+        );
+        assert!(
+            readme
+                .contents
+                .contains(&format!("`{} backlog tech`", crate::branding::COMMAND_NAME))
+        );
         assert!(validation.contents.contains(&format!(
             "`{} backlog sync pull {{{{issue_identifier}}}}`",
             crate::branding::COMMAND_NAME
