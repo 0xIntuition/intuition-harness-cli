@@ -58,7 +58,8 @@ use crate::progress::{LoadingPanelData, SPINNER_FRAMES, render_loading_panel};
 use crate::scaffold::ensure_planning_layout;
 use crate::text_diff::render_text_diff;
 use crate::tui::copy::{
-    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
+    CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, is_field_copy_key,
+    pane_copy_help,
 };
 use crate::tui::fields::InputFieldState;
 use crate::tui::keybindings::is_copy_key;
@@ -1932,7 +1933,7 @@ fn handle_fast_request_step_key(
             }
         }
         _ => {
-            if is_copy_key(key) {
+            if is_field_copy_key(key, app.request.has_selection()) {
                 copy.copy_payload(app.request.copy_payload("fast planning request"));
             } else if app.request.handle_key_with_width(key, input_width) {
                 if input_key_clears_sticky_error(key) {
@@ -2044,7 +2045,11 @@ fn handle_fast_questions_step_key(
             }
         }
         _ => {
-            if is_copy_key(key) {
+            let field_has_selection = app
+                .questions
+                .get(app.selected)
+                .is_some_and(|q| q.answer.has_selection());
+            if is_field_copy_key(key, field_has_selection) {
                 copy.copy_payload(fast_questions_copy_payload(app));
             } else if let Some(question) = app.questions.get_mut(app.selected)
                 && question.answer.handle_key_with_width(key, input_width)
@@ -2093,7 +2098,7 @@ fn handle_fast_addendum_step_key(
             }
         }
         _ => {
-            if is_copy_key(key) {
+            if is_field_copy_key(key, app.addendum.has_selection()) {
                 copy.copy_payload(fast_addendum_copy_payload(app));
             } else if app.addendum.handle_key_with_width(key, input_width) {
                 if input_key_clears_sticky_error(key) {
