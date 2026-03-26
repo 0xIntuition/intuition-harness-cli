@@ -8,7 +8,6 @@ use crate::agent_provider::{
     builtin_provider_adapter, builtin_provider_model_keys, builtin_provider_names,
     builtin_provider_reasoning_keys,
 };
-use crate::branding;
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AGENT_ROUTE_AGENTS_REVIEW, AGENT_ROUTE_AGENTS_WORKFLOWS_RUN,
     AGENT_ROUTE_BACKLOG_IMPROVE, AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPEC,
@@ -103,12 +102,12 @@ impl fmt::Display for NoAgentSelectedError {
             Some(route_key) => write!(
                 f,
                 "no agent was selected for route `{route_key}`. Pass `--agent <NAME>` or configure a route or global default with `{} runtime config`.",
-                branding::COMMAND_NAME
+                crate::branding::COMMAND_NAME,
             ),
             None => write!(
                 f,
                 "no agent was selected. Pass `--agent <NAME>` or run `{} runtime config` to configure a default agent.",
-                branding::COMMAND_NAME
+                crate::branding::COMMAND_NAME,
             ),
         }
     }
@@ -155,8 +154,8 @@ pub fn load_required_planning_meta(root: &Path, command_name: &str) -> Result<Pl
     if !meta_path.is_file() {
         return Err(anyhow!(
             "`{} {command_name}` requires repo setup. Run `{} runtime setup --root {}` and rerun.",
-            branding::COMMAND_NAME,
-            branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
+            crate::branding::COMMAND_NAME,
             root.display()
         ));
     }
@@ -265,7 +264,7 @@ impl LinearConfig {
     pub fn missing_auth_error() -> anyhow::Error {
         anyhow!(
             "Linear auth is required for this command. Set LINEAR_API_KEY, run `{} runtime config`, or pass `--api-key <token>`.",
-            branding::COMMAND_NAME
+            crate::branding::COMMAND_NAME,
         )
     }
 }

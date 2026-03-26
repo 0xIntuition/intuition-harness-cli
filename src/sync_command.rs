@@ -341,7 +341,7 @@ fn build_unlinked_sync_dashboard_issue(entry: &BacklogSyncEntry) -> SyncDashboar
             description: Some(format!(
                 "Local backlog entry under `{}/backlog/{slug}`. Link it with `{} backlog sync link <ISSUE> --entry {slug}` to enable pull and push.",
                 crate::branding::PROJECT_DIR,
-                branding::COMMAND_NAME
+                crate::branding::COMMAND_NAME
             )),
             url: format!("{}/backlog/{slug}", crate::branding::PROJECT_DIR),
             priority: None,
@@ -808,8 +808,9 @@ fn guard_listen_issue_description_sync(identifier: &str) -> Result<()> {
             .is_some_and(|value| value.eq_ignore_ascii_case(identifier))
     {
         bail!(
-            "`{cmd} backlog sync push {identifier}` is disabled during `{cmd} agents listen` because it would overwrite the primary Linear issue description; update the workpad comment instead",
-            cmd = branding::COMMAND_NAME
+            "`{} backlog sync push {identifier}` is disabled during `{} agents listen` because it would overwrite the primary Linear issue description; update the workpad comment instead",
+            branding::COMMAND_NAME,
+            branding::COMMAND_NAME
         );
     }
 
@@ -1517,8 +1518,9 @@ async fn load_sync_project_issues(
     } else {
         let project_id = default_project_id.ok_or_else(|| {
             anyhow!(
-                "`{cmd} backlog sync` requires a repo default project or `--project`. Run `{cmd} runtime setup --root . --project <PROJECT>` or pass `--project \"Project Name\"`.",
-                cmd = branding::COMMAND_NAME
+                "`{} backlog sync` requires a repo default project or `--project`. Run `{} runtime setup --root . --project <PROJECT>` or pass `--project \"Project Name\"`.",
+                branding::COMMAND_NAME,
+                branding::COMMAND_NAME
             )
         })?;
         (

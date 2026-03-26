@@ -44,30 +44,114 @@ pub enum Command {
     Workspace(WorkspaceArgs),
     /// Securely self-update a GitHub Release install on macOS/Linux.
     Upgrade(UpgradeArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " backlog plan`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog plan`."
+        )
+    )]
     Plan(PlanArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " backlog tech`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog tech`."
+        )
+    )]
     Technical(TechnicalArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " agents listen`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " agents listen`."
+        )
+    )]
     Listen(ListenArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " linear issues`."))]
-    #[command(visible_alias = "tickets")]
+    #[command(
+        hide = true,
+        visible_alias = "tickets",
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " linear issues`."
+        )
+    )]
     Issues(IssuesArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " linear projects`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " linear projects`."
+        )
+    )]
     Projects(ProjectsArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " runtime cron`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " runtime cron`."
+        )
+    )]
     Cron(CronArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " context scan`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " context scan`."
+        )
+    )]
     Scan(ScanArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " agents workflows`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " agents workflows`."
+        )
+    )]
     Workflows(WorkflowsArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " runtime config`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " runtime config`."
+        )
+    )]
     Config(ConfigArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " runtime setup`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " runtime setup`."
+        )
+    )]
     Setup(SetupArgs),
-    #[command(hide = true, about = concat!("Compatibility alias for `", env!("BRAND_COMMAND_NAME"), " backlog sync`."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Compatibility alias for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog sync`."
+        )
+    )]
     Sync(SyncArgs),
-    #[command(hide = true, about = concat!("Hidden worker used by `", env!("BRAND_COMMAND_NAME"), " listen` to supervise repeated agent turns."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Hidden worker used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen` to supervise repeated agent turns."
+        )
+    )]
     ListenWorker(ListenWorkerArgs),
     /// Create the local .metastack workspace and reusable templates.
     #[command(hide = true)]
@@ -629,7 +713,14 @@ pub enum CronCommands {
     Approve(CronApproveArgs),
     /// Reject a waiting cron workflow run.
     Reject(CronRejectArgs),
-    #[command(hide = true, about = concat!("Hidden worker used by `", env!("BRAND_COMMAND_NAME"), " cron start` for the detached scheduler loop."))]
+    #[command(
+        hide = true,
+        about = concat!(
+            "Hidden worker used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " cron start` for the detached scheduler loop."
+        )
+    )]
     Daemon(CronDaemonArgs),
 }
 
@@ -838,11 +929,32 @@ pub struct ConfigArgs {
     /// Update the global default built-in reasoning option.
     #[arg(long)]
     pub default_reasoning: Option<String>,
-    #[arg(long, help = concat!("Update how many times `", env!("BRAND_COMMAND_NAME"), " merge` will ask the agent to repair failed validation by default."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update how many times `",
+            env!("BRAND_COMMAND_NAME"),
+            " merge` will ask the agent to repair failed validation by default."
+        )
+    )]
     pub merge_validation_repair_attempts: Option<String>,
-    #[arg(long, help = concat!("Update how many transient validation reruns `", env!("BRAND_COMMAND_NAME"), " merge` will allow before escalating."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update how many transient validation reruns `",
+            env!("BRAND_COMMAND_NAME"),
+            " merge` will allow before escalating."
+        )
+    )]
     pub merge_validation_transient_retry_attempts: Option<String>,
-    #[arg(long, help = concat!("Update how many times `", env!("BRAND_COMMAND_NAME"), " merge` retries push and PR publication after transient remote failures."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update how many times `",
+            env!("BRAND_COMMAND_NAME"),
+            " merge` retries push and PR publication after transient remote failures."
+        )
+    )]
     pub merge_publication_retry_attempts: Option<String>,
     /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
@@ -883,7 +995,14 @@ pub struct ConfigArgs {
     /// Update the install-scoped plan follow-up question limit.
     #[arg(long)]
     pub plan_follow_up_limit: Option<String>,
-    #[arg(long, help = concat!("Update the install-scoped default mode for `", env!("BRAND_COMMAND_NAME"), " backlog plan`. Supported values: `normal`, `fast`, or `none`."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the install-scoped default mode for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog plan`. Supported values: `normal`, `fast`, or `none`."
+        )
+    )]
     pub plan_default_mode: Option<String>,
     /// Update whether install-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
     #[arg(long)]
@@ -968,20 +1087,65 @@ pub struct SetupArgs {
     /// Update the repo-scoped default built-in reasoning option.
     #[arg(long)]
     pub reasoning: Option<String>,
-    #[arg(long, help = concat!("Update the labels required for `", env!("BRAND_COMMAND_NAME"), " listen` pickup. Provide a comma-separated list."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the labels required for `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen` pickup. Provide a comma-separated list."
+        )
+    )]
     pub listen_label: Option<String>,
-    #[arg(long = "assignee-scope", alias = "assignment-scope", value_enum, help = concat!("Update the assignee scope used by `", env!("BRAND_COMMAND_NAME"), " listen`."))]
+    #[arg(
+        long = "assignee-scope",
+        alias = "assignment-scope",
+        value_enum,
+        help = concat!(
+            "Update the assignee scope used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen`."
+        )
+    )]
     pub assignee_scope: Option<ListenAssigneeScopeArg>,
-    #[arg(long, value_enum, help = concat!("Update how `", env!("BRAND_COMMAND_NAME"), " listen` refreshes existing ticket workspaces."))]
+    #[arg(
+        long,
+        value_enum,
+        help = concat!(
+            "Update how `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen` refreshes existing ticket workspaces."
+        )
+    )]
     pub refresh_policy: Option<ListenRefreshPolicyArg>,
     /// Update the optional instructions file injected into launched agents.
     #[arg(long)]
     pub instructions_path: Option<String>,
-    #[arg(long, help = concat!("Update the default Linear refresh cadence used by `", env!("BRAND_COMMAND_NAME"), " listen`."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the default Linear refresh cadence used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen`."
+        )
+    )]
     pub listen_poll_interval: Option<String>,
-    #[arg(long, help = concat!("Update the interactive `", env!("BRAND_COMMAND_NAME"), " plan` follow-up question limit."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the interactive `",
+            env!("BRAND_COMMAND_NAME"),
+            " plan` follow-up question limit."
+        )
+    )]
     pub interactive_plan_follow_up_question_limit: Option<String>,
-    #[arg(long, help = concat!("Update the repo-scoped default mode for `", env!("BRAND_COMMAND_NAME"), " backlog plan`. Supported values: `normal`, `fast`, or `none`."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the repo-scoped default mode for `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog plan`. Supported values: `normal`, `fast`, or `none`."
+        )
+    )]
     pub plan_default_mode: Option<String>,
     /// Update whether repo-scoped fast planning defaults to a single ticket. Supported values: `true`, `false`, or `none`.
     #[arg(long)]
@@ -989,9 +1153,23 @@ pub struct SetupArgs {
     /// Update the repo-scoped fast planning follow-up batch size.
     #[arg(long)]
     pub plan_fast_questions: Option<String>,
-    #[arg(long, help = concat!("Update the default label applied to issues created by `", env!("BRAND_COMMAND_NAME"), " plan`."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the default label applied to issues created by `",
+            env!("BRAND_COMMAND_NAME"),
+            " plan`."
+        )
+    )]
     pub plan_label: Option<String>,
-    #[arg(long, help = concat!("Update the default label applied to issues created by `", env!("BRAND_COMMAND_NAME"), " backlog tech`."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Update the default label applied to issues created by `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog tech`."
+        )
+    )]
     pub technical_label: Option<String>,
     /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
@@ -1136,7 +1314,14 @@ pub struct ListenRunArgs {
     /// Override the Linear GraphQL endpoint.
     #[arg(long)]
     pub api_url: Option<String>,
-    #[arg(long, help = concat!("Override the named Linear profile used by `", env!("BRAND_COMMAND_NAME"), " listen`."))]
+    #[arg(
+        long,
+        help = concat!(
+            "Override the named Linear profile used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen`."
+        )
+    )]
     pub profile: Option<String>,
     /// Default Linear team key.
     #[arg(long)]
@@ -1732,7 +1917,11 @@ pub struct DashboardArgs {
 pub enum DashboardCommands {
     /// Launch the Linear issue dashboard.
     Linear(DashboardLinearArgs),
-    #[command(about = concat!("Launch the agent-session dashboard exposed by `", env!("BRAND_COMMAND_NAME"), " agents listen`."))]
+    #[doc = concat!(
+        "Launch the agent-session dashboard exposed by `",
+        env!("BRAND_COMMAND_NAME"),
+        " agents listen`."
+    )]
     Agents(DashboardAgentsArgs),
     /// Launch the team-oriented Linear review dashboard.
     Team(DashboardLinearArgs),

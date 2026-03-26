@@ -3282,7 +3282,7 @@ fn read_context(path: &Path) -> Result<String> {
             path.file_name()
                 .map(|value| value.to_string_lossy())
                 .unwrap_or_default(),
-            branding::COMMAND_NAME
+            crate::branding::COMMAND_NAME,
         )),
         Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
     }
