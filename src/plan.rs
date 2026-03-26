@@ -3536,7 +3536,7 @@ fn render_request_form_frame(frame: &mut Frame<'_>, app: &RequestApp, copy_statu
         app.error.as_deref(),
         copy_status,
         &field_copy_help(
-            "Type the planning request. Up/Down and PgUp/PgDn/Home/End move through wrapped lines, and the mouse wheel scrolls while the editor is focused. Enter continues. Shift+Enter inserts a newline. Ctrl+S also continues. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+            "Enter/Ctrl+S continue. Shift+Enter newline. Ctrl+V paste. Esc cancel.",
         ),
     );
 }
@@ -3565,7 +3565,7 @@ fn render_questions_form_frame(
         Line::from(selected.question.clone()),
         Line::from(""),
         Line::styled(
-            "Enter records the current answer. Up/Down and PgUp/PgDn/Home/End move through wrapped content, and the mouse wheel scrolls while the answer pane is focused. Shift+Enter inserts a newline. Ctrl+S also moves to the next unanswered question, or generates the ticket plan once every answer is complete. Ctrl+V checks for clipboard images first, otherwise pastes text.",
+            "Enter records answer. Shift+Enter newline. Ctrl+S next question or generate plan. Ctrl+V paste.",
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]))
@@ -3670,7 +3670,7 @@ fn render_questions_form_frame(
         app.error.as_deref(),
         copy_status,
         &field_copy_help(
-            "Tab/Shift-Tab moves between questions. Up/Down moves inside the active multiline answer, including wrapped lines. Enter records the current response; a blank answer skips that question. Shift+Enter inserts a newline. Once every question is answered or skipped, Enter generates the ticket plan. Ctrl+S remains available as an alternate submit key. Ctrl+V checks for clipboard images first, otherwise pastes text. Attached images render as [Image #N] placeholders. Esc cancels.",
+            "Tab/Shift-Tab switch questions. Enter records answer (blank skips). Shift+Enter newline. Ctrl+S submit. Ctrl+V paste. Esc cancel.",
         ),
     );
 }
@@ -3773,7 +3773,7 @@ fn render_review_form_frame(frame: &mut Frame<'_>, app: &ReviewApp, copy_status:
         app.error.as_deref(),
         copy_status,
         &pane_copy_help(
-            "Tab/Shift+Tab changes review focus. In [scroll] panes, Up/Down and PgUp/PgDn/Home/End or the mouse wheel scroll. Space cycles [ ] skip -> [x] keep -> [1] -> [2] for the active ticket. Enter creates the checked batch or rebuilds the next preview when numbered merge groups are present. U clears all marks. Esc cancels.",
+            "Tab/Shift+Tab focus. Space cycle marks. Enter create batch. U clear marks. Esc cancel.",
         ),
     );
 }
