@@ -202,6 +202,11 @@ Long-form editors and preview panes in the terminal UI now share one scrolling m
 
 This applies to flows such as `meta backlog spec`, `meta backlog plan`, `meta linear issues create`, `meta linear issues edit`, `meta dashboard linear`, `meta backlog tech`, `meta merge`, and related preview-driven dashboards that render long descriptions or generated file content.
 
+Interactive TUIs also share one copy/export contract. Press `Ctrl+Y` to copy the focused field or
+pane, and when the local clipboard is unavailable MetaStack opens a terminal-safe export overlay
+instead of failing silently. The shared implementation and coverage matrix are documented in
+[`docs/tui-copy-contract.md`](docs/tui-copy-contract.md).
+
 ## Build From Source
 
 Build and install the CLI into your local Cargo bin directory:
@@ -1066,6 +1071,10 @@ Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, 
 
 The interactive dashboard keeps candidates and live sessions in separate views so you can search, multi-select, and queue more PRs while earlier reviews are still running. `Enter` queues a normal review, `Tab` rotates focus between the candidate list, candidate preview, session list, and session detail panes, and `R` refreshes the candidate discovery set without leaving the dashboard. Once a review reaches `Review Complete`, switch to the Sessions view and press `A` to start the remediation agent PR workflow from the saved report.
 
+Across review, retro, and follow-up ticket review panes, `Ctrl+Y` copies the focused search field
+or detail pane through the shared TUI copy contract, with the same fallback export overlay when
+the clipboard is unavailable.
+
 ```bash
 # One-shot review
 meta agents review 42 --root .
@@ -1156,6 +1165,8 @@ Inspect open PRs for the current repository, describe an improvement request, an
 - `Tab` toggles focus between the PR list and session list.
 - `Enter` on a session opens a detail view with phase, instructions, and stacked PR link.
 - `Backspace` returns from a detail view to the parent list.
+- `Ctrl+Y` copies the focused list or detail pane with the shared terminal export fallback when
+  direct clipboard access is unavailable.
 
 Sessions persist across restarts. Each session records the source PR metadata, user instructions, execution phase, workspace path, improve branch, and stacked PR URL.
 
@@ -1305,6 +1316,8 @@ The interactive selected-session detail pane follows the same fallback contract 
 #N` when the detail artifact has a PR number but no published PR URL yet.
 Within the live dashboard, `P` pauses the selected running worker, and `R` either resumes a paused
 worker or retries a blocked session from its existing workspace state.
+`Ctrl+Y` copies the focused listen pane or detail view and opens the shared terminal export overlay
+when direct clipboard writes are unavailable.
 
 ### `workspace`
 

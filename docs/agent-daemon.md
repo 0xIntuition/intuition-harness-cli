@@ -88,7 +88,7 @@ Primary options:
   falling back to a legacy `session_id`.
 - `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
   `--all`; it refuses to remove any targeted record whose stored PID is still alive.
-- Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, `Up` / `Down` move the selected row, `Enter` toggles the selected-session detail pane, `Esc` / `Backspace` close detail mode, `PgUp` / `PgDn` scroll the detail pane, `P` pauses the selected running worker, `R` resumes a paused worker or retries a blocked session, and `q` / `Ctrl-C` exits.
+- Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, `Up` / `Down` move the selected row, `Enter` toggles the selected-session detail pane, `Esc` / `Backspace` close detail mode, `PgUp` / `PgDn` scroll the detail pane, `P` pauses the selected running worker, `R` resumes a paused worker or retries a blocked session, `Ctrl+Y` copies the focused pane with the shared export fallback, and `q` / `Ctrl-C` exits.
 
 Examples:
 
