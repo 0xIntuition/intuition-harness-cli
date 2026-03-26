@@ -292,14 +292,12 @@ pub(crate) fn is_field_copy_key(key: crossterm::event::KeyEvent, has_selection: 
 
 /// Append shared copy guidance for a read-only pane help line.
 pub(crate) fn pane_copy_help(base: &str) -> String {
-    format!("{base} Ctrl+Y copies the pane. Ctrl+G releases the mouse for native text selection.")
+    format!("{base} Ctrl+Y copy. Ctrl+G grab/release mouse.")
 }
 
 /// Append shared copy guidance for an editable field help line.
 pub(crate) fn field_copy_help(base: &str) -> String {
-    format!(
-        "{base} Shift+Arrow selects. Ctrl+A selects all. Ctrl+Y copies. Ctrl+G releases mouse for native selection."
-    )
+    format!("{base} Ctrl+A select all. Ctrl+Y copy. Ctrl+G grab/release mouse.")
 }
 
 /// Returns the centered viewport used by the shared export overlay.
