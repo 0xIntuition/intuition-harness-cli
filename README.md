@@ -4,41 +4,41 @@
   <p><strong>Linear-native planning, repo context, and local agent automation from one CLI.</strong></p>
   <p>Create backlog items, sync planning files, run reusable workflows, and supervise unattended ticket execution without leaving the terminal.</p>
   <p>
-    <a href="https://github.com/metastack-systems/metastack-cli/actions/workflows/quality.yml"><img src="https://img.shields.io/github/actions/workflow/status/metastack-systems/metastack-cli/quality.yml?label=quality" alt="Quality status" /></a>
-    <a href="https://github.com/metastack-systems/metastack-cli/releases"><img src="https://img.shields.io/github/v/release/metastack-systems/metastack-cli?display_name=tag" alt="Latest release" /></a>
+    <a href="https://github.com/0xintuition/intuition-harness-cli/actions/workflows/quality.yml"><img src="https://img.shields.io/github/actions/workflow/status/0xintuition/intuition-harness-cli/quality.yml?label=quality" alt="Quality status" /></a>
+    <a href="https://github.com/0xintuition/intuition-harness-cli/releases"><img src="https://img.shields.io/github/v/release/0xintuition/intuition-harness-cli?display_name=tag" alt="Latest release" /></a>
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-0f172a" alt="Supported platforms" />
     <img src="https://img.shields.io/badge/built%20with-Rust-f74c00" alt="Built with Rust" />
   </p>
-  <p><a href="#install-meta">Install</a> · <a href="#quick-start">Quick Start</a> · <a href="#command-overview">Commands</a> · <a href="#command-reference">Reference</a></p>
+  <p><a href="#install-intu">Install</a> · <a href="#quick-start">Quick Start</a> · <a href="#command-overview">Commands</a> · <a href="#command-reference">Reference</a></p>
 </div>
 
-The MetaStack CLI is a Rust terminal tool for engineers who want repository planning context, Linear workflows, and agent-backed automation to stay close to the code.
+The Intuition CLI (`intu`) is a Rust terminal tool for engineers who want repository planning context, Linear workflows, and agent-backed automation to stay close to the code.
 
 It is built for teams that want to:
 
-- manage repo-scoped planning state under `.metastack/`
+- manage repo-scoped planning state under `.intuition/`
 - move between Linear and local backlog files without context switching
 - run local agents such as Codex or Claude with repository-aware prompts
-- supervise unattended issue execution with `meta agents listen`
+- supervise unattended issue execution with `intu agents listen`
 
-## Why MetaStack?
+## Why Intuition?
 
-Most planning tools split work across issue trackers, docs, scripts, and ad hoc prompts. MetaStack pulls those workflows back into one place:
+Most planning tools split work across issue trackers, docs, scripts, and ad hoc prompts. Intuition pulls those workflows back into one place:
 
-- `meta runtime config` saves install-scoped Linear and agent defaults.
-- `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
-- `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
-- `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
-- `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
-- `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
-- `meta agents retro` analyzes shipped PRs for follow-up backlog opportunities and opens a plan-style Linear ticket curation flow.
-- `meta agents improve` inspects open PRs, accepts improvement instructions, and publishes stacked PRs targeting the source PR branch from an isolated workspace.
-- `meta agents execute <ISSUE_ID>` runs a one-off headless agent session for a single Linear issue, persisting session state for later adoption by `meta agents listen`.
-- `meta agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout. Execute-started sessions are visible in the listen dashboard but not auto-claimed.
-- `meta workspace` inventories and cleans sibling workspace clones (listener, improve, and review) with automatic merged-workspace cleanup and batch reconciliation.
+- `intu runtime config` saves install-scoped Linear and agent defaults.
+- `intu runtime setup` bootstraps the repo and saves repo-scoped defaults under `.intuition/`.
+- `intu context scan` turns the codebase into reusable planning context.
+- `intu backlog spec`, `intu backlog plan`, `intu backlog improve`, `intu backlog tech`, `intu linear issues refine`, and `intu agents workflows` generate structured backlog work.
+- `intu merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
+- `intu linear ...` and `intu backlog sync` keep Linear and local files aligned.
+- `intu agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
+- `intu agents retro` analyzes shipped PRs for follow-up backlog opportunities and opens a plan-style Linear ticket curation flow.
+- `intu agents improve` inspects open PRs, accepts improvement instructions, and publishes stacked PRs targeting the source PR branch from an isolated workspace.
+- `intu agents execute <ISSUE_ID>` runs a one-off headless agent session for a single Linear issue, persisting session state for later adoption by `intu agents listen`.
+- `intu agents listen` runs unattended ticket execution in dedicated workspace clones instead of your source checkout. Execute-started sessions are visible in the listen dashboard but not auto-claimed.
+- `intu workspace` inventories and cleans sibling workspace clones (listener, improve, and review) with automatic merged-workspace cleanup and batch reconciliation.
 
-## Install `meta` During Development
+## Install `intu` During Development
 
 From the root of the repository:
 
@@ -46,92 +46,92 @@ From the root of the repository:
 cargo install --path . --force
 ```
 
-This will install the `meta` command to your Cargo bin directory, which is typically `~/.cargo/bin`.
+This will install the `intu` command to your Cargo bin directory, which is typically `~/.cargo/bin`.
 
-Cargo installs are intentionally not self-updatable with `meta upgrade`. Use the GitHub Release
+Cargo installs are intentionally not self-updatable with `intu upgrade`. Use the GitHub Release
 installer below when you want secure in-place updates.
 
-## Install `meta` From Source
+## Install `intu` From Source
 
 Install the latest GitHub Release into `~/.local/bin`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh | sh
+curl -fsSL https://raw.githubusercontent.com/0xintuition/intuition-harness-cli/main/scripts/install-meta.sh | sh
 ```
 
 Install a pinned release instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh | sh -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/0xintuition/intuition-harness-cli/main/scripts/install-meta.sh | sh -s -- --version v0.1.0
 ```
 
 Install into a custom bin directory without `sudo`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh | META_INSTALL_DIR="$HOME/bin" sh
+curl -fsSL https://raw.githubusercontent.com/0xintuition/intuition-harness-cli/main/scripts/install-meta.sh | META_INSTALL_DIR="$HOME/bin" sh
 ```
 
 Download the installer first when you do not want `curl | sh`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/metastack-systems/metastack-cli/main/scripts/install-meta.sh -o install-meta.sh
+curl -fsSL https://raw.githubusercontent.com/0xintuition/intuition-harness-cli/main/scripts/install-meta.sh -o install-meta.sh
 sh install-meta.sh --version v0.1.0
 ```
 
 After installation:
 
 ```bash
-meta --help
+intu --help
 ```
 
 Check whether a newer stable GitHub Release is available for the installed binary:
 
 ```bash
-meta upgrade --check
+intu upgrade --check
 ```
 
 Preview the verified replacement plan without mutating the install:
 
 ```bash
-meta upgrade --dry-run
+intu upgrade --dry-run
 ```
 
 Apply the latest stable GitHub Release in place:
 
 ```bash
-meta upgrade
+intu upgrade
 ```
 
 Advanced version-management path:
 
 ```bash
-meta upgrade --version 0.2.0 --dry-run
-meta upgrade --version 0.3.0-rc.1 --prerelease
-meta upgrade --version 0.1.0 --allow-downgrade
+intu upgrade --version 0.2.0 --dry-run
+intu upgrade --version 0.3.0-rc.1 --prerelease
+intu upgrade --version 0.1.0 --allow-downgrade
 ```
 
 ## Quick Start
 
-Inside a repository you want metastack to manage:
+Inside a repository you want Intuition to manage:
 
 ```bash
-meta runtime config
-meta runtime setup
-meta backlog spec --root .
-meta context scan
-meta context show
-meta backlog plan --request "Break the next release into Linear-ready tickets"
+intu runtime config
+intu runtime setup
+intu backlog spec --root .
+intu context scan
+intu context show
+intu backlog plan --request "Break the next release into Linear-ready tickets"
 ```
 
 If you are ready to supervise issue execution:
 
 ```bash
-meta agents listen --team MET --project "MetaStack CLI"
+intu agents listen --team MET --project "Intuition CLI"
 ```
 
 ## Listen Prerequisites
 
-Before running `meta agents listen` with the built-in providers:
+Before running `intu agents listen` with the built-in providers:
 
 - Built-in Codex workers require `~/.codex/config.toml` to include:
 
@@ -143,12 +143,12 @@ sandbox_mode = "danger-full-access"
 - Remove `[mcp_servers.linear]` from the Codex config when possible. The preflight warns when Linear MCP is detected.
 - Built-in Claude workers require `claude` on `PATH`.
 - Built-in Claude listen runs should not inherit `ANTHROPIC_API_KEY`; headless listen is expected to use the local Claude subscription instead of an API-key override.
-- Run `meta agents listen --check` to validate the active listen provider prerequisites plus Linear reachability/auth without starting the daemon.
+- Run `intu agents listen --check` to validate the active listen provider prerequisites plus Linear reachability/auth without starting the daemon.
 
-`meta runtime setup` bootstraps the repo-local `.metastack/` workspace:
+`intu runtime setup` bootstraps the repo-local `.intuition/` workspace:
 
 ```text
-.metastack/
+.intuition/
   SPEC.md
   README.md
   meta.json
@@ -182,28 +182,28 @@ sandbox_mode = "danger-full-access"
 
 ## Command Overview
 
-The preferred public surface is domain-first. Legacy top-level commands such as `meta plan`, `meta technical`, `meta listen`, and `meta sync` remain available during the migration window and print a hint toward the preferred path.
+The preferred public surface is domain-first. Legacy top-level commands such as `intu plan`, `intu technical`, `intu listen`, and `intu sync` remain available during the migration window and print a hint toward the preferred path.
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, analyze dependencies, batch into releases, create technical backlog children, and sync backlog work for the current repository |
-| `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
-| `meta agents` | Run the unattended listener and reusable workflow playbooks |
-| `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
-| `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
-| `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
-| `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
-| `meta workspace` | List, clean, and prune sibling workspace clones (listener, improve, review) under the fixed workspace root |
-| `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
+| `intu backlog` | Plan, analyze dependencies, batch into releases, create technical backlog children, and sync backlog work for the current repository |
+| `intu linear` | Browse, create, edit, refine, and dashboard Linear work |
+| `intu agents` | Run the unattended listener and reusable workflow playbooks |
+| `intu context` | Inspect, map, doctor, scan, or reload the effective agent context |
+| `intu runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
+| `intu dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
+| `intu merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
+| `intu workspace` | List, clean, and prune sibling workspace clones (listener, improve, review) under the fixed workspace root |
+| `intu upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
 
 ## Interactive TUI Scrolling
 
 Long-form editors and preview panes in the terminal UI now share one scrolling model. When a multiline editor or preview has focus, `Up`, `Down`, `PgUp`, `PgDn`, `Home`, and `End` move within the wrapped content, and mouse-wheel scrolling applies to the focused pane instead of leaking into surrounding lists or forms.
 
-This applies to flows such as `meta backlog spec`, `meta backlog plan`, `meta linear issues create`, `meta linear issues edit`, `meta dashboard linear`, `meta backlog tech`, `meta merge`, and related preview-driven dashboards that render long descriptions or generated file content.
+This applies to flows such as `intu backlog spec`, `intu backlog plan`, `intu linear issues create`, `intu linear issues edit`, `intu dashboard linear`, `intu backlog tech`, `intu merge`, and related preview-driven dashboards that render long descriptions or generated file content.
 
 Interactive TUIs also share one copy/export contract. Press `Ctrl+Y` to copy the focused field or
-pane, and when the local clipboard is unavailable MetaStack opens a terminal-safe export overlay
+pane, and when the local clipboard is unavailable Intuition opens a terminal-safe export overlay
 instead of failing silently. The shared implementation and coverage matrix are documented in
 [`docs/tui-copy-contract.md`](docs/tui-copy-contract.md).
 
@@ -225,81 +225,81 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 A typical end-to-end loop looks like this:
 
-1. Run `meta runtime config` once to save install-scoped Linear auth and agent defaults.
-2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
-3. Run `meta backlog spec` to create or refine the repo-local `.metastack/SPEC.md`.
-4. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-5. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
-6. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
-7. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
-8. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
-9. Use `meta workspace` when you want to inspect or clean those listener-created clones later.
+1. Run `intu runtime config` once to save install-scoped Linear auth and agent defaults.
+2. Run `intu runtime setup` once per repository to scaffold `.intuition/` and save repo defaults.
+3. Run `intu backlog spec` to create or refine the repo-local `.intuition/SPEC.md`.
+4. Run `intu context scan` to refresh the repo context under `.intuition/codebase/`.
+5. Use `intu backlog plan` or `intu backlog tech` to create structured backlog work.
+6. Use `intu linear ...`, `intu dashboard ...`, or `intu backlog sync` to coordinate with Linear.
+7. Use `intu merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
+8. Use `intu agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
+9. Use `intu workspace` when you want to inspect or clean those listener-created clones later.
 
 ## Example Flows
 
 Engineer:
 
 ```bash
-meta runtime setup --team MET --project "MetaStack CLI"
-meta backlog spec --root .
-meta context scan
-meta backlog plan --request "Break the next release into Linear-ready tickets"
-meta backlog tech MET-35
+intu runtime setup --team MET --project "Intuition CLI"
+intu backlog spec --root .
+intu context scan
+intu backlog plan --request "Break the next release into Linear-ready tickets"
+intu backlog tech MET-35
 ```
 
 Team lead:
 
 ```bash
-meta linear issues list --team MET --state "In Progress"
-meta linear issues refine MET-35 --passes 2
-meta dashboard team --team MET --project "MetaStack CLI"
+intu linear issues list --team MET --state "In Progress"
+intu linear issues refine MET-35 --passes 2
+intu dashboard team --team MET --project "Intuition CLI"
 ```
 
 Ops-style operator:
 
 ```bash
-meta agents listen --team MET --project "MetaStack CLI" --once
-meta dashboard agents --team MET --project "MetaStack CLI" --render-once
-meta dashboard ops
-meta runtime cron status
+intu agents listen --team MET --project "Intuition CLI" --once
+intu dashboard agents --team MET --project "Intuition CLI" --render-once
+intu dashboard ops
+intu runtime cron status
 ```
 
 Aggregate merge operator:
 
 ```bash
-meta merge --json
-meta merge
-meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
+intu merge --json
+intu merge
+intu merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
 ```
 
 ## Command Reference
 
 ### `runtime config`
 
-Inspect or update the install-scoped MetaStack CLI config:
+Inspect or update the install-scoped Intuition CLI config:
 
 ```bash
-meta runtime config
-meta runtime config --json
-meta runtime config --api-key lin_api_work
-meta runtime config --default-profile work
-meta runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
-meta runtime config --default-assignee viewer --default-state Backlog --default-priority 2 --default-label platform --default-label cli
-meta runtime config --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
-meta runtime config --vim-mode enabled
-meta runtime config --merge-validation-repair-attempts 8
-meta runtime config --merge-validation-transient-retry-attempts 2
-meta runtime config --merge-publication-retry-attempts 6
-meta runtime config --route backlog --route-agent claude --route-model opus
-meta runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
-meta runtime config --clear-route backlog.plan
-meta runtime config --advanced-routing
-meta runtime config --replay-onboarding
+intu runtime config
+intu runtime config --json
+intu runtime config --api-key lin_api_work
+intu runtime config --default-profile work
+intu runtime config --default-agent codex --default-model gpt-5.4 --default-reasoning medium
+intu runtime config --default-assignee viewer --default-state Backlog --default-priority 2 --default-label platform --default-label cli
+intu runtime config --velocity-project "Intuition CLI" --velocity-state Backlog --velocity-auto-assign viewer
+intu runtime config --vim-mode enabled
+intu runtime config --merge-validation-repair-attempts 8
+intu runtime config --merge-validation-transient-retry-attempts 2
+intu runtime config --merge-publication-retry-attempts 6
+intu runtime config --route backlog --route-agent claude --route-model opus
+intu runtime config --route backlog.plan --route-agent codex --route-model gpt-5.3-codex
+intu runtime config --clear-route backlog.plan
+intu runtime config --advanced-routing
+intu runtime config --replay-onboarding
 ```
 
-Legacy alias: `meta config`
+Legacy alias: `intu config`
 
-`meta runtime config` writes a TOML config file to `$METASTACK_CONFIG` when set, otherwise:
+`intu runtime config` writes a TOML config file to `$METASTACK_CONFIG` when set, otherwise:
 
 - `$XDG_CONFIG_HOME/metastack/config.toml`
 - `~/.config/metastack/config.toml`
@@ -315,7 +315,7 @@ The persisted config can store:
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
-- install-scoped merge defaults under `[merge]`, including validation repair, transient retry, and publication retry caps for `meta merge`
+- install-scoped merge defaults under `[merge]`, including validation repair, transient retry, and publication retry caps for `intu merge`
 - advanced family-level agent routing under `[agents.routing.families.<family>]`
 - advanced command-level agent routing under `[agents.routing.commands."<route>"]`
 
@@ -323,7 +323,7 @@ Agent-backed routes resolve install-scoped settings in this order:
 
 1. command route override
 2. command family override
-3. repo default from `.metastack/meta.json` when present
+3. repo default from `.intuition/meta.json` when present
 4. global default
 
 For an individual run, explicit CLI flags still win over the routed defaults:
@@ -331,10 +331,10 @@ For an individual run, explicit CLI flags still win over the routed defaults:
 
 First-run behavior:
 
-- a fresh install routes normal `meta` commands into the shared onboarding wizard before the requested command runs
-- `meta runtime setup` / `meta setup` are also intercepted until install onboarding completes, then return to being the manual repo-scoped editing flows
-- `meta runtime config --replay-onboarding` and `meta config --replay-onboarding` rerun the same wizard for debugging or refreshes
-- plain `meta runtime config` / `meta config` remain the manual install-scoped editing dashboards after onboarding
+- a fresh install routes normal `intu` commands into the shared onboarding wizard before the requested command runs
+- `intu runtime setup` / `intu setup` are also intercepted until install onboarding completes, then return to being the manual repo-scoped editing flows
+- `intu runtime config --replay-onboarding` and `intu config --replay-onboarding` rerun the same wizard for debugging or refreshes
+- plain `intu runtime config` / `intu config` remain the manual install-scoped editing dashboards after onboarding
 
 For the built-in providers, `--reasoning`, `default_reasoning`, and `route_reasoning` are validated
 against the selected provider/model catalog instead of being accepted as free text. The dashboards
@@ -350,7 +350,7 @@ Built-in reasoning options shipped in-repo:
 - `codex` `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5-codex`, `gpt-5-codex-mini`: `low`, `medium`, `high`
 - `claude` `sonnet`, `opus`, `haiku`, `sonnet[1m]`, `opusplan`: `low`, `medium`, `high`, `max`
 
-Use `meta runtime config --advanced-routing` for the dedicated routing dashboard, or use
+Use `intu runtime config --advanced-routing` for the dedicated routing dashboard, or use
 `--route`, `--route-agent`, `--route-model`, `--route-reasoning`, and `--clear-route` for
 non-interactive edits.
 
@@ -399,7 +399,7 @@ default_priority = 2
 default_labels = ["platform", "cli"]
 
 [backlog.velocity_defaults]
-project = "MetaStack CLI"
+project = "Intuition CLI"
 state = "Backlog"
 auto_assign = "viewer"
 
@@ -420,17 +420,17 @@ model = "gpt-5.3-codex"
 
 ### `runtime setup`
 
-Scaffold repo-local `.metastack/` state and inspect or update repo-scoped defaults:
+Scaffold repo-local `.intuition/` state and inspect or update repo-scoped defaults:
 
 ```bash
-meta runtime setup
-meta runtime setup --json
-meta runtime setup --team MET --project "MetaStack CLI"
-meta runtime setup --api-key lin_api_repo --team MET --project "MetaStack CLI"
-meta runtime setup --provider codex --model gpt-5.4 --reasoning medium
-meta runtime setup --listen-label agent --assignee-scope viewer-only --refresh-policy reuse-and-refresh
-meta runtime setup --default-assignee viewer --default-state Todo --default-priority 3 --default-label platform
-meta runtime setup --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
+intu runtime setup
+intu runtime setup --json
+intu runtime setup --team MET --project "Intuition CLI"
+intu runtime setup --api-key lin_api_repo --team MET --project "Intuition CLI"
+intu runtime setup --provider codex --model gpt-5.4 --reasoning medium
+intu runtime setup --listen-label agent --assignee-scope viewer-only --refresh-policy reuse-and-refresh
+intu runtime setup --default-assignee viewer --default-state Todo --default-priority 3 --default-label platform
+intu runtime setup --velocity-project "Intuition CLI" --velocity-state Backlog --velocity-auto-assign viewer
 ```
 
 ### `upgrade`
@@ -438,19 +438,19 @@ meta runtime setup --velocity-project "MetaStack CLI" --velocity-state Backlog -
 Inspect or apply GitHub Release self-updates for supported macOS/Linux release installs:
 
 ```bash
-meta upgrade --check
-meta upgrade --dry-run
-meta upgrade
-meta upgrade --version 0.2.0 --dry-run
-meta upgrade --version 0.3.0-rc.1 --prerelease
-meta upgrade --version 0.1.0 --allow-downgrade
+intu upgrade --check
+intu upgrade --dry-run
+intu upgrade
+intu upgrade --version 0.2.0 --dry-run
+intu upgrade --version 0.3.0-rc.1 --prerelease
+intu upgrade --version 0.1.0 --allow-downgrade
 ```
 
 Default behavior resolves the latest stable GitHub Release for the running platform, verifies the
 selected archive against the published `SHA256SUMS`, stages extraction outside the live install
-path, and replaces the installed `meta` binary only after verification succeeds.
+path, and replaces the installed `intu` binary only after verification succeeds.
 
-`meta upgrade` refuses Cargo installs and source-checkout builds because those origins are not safe
+`intu upgrade` refuses Cargo installs and source-checkout builds because those origins are not safe
 to mutate in place. Reinstall from GitHub Releases when you want an install that can self-update.
 
 Use `--check` to inspect the latest stable release without mutating the current install. Use
@@ -458,28 +458,28 @@ Use `--check` to inspect the latest stable release without mutating the current 
 binary. The advanced path keeps the default UX strict while still allowing pinned versions,
 prerelease opt-in, and deliberate downgrades with explicit flags.
 
-Legacy alias: `meta setup`
+Legacy alias: `intu setup`
 
-`meta runtime setup` is safe to rerun in an existing checkout. It creates `.metastack/` when needed, seeds `.metastack/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.metastack/meta.json`.
+`intu runtime setup` is safe to rerun in an existing checkout. It creates `.intuition/` when needed, seeds `.intuition/backlog/_TEMPLATE/` from the canonical Markdown tree shipped in `src/artifacts/BACKLOG_TEMPLATE`, lets the setup flow inherit shared Linear auth or save a project-specific Linear API key in install-scoped CLI config when a project needs its own token, validates any repo-selected profiles and built-in provider/model/reasoning combinations against the install-scoped catalog, resolves `--project <NAME>` to a canonical Linear project ID before saving, and writes repo defaults only to `.intuition/meta.json`.
 
-Repo setup dashboards automatically honor the install-scoped `vim_mode` toggle from `meta runtime config`, but only for non-text controls such as select lists. Title, label, path, and prompt fields keep literal `h/j/k/l` editing behavior.
+Repo setup dashboards automatically honor the install-scoped `vim_mode` toggle from `intu runtime config`, but only for non-text controls such as select lists. Title, label, path, and prompt fields keep literal `h/j/k/l` editing behavior.
 
-For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
-Promoted repo-aware settings now resolve as `CLI override -> repo default -> install default` for the shared team/project, listen label/scope/refresh/poll interval, interactive plan follow-up limit, and plan/technical issue labels. Repo-scoped `.metastack/meta.json` still overrides the install-scoped defaults saved by onboarding.
+For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `intu agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
+Promoted repo-aware settings now resolve as `CLI override -> repo default -> install default` for the shared team/project, listen label/scope/refresh/poll interval, interactive plan follow-up limit, and plan/technical issue labels. Repo-scoped `.intuition/meta.json` still overrides the install-scoped defaults saved by onboarding.
 
-For listen setup, `assignment_scope = "viewer"` now means `viewer + unassigned` for unattended listen runs. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
+For listen setup, `assignment_scope = "viewer"` now means `viewer + unassigned` for unattended listen runs. Use `intu agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 
-For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `meta agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
+For listen setup, use `assignment_scope = "viewer_only"` to watch only issues assigned to the authenticated viewer, or `assignment_scope = "viewer_or_unassigned"` to also admit unassigned tickets. Existing repo config that still stores the legacy value `assignment_scope = "viewer"` continues to load as `viewer_or_unassigned` for compatibility. Use `intu agents listen --all-assignees` when a single run should ignore assignee scope without mutating repo setup.
 
-For unattended `meta agents listen` runs, setup should be paired with a provider preflight:
+For unattended `intu agents listen` runs, setup should be paired with a provider preflight:
 
 - Codex requires `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`, and `[mcp_servers.linear]` should be removed or disabled.
 - Claude requires `claude` on `PATH` and `ANTHROPIC_API_KEY` unset so the local subscription is used.
-- Run `meta agents listen --check --root .` to verify the current machine before starting the daemon.
+- Run `intu agents listen --check --root .` to verify the current machine before starting the daemon.
 
 If setup finds canonical template files with local changes, interactive TTY runs prompt for `overwrite`, `skip`, or `cancel`. Non-interactive paths such as `--json` and direct flag updates stop with a clear error instead of silently overwriting those backlog template files.
 
-Repo-dependent commands such as `meta backlog plan`, `meta backlog tech`, `meta backlog sync`, and `meta agents listen` now require repo setup and point back to `meta runtime setup` when `.metastack/meta.json` is missing.
+Repo-dependent commands such as `intu backlog plan`, `intu backlog tech`, `intu backlog sync`, and `intu agents listen` now require repo setup and point back to `intu runtime setup` when `.intuition/meta.json` is missing.
 
 Example repo-scoped config:
 
@@ -506,47 +506,47 @@ Example repo-scoped config:
 
 Precedence is consistent across the CLI:
 
-- Linear-backed commands use `CLI flag override -> install-scoped repo auth -> repo .metastack/meta.json/profile -> global config -> LINEAR_* environment fallback`
-- Agent-backed launches use `CLI override -> repo .metastack/meta.json -> global config`
-- Default issue status for standalone tickets resolves as `CLI --state override -> velocity_defaults.state (zero-prompt) -> repo backlog.default_state -> global backlog.default_state -> built-in "Backlog"`. Child tickets created by `meta backlog tech` inherit the parent issue's status instead of using the configured default; explicit `--state` overrides still take precedence.
-- `meta linear issues create` also resolves the default issue status from repo and global config when no `--state` flag is provided.
+- Linear-backed commands use `CLI flag override -> install-scoped repo auth -> repo .intuition/meta.json/profile -> global config -> LINEAR_* environment fallback`
+- Agent-backed launches use `CLI override -> repo .intuition/meta.json -> global config`
+- Default issue status for standalone tickets resolves as `CLI --state override -> velocity_defaults.state (zero-prompt) -> repo backlog.default_state -> global backlog.default_state -> built-in "Backlog"`. Child tickets created by `intu backlog tech` inherit the parent issue's status instead of using the configured default; explicit `--state` overrides still take precedence.
+- `intu linear issues create` also resolves the default issue status from repo and global config when no `--state` flag is provided.
 - The CLI is read-only for workflow state selection: onboarding and config pickers query existing states from the Linear team but cannot create new ones. If a configured `default_state` does not match any state on the target team, the command fails with a clear error. Create new workflow states in the Linear UI first. See [`docs/linear-workflow-state-creation.md`](docs/linear-workflow-state-creation.md) for the full decision.
 
 ### `merge`
 
 Inspect open GitHub pull requests for the current checkout, select a batch in a one-shot ratatui dashboard, run an aggregate merge in an isolated workspace outside the source checkout, rerun validation, and open or update one aggregate PR back into the repository default branch.
 
-`meta merge` requires:
+`intu merge` requires:
 
 - `gh` on `PATH`
-- a repo that has already been bootstrapped with `meta runtime setup`
+- a repo that has already been bootstrapped with `intu runtime setup`
 - a configured local agent for merge planning and conflict help
 
 Common invocations:
 
 ```bash
-meta merge --json
-meta merge
-meta merge --render-once --events space,down,space,enter
-meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
-meta merge --resume-run 20260320T150254Z
+intu merge --json
+intu merge
+intu merge --render-once --events space,down,space,enter
+intu merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
+intu merge --resume-run 20260320T150254Z
 ```
 
 Behavior summary:
 
 - `--json` emits the resolved GitHub repository metadata plus the open PR list used by the dashboard and planner.
-- Plain `meta merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, scroll the focused preview pane with `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, or the mouse wheel when it overflows, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
-- The focused `meta merge` preview keeps the PR metadata header and now renders the selected PR body with the shared TUI markdown renderer, preserving headings, lists, blockquotes, fenced code blocks, and blank lines.
+- Plain `intu merge` opens a one-shot dashboard that lets you select multiple PRs, review the selected batch summary, scroll the focused preview pane with `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, or the mouse wheel when it overflows, launch immediately, then stay in a live progress screen until the merge run succeeds or fails.
+- The focused `intu merge` preview keeps the PR metadata header and now renders the selected PR body with the shared TUI markdown renderer, preserving headings, lists, blockquotes, fenced code blocks, and blank lines.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
-- `--resume-run <RUN_ID>` reuses an existing aggregate branch and run artifact directory under `.metastack/merge-runs/<RUN_ID>/`, revalidates the preserved workspace, repushes the branch, and updates the aggregate PR instead of starting from scratch.
-- `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
-- Validation now narrows repeated failures before rerunning the full suite. When `make quality` reports a specific Rust test or clippy failure, `meta merge` first reruns the exact failing target, fingerprints the failure, and stops treating the same signature as transient once it repeats. That avoids wasting loops on deterministic failures that only looked flaky on the first pass.
-- Validation is no longer a hard publication gate. When validation stays red after bounded automated recovery, `meta merge` still pushes the aggregate branch, creates or updates the aggregate PR, and records the unresolved validation status in both the run artifacts and the PR body so repair work can continue without restarting the batch.
+- `--resume-run <RUN_ID>` reuses an existing aggregate branch and run artifact directory under `.intuition/merge-runs/<RUN_ID>/`, revalidates the preserved workspace, repushes the branch, and updates the aggregate PR instead of starting from scratch.
+- `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `intu merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
+- Validation now narrows repeated failures before rerunning the full suite. When `make quality` reports a specific Rust test or clippy failure, `intu merge` first reruns the exact failing target, fingerprints the failure, and stops treating the same signature as transient once it repeats. That avoids wasting loops on deterministic failures that only looked flaky on the first pass.
+- Validation is no longer a hard publication gate. When validation stays red after bounded automated recovery, `intu merge` still pushes the aggregate branch, creates or updates the aggregate PR, and records the unresolved validation status in both the run artifacts and the PR body so repair work can continue without restarting the batch.
 - Push and aggregate PR publication retry on transient remote errors, and the install-scoped merge knobs now cover all three control points: `[merge].validation_repair_attempts`, `[merge].validation_transient_retry_attempts`, and `[merge].publication_retry_attempts`.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
-Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
+Each run writes local audit artifacts under `.intuition/merge-runs/<RUN_ID>/`, including:
 
 - `context.json` with the repository, selected PR set, aggregate branch, and isolated workspace path
 - `agent-plan-prompt.md` with the exact planner prompt sent to the configured local agent
@@ -564,55 +564,55 @@ Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, i
 Inspect the current repository, write a deterministic scan fact base, then launch the configured local agent to refresh the higher-level planning docs:
 
 ```bash
-meta context scan
+intu context scan
 ```
 
-Legacy alias: `meta scan`
+Legacy alias: `intu scan`
 
 Outputs:
 
-- `.metastack/codebase/SCAN.md`
-- `.metastack/codebase/ARCHITECTURE.md`
-- `.metastack/codebase/CONCERNS.md`
-- `.metastack/codebase/CONVENTIONS.md`
-- `.metastack/codebase/INTEGRATIONS.md`
-- `.metastack/codebase/STACK.md`
-- `.metastack/codebase/STRUCTURE.md`
-- `.metastack/codebase/TESTING.md`
+- `.intuition/codebase/SCAN.md`
+- `.intuition/codebase/ARCHITECTURE.md`
+- `.intuition/codebase/CONCERNS.md`
+- `.intuition/codebase/CONVENTIONS.md`
+- `.intuition/codebase/INTEGRATIONS.md`
+- `.intuition/codebase/STACK.md`
+- `.intuition/codebase/STRUCTURE.md`
+- `.intuition/codebase/TESTING.md`
 
-When stdout is attached to a TTY, `meta context scan` renders a compact progress dashboard. The underlying agent output is captured in `.metastack/agents/sessions/scan.log`.
+When stdout is attached to a TTY, `intu context scan` renders a compact progress dashboard. The underlying agent output is captured in `.intuition/agents/sessions/scan.log`.
 
-`meta context scan` treats the resolved repository root as the default target scope for the run. In monorepos, that means the top-level directory you invoked as `--root` (or the current working directory when `--root` is omitted). The scan prompt stays focused on that repository only and should narrow to a subproject only when the user explicitly asks for it.
+`intu context scan` treats the resolved repository root as the default target scope for the run. In monorepos, that means the top-level directory you invoked as `--root` (or the current working directory when `--root` is omitted). The scan prompt stays focused on that repository only and should narrow to a subproject only when the user explicitly asks for it.
 
 ### `agents workflows`
 
-List, explain, and run reusable workflow playbooks. The CLI ships with built-in playbooks for backlog planning, ticket implementation, PR review, and incident triage, and it also loads repo-local playbooks from `.metastack/workflows/`.
+List, explain, and run reusable workflow playbooks. The CLI ships with built-in playbooks for backlog planning, ticket implementation, PR review, and incident triage, and it also loads repo-local playbooks from `.intuition/workflows/`.
 
 ```bash
-meta agents workflows list
-meta agents workflows explain backlog-planning
-meta agents workflows run backlog-planning
-meta agents workflows run ticket-implementation
-meta agents workflows run ticket-implementation --no-interactive --param issue=MET-93
-meta agents workflows run ticket-implementation --render-once --param issue=MET-93
+intu agents workflows list
+intu agents workflows explain backlog-planning
+intu agents workflows run backlog-planning
+intu agents workflows run ticket-implementation
+intu agents workflows run ticket-implementation --no-interactive --param issue=MET-93
+intu agents workflows run ticket-implementation --render-once --param issue=MET-93
 ```
 
-Legacy alias: `meta workflows`
+Legacy alias: `intu workflows`
 
-Compatibility alias under `meta agents`: `meta agents workflow ...`
+Compatibility alias under `intu agents`: `intu agents workflow ...`
 
 ```bash
-meta agents workflow run ticket-implementation --render-once
+intu agents workflow run ticket-implementation --render-once
 ```
 
-Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `.metastack/workflows/README.md` for the repo-local scaffold.
+Playbooks use Markdown with YAML front matter. The front matter defines the workflow name, summary, default provider, parameter contract, validation steps, optional instructions, and optional Linear issue lookup parameter. See [`src/artifacts/workflows/README.md`](src/artifacts/workflows/README.md) for the shipped format and `.intuition/workflows/README.md` for the repo-local scaffold.
 
 Interactive terminal runs are TUI-first:
 
 - TTY runs open a guided wizard that collects required workflow inputs step by step.
 - After generation the command lands on a review dashboard instead of exiting immediately.
 - `e` opens multiline edit mode for the generated Markdown.
-- `s` opens a one-off save-path prompt whose default lives under `.metastack/workflows/generated/`.
+- `s` opens a one-off save-path prompt whose default lives under `.intuition/workflows/generated/`.
 - Existing files require explicit overwrite confirmation in the TUI, or `--overwrite` in the headless fallback.
 
 Deterministic fallback rules:
@@ -634,17 +634,17 @@ Reference:
 Inspect and refresh the effective context that agent-backed runs consume:
 
 ```bash
-meta context show
-meta context map
-meta context doctor
-meta context scan --json
-meta context reload
+intu context show
+intu context map
+intu context doctor
+intu context scan --json
+intu context reload
 ```
 
 - `show` prints the effective repo-scoped instructions, loaded project rules, and known codebase context sources
 - `map` prints a repo-map style summary derived from the live repository tree
-- `doctor` reports missing or stale inputs such as `.metastack/meta.json`, repo rules, instructions files, and generated codebase docs
-- `reload` re-runs the context refresh path used by `meta scan`
+- `doctor` reports missing or stale inputs such as `.intuition/meta.json`, repo rules, instructions files, and generated codebase docs
+- `reload` re-runs the context refresh path used by `intu scan`
 - `scan --json` runs the scan pipeline without a terminal snapshot and emits a JSON report describing the refreshed codebase context plus the written and removed files
 
 ### Machine-readable Command Contract
@@ -653,16 +653,16 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 
 | Command | Promptless mode | JSON selector | Machine output behavior |
 | --- | --- | --- | --- |
-| `meta backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
-| `meta backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
-| `meta backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
-| `meta linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
-| `meta linear issues edit` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
-| `meta linear issues refine` | n/a | `--json` | success and failure emit JSON |
-| `meta context scan` | n/a | `--json` | success and failure emit JSON |
-| `meta agents listen --once` | headless | `--json` | emits one poll-cycle JSON payload |
-| `meta agents workflows run` | `--no-interactive` | n/a | human-readable output or `--render-once` snapshot |
-| `meta runtime cron init` | `--no-interactive` | `--json` or implicit in `--no-interactive` | success and failure emit JSON |
+| `intu backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `intu backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `intu backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
+| `intu linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `intu linear issues edit` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `intu linear issues refine` | n/a | `--json` | success and failure emit JSON |
+| `intu context scan` | n/a | `--json` | success and failure emit JSON |
+| `intu agents listen --once` | headless | `--json` | emits one poll-cycle JSON payload |
+| `intu agents workflows run` | `--no-interactive` | n/a | human-readable output or `--render-once` snapshot |
+| `intu runtime cron init` | `--no-interactive` | `--json` or implicit in `--no-interactive` | success and failure emit JSON |
 
 Notes:
 
@@ -676,26 +676,26 @@ This matrix is the contract for agent callers deciding whether to drive a comman
 
 | Command | `--no-interactive` | `--json` | `--render-once` |
 | --- | --- | --- | --- |
-| `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
-| `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
-| `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
-| `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
-| `meta backlog sync pull` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
-| `meta backlog sync push` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
-| `meta linear issues create` | required for promptless runs; implies JSON | n/a | supported for the create form |
-| `meta linear issues edit` | required for promptless runs; implies JSON | n/a | supported for the edit form |
-| `meta linear issues refine` | not needed; command is already headless | supported | not supported |
-| `meta context scan` | not needed; command is already headless | supported | not supported |
-| `meta agents listen --once` | not needed; `--once` is the headless poll mode | supported only with `--once`; returns one poll cycle | supported separately as a text dashboard snapshot |
-| `meta agents workflows run` | required for promptless scripted runs with explicit params | not supported | supported for the workflow wizard snapshot |
-| `meta runtime cron init` | required for promptless writes; implies JSON | supported | supported as a text dashboard snapshot |
-| `meta runtime config` | not needed | supported | supported |
-| `meta merge` | required for promptless execution with explicit PR selection | supported | supported |
+| `intu backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
+| `intu backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
+| `intu backlog sync status` | optional | supported | supported on dashboard form (`intu backlog sync --render-once`) |
+| `intu backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `intu backlog sync pull` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `intu backlog sync push` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
+| `intu linear issues create` | required for promptless runs; implies JSON | n/a | supported for the create form |
+| `intu linear issues edit` | required for promptless runs; implies JSON | n/a | supported for the edit form |
+| `intu linear issues refine` | not needed; command is already headless | supported | not supported |
+| `intu context scan` | not needed; command is already headless | supported | not supported |
+| `intu agents listen --once` | not needed; `--once` is the headless poll mode | supported only with `--once`; returns one poll cycle | supported separately as a text dashboard snapshot |
+| `intu agents workflows run` | required for promptless scripted runs with explicit params | not supported | supported for the workflow wizard snapshot |
+| `intu runtime cron init` | required for promptless writes; implies JSON | supported | supported as a text dashboard snapshot |
+| `intu runtime config` | not needed | supported | supported |
+| `intu merge` | required for promptless execution with explicit PR selection | supported | supported |
 
 Rules:
 
 - Prefer `--no-interactive` for any mutation command that would otherwise prompt for missing input.
-- Prefer `--json` for read-only or already-headless flows such as `meta context scan`, `meta linear issues refine`, and `meta agents listen --once`.
+- Prefer `--json` for read-only or already-headless flows such as `intu context scan`, `intu linear issues refine`, and `intu agents listen --once`.
 - Use `--render-once` only when a text snapshot of the TUI is useful for humans or snapshot-style tests; it is not part of the machine JSON contract.
 - Where both modes exist, `--render-once` is mutually exclusive with `--json`, `--no-interactive`, and `--once` because snapshot output is a separate text contract.
 
@@ -704,36 +704,36 @@ Rules:
 Create repository-local cron jobs as Markdown plus YAML front matter, then supervise them from the CLI:
 
 ```bash
-meta runtime cron init
-meta runtime cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test" --prompt "Review the latest test output and fix any failures"
-meta runtime cron --root target/cli-proof/cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test"
-meta runtime cron list
-meta runtime cron validate
-meta runtime cron status
-meta runtime cron start
-meta runtime cron stop
-meta runtime cron run nightly
-meta runtime cron approvals
-meta runtime cron approve <RUN_ID> --note "ship it"
-meta runtime cron reject <RUN_ID> --reason "not ready"
-meta runtime cron resume <RUN_ID>
+intu runtime cron init
+intu runtime cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test" --prompt "Review the latest test output and fix any failures"
+intu runtime cron --root target/cli-proof/cron init nightly --no-interactive --schedule "0 * * * *" --command "cargo test"
+intu runtime cron list
+intu runtime cron validate
+intu runtime cron status
+intu runtime cron start
+intu runtime cron stop
+intu runtime cron run nightly
+intu runtime cron approvals
+intu runtime cron approve <RUN_ID> --note "ship it"
+intu runtime cron reject <RUN_ID> --reason "not ready"
+intu runtime cron resume <RUN_ID>
 ```
 
-Legacy alias: `meta cron`
+Legacy alias: `intu cron`
 
 Machine mode:
 
-- `meta runtime cron init --no-interactive ...` now emits structured JSON by default
-- `meta runtime cron init --json ...` forces JSON without changing the rest of the command contract
-- `meta runtime cron list --json`, `validate --json`, and `approvals --json` emit structured inspection output
+- `intu runtime cron init --no-interactive ...` now emits structured JSON by default
+- `intu runtime cron init --json ...` forces JSON without changing the rest of the command contract
+- `intu runtime cron list --json`, `validate --json`, and `approvals --json` emit structured inspection output
 - `--render-once` stays a text snapshot path for the dashboard and is separate from machine JSON output
 
 Side effects:
 
-- ensures `.metastack/cron/` exists
-- creates `.metastack/cron/<NAME>.md` job definitions
-- discovers workflow definitions from the install-scoped data root first, then overrides them by name with repo-scoped definitions under `.metastack/cron/`
-- creates `.metastack/cron/.runtime/` on demand for scheduler state, per-run logs, and persisted run-state JSON under `.metastack/cron/.runtime/runs/`
+- ensures `.intuition/cron/` exists
+- creates `.intuition/cron/<NAME>.md` job definitions
+- discovers workflow definitions from the install-scoped data root first, then overrides them by name with repo-scoped definitions under `.intuition/cron/`
+- creates `.intuition/cron/.runtime/` on demand for scheduler state, per-run logs, and persisted run-state JSON under `.intuition/cron/.runtime/runs/`
 - persists approval checkpoints, retry history, and resumable step state for every workflow run
 
 In the interactive cron editor, the prompt field submits on `Enter`, inserts a newline on `Shift+Enter`, and supports `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling to keep long wrapped prompts reachable.
@@ -786,33 +786,33 @@ steps:
 Operator notes and runbook text live in the Markdown body.
 ```
 
-Use `meta runtime cron validate` before starting the daemon when you are editing workflow files, `meta runtime cron approvals` to inspect paused runs, and `meta runtime cron approve|reject|resume` to move persisted runs forward without replaying completed steps. Shipped disabled-by-default examples live under [`src/artifacts/cron/`](src/artifacts/cron/README.md).
+Use `intu runtime cron validate` before starting the daemon when you are editing workflow files, `intu runtime cron approvals` to inspect paused runs, and `intu runtime cron approve|reject|resume` to move persisted runs forward without replaying completed steps. Shipped disabled-by-default examples live under [`src/artifacts/cron/`](src/artifacts/cron/README.md).
 
 ### `backlog plan`
 
 Turn a planning request into one or more Linear backlog issues:
 
 ```bash
-meta backlog plan
-meta backlog plan --no-interactive --request "Plan a dashboard for feature intake" --answer "Use the existing TUI patterns" --answer "Split the work into multiple tickets"
-meta backlog plan --fast
-meta backlog plan --fast --multi --questions 1
-meta backlog plan --fast --no-interactive --request "Plan the onboarding rewrite"
-meta backlog plan ENG-10144
-meta backlog plan ENG-10144 --velocity
+intu backlog plan
+intu backlog plan --no-interactive --request "Plan a dashboard for feature intake" --answer "Use the existing TUI patterns" --answer "Split the work into multiple tickets"
+intu backlog plan --fast
+intu backlog plan --fast --multi --questions 1
+intu backlog plan --fast --no-interactive --request "Plan the onboarding rewrite"
+intu backlog plan ENG-10144
+intu backlog plan ENG-10144 --velocity
 ```
 
-Legacy alias: `meta plan`
+Legacy alias: `intu plan`
 
-In a TTY, `meta backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
+In a TTY, `intu backlog plan` opens one persistent ratatui planning session to capture the request, collect follow-up answers, and review the generated ticket breakdown before creating Backlog issues in Linear.
 
 Fast mode keeps the same downstream issue creation path but switches the interaction model to a single pass. When `--fast` is active, the command captures the request, optionally asks at most one round of follow-up questions, prompts once for `Anything Else To Add?`, streams the draft preview while the agent is still generating it, and then shows an approve-or-reject review screen. Fast review intentionally removes merge groups, skip states, and regeneration controls.
 
-Within one `meta backlog plan` run, the shared agent runtime now reuses a built-in Codex or Claude session across follow-up generation, ticket generation, and interactive revisions when the provider returns a resume handle. That continuation is run-scoped only: the command does not persist planning sessions under `.metastack/` or share them with listen workers.
+Within one `intu backlog plan` run, the shared agent runtime now reuses a built-in Codex or Claude session across follow-up generation, ticket generation, and interactive revisions when the provider returns a resume handle. That continuation is run-scoped only: the command does not persist planning sessions under `.intuition/` or share them with listen workers.
 
 Multiline request and follow-up editors submit on `Enter`; use `Shift+Enter` when you need to insert a newline without advancing the workflow. Focused editors also support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, and mouse-wheel scrolling so long wrapped prompts and follow-up answers stay editable after they overflow the visible pane.
 
-For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values. In zero-prompt mode (`--no-interactive` or no TTY), backlog planning resolves ticket defaults in this order: explicit flags, remembered project/team for the canonical repo root, repo `backlog.velocity_defaults`, global `backlog.velocity_defaults`, repo defaults from `.metastack/meta.json`, global defaults from `config.toml`, then built-in behavior. Generated plan priority still wins over config priority unless you pass `--priority`.
+For deterministic automation, pass `--no-interactive` with `--request` and repeated `--answer` values. In zero-prompt mode (`--no-interactive` or no TTY), backlog planning resolves ticket defaults in this order: explicit flags, remembered project/team for the canonical repo root, repo `backlog.velocity_defaults`, global `backlog.velocity_defaults`, repo defaults from `.intuition/meta.json`, global defaults from `config.toml`, then built-in behavior. Generated plan priority still wins over config priority unless you pass `--priority`.
 
 Fast planning adds three mode-specific controls:
 
@@ -824,16 +824,16 @@ Fast mode defaults to a single ticket unless you pass `--multi` or disable that 
 
 Machine mode:
 
-- `meta backlog plan --no-interactive ...` emits created or reshaped issue data as JSON instead of text
+- `intu backlog plan --no-interactive ...` emits created or reshaped issue data as JSON instead of text
 - missing-input and other machine-mode failures also emit JSON with `error.code`, `error.message`, and optional `error.context`
-- the old harness `intuition product "desc" --velocity` maps to `meta backlog plan --no-interactive --request "desc" --answer "..."`
-- the old harness `intuition product "desc" --velocity --dry-run` maps to `meta backlog plan --no-interactive --request "desc" --answer "..." --dry-run`
+- the old harness `intuition product "desc" --velocity` maps to `intu backlog plan --no-interactive --request "desc" --answer "..."`
+- the old harness `intuition product "desc" --velocity --dry-run` maps to `intu backlog plan --no-interactive --request "desc" --answer "..." --dry-run`
 
-`meta backlog plan` also accepts `--state`, `--priority`, repeated `--label`, and `--assignee`. Built-in `plan` labeling remains mandatory and additive, so config labels and explicit labels are appended rather than replacing it.
+`intu backlog plan` also accepts `--state`, `--priority`, repeated `--label`, and `--assignee`. Built-in `plan` labeling remains mandatory and additive, so config labels and explicit labels are appended rather than replacing it.
 
-`meta backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
+`intu backlog plan <IDENTIFIER>` reshapes an existing Linear issue in place instead of creating a new one. The command loads the current issue context, asks the configured planning agent for a stronger rewrite, and then updates the same ticket through `issueUpdate`.
 
-Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.metastack/backlog/<ISSUE>/` files unchanged in this slice.
+Interactive reshape runs print a before/after diff preview and require confirmation before the update. Pass `--velocity` to skip that preview and auto-apply the rewrite. Reshape mode preserves assignee, labels, project, state, cycle, and priority, updates or creates the active `## Codex Workpad` comment, and intentionally leaves local `.intuition/backlog/<ISSUE>/` files unchanged in this slice.
 
 `--fast`, `--multi`, and `--questions` do not apply to reshape mode. The command rejects those combinations instead of silently changing reshape behavior.
 
@@ -841,26 +841,26 @@ The planning prompt is repo-scoped by default: it derives the active project ide
 
 Side effects:
 
-- ensures `.metastack/backlog/_TEMPLATE/` exists
+- ensures `.intuition/backlog/_TEMPLATE/` exists
 - creates one or more Linear backlog issues
-- copies the full canonical template tree into `.metastack/backlog/<NEW_ISSUE_ID>/`
-- writes each generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
-- uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
-- writes `.metastack/backlog/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
+- copies the full canonical template tree into `.intuition/backlog/<NEW_ISSUE_ID>/`
+- writes each generated backlog item to `.intuition/backlog/<NEW_ISSUE_ID>/`
+- uses `.intuition/backlog/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
+- writes `.intuition/backlog/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
 
 ### `backlog spec`
 
-Create or improve the repo-local `.metastack/SPEC.md` for the active repository:
+Create or improve the repo-local `.intuition/SPEC.md` for the active repository:
 
 ```bash
-meta backlog spec --root .
-meta backlog spec --root . --no-interactive --request "Add a repo-local SPEC workflow"
-meta backlog spec --root . --no-interactive --request "Improve the current SPEC" --answer "Clarify the non-goals"
+intu backlog spec --root .
+intu backlog spec --root . --no-interactive --request "Add a repo-local SPEC workflow"
+intu backlog spec --root . --no-interactive --request "Improve the current SPEC" --answer "Clarify the non-goals"
 ```
 
-In a TTY, `meta backlog spec` opens a staged ratatui interview. On first run it asks what the repository should build, asks concise follow-up questions, and drafts `.metastack/SPEC.md`. On later runs it loads the existing SPEC, asks what should change, and revises that same file in place.
+In a TTY, `intu backlog spec` opens a staged ratatui interview. On first run it asks what the repository should build, asks concise follow-up questions, and drafts `.intuition/SPEC.md`. On later runs it loads the existing SPEC, asks what should change, and revises that same file in place.
 
-The command is repo-local by design: it targets only `.metastack/SPEC.md`, does not create Linear issues, and does not write `.metastack/backlog/<ISSUE>/` packets. Generated markdown must include uppercase `OVERVIEW`, `GOALS`, `FEATURES`, and `NON-GOALS` headings.
+The command is repo-local by design: it targets only `.intuition/SPEC.md`, does not create Linear issues, and does not write `.intuition/backlog/<ISSUE>/` packets. Generated markdown must include uppercase `OVERVIEW`, `GOALS`, `FEATURES`, and `NON-GOALS` headings.
 
 For deterministic automation, pass `--no-interactive` with `--request` and optional repeated `--answer` values. Hidden `--render-once` hooks exist for snapshot testing of the major TUI states.
 
@@ -869,22 +869,22 @@ For deterministic automation, pass `--no-interactive` with `--request` and optio
 Create a technical sub-issue from an existing Linear parent issue and have the configured local agent turn the repo template into a concrete backlog item:
 
 ```bash
-meta backlog tech --api-key "$LINEAR_API_KEY" MET-35
-meta backlog split --api-key "$LINEAR_API_KEY" MET-35
-meta backlog derive --api-key "$LINEAR_API_KEY" MET-35
+intu backlog tech --api-key "$LINEAR_API_KEY" MET-35
+intu backlog split --api-key "$LINEAR_API_KEY" MET-35
+intu backlog derive --api-key "$LINEAR_API_KEY" MET-35
 ```
 
-Legacy alias: `meta technical`
+Legacy alias: `intu technical`
 
 The command requires a configured local agent, or one of the built-in supported agents (`codex` / `claude`) available on `PATH`.
 
-`meta backlog tech` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
+`intu backlog tech` uses the same repo-root scope contract as `intu backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only produce a narrower technical backlog item when the user explicitly requested a subproject.
 
-`meta backlog tech` also accepts `--no-interactive`, `--state`, `--priority`, repeated `--label`, and `--assignee`. Child tickets inherit their parent issue's workflow status by default. When the parent has no status or an explicit `--state` override is passed, the command falls back to the configured default (repo > global > built-in `Backlog`). Parent issue project and priority are preserved over config defaults unless an explicit CLI override is passed, and the final project/team selection is persisted for later zero-prompt runs in the install-scoped data directory.
+`intu backlog tech` also accepts `--no-interactive`, `--state`, `--priority`, repeated `--label`, and `--assignee`. Child tickets inherit their parent issue's workflow status by default. When the parent has no status or an explicit `--state` override is passed, the command falls back to the configured default (repo > global > built-in `Backlog`). Parent issue project and priority are preserved over config defaults unless an explicit CLI override is passed, and the final project/team selection is persisted for later zero-prompt runs in the install-scoped data directory.
 
-In machine mode, `meta backlog tech --no-interactive <ISSUE>` emits the created child issue, parent issue, and local backlog path as JSON. Missing-input failures also emit structured JSON.
+In machine mode, `intu backlog tech --no-interactive <ISSUE>` emits the created child issue, parent issue, and local backlog path as JSON. Missing-input failures also emit structured JSON.
 
-Across `meta backlog plan`, `meta backlog spec`, and `meta backlog tech`, recovered generation failures now stay visible until the next real edit or resubmit instead of disappearing on routine navigation. If capture-mode execution fails with `agent returned empty response — check provider CLI version or agent configuration`, treat that as a provider CLI regression or local agent-command misconfiguration before debugging downstream JSON parsing.
+Across `intu backlog plan`, `intu backlog spec`, and `intu backlog tech`, recovered generation failures now stay visible until the next real edit or resubmit instead of disappearing on routine navigation. If capture-mode execution fails with `agent returned empty response — check provider CLI version or agent configuration`, treat that as a provider CLI regression or local agent-command misconfiguration before debugging downstream JSON parsing.
 
 In a TTY, the parent-issue picker now uses the shared Linear issue browser:
 
@@ -894,12 +894,12 @@ In a TTY, the parent-issue picker now uses the shared Linear issue browser:
 
 Side effects:
 
-- ensures `.metastack/backlog/_TEMPLATE/` exists
-- asks the configured local agent to inspect the parent Linear issue and author the backlog files from `.metastack/backlog/_TEMPLATE/`
+- ensures `.intuition/backlog/_TEMPLATE/` exists
+- asks the configured local agent to inspect the parent Linear issue and author the backlog files from `.intuition/backlog/_TEMPLATE/`
 - creates a new Linear child issue under the referenced parent
-- copies the full canonical template tree into `.metastack/backlog/<NEW_ISSUE_ID>/`
-- writes the generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
-- uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
+- copies the full canonical template tree into `.intuition/backlog/<NEW_ISSUE_ID>/`
+- writes the generated backlog item to `.intuition/backlog/<NEW_ISSUE_ID>/`
+- uses `.intuition/backlog/<NEW_ISSUE_ID>/index.md` as the Linear issue description
 - uploads the remaining managed backlog files as Linear attachments
 
 ### `backlog improve`
@@ -907,25 +907,25 @@ Side effects:
 Review repo-scoped backlog issues for issue hygiene gaps before execution:
 
 ```bash
-meta backlog improve
-meta backlog improve --mode basic
-meta backlog improve ENG-10144 --mode advanced
-meta backlog improve ENG-10144 --mode advanced --apply
+intu backlog improve
+intu backlog improve --mode basic
+intu backlog improve ENG-10144 --mode advanced
+intu backlog improve ENG-10144 --mode advanced --apply
 ```
 
-`meta backlog improve` is the repo-scoped backlog triage pass for existing backlog issues. Use it when you want to scan the current backlog for missing labels, weak titles/descriptions, missing acceptance criteria, absent priority or estimate, and parent-child structure opportunities. The default `basic` mode stays conservative and focuses on metadata hygiene. `advanced` mode can rewrite issue content more deeply and propose or apply an existing parent issue when the repository backlog clearly supports that structure.
+`intu backlog improve` is the repo-scoped backlog triage pass for existing backlog issues. Use it when you want to scan the current backlog for missing labels, weak titles/descriptions, missing acceptance criteria, absent priority or estimate, and parent-child structure opportunities. The default `basic` mode stays conservative and focuses on metadata hygiene. `advanced` mode can rewrite issue content more deeply and propose or apply an existing parent issue when the repository backlog clearly supports that structure.
 
 In a TTY, the command now stays inside one guided dashboard flow after issue selection. For each issue, the configured agent classifies the ticket into one of four states: `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`. The engineer then explicitly accepts, skips, or rejects that recommendation before the command moves on. The decision panel always shows the primary `Enter` action for the current ticket, plus explicit `skip` and `reject` paths. When the agent needs direct follow-up answers, the dashboard captures them inline, reruns the same issue review, and only offers an apply path once the recommendation is concrete enough to mutate local backlog content or Linear.
 
-Use `meta linear issues refine` when you already know which issue needs a critique/rewrite and the main goal is improving the issue description itself. Use `meta backlog improve` when you want a backlog-quality sweep that evaluates whether existing repo-scoped backlog issues are ready for execution.
+Use `intu linear issues refine` when you already know which issue needs a critique/rewrite and the main goal is improving the issue description itself. Use `intu backlog improve` when you want a backlog-quality sweep that evaluates whether existing repo-scoped backlog issues are ready for execution.
 
 Side effects:
 
 - scans either explicit issue identifiers or repo-scoped issues in the configured backlog state
-- writes `original.md`, `issue.json`, `local-index.md` when present, `proposal.json`, `proposal.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/improvement/<RUN_ID>/`
+- writes `original.md`, `issue.json`, `local-index.md` when present, `proposal.json`, `proposal.md`, and `summary.json` under `.intuition/backlog/<ISSUE>/artifacts/improvement/<RUN_ID>/`
 - in the interactive dashboard, keeps local and remote changes gated behind an explicit human decision for each issue
-- keeps the default flow proposal-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue
-- with `--apply`, writes the local artifact trail first, then updates `.metastack/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear
+- keeps the default flow proposal-only, without mutating `.intuition/backlog/<ISSUE>/index.md` or the Linear issue
+- with `--apply`, writes the local artifact trail first, then updates `.intuition/backlog/<ISSUE>/index.md` when the proposal includes a description rewrite, and finally pushes the proposed metadata/content updates back to Linear
 
 
 ### `issues refine`
@@ -933,80 +933,80 @@ Side effects:
 Critique and rewrite one or more existing Linear issues that already belong to the active repository scope:
 
 ```bash
-meta issues refine MET-35
-meta issues refine MET-35 MET-36 --passes 2
-meta issues refine MET-35 --apply
+intu issues refine MET-35
+intu issues refine MET-35 MET-36 --passes 2
+intu issues refine MET-35 --apply
 ```
 
-`meta issues refine` is the quality-improvement step after `meta plan` or `meta backlog tech`. It reuses the configured local agent to critique the current Linear description, persist each refinement pass under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`, and generate a proposed rewrite. By default the command is critique-only.
+`intu issues refine` is the quality-improvement step after `intu plan` or `intu backlog tech`. It reuses the configured local agent to critique the current Linear description, persist each refinement pass under `.intuition/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`, and generate a proposed rewrite. By default the command is critique-only.
 
-Pass `--apply` only when you want to promote the final rewrite into `.metastack/backlog/<ISSUE>/index.md` and then push that rewritten description back to Linear. The command always writes the local before/after snapshots first so the refinement run stays auditable even if the remote mutation fails.
+Pass `--apply` only when you want to promote the final rewrite into `.intuition/backlog/<ISSUE>/index.md` and then push that rewritten description back to Linear. The command always writes the local before/after snapshots first so the refinement run stays auditable even if the remote mutation fails.
 
 Machine mode:
 
-- `meta linear issues refine --json ...` emits structured findings, artifact paths, and apply-state details
+- `intu linear issues refine --json ...` emits structured findings, artifact paths, and apply-state details
 - failure paths also use the same structured JSON envelope as the other machine-facing commands
 
 Side effects:
 
 - validates that every requested issue matches the configured repo team/project scope
-- writes `original.md`, per-pass findings JSON/Markdown, `final-proposed.md`, and `summary.json` under `.metastack/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`
-- keeps the default flow critique-only, without mutating `.metastack/backlog/<ISSUE>/index.md` or the Linear issue description
-- with `--apply`, updates `.metastack/backlog/<ISSUE>/index.md` before attempting the Linear description update
-- during `meta listen`, blocks `--apply` for the active ticket so the primary issue description is not overwritten in unattended execution
+- writes `original.md`, per-pass findings JSON/Markdown, `final-proposed.md`, and `summary.json` under `.intuition/backlog/<ISSUE>/artifacts/refinement/<RUN_ID>/`
+- keeps the default flow critique-only, without mutating `.intuition/backlog/<ISSUE>/index.md` or the Linear issue description
+- with `--apply`, updates `.intuition/backlog/<ISSUE>/index.md` before attempting the Linear description update
+- during `intu listen`, blocks `--apply` for the active ticket so the primary issue description is not overwritten in unattended execution
 
 ### `backlog sync`
 
-Browse backlog entries from local `.metastack/backlog/`, hydrate linked rows from Linear, and pull or push the selected linked entry without leaving the terminal:
+Browse backlog entries from local `.intuition/backlog/`, hydrate linked rows from Linear, and pull or push the selected linked entry without leaving the terminal:
 
 ```bash
-meta backlog sync --api-key "$LINEAR_API_KEY"
-meta backlog sync --api-key "$LINEAR_API_KEY" status
-meta backlog sync --api-key "$LINEAR_API_KEY" status --fetch
-meta backlog sync --api-key "$LINEAR_API_KEY" link MET-35 --entry manual-notes
-meta backlog sync --api-key "$LINEAR_API_KEY" link MET-35 --entry manual-notes --pull
-meta backlog sync --api-key "$LINEAR_API_KEY" pull MET-35
-meta backlog sync --api-key "$LINEAR_API_KEY" pull --all
-meta backlog sync --api-key "$LINEAR_API_KEY" push MET-35
-meta backlog sync --api-key "$LINEAR_API_KEY" push MET-35 --update-description
-meta backlog sync --api-key "$LINEAR_API_KEY" push --all
+intu backlog sync --api-key "$LINEAR_API_KEY"
+intu backlog sync --api-key "$LINEAR_API_KEY" status
+intu backlog sync --api-key "$LINEAR_API_KEY" status --fetch
+intu backlog sync --api-key "$LINEAR_API_KEY" link MET-35 --entry manual-notes
+intu backlog sync --api-key "$LINEAR_API_KEY" link MET-35 --entry manual-notes --pull
+intu backlog sync --api-key "$LINEAR_API_KEY" pull MET-35
+intu backlog sync --api-key "$LINEAR_API_KEY" pull --all
+intu backlog sync --api-key "$LINEAR_API_KEY" push MET-35
+intu backlog sync --api-key "$LINEAR_API_KEY" push MET-35 --update-description
+intu backlog sync --api-key "$LINEAR_API_KEY" push --all
 ```
 
-Legacy alias: `meta sync`
+Legacy alias: `intu sync`
 
 Side effects:
 
-- bare `meta backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.metastack/backlog/` state
+- bare `intu backlog sync` opens a ratatui backlog-entry dashboard sourced from local `.intuition/backlog/` state
 - the dashboard starts with query focus; finish editing the search, then press `Tab` or `Enter` to move into the backlog list
 - linked dashboard rows hydrate the mapped Linear issue from `.linear.json`, while unlinked rows stay visible with explicit `unlinked` state
-- unlinked dashboard rows are local-only until you run `meta backlog sync link <ISSUE> --entry <SLUG>`
-- `link` associates an existing `.metastack/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
+- unlinked dashboard rows are local-only until you run `intu backlog sync link <ISSUE> --entry <SLUG>`
+- `link` associates an existing `.intuition/backlog/<ENTRY>/` directory with a Linear issue by writing `.linear.json`
 - `link` prompts for an unlinked backlog entry in a TTY when `--entry <SLUG>` is omitted
 - `link --pull` immediately hydrates the linked entry from Linear after writing metadata
-- `status` scans `.metastack/backlog/` and prints `identifier | title | status | last sync`
+- `status` scans `.intuition/backlog/` and prints `identifier | title | status | last sync`
 - `status` resolves only local change state by default; pass `--fetch` to check the current Linear issue and surface `remote-ahead` or `diverged`
-- `pull` refreshes `.metastack/backlog/<ISSUE_ID>/index.md` from the Linear description
+- `pull` refreshes `.intuition/backlog/<ISSUE_ID>/index.md` from the Linear description
 - `pull` restores CLI-managed attachment files into the same directory when present
-- `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `.metastack/backlog/<ISSUE_ID>/artifacts/`
-- `pull` writes `.metastack/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
-- `pull` writes `.metastack/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
-- `pull` filters generated workpad and `[harness-sync]` comments out of the persisted discussion context and stores `last_pulled_comment_ids` in `.metastack/backlog/<ISSUE_ID>/.linear.json`
+- `pull` re-downloads every markdown image referenced by the issue description, parent description, and Linear comments into `.intuition/backlog/<ISSUE_ID>/artifacts/`
+- `pull` writes `.intuition/backlog/<ISSUE_ID>/artifacts/ticket-images.md` as a localized-image manifest
+- `pull` writes `.intuition/backlog/<ISSUE_ID>/context/ticket-discussion.md` with chronological author-attributed comment context
+- `pull` filters generated workpad and `[harness-sync]` comments out of the persisted discussion context and stores `last_pulled_comment_ids` in `.intuition/backlog/<ISSUE_ID>/.linear.json`
 - `pull` logs per-image download failures without failing the overall sync
 - `pull` uses raw `Authorization: <LINEAR_API_KEY>` only for `uploads.linear.app` image downloads; other hosts are fetched without that special auth header
 - `pull` reuses previously localized ticket images when the same generated artifact path is still current
-- `pull` persists `.metastack/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, `last_sync_at`, and `last_pulled_comment_ids` alongside the existing issue metadata
+- `pull` persists `.intuition/backlog/<ISSUE_ID>/.linear.json`, including `local_hash`, `remote_hash`, `last_sync_at`, and `last_pulled_comment_ids` alongside the existing issue metadata
 - when `pull` sees a `remote-ahead` or `diverged` packet, it shows a diff between the local `index.md` and the incoming Linear description before any files are overwritten
 - in a TTY, `pull` asks for confirmation before overwriting local backlog content; in non-interactive runs it exits non-zero instead of silently replacing changed files
 - `pull --all` walks every linked backlog entry sequentially and prints a synced/skipped/error summary
 - `push` replaces only CLI-managed attachments by default, leaving unrelated Linear attachments untouched
-- `push` parses `.metastack/backlog/<ISSUE_ID>/checklist.md` when present and upserts a single `[harness-sync]` Linear comment with per-milestone and overall completion status
+- `push` parses `.intuition/backlog/<ISSUE_ID>/checklist.md` when present and upserts a single `[harness-sync]` Linear comment with per-milestone and overall completion status
 - `push` leaves the Linear issue description unchanged unless you pass `--update-description`
 - `push --update-description` refuses to overwrite the Linear description when the stored baselines resolve to `remote-ahead` or `diverged`
 - `push --all` walks every linked backlog entry sequentially, respects `--update-description`, and exits non-zero when any entry fails
-- during `meta listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
+- during `intu listen`, `push --update-description` is blocked for the active ticket so the primary issue description stays untouched
 - pass `--no-interactive` with `link`, `pull`, or `push` when scripting; in that mode every required selector must be explicit
 - direct subcommands emit JSON when `--no-interactive` is active; `status` also supports explicit `--json`
-- `.metastack/meta.json` optionally accepts `sync.discussion_file_char_limit` and `sync.discussion_prompt_char_limit` to tune the persisted discussion file budget and the `meta listen` prompt excerpt budget
+- `.intuition/meta.json` optionally accepts `sync.discussion_file_char_limit` and `sync.discussion_prompt_char_limit` to tune the persisted discussion file budget and the `intu listen` prompt excerpt budget
 
 The sync dashboard and render-once snapshot now include a shared issue search bar plus each issue's local sync state:
 
@@ -1022,39 +1022,39 @@ The sync dashboard and render-once snapshot also show each issue's local sync st
 - `diverged`: both local backlog files and the Linear issue changed since the last stored baseline
 - `unlinked`: the local packet is missing or the existing `.linear.json` predates hash baselines
 
-Local hashes are derived deterministically from tracked files under `.metastack/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded, and generated discussion/image artifacts stay local-only so repeat no-op syncs remain `synced`.
+Local hashes are derived deterministically from tracked files under `.intuition/backlog/<ISSUE>/`. Dotfiles, including `.linear.json`, are excluded, and generated discussion/image artifacts stay local-only so repeat no-op syncs remain `synced`.
 
 ### `linear issues`, `linear projects`, and `dashboard`
 
 Use Linear from the command line:
 
 ```bash
-meta linear projects list --team MET
-meta linear issues list --team MET --project "MetaStack CLI"
-meta linear issues list --team MET --json
-meta linear issues create --team MET
-meta linear issues create --no-interactive --team MET --title "Add docs" --description "Cover command usage"
-meta linear issues edit --issue MET-11
-meta linear issues edit --no-interactive --issue MET-11 --state "In Progress"
-meta linear issues refine MET-11
-meta linear issues refine MET-11 --passes 2 --apply
-meta dashboard linear --demo
-meta dashboard team --team MET
+intu linear projects list --team MET
+intu linear issues list --team MET --project "Intuition CLI"
+intu linear issues list --team MET --json
+intu linear issues create --team MET
+intu linear issues create --no-interactive --team MET --title "Add docs" --description "Cover command usage"
+intu linear issues edit --issue MET-11
+intu linear issues edit --no-interactive --issue MET-11 --state "In Progress"
+intu linear issues refine MET-11
+intu linear issues refine MET-11 --passes 2 --apply
+intu dashboard linear --demo
+intu dashboard team --team MET
 ```
 
-Legacy aliases: `meta issues`, `meta projects`, `meta dashboard`
+Legacy aliases: `intu issues`, `intu projects`, `intu dashboard`
 
 Notes:
 
-- `meta linear issues list` opens an interactive issue browser unless you pass `--json`
-- `meta linear issues list`, `meta dashboard linear`, and `meta dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
+- `intu linear issues list` opens an interactive issue browser unless you pass `--json`
+- `intu linear issues list`, `intu dashboard linear`, and `intu dashboard team` share the same free-text search behavior when the issue list is focused: type to search by identifier, title, state, project, or description, with exact identifiers ranked ahead of broader matches
 - the shared Linear dashboards keep their existing filters, and the search query narrows the visible issue set after those filters are applied
 - All TUI preview and detail panes that display markdown-authored content (Linear issue previews, PR bodies, review reports, planning ticket details, improvement comparisons, and listen session descriptions) render through the shared markdown renderer at `src/tui/markdown.rs`, preserving headings, bullet/ordered lists, blockquotes, fenced code blocks, inline bold/italic/code, tables, and blank lines.
-- `meta linear issues create` and `meta linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
-- `meta linear issues create --no-interactive ...` and `meta linear issues edit --no-interactive ...` emit structured JSON instead of text
+- `intu linear issues create` and `intu linear issues edit` open ratatui workflows when stdin/stdout are attached to a TTY
+- `intu linear issues create --no-interactive ...` and `intu linear issues edit --no-interactive ...` emit structured JSON instead of text
 - In the interactive create/edit forms, multiline descriptions advance on `Enter`, insert a newline on `Shift+Enter`, and support `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, plus mouse-wheel scrolling while the description pane is focused; the summary/review sidebar also scrolls with the mouse wheel when long descriptions overflow
-- `meta linear issues refine` is non-interactive, uses the configured local agent, defaults to critique-only unless you pass `--apply`, and emits machine-readable results when `--json` is set
-- `meta dashboard linear` is the preferred Linear dashboard path; bare `meta dashboard` remains a compatibility alias during migration
+- `intu linear issues refine` is non-interactive, uses the configured local agent, defaults to critique-only unless you pass `--apply`, and emits machine-readable results when `--json` is set
+- `intu dashboard linear` is the preferred Linear dashboard path; bare `intu dashboard` remains a compatibility alias during migration
 
 Required auth:
 
@@ -1066,8 +1066,8 @@ Required auth:
 
 Review open GitHub PRs with a holistic audit pipeline that gathers PR metadata, review state, changed files, diff scope, linked Linear ticket details, and repository context. Interactive TTY runs stay inside one guided dashboard flow:
 
-- **Direct review**: `meta agents review <PR_NUMBER>` loads one PR into the dashboard, shows a review preview, and waits for explicit approval before the audit starts.
-- **Guided queue review**: `meta agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each review session.
+- **Direct review**: `intu agents review <PR_NUMBER>` loads one PR into the dashboard, shows a review preview, and waits for explicit approval before the audit starts.
+- **Guided queue review**: `intu agents review` (no PR number) discovers open PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each review session.
 
 The interactive dashboard keeps candidates and live sessions in separate views so you can search, multi-select, and queue more PRs while earlier reviews are still running. `Enter` queues a normal review, `Tab` rotates focus between the candidate list, candidate preview, session list, and session detail panes, and `R` refreshes the candidate discovery set without leaving the dashboard. Once a review reaches `Review Complete`, switch to the Sessions view and press `A` to start the remediation agent PR workflow from the saved report.
 
@@ -1077,24 +1077,24 @@ the clipboard is unavailable.
 
 ```bash
 # One-shot review
-meta agents review 42 --root .
-meta agents review 42 --root . --dry-run
-meta agents review 42 --root . --agent claude --model opus
+intu agents review 42 --root .
+intu agents review 42 --root . --dry-run
+intu agents review 42 --root . --agent claude --model opus
 
 # Prerequisite check
-meta agents review --check --root .
+intu agents review --check --root .
 
 # Guided queue mode
-meta agents review --root .
-meta agents review --root . --once
-meta agents review --root . --once --json
-meta agents review --root . --render-once
+intu agents review --root .
+intu agents review --root . --once
+intu agents review --root . --once --json
+intu agents review --root . --render-once
 
 # Non-interactive remediation dispatch
-meta agents review --root . --fix-pr 42
-meta agents review --root . --fix-pr 42 --json
-meta agents review --root . --skip-pr 42
-meta agents review --root . --skip-pr 42 --json
+intu agents review --root . --fix-pr 42
+intu agents review --root . --fix-pr 42 --json
+intu agents review --root . --skip-pr 42
+intu agents review --root . --skip-pr 42 --json
 ```
 
 The review instructions are stored as source-controlled artifacts at `src/artifacts/REVIEW.md` and `src/artifacts/VIEW_LINEAR.md`, and loaded at compile time via `include_str!`. `--dry-run` and `--check` now print the resolved transport alongside provider, model, reasoning, route key, and config-source diagnostics so stdin-vs-argv behavior is visible before launch.
@@ -1111,7 +1111,7 @@ Each reviewed PR transitions through a per-PR state model:
 6. **Fix Agent Complete** - Remediation PR created and pushed.
 7. **Skipped** - User explicitly declined remediation.
 
-When a review requires remediation, the interactive dashboard shows `[a] Create fix PR` and `[n] Skip` actions on the selected session. Press `d` to delete a stored session after confirmation when you no longer want it in the session view. Dispatching a fix agent does not exit the TUI; the dashboard remains active and shows live progress for the remediation run. Multiple reviewed PRs maintain independent state in the same session, and each new `meta agents review` run starts from a fresh session set instead of restoring prior runs into the dashboard.
+When a review requires remediation, the interactive dashboard shows `[a] Create fix PR` and `[n] Skip` actions on the selected session. Press `d` to delete a stored session after confirmation when you no longer want it in the session view. Dispatching a fix agent does not exit the TUI; the dashboard remains active and shows live progress for the remediation run. Multiple reviewed PRs maintain independent state in the same session, and each new `intu agents review` run starts from a fresh session set instead of restoring prior runs into the dashboard.
 
 For scripted and CI usage, `--fix-pr N` and `--skip-pr N` act on a previously reviewed PR without requiring the interactive TUI. Both produce JSON output with `--json`.
 
@@ -1123,14 +1123,14 @@ Re-entering the interactive dashboard restores existing review and remediation s
 
 Analyze completed PRs for non-blocking follow-up backlog opportunities. Interactive TTY runs stay inside a guided retro dashboard:
 
-- **Direct retro**: `meta agents retro <PR_NUMBER>` loads one PR into the dashboard and waits for explicit approval before the retro analysis starts.
-- **Guided queue retro**: `meta agents retro` (no PR number) discovers both open and closed PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each retro session.
+- **Direct retro**: `intu agents retro <PR_NUMBER>` loads one PR into the dashboard and waits for explicit approval before the retro analysis starts.
+- **Guided queue retro**: `intu agents retro` (no PR number) discovers both open and closed PRs with the `metastack` label via `gh`, shows a searchable candidate queue, and waits for a human to approve starting each retro session.
 
 After a retro analysis finishes, selecting that session and pressing `Enter` opens a dedicated backlog-plan-style review screen. From there you can keep, skip, or merge suggested tickets before creating the curated batch in Linear.
 
 ```bash
-meta agents retro 42 --root .
-meta agents retro --root .
+intu agents retro 42 --root .
+intu agents retro --root .
 ```
 
 Interactive runs now show explicit loading states for auth, PR discovery, context assembly, agent review, and remediation so the current phase stays visible throughout the session.
@@ -1152,7 +1152,7 @@ Panel controls: `Space` toggle, `Up/Down` navigate, `C` clear all, `F`/`Enter`/`
 
 Prerequisites:
 - `gh` CLI installed and authenticated (`gh auth login`)
-- Repository with a configured `.metastack/meta.json`
+- Repository with a configured `.intuition/meta.json`
 - For guided queue mode: PRs must carry the `metastack` label
 
 ### `agents improve`
@@ -1160,7 +1160,7 @@ Prerequisites:
 Inspect open PRs for the current repository, describe an improvement request, and publish the result as a stacked PR targeting the source PR branch. Interactive TTY runs stay inside one TUI dashboard:
 
 - The left panel lists open PRs discovered via `gh pr list`.
-- The right panel lists persisted improve sessions loaded from `.metastack/agents/improve/sessions/state.json`.
+- The right panel lists persisted improve sessions loaded from `.intuition/agents/improve/sessions/state.json`.
 - `Enter` on a PR opens a detail view with branch info and body preview.
 - `Tab` toggles focus between the PR list and session list.
 - `Enter` on a session opens a detail view with phase, instructions, and stacked PR link.
@@ -1176,10 +1176,10 @@ When an improve session executes, it:
 3. Publishes a stacked PR targeting the source PR branch with a title and body linking back to the original PR.
 
 ```bash
-meta agents improve --root .
-meta agents improve --root . --render-once
-meta agents improve --root . --render-once --events enter
-meta agents improve --root . --render-once --events tab,enter
+intu agents improve --root .
+intu agents improve --root . --render-once
+intu agents improve --root . --render-once --events enter
+intu agents improve --root . --render-once --events tab,enter
 ```
 
 Prerequisites:
@@ -1188,35 +1188,35 @@ Prerequisites:
 
 ### `agents execute`
 
-Run a one-off headless agent session for a single Linear issue. The execute command reuses the same bootstrap path as `meta agents listen` — workspace provisioning, backlog setup, workpad creation, and worker launch — but records the session origin as `execute` instead of `listen`. This means:
+Run a one-off headless agent session for a single Linear issue. The execute command reuses the same bootstrap path as `intu agents listen` — workspace provisioning, backlog setup, workpad creation, and worker launch — but records the session origin as `execute` instead of `listen`. This means:
 
 - The listen dashboard surfaces execute-origin sessions with an `execute-origin` label.
-- The listen daemon does **not** auto-resume or auto-claim execute-origin sessions when their worker finishes. They remain blocked until an operator explicitly adopts them via `R` (resume) in the dashboard or `meta listen sessions resume`.
+- The listen daemon does **not** auto-resume or auto-claim execute-origin sessions when their worker finishes. They remain blocked until an operator explicitly adopts them via `R` (resume) in the dashboard or `intu listen sessions resume`.
 - Workspace safety guarantees remain identical: the source checkout is never used as the turn cwd.
 
-Use `meta agents execute` when you want to kick off work on a specific ticket without leaving the continuous listen daemon running. The session will persist and be visible in the next `meta agents listen` dashboard.
+Use `intu agents execute` when you want to kick off work on a specific ticket without leaving the continuous listen daemon running. The session will persist and be visible in the next `intu agents listen` dashboard.
 
 Examples:
 
 ```bash
-meta agents execute MET-45 --team MET --project "MetaStack CLI"
-meta agents execute MET-45 --root . --max-turns 10
-meta agents execute MET-45 --root . --json
+intu agents execute MET-45 --team MET --project "Intuition CLI"
+intu agents execute MET-45 --root . --max-turns 10
+intu agents execute MET-45 --root . --json
 ```
 
 ### `agents listen`
 
-Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker now follows an explicit phased loop: one execution turn tries to complete as much of the Linear ticket as possible, a review phase compares the current workspace against the Linear ticket acceptance criteria and validation requirements, continuation turns receive only the remaining-work delta, and a final review runs before PR publication and the Linear review transition. The first turn keeps the prompt focused on the Linear ticket and core repo instructions, references large legacy overlay files instead of inlining them, and tells the agent to execute the ticket directly rather than expanding it into extra planning or backlog maintenance. Existing local backlog files are treated as lightweight tracking only unless the ticket explicitly asks for more; after each review phase, the listener updates both the active workpad comment and a managed progress checklist section in the local backlog `index.md`. When the ticket branch is pushed, shared automation creates or updates that branch PR as a draft, keeps the `metastack` label attached, and promotes the same PR to ready for review during the existing review handoff without demoting an already-ready PR on continuation. If no matching open branch PR exists during handoff, the worker leaves the PR state as `none` and continues safely without creating a new review PR at completion time.
+Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.intuition/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker now follows an explicit phased loop: one execution turn tries to complete as much of the Linear ticket as possible, a review phase compares the current workspace against the Linear ticket acceptance criteria and validation requirements, continuation turns receive only the remaining-work delta, and a final review runs before PR publication and the Linear review transition. The first turn keeps the prompt focused on the Linear ticket and core repo instructions, references large legacy overlay files instead of inlining them, and tells the agent to execute the ticket directly rather than expanding it into extra planning or backlog maintenance. Existing local backlog files are treated as lightweight tracking only unless the ticket explicitly asks for more; after each review phase, the listener updates both the active workpad comment and a managed progress checklist section in the local backlog `index.md`. When the ticket branch is pushed, shared automation creates or updates that branch PR as a draft, keeps the `metastack` label attached, and promotes the same PR to ready for review during the existing review handoff without demoting an already-ready PR on continuation. If no matching open branch PR exists during handoff, the worker leaves the PR state as `none` and continues safely without creating a new review PR at completion time.
 
 With repo setup `assignment_scope = "viewer_only"`, listen watches only Todo issues assigned to the authenticated viewer. Use `assignment_scope = "viewer_or_unassigned"` to also watch unassigned Todo issues, or `--all-assignees` to disable assignee filtering for just the active run.
 
-Legacy alias: `meta listen`
+Legacy alias: `intu listen`
 
-`meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
+`intu agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
 
-When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and default textual inspection output render session-level `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The worker also appends one per-turn token summary line to the per-issue log and persists additive turn-history snapshots in the mirrored detail artifact so `meta listen sessions inspect --turns` can render the exact turn order, prompt mode (`full_prompt` or `continuation`), and per-turn token counts without reparsing raw provider JSON. The listener also persists canonical provider, model, reasoning, and token metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`. Persisted worker logs are a small compatibility surface for that repair pass: the current branded `--- intu listen turn ...` / `--- intu listen preflight failed @ ...` headers and the legacy `--- meta ...` equivalents remain readable, and preflight-failure blocks act only as repair boundaries rather than as recoverable canonical metadata on their own.
+When built-in `codex` or `claude` workers emit structured usage telemetry, `intu agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and default textual inspection output render session-level `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The worker also appends one per-turn token summary line to the per-issue log and persists additive turn-history snapshots in the mirrored detail artifact so `intu listen sessions inspect --turns` can render the exact turn order, prompt mode (`full_prompt` or `continuation`), and per-turn token counts without reparsing raw provider JSON. The listener also persists canonical provider, model, reasoning, and token metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`. Persisted worker logs are a small compatibility surface for that repair pass: the current branded `--- intu listen turn ...` / `--- intu listen preflight failed @ ...` headers and the legacy `--- meta ...` equivalents remain readable, and preflight-failure blocks act only as repair boundaries rather than as recoverable canonical metadata on their own.
 The interactive dashboard has two primary panes: **Agent Sessions** (active and completed listener
 workers) and **In Progress Issues - All Users** (all Linear issues currently in `In Progress`). The In Progress Issues
 pane displays each issue's short title, assignee, and whether an open GitHub PR is attached.
@@ -1234,7 +1234,7 @@ Both panes can be independently hidden via CLI flags or config:
 - `--hide-active-issues` hides the In Progress Issues pane for this run
 - `--hide-preview` hides the preview/detail pane for this run
 - Set `listen.dashboard_active_issues` or `listen.dashboard_preview` to `false` in
-  `.metastack/meta.json` to change the default
+  `.intuition/meta.json` to change the default
 
 When `vim_mode` is enabled, the dashboard also accepts `h`/`l` as aliases for left/right and
 `j`/`k` as aliases for up/down. The session table renders a compact `PR` badge (`none`,
@@ -1249,15 +1249,15 @@ presentation-only fields to the JSON shape.
 Examples:
 
 ```bash
-meta agents listen --demo --render-once
-meta agents listen --check --root .
-meta agents listen --team MET --once
-meta agents listen --check --root . --all-assignees
-meta agents listen --team MET --project "MetaStack CLI" --once
-meta agents listen --team MET --project "MetaStack API"
-meta agents listen --team MET --project "MetaStack CLI" --once --all-assignees
-meta agents listen --team MET --project "MetaStack CLI"
-meta runtime setup --listen-label agent --assignee-scope viewer-only --refresh-policy reuse-and-refresh
+intu agents listen --demo --render-once
+intu agents listen --check --root .
+intu agents listen --team MET --once
+intu agents listen --check --root . --all-assignees
+intu agents listen --team MET --project "Intuition CLI" --once
+intu agents listen --team MET --project "Intuition API"
+intu agents listen --team MET --project "Intuition CLI" --once --all-assignees
+intu agents listen --team MET --project "Intuition CLI"
+intu runtime setup --listen-label agent --assignee-scope viewer-only --refresh-policy reuse-and-refresh
 ```
 
 Listen prerequisites:
@@ -1271,17 +1271,17 @@ sandbox_mode = "danger-full-access"
 
 - Codex: remove `[mcp_servers.linear]` from the Codex config or disable it; the preflight warns when Linear MCP is detected.
 - Claude: `claude` must be on `PATH`, and `ANTHROPIC_API_KEY` should be unset for unattended subscription-backed runs.
-- `meta agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
+- `intu agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
 - `--check` also prints the effective assignee filter, for example `only Kames`, `Kames + unassigned`, or `all assignees`.
 
 Outputs:
 
 - `<parent>/<repo>-workspace/<TICKET>/`
-- repo-scoped listen refresh policy in `.metastack/meta.json`
-- `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/briefs/<TICKET>.md`
-- `<parent>/<repo>-workspace/<TICKET>/.metastack/agents/issue-context/<TICKET>/README.md`
-- install-scoped MetaListen state under the global MetaStack data root, keyed by the canonical
-  source project `.metastack` root
+- repo-scoped listen refresh policy in `.intuition/meta.json`
+- `<parent>/<repo>-workspace/<TICKET>/.intuition/agents/briefs/<TICKET>.md`
+- `<parent>/<repo>-workspace/<TICKET>/.intuition/agents/issue-context/<TICKET>/README.md`
+- install-scoped MetaListen state under the global Intuition data root, keyed by the canonical
+  source project `.intuition` root
 - install-scoped MetaListen logs under the same project store
 - a live terminal dashboard in steady-state mode, or a render-once terminal snapshot when requested
 
@@ -1301,15 +1301,15 @@ logs in place or attempt fuzzy recovery from unrelated text.
 Stored-session management commands:
 
 ```bash
-meta listen sessions list
-meta listen sessions inspect
-meta listen sessions inspect --turns
-meta listen sessions clear
-meta listen sessions resume --project-key <PROJECT_KEY> --once
+intu listen sessions list
+intu listen sessions inspect
+intu listen sessions inspect --turns
+intu listen sessions clear
+intu listen sessions resume --project-key <PROJECT_KEY> --once
 ```
 
-`meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
-`meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
+`intu listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
+`intu listen sessions inspect` now expands the latest stored session with structured detail-artifact
 fields when available, including PR URL/state, workspace/backlog/workpad references, recent
 milestones, prompt-context references, compact log excerpts, and a fallback `Detail PR Ref: #N`
 line when the detail artifact only carries a PR number. Pass `--turns` to append the persisted
@@ -1324,7 +1324,7 @@ when direct clipboard writes are unavailable.
 
 ### `workspace`
 
-Manage the sibling workspace clones created by `meta agents listen`, `meta agents improve`, and `meta agents review`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
+Manage the sibling workspace clones created by `intu agents listen`, `intu agents improve`, and `intu agents review`. These commands always resolve the workspace root from the repository root with the fixed sibling convention:
 
 - `<parent>/<repo>-workspace/`
 
@@ -1334,11 +1334,11 @@ That root is intentionally not configurable.
 
 When a listener session completes (the Linear ticket moves to a non-active state such as Done or Cancelled), the listener worker attempts to auto-clean the corresponding workspace clone immediately. Auto-clean succeeds only when the workspace has no uncommitted changes, no unpushed commits, and HEAD is not detached. When any safety check fails, the workspace is left in place and a manual-review-needed skip is logged. This ensures no local work is ever lost automatically.
 
-The same ticket-scoped listen artifacts (session entry, detail file, log file) that manual `meta workspace clean` removes are also removed during auto-clean.
+The same ticket-scoped listen artifacts (session entry, detail file, log file) that manual `intu workspace clean` removes are also removed during auto-clean.
 
 #### Batch reconciliation
 
-`meta workspace prune` reconciles previously missed merged workspaces across all managed workspace families:
+`intu workspace prune` reconciles previously missed merged workspaces across all managed workspace families:
 
 - **Listener clones** (`<TICKET>/`): removed when the Linear ticket is Done or Cancelled and the workspace is safe.
 - **Improve workspaces** (`improve-<session-id>/`): removed when the associated PR is merged or closed and the workspace is safe.
@@ -1349,29 +1349,29 @@ Workspaces with uncommitted changes, unpushed commits, or detached HEAD are alwa
 Examples:
 
 ```bash
-meta workspace list --root .
-meta workspace clean ENG-10175 --root .
-meta workspace clean --target-only --root .
-meta workspace clean --target-only ENG-10175 --root .
-meta workspace prune --dry-run --root .
-meta workspace prune --root .
+intu workspace list --root .
+intu workspace clean ENG-10175 --root .
+intu workspace clean --target-only --root .
+intu workspace clean --target-only ENG-10175 --root .
+intu workspace prune --dry-run --root .
+intu workspace prune --root .
 ```
 
 Behavior:
 
-- `meta workspace list` prints one row per ticket clone with the ticket directory name, branch, disk usage, last modified timestamp, local git safety state, Linear state, and optional GitHub PR state.
+- `intu workspace list` prints one row per ticket clone with the ticket directory name, branch, disk usage, last modified timestamp, local git safety state, Linear state, and optional GitHub PR state.
 - Done or Cancelled tickets are marked as safe removal candidates in the list output.
 - GitHub PR enrichment is optional. When `gh` auth is unavailable, `list` and `prune` still succeed and mark PR data as unavailable while continuing from Linear completion state alone.
-- `meta workspace clean <TICKET>` deletes one clone after confirmation unless `--force` is passed, and it always reports dirty or ahead safety signals before removal.
-- `meta workspace clean --target-only` removes `target/` directories across all listener clones by default, or narrows to one ticket when a ticket identifier is also supplied.
-- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space. Includes listener ticket clones, improve workspaces, and review remediation workspaces.
-- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled (for listener clones) or whose associated PRs are merged or closed (for improve and review workspaces), keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
+- `intu workspace clean <TICKET>` deletes one clone after confirmation unless `--force` is passed, and it always reports dirty or ahead safety signals before removal.
+- `intu workspace clean --target-only` removes `target/` directories across all listener clones by default, or narrows to one ticket when a ticket identifier is also supplied.
+- `intu workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space. Includes listener ticket clones, improve workspaces, and review remediation workspaces.
+- `intu workspace prune` removes clones whose Linear tickets are Done or Cancelled (for listener clones) or whose associated PRs are merged or closed (for improve and review workspaces), keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
 - Clone deletion also removes only the matching ticket-scoped MetaListen session entry and per-ticket log artifact from the install-scoped project store, leaving unrelated sessions for the same repository intact.
 
 For built-in `codex` and `claude` listen workers, the install-scoped `session.json` state now keeps
 the latest provider-native manual resume target separately from the Linear issue identity. The
 dashboard `SESSION` column renders only the compact provider-native handle, while
-`meta listen sessions list` and `meta listen sessions inspect` surface the latest provider plus the
+`intu listen sessions list` and `intu listen sessions inspect` surface the latest provider plus the
 full resume ID so operators can copy the correct `codex` or `claude` resume target directly.
 Capture is latest-only and silent best effort: new listen turns overwrite the stored provider/ID
 when capture succeeds, and leave those fields explicitly unavailable when it does not. The same
@@ -1386,29 +1386,29 @@ Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
+Linear commands also read repo-scoped defaults from `.intuition/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `intu setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, Intuition falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `intu listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.intuition/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `intu runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `intu plan` reads the optional `plan.interactive_follow_up_questions` override there and `intu plan` / `intu backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `intu setup` saves and onboarding saves, Intuition checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `intu linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `intu backlog spec`, `intu backlog plan`, `intu backlog improve`, `intu backlog split`, `intu context scan`, `intu context reload`, `intu linear issues refine`, `intu agents workflows run`, `intu runtime cron run`, `intu agents listen`, and `intu merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
 3. command family override
-4. repo default from `.metastack/meta.json` when present
+4. repo default from `.intuition/meta.json` when present
 5. global default
 
 Workflow playbooks can still declare a built-in provider, but that value is now only used as the final fallback when the explicit, route, repo, and global config layers do not select one.
 
 The built-in provider adapters are the single source of truth for metadata and launch behavior. They run `codex exec` and `claude -p`, pass `--model=<value>` automatically when a model is configured, validate reasoning against the selected provider/model, and expose resolution diagnostics before launch. Built-in `codex` and `claude` now default to stdin prompt delivery, so large review-family payloads stay off argv unless an explicit transport override selects `arg`. Before spawning a built-in provider, the CLI now checks the installed shell help surface for the emitted flags and fails fast with the resolved provider/model/reasoning plus transport and the exact attempted command if the local binary has drifted. Codex reasoning is passed as `-c reasoning.effort="<value>"`; Claude reasoning is passed as `--effort=<value>`.
 
-For capture-oriented non-interactive runs such as `meta backlog plan`, the runtime requests machine-readable built-in output, unwraps the final assistant text before returning it to the caller, captures provider-native session IDs, and can resume the next phase inside the same command. If a resumed built-in launch fails with a narrow invalid-resume signal, the runtime clears that handle and retries the phase once as a fresh launch.
+For capture-oriented non-interactive runs such as `intu backlog plan`, the runtime requests machine-readable built-in output, unwraps the final assistant text before returning it to the caller, captures provider-native session IDs, and can resume the next phase inside the same command. If a resumed built-in launch fails with a narrow invalid-resume signal, the runtime clears that handle and retries the phase once as a fresh launch.
 
 Sandbox and permission handling depends on the command path:
 
-- `meta agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
-- `meta agents listen` also enables machine-readable provider output for built-in workers so the listener can capture the latest provider-native manual resume ID. Codex listen runs use `codex exec --json`, and Claude listen runs use `claude -p --verbose --output-format=stream-json`.
-- Built-in listen worker restarts and `meta listen sessions resume` only reuse a stored manual resume target when provider-native metadata exists for the active built-in provider; operator-facing detail falls back to explicit `unavailable`, not to legacy continuation bookkeeping.
-- `meta context scan`, `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
+- `intu agents listen` uses unrestricted execution for built-in providers so unattended workers can run validation, git/GitHub flows, and Linear updates. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses `--permission-mode=bypassPermissions`.
+- `intu agents listen` also enables machine-readable provider output for built-in workers so the listener can capture the latest provider-native manual resume ID. Codex listen runs use `codex exec --json`, and Claude listen runs use `claude -p --verbose --output-format=stream-json`.
+- Built-in listen worker restarts and `intu listen sessions resume` only reuse a stored manual resume target when provider-native metadata exists for the active built-in provider; operator-facing detail falls back to explicit `unavailable`, not to legacy continuation bookkeeping.
+- `intu context scan`, `intu backlog spec`, `intu backlog plan`, `intu backlog improve`, `intu backlog split`, `intu linear issues refine`, workflow runs, merge flows, and cron prompts keep the built-in Codex adapter on `--sandbox workspace-write --ask-for-approval never`.
 
 Listen startup now runs a provider preflight before polling Linear, and worker pickup reruns it inside the workspace before the first agent turn. Codex checks require a readable `~/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` and warn when `[mcp_servers.linear]` is configured. Claude checks require `claude` on `PATH` and fail fast when `ANTHROPIC_API_KEY` is set. Both providers also validate that the resolved built-in launch command exposes the required unrestricted mode for unattended listen runs.
 
@@ -1416,13 +1416,13 @@ This is intentionally stricter than Codex `--full-auto`: in `codex-cli 0.115.0`,
 
 Agent launches receive:
 
-For `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen`, the rendered agent prompt also includes a shared repo-target contract derived from the resolved command root:
+For `intu plan`, `intu backlog tech`, `intu issues refine`, `intu scan`, and `intu listen`, the rendered agent prompt also includes a shared repo-target contract derived from the resolved command root:
 
 - the built-in workflow contract shipped in `src/artifacts/injected-agent-workflow-contract.md`
 - the resolved `RepoTarget` scope block, including repo identity and root path
 - optional repo overlays from root `AGENTS.md` and legacy `WORKFLOW.md`
-- optional repo-scoped instructions configured in `.metastack/meta.json`
-- for `meta listen`, an additional unattended workspace/workpad layer on top of that shared contract
+- optional repo-scoped instructions configured in `.intuition/meta.json`
+- for `intu listen`, an additional unattended workspace/workpad layer on top of that shared contract
 
 - a combined payload via the configured transport (`arg` or `stdin`)
 - `METASTACK_AGENT_NAME`
@@ -1437,8 +1437,8 @@ For `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `me
 - `METASTACK_AGENT_REASONING_SOURCE`
 - `METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH` when the issue has downloaded attachment context
 
-`meta agents workflows run --dry-run` now prints the resolved provider/model/reasoning plus their
-resolution sources. `meta context scan` also writes the same diagnostics into the scan agent log so
+`intu agents workflows run --dry-run` now prints the resolved provider/model/reasoning plus their
+resolution sources. `intu context scan` also writes the same diagnostics into the scan agent log so
 misrouting can be proved from the persisted runtime evidence.
 
 If you need to override the built-in launch command, you can still customize the persisted agent command in the config file:
@@ -1472,7 +1472,7 @@ make quality
 The interactive planning integration proof in `tests/plan.rs` shells out to `expect`, so local
 `make quality` runs also require that binary on `PATH` in addition to Rust.
 
-The focused `release_artifacts` proof keeps the GitHub Release packaging contract explicit in the root gate by verifying the release-script archive names, `SHA256SUMS`, and extracted `meta --version` output.
+The focused `release_artifacts` proof keeps the GitHub Release packaging contract explicit in the root gate by verifying the release-script archive names, `SHA256SUMS`, and extracted `intu --version` output.
 
 ## Testing
 
