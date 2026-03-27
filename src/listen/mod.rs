@@ -3960,7 +3960,7 @@ fn ensure_listen_progress_section(contents: &str) -> String {
 }
 
 fn default_listen_progress_section() -> &'static str {
-    "## Listener Progress Checklist\n\n### Completed\n\n- [ ] No completed items recorded yet.\n\n### Remaining\n\n- [x] No remaining items identified.\n\n### Validation\n\n- [ ] No explicit validation status recorded."
+    "## Listener Progress Checklist\n\n### Completed\n\n_None recorded yet._\n\n### Remaining\n\n_None currently identified._\n\n### Validation\n\n_No explicit validation status recorded._"
 }
 
 async fn sync_issue_attachment_context<C>(
@@ -4256,6 +4256,9 @@ mod tests {
         assert!(rendered.contains("<!-- metastack-listen-progress:start -->"));
         assert!(rendered.contains("## Listener Progress Checklist"));
         assert!(rendered.contains("<!-- metastack-listen-progress:end -->"));
+        assert!(!rendered.contains("No completed items recorded yet."));
+        assert!(!rendered.contains("No remaining items identified."));
+        assert!(!rendered.contains("- [ ] No explicit validation status recorded."));
     }
 
     #[test]
