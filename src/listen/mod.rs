@@ -3864,7 +3864,7 @@ fn render_listen_backlog_description(
     if let Some(existing_description) = existing_description
         && backlog_description_has_task_list(existing_description)
     {
-        return existing_description.to_string();
+        return ensure_listen_progress_section(existing_description);
     }
 
     let mut lines = Vec::new();
@@ -3899,7 +3899,7 @@ fn render_listen_backlog_description(
         );
     }
 
-    lines.join("\n")
+    ensure_listen_progress_section(&lines.join("\n"))
 }
 
 fn backlog_description_has_task_list(description: &str) -> bool {
@@ -3910,6 +3910,27 @@ fn backlog_description_has_task_list(description: &str) -> bool {
         || description.contains("* [ ] ")
         || description.contains("* [x] ")
         || description.contains("* [X] ")
+}
+
+fn ensure_listen_progress_section(contents: &str) -> String {
+    let start = "<!-- metastack-listen-progress:start -->";
+    let end = "<!-- metastack-listen-progress:end -->";
+    if contents.contains(start) && contents.contains(end) {
+        return contents.to_string();
+    }
+
+    let section = format!("{start}\n{}\n{end}", default_listen_progress_section());
+    let mut updated = contents.trim_end().to_string();
+    if !updated.is_empty() {
+        updated.push_str("\n\n");
+    }
+    updated.push_str(&section);
+    updated.push('\n');
+    updated
+}
+
+fn default_listen_progress_section() -> &'static str {
+    "## Listener Progress Checklist\n\n### Completed\n\n- [ ] No completed items recorded yet.\n\n### Remaining\n\n- [x] No remaining items identified.\n\n### Validation\n\n- [ ] No explicit validation status recorded."
 }
 
 async fn sync_issue_attachment_context<C>(
@@ -4152,7 +4173,7 @@ mod tests {
         SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot, compact_identifier,
         format_duration, format_number, listen_browser_action, listen_scope_label,
         mark_running_session_stale, render_agent_prompt, render_continuation_prompt,
-        required_label_skip_reason,
+        render_listen_backlog_description, required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -4188,6 +4209,23 @@ mod tests {
     fn number_formatter_adds_grouping() {
         assert_eq!(format_number(0), "0");
         assert_eq!(format_number(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn render_listen_backlog_description_preserves_existing_body_and_appends_progress_block() {
+        let rendered = render_listen_backlog_description(
+            "# Existing Technical Backlog\n\nDo not overwrite me.\n\n## Requirements\n\n- [ ] Keep the original checklist",
+            &test_issue("MET-50"),
+            Some(
+                "# Existing Technical Backlog\n\nDo not overwrite me.\n\n## Requirements\n\n- [ ] Keep the original checklist",
+            ),
+        );
+
+        assert!(rendered.starts_with("# Existing Technical Backlog\n\nDo not overwrite me."));
+        assert!(rendered.contains("## Requirements\n\n- [ ] Keep the original checklist"));
+        assert!(rendered.contains("<!-- metastack-listen-progress:start -->"));
+        assert!(rendered.contains("## Listener Progress Checklist"));
+        assert!(rendered.contains("<!-- metastack-listen-progress:end -->"));
     }
 
     #[test]
