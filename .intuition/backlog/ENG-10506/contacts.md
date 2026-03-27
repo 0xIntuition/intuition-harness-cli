@@ -5,7 +5,7 @@ Last updated: 2026-03-26
 ## Owners
 
 - Driver: `kames@intuition.systems` (Linear assignee)
-- Reviewer: Not yet assigned in the local ticket packet
+- Reviewer: MetaStack CLI maintainers via the linked PR review
 - Stakeholder: MetaStack CLI maintainers
 
 ## Escalation
