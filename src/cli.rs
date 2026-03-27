@@ -409,13 +409,11 @@ pub struct ExecuteArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct BuildArgs {
-    /// Workspace identifier: a Linear ticket ID (e.g. MET-45) resolved to its sibling workspace
-    /// path. Not required when `--dir` is provided.
-    #[arg(value_name = "WORKSPACE")]
-    pub workspace: Option<String>,
-    /// Prompt to send for the first agent run. If omitted, enters the interactive prompt directly.
-    #[arg(value_name = "PROMPT")]
-    pub prompt: Option<String>,
+    /// Positional arguments for the build session. Without `--dir`, the first value is the
+    /// workspace identifier and the optional second value is the initial prompt. With `--dir`,
+    /// the first value is treated as the initial prompt.
+    #[arg(value_names = ["WORKSPACE", "PROMPT"], num_args = 0..=2)]
+    pub positionals: Vec<String>,
     /// Repository root used to resolve sibling workspace paths.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub root: PathBuf,

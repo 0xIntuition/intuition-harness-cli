@@ -209,18 +209,25 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
 
 fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<String>)> {
     if let Some(dir) = &args.dir {
-        let prompt = args.prompt.clone().or_else(|| args.workspace.clone());
+        let prompt = match args.positionals.as_slice() {
+            [] => None,
+            [prompt] => Some(prompt.clone()),
+            [_, ..] => bail!("`agents build --dir` accepts at most one positional prompt"),
+        };
         Ok((dir.clone(), prompt))
     } else {
-        let workspace = args.workspace.as_ref().ok_or_else(|| {
-            anyhow!("workspace identifier is required when `--dir` is not provided")
-        })?;
+        let (workspace, prompt) = match args.positionals.as_slice() {
+            [workspace] => (workspace, None),
+            [workspace, prompt] => (workspace, Some(prompt.clone())),
+            [] => bail!("workspace identifier is required when `--dir` is not provided"),
+            [_, _, ..] => bail!("`agents build` accepts at most two positional arguments"),
+        };
         let workspace_path = PathBuf::from(workspace);
         if path_like_workspace_arg(&workspace_path) || workspace_path.exists() {
-            Ok((workspace_path, args.prompt.clone()))
+            Ok((workspace_path, prompt))
         } else {
             let root = canonicalize_existing_dir(&args.root)?;
-            Ok((ticket_workspace_root(&root)?.join(workspace), args.prompt.clone()))
+            Ok((ticket_workspace_root(&root)?.join(workspace), prompt))
         }
     }
 }
@@ -601,8 +608,7 @@ mod tests {
     #[test]
     fn build_args_use_dir_as_workspace_and_positional_as_prompt() {
         let args = BuildArgs {
-            workspace: Some("fix auth".to_string()),
-            prompt: None,
+            positionals: vec!["fix auth".to_string()],
             root: PathBuf::from("."),
             agent: None,
             model: None,
@@ -630,8 +636,7 @@ mod tests {
     #[test]
     fn workspace_resolution_accepts_path_like_positionals() {
         let args = BuildArgs {
-            workspace: Some("workspace/MET-45".to_string()),
-            prompt: Some("run qa".to_string()),
+            positionals: vec!["workspace/MET-45".to_string(), "run qa".to_string()],
             root: PathBuf::from("."),
             agent: None,
             model: None,
@@ -652,5 +657,49 @@ mod tests {
         assert!(path_like_workspace_arg(Path::new("./MET-45")));
         assert!(path_like_workspace_arg(Path::new("workspace/MET-45")));
         assert!(!path_like_workspace_arg(Path::new("MET-45")));
+    }
+
+    #[test]
+    fn build_args_require_workspace_without_dir() {
+        let args = BuildArgs {
+            positionals: Vec::new(),
+            root: PathBuf::from("."),
+            agent: None,
+            model: None,
+            reasoning: None,
+            dir: None,
+            max_turns: 20,
+            no_interactive: false,
+        };
+
+        let error = resolve_workspace_and_prompt(&args).expect_err("workspace should be required");
+        assert!(
+            error
+                .to_string()
+                .contains("workspace identifier is required"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn build_args_reject_extra_dir_positionals() {
+        let args = BuildArgs {
+            positionals: vec!["prompt".to_string(), "extra".to_string()],
+            root: PathBuf::from("."),
+            agent: None,
+            model: None,
+            reasoning: None,
+            dir: Some(PathBuf::from("/tmp/workspace")),
+            max_turns: 20,
+            no_interactive: false,
+        };
+
+        let error = resolve_workspace_and_prompt(&args).expect_err("extra positionals should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("accepts at most one positional prompt"),
+            "unexpected error: {error:#}"
+        );
     }
 }

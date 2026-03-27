@@ -2318,8 +2318,10 @@ fn is_placeholder_checklist_label(label: &str) -> bool {
     let normalized = label.trim();
     normalized.eq_ignore_ascii_case("No completed items recorded yet.")
         || normalized.eq_ignore_ascii_case("No explicit validation status recorded.")
+        || normalized.eq_ignore_ascii_case("Confirm owners/reviewers in `contacts.md`.")
         || normalized.eq_ignore_ascii_case("Follow-up action 1")
         || normalized.eq_ignore_ascii_case("Follow-up action 2")
+        || normalized.eq_ignore_ascii_case("Remove consumer-side ad hoc transforms.")
         || normalized.eq_ignore_ascii_case("Task 1")
         || normalized.eq_ignore_ascii_case("Task 2")
         || normalized.eq_ignore_ascii_case("Task 3")
@@ -4243,6 +4245,8 @@ mod tests {
             "\
 - [ ] Follow-up action 1
 - [ ] Follow-up action 2
+- [ ] Confirm owners/reviewers in `contacts.md`.
+- [ ] Remove consumer-side ad hoc transforms.
 - [ ] Task 1
 - [ ] Task 2
 - [ ] Task 3
