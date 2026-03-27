@@ -2217,9 +2217,7 @@ fn backlog_progress_for_issue_dir(
     if index_path.is_file() {
         let index_contents = fs::read_to_string(&index_path)
             .with_context(|| format!("failed to read `{}`", index_path.display()))?;
-        if let Some(section) =
-            marked_section_body(&index_contents, "metastack-listen-progress")
-        {
+        if let Some(section) = marked_section_body(&index_contents, "metastack-listen-progress") {
             return Ok(parse_checklist_progress(section));
         }
     }

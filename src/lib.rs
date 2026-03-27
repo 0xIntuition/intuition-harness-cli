@@ -6,6 +6,7 @@ mod backlog_improve;
 mod backlog_spec;
 pub mod branding;
 mod build;
+mod build_dashboard;
 mod cli;
 mod codebase_context;
 mod config;

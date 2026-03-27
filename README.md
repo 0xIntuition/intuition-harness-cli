@@ -1208,19 +1208,30 @@ meta agents execute MET-45 --root . --json
 
 ### `agents build`
 
-Run a headless agent directly inside a workspace checkout without the Linear listener/bootstrap
-ceremony. The command resolves the target workspace from a sibling ticket workspace such as
-`MET-45` or from an explicit `--dir` path, validates that the directory is a git repository, and
-then launches the resolved provider with that workspace as the working directory. Completed runs
-return to a lightweight `build> ` prompt so you can iterate on QA fixes in the same checkout, and
-mid-run queued input is either resumed immediately through Codex continuation or prepended to the
-next run for providers without native continuation support.
+Run an agent directly inside an existing workspace checkout without the Linear listener/bootstrap
+ceremony. Interactive TTY runs are now workspace-dashboard-first:
+
+- Bare `meta agents build` opens the sibling workspace inventory under `<repo>-workspace/`, shows
+  each available checkout, and lets you switch between workspaces before sending prompts.
+- Selecting a workspace keeps its run history, live output, and current git status visible in the
+  same session so you can move between multiple PR/ticket clones without restarting the command.
+- The status pane now shows whether the selected workspace is clean or dirty, which files are
+  currently changed, and what changed during the last run so engineers get direct confirmation that
+  the agent is editing the intended checkout.
+
+Passing `MET-45` or another workspace selector preselects that workspace in the dashboard, and
+passing both a workspace and a prompt auto-starts the first run there. When the resolved provider
+exposes a continuation handle, the dashboard keeps that resume state available for the next
+compatible run in the same session. Use `--no-interactive` when you want a one-shot scripted run
+with an explicit workspace and prompt.
 
 Examples:
 
 ```bash
+meta agents build
 meta agents build MET-45 "fix the auth bug"
 meta agents build --dir ../repo-workspace/MET-45 "tighten the failing tests"
+meta agents build --dir ../repo-workspace/MET-45
 meta agents build --dir ../repo-workspace/MET-45 --agent codex --model gpt-5.4
 meta agents build --dir ../repo-workspace/MET-45 "run the focused QA pass" --no-interactive
 ```

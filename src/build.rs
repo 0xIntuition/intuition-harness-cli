@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Read, Write as _};
+use std::io::{self, Read, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +15,7 @@ use crate::agents::{
     render_invocation_diagnostics, resolve_agent_invocation_for_planning,
     validate_invocation_command_surface,
 };
+use crate::build_dashboard::{BuildDashboardOptions, run_build_dashboard};
 use crate::cli::{BuildArgs, RunAgentArgs};
 use crate::config::{AGENT_ROUTE_AGENTS_BUILD, AppConfig, PlanningMeta, PromptTransport};
 use crate::fs::{canonicalize_existing_dir, ticket_workspace_root};
@@ -36,14 +37,6 @@ fn install_sigint_handler() {
     }
 }
 
-/// Restores the default SIGINT behavior while waiting at the interactive prompt.
-fn restore_default_sigint() {
-    // SAFETY: restoring the default disposition is the intended `libc::signal` contract.
-    unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum OutputStream {
     Stdout,
@@ -57,9 +50,9 @@ struct OutputChunk {
 }
 
 #[derive(Debug, Default, Clone)]
-struct BuildRunSummary {
-    usage: Option<AgentTokenUsage>,
-    resumed_turns: u32,
+pub(crate) struct BuildRunSummary {
+    pub(crate) usage: Option<AgentTokenUsage>,
+    pub(crate) resumed_turns: u32,
 }
 
 #[derive(Debug, Default)]
@@ -82,42 +75,38 @@ struct BuildSession {
 ///
 /// Resolves the workspace directory from the provided ticket ID or explicit `--dir` path,
 /// validates that the target is a git repository, resolves the provider/model/reasoning settings
-/// through the `agents.build` route, and enters an interactive prompt loop that launches
-/// headless agent runs inside that workspace.
+/// through the `agents.build` route, and either launches the interactive dashboard or runs one
+/// headless agent prompt inside that workspace when `--no-interactive` is used.
 ///
 /// Returns an error when workspace resolution fails, the workspace is not a git repository,
 /// `--no-interactive` is used without an initial prompt, provider resolution fails, or a
-/// non-interactive agent run exits unsuccessfully.
+/// provider subprocess exits unsuccessfully.
 pub async fn run_build(args: &BuildArgs) -> Result<()> {
-    let (workspace_dir, effective_prompt) = resolve_workspace_and_prompt(args)?;
-    if args.no_interactive && effective_prompt.is_none() {
-        bail!("`--no-interactive` requires a prompt");
-    }
-
-    let workspace_dir = validate_git_repo(&workspace_dir)?;
+    let source_root = canonicalize_existing_dir(&args.root)?;
     let config = AppConfig::load()?;
     let planning_meta = PlanningMeta::load(&args.root).unwrap_or_default();
 
-    let (input_tx, input_rx) = mpsc::channel::<String>();
-    thread::spawn(move || {
-        let stdin = io::stdin();
-        loop {
-            let mut line = String::new();
-            match stdin.lock().read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = line
-                        .trim_end_matches('\n')
-                        .trim_end_matches('\r')
-                        .to_string();
-                    if input_tx.send(trimmed).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    if !args.no_interactive {
+        let (initial_workspace, effective_prompt) =
+            resolve_interactive_workspace_and_prompt(args, &source_root)?;
+        let initial_workspace = match initial_workspace {
+            Some(workspace) => Some(validate_git_repo(&workspace)?),
+            None => None,
+        };
+        return run_build_dashboard(BuildDashboardOptions {
+            source_root,
+            workspace_root: ticket_workspace_root(&canonicalize_existing_dir(&args.root)?)?,
+            initial_workspace,
+            config,
+            planning_meta,
+            args: args.clone(),
+            initial_prompt: effective_prompt,
+        });
+    }
+
+    let (workspace_dir, prompt) = resolve_noninteractive_workspace_and_prompt(args, &source_root)?;
+    let workspace_dir = validate_git_repo(&workspace_dir)?;
+    let (_input_tx, input_rx) = mpsc::channel::<String>();
 
     let mut session = BuildSession {
         workspace_dir,
@@ -126,110 +115,90 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
         run_count: 0,
         queued_prompts: Vec::new(),
     };
-    let mut initial_prompt = effective_prompt;
+    session.run_count = 1;
+    INTERRUPTED.store(false, Ordering::SeqCst);
+    install_sigint_handler();
 
-    loop {
-        let prompt = if let Some(prompt) = initial_prompt.take() {
-            prompt
-        } else {
-            if args.no_interactive {
-                break;
-            }
-            restore_default_sigint();
-            eprint!("build> ");
-            io::stderr().flush().ok();
-            match input_rx.recv() {
-                Ok(line) => {
-                    if line.is_empty() || line == "exit" || line == "quit" {
-                        break;
-                    }
-                    line
-                }
-                Err(_) => break,
-            }
-        };
+    let full_prompt = apply_deferred_queue(prompt, &mut session.queued_prompts);
+    let invocation =
+        resolve_build_invocation(&session.config, &session.planning_meta, args, &full_prompt)?;
 
-        if session.run_count >= args.max_turns {
+    eprintln!(
+        "--- Run #{} | {} | {} ---",
+        session.run_count,
+        session.workspace_dir.display(),
+        provider_display(&invocation.agent, invocation.model.as_deref()),
+    );
+
+    let result = execute_build_agent(&mut session, args, &full_prompt, &input_rx);
+    match &result {
+        Ok(summary) => {
             eprintln!(
-                "Reached maximum number of runs ({}). Exiting.",
-                args.max_turns
+                "Completion summary: status=success, {}",
+                render_summary(summary)
             );
-            break;
+            eprintln!(
+                "--- Run #{} complete ({}) ---",
+                session.run_count,
+                render_summary(summary)
+            );
         }
-
-        session.run_count += 1;
-        INTERRUPTED.store(false, Ordering::SeqCst);
-        install_sigint_handler();
-
-        let full_prompt = apply_deferred_queue(prompt, &mut session.queued_prompts);
-        let invocation = resolve_build_invocation(&session, args, &full_prompt)?;
-
-        eprintln!(
-            "─── Run #{} | {} | {} ───",
-            session.run_count,
-            session.workspace_dir.display(),
-            provider_display(&invocation.agent, invocation.model.as_deref()),
-        );
-
-        let result = execute_build_agent(&mut session, args, &full_prompt, &input_rx);
-        match &result {
-            Ok(summary) => {
-                eprintln!(
-                    "Completion summary: status=success, {}",
-                    render_summary(summary)
-                );
-                eprintln!(
-                    "─── Run #{} complete ({}) ───",
-                    session.run_count,
-                    render_summary(summary)
-                );
-            }
-            Err(_) if INTERRUPTED.load(Ordering::SeqCst) => {
-                eprintln!("Completion summary: status=interrupted");
-                eprintln!("─── Run #{} interrupted ───", session.run_count);
-            }
-            Err(error) => {
-                eprintln!("Completion summary: status=failure");
-                eprintln!("─── Run #{} failed: {error} ───", session.run_count);
-            }
+        Err(_) if INTERRUPTED.load(Ordering::SeqCst) => {
+            eprintln!("Completion summary: status=interrupted");
+            eprintln!("--- Run #{} interrupted ---", session.run_count);
         }
-
-        if args.no_interactive {
-            if let Err(error) = result {
-                if !INTERRUPTED.load(Ordering::SeqCst) {
-                    return Err(error);
-                }
-            }
-            break;
+        Err(error) => {
+            eprintln!("Completion summary: status=failure");
+            eprintln!("--- Run #{} failed: {error} ---", session.run_count);
         }
     }
 
-    Ok(())
+    match result {
+        Ok(_) => Ok(()),
+        Err(_) if INTERRUPTED.load(Ordering::SeqCst) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
-fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<String>)> {
+fn resolve_interactive_workspace_and_prompt(
+    args: &BuildArgs,
+    source_root: &Path,
+) -> Result<(Option<PathBuf>, Option<String>)> {
     if let Some(dir) = &args.dir {
         let prompt = match args.positionals.as_slice() {
             [] => None,
             [prompt] => Some(prompt.clone()),
             [_, ..] => bail!("`agents build --dir` accepts at most one positional prompt"),
         };
-        Ok((dir.clone(), prompt))
+        Ok((Some(dir.clone()), prompt))
     } else {
         let (workspace, prompt) = match args.positionals.as_slice() {
+            [] => return Ok((None, None)),
             [workspace] => (workspace, None),
             [workspace, prompt] => (workspace, Some(prompt.clone())),
-            [] => bail!("workspace identifier is required when `--dir` is not provided"),
             [_, _, ..] => bail!("`agents build` accepts at most two positional arguments"),
         };
         let workspace_path = PathBuf::from(workspace);
         if path_like_workspace_arg(&workspace_path) || workspace_path.exists() {
-            Ok((workspace_path, prompt))
+            Ok((Some(workspace_path), prompt))
         } else {
-            let root = canonicalize_existing_dir(&args.root)?;
-            Ok((ticket_workspace_root(&root)?.join(workspace), prompt))
+            Ok((
+                Some(ticket_workspace_root(source_root)?.join(workspace)),
+                prompt,
+            ))
         }
     }
+}
+
+fn resolve_noninteractive_workspace_and_prompt(
+    args: &BuildArgs,
+    source_root: &Path,
+) -> Result<(PathBuf, String)> {
+    let (workspace, prompt) = resolve_interactive_workspace_and_prompt(args, source_root)?;
+    let workspace = workspace
+        .ok_or_else(|| anyhow!("workspace identifier is required when `--dir` is not provided"))?;
+    let prompt = prompt.ok_or_else(|| anyhow!("`--no-interactive` requires a prompt"))?;
+    Ok((workspace, prompt))
 }
 
 fn validate_git_repo(path: &Path) -> Result<PathBuf> {
@@ -276,14 +245,16 @@ fn path_like_workspace_arg(path: &Path) -> bool {
             .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
 }
 
-fn provider_display(agent: &str, model: Option<&str>) -> String {
+/// Formats the resolved provider/model label for build status output.
+pub(crate) fn provider_display(agent: &str, model: Option<&str>) -> String {
     match model {
         Some(model) => format!("{agent} ({model})"),
         None => agent.to_string(),
     }
 }
 
-fn render_summary(summary: &BuildRunSummary) -> String {
+/// Renders a concise completion summary for one or more build turns.
+pub(crate) fn render_summary(summary: &BuildRunSummary) -> String {
     let mut parts = Vec::new();
     match &summary.usage {
         Some(usage) => {
@@ -308,7 +279,8 @@ fn render_summary(summary: &BuildRunSummary) -> String {
     parts.join(", ")
 }
 
-fn add_optional_u64(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
+/// Adds two optional token counts, preserving whichever side is present.
+pub(crate) fn add_optional_u64(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
     match (lhs, rhs) {
         (Some(lhs), Some(rhs)) => Some(lhs + rhs),
         (Some(lhs), None) => Some(lhs),
@@ -341,8 +313,13 @@ fn apply_deferred_queue(prompt: String, queued_prompts: &mut Vec<String>) -> Str
     )
 }
 
-fn resolve_build_invocation(
-    session: &BuildSession,
+/// Resolves the provider invocation used by `agents build`.
+///
+/// Returns an error when route resolution fails, the requested provider/model combination is not
+/// valid, or the configured command cannot be constructed for the current prompt.
+pub(crate) fn resolve_build_invocation(
+    config: &AppConfig,
+    planning_meta: &PlanningMeta,
     args: &BuildArgs,
     prompt: &str,
 ) -> Result<crate::agents::resolution::ResolvedAgentInvocation> {
@@ -357,7 +334,7 @@ fn resolve_build_invocation(
         transport: None,
         attachments: Vec::new(),
     };
-    resolve_agent_invocation_for_planning(&session.config, &session.planning_meta, &run_args)
+    resolve_agent_invocation_for_planning(config, planning_meta, &run_args)
 }
 
 fn spawn_output_reader(
@@ -401,7 +378,8 @@ fn execute_build_agent(
             break;
         }
 
-        let invocation = resolve_build_invocation(session, args, &prompt)?;
+        let invocation =
+            resolve_build_invocation(&session.config, &session.planning_meta, args, &prompt)?;
         if invocation.builtin_provider && invocation.agent == "codex" {
             if let Some(active_continuation) = continuation.as_ref() {
                 summary.resumed_turns += 1;
@@ -439,7 +417,8 @@ fn execute_build_turn(
     input_rx: &mpsc::Receiver<String>,
     continuation: Option<&AgentContinuation>,
 ) -> Result<BuildRunOutcome> {
-    let invocation = resolve_build_invocation(session, args, prompt)?;
+    let invocation =
+        resolve_build_invocation(&session.config, &session.planning_meta, args, prompt)?;
 
     if std::env::var_os("METASTACK_DEBUG").is_some() {
         for line in render_invocation_diagnostics(&invocation) {
@@ -601,7 +580,10 @@ fn execute_build_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_deferred_queue, path_like_workspace_arg, resolve_workspace_and_prompt};
+    use super::{
+        apply_deferred_queue, path_like_workspace_arg, resolve_interactive_workspace_and_prompt,
+        resolve_noninteractive_workspace_and_prompt,
+    };
     use crate::cli::BuildArgs;
     use std::path::{Path, PathBuf};
 
@@ -618,9 +600,10 @@ mod tests {
             no_interactive: false,
         };
 
-        let (workspace, prompt) =
-            resolve_workspace_and_prompt(&args).expect("resolution should succeed");
-        assert_eq!(workspace, PathBuf::from("/tmp/workspace"));
+        let source_root = PathBuf::from("/tmp/repo");
+        let (workspace, prompt) = resolve_interactive_workspace_and_prompt(&args, &source_root)
+            .expect("resolution should succeed");
+        assert_eq!(workspace, Some(PathBuf::from("/tmp/workspace")));
         assert_eq!(prompt.as_deref(), Some("fix auth"));
     }
 
@@ -646,9 +629,10 @@ mod tests {
             no_interactive: false,
         };
 
-        let (workspace, prompt) =
-            resolve_workspace_and_prompt(&args).expect("resolution should succeed");
-        assert_eq!(workspace, PathBuf::from("workspace/MET-45"));
+        let source_root = PathBuf::from("/tmp/repo");
+        let (workspace, prompt) = resolve_interactive_workspace_and_prompt(&args, &source_root)
+            .expect("resolution should succeed");
+        assert_eq!(workspace, Some(PathBuf::from("workspace/MET-45")));
         assert_eq!(prompt.as_deref(), Some("run qa"));
     }
 
@@ -660,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn build_args_require_workspace_without_dir() {
+    fn interactive_build_args_allow_workspace_picker_without_explicit_workspace() {
         let args = BuildArgs {
             positionals: Vec::new(),
             root: PathBuf::from("."),
@@ -672,7 +656,29 @@ mod tests {
             no_interactive: false,
         };
 
-        let error = resolve_workspace_and_prompt(&args).expect_err("workspace should be required");
+        let source_root = PathBuf::from("/tmp/repo");
+        let (workspace, prompt) = resolve_interactive_workspace_and_prompt(&args, &source_root)
+            .expect("interactive picker should resolve");
+        assert!(workspace.is_none());
+        assert!(prompt.is_none());
+    }
+
+    #[test]
+    fn noninteractive_build_args_require_workspace() {
+        let args = BuildArgs {
+            positionals: Vec::new(),
+            root: PathBuf::from("."),
+            agent: None,
+            model: None,
+            reasoning: None,
+            dir: None,
+            max_turns: 20,
+            no_interactive: true,
+        };
+
+        let source_root = PathBuf::from("/tmp/repo");
+        let error = resolve_noninteractive_workspace_and_prompt(&args, &source_root)
+            .expect_err("workspace should be required");
         assert!(
             error
                 .to_string()
@@ -694,7 +700,9 @@ mod tests {
             no_interactive: false,
         };
 
-        let error = resolve_workspace_and_prompt(&args).expect_err("extra positionals should fail");
+        let source_root = PathBuf::from("/tmp/repo");
+        let error = resolve_interactive_workspace_and_prompt(&args, &source_root)
+            .expect_err("extra positionals should fail");
         assert!(
             error
                 .to_string()
