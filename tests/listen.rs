@@ -8753,6 +8753,12 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [ ] Continue the resumed execution flow\n",
+    )?;
 
     // Start with NO pre-existing resume handle — clean session.
     let state_path = write_listen_store_session(
@@ -8768,6 +8774,9 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
             "phase": "running",
             "summary": "Starting multi-turn test",
             "brief_path": null,
+            "backlog_issue_identifier": "MET-32",
+            "backlog_issue_title": "Session resume continuation test",
+            "backlog_path": backlog_dir.display().to_string(),
             "workspace_path": workspace.display().to_string(),
             "workpad_comment_id": "comment-32",
             "updated_at_epoch_seconds": 1_773_575_100u64,
@@ -8968,6 +8977,12 @@ printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [ ] Continue the resumed execution flow\n",
+    )?;
 
     // Start with NO pre-existing resume handle.
     let state_path = write_listen_store_session(
@@ -8983,6 +8998,9 @@ printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"
             "phase": "running",
             "summary": "Starting multi-turn codex test",
             "brief_path": null,
+            "backlog_issue_identifier": "MET-32",
+            "backlog_issue_title": "Session resume codex continuation test",
+            "backlog_path": backlog_dir.display().to_string(),
             "workspace_path": workspace.display().to_string(),
             "workpad_comment_id": "comment-32",
             "updated_at_epoch_seconds": 1_773_575_100u64,
