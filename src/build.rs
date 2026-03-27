@@ -142,14 +142,20 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
 
         session.run_count += 1;
         print_status_line(&session);
-        let report = run_build_turn(&session, request)?;
+        let report = run_build_turn(&session, request, !args.no_interactive)?;
         print_completion_summary(&session, &report);
 
         if report.cancelled {
             continue;
         }
 
-        if let Some(request) = next_request_from_queued_prompts(&mut session, &report) {
+        if args.no_interactive {
+            break;
+        }
+
+        if let Some(request) =
+            next_request_after_report(&mut session, &report, !args.no_interactive)
+        {
             next_request = Some(request);
             continue;
         }
@@ -159,10 +165,6 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
                 bail!("{message}");
             }
             continue;
-        }
-
-        if args.no_interactive {
-            break;
         }
     }
 
@@ -337,7 +339,11 @@ fn render_optional_token(value: Option<u64>) -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
-fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<BuildTurnReport> {
+fn run_build_turn(
+    session: &BuildSession,
+    request: BuildTurnRequest,
+    allow_active_input: bool,
+) -> Result<BuildTurnReport> {
     let prompt = request.prompt.clone();
     let run_args = RunAgentArgs {
         root: Some(session.root.clone()),
@@ -364,6 +370,7 @@ fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<B
         &run_args,
         &invocation,
         request.continuation.as_ref(),
+        allow_active_input,
     )?;
     if should_retry_without_continuation(&invocation.agent, request.continuation.as_ref(), &report)
     {
@@ -371,7 +378,7 @@ fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<B
             "Stored `{}` continuation was rejected; retrying this build prompt as a fresh run.",
             invocation.agent
         );
-        report = run_build_turn_attempt(session, &run_args, &invocation, None)?;
+        report = run_build_turn_attempt(session, &run_args, &invocation, None, allow_active_input)?;
     }
     Ok(report)
 }
@@ -381,6 +388,7 @@ fn run_build_turn_attempt(
     run_args: &RunAgentArgs,
     invocation: &ResolvedAgentInvocation,
     continuation: Option<&AgentContinuation>,
+    allow_active_input: bool,
 ) -> Result<BuildTurnReport> {
     let options = AgentExecutionOptions {
         working_dir: Some(session.workspace_path.clone()),
@@ -445,7 +453,8 @@ fn run_build_turn_attempt(
     let stdout_handle = spawn_stream_printer(stdout, io::stdout(), Arc::clone(&capture.stdout));
     let stderr_handle = spawn_stream_printer(stderr, io::stderr(), Arc::clone(&capture.stderr));
 
-    let interactive_input = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let interactive_input =
+        allow_active_input && io::stdin().is_terminal() && io::stdout().is_terminal();
     let stop_input = Arc::new(AtomicBool::new(false));
     let (input_tx, input_rx) = mpsc::channel();
     let input_handle = if interactive_input {
@@ -610,6 +619,18 @@ fn next_request_from_queued_prompts(
     None
 }
 
+fn next_request_after_report(
+    session: &mut BuildSession,
+    report: &BuildTurnReport,
+    interactive: bool,
+) -> Option<BuildTurnRequest> {
+    if !interactive || report.cancelled {
+        return None;
+    }
+
+    next_request_from_queued_prompts(session, report)
+}
+
 fn combine_queued_prompts(queued_prompts: &[String]) -> Option<String> {
     if queued_prompts.is_empty() {
         None
@@ -740,8 +761,8 @@ fn cancel_child_process(child: &mut Child) -> Result<()> {
 mod tests {
     use super::{
         BuildSession, BuildTurnReport, combine_queued_prompts, looks_like_path,
-        next_request_from_queued_prompts, resolve_build_workspace_path, resolve_initial_prompt,
-        should_retry_without_continuation,
+        next_request_after_report, next_request_from_queued_prompts, resolve_build_workspace_path,
+        resolve_initial_prompt, should_retry_without_continuation,
     };
     use crate::agents::AgentContinuation;
     use crate::cli::BuildArgs;
@@ -882,6 +903,24 @@ mod tests {
             session.deferred_prompt.as_deref(),
             Some("apply the queued fix")
         );
+    }
+
+    #[test]
+    fn next_request_after_report_skips_follow_up_when_interactive_loop_is_disabled() {
+        let mut session = build_session("codex");
+        let report = BuildTurnReport {
+            continuation: Some(AgentContinuation {
+                provider: "codex".to_string(),
+                session_id: "thread-123".to_string(),
+            }),
+            usage: None,
+            queued_prompts: vec!["keep going".to_string()],
+            cancelled: false,
+            failure: None,
+        };
+
+        assert!(next_request_after_report(&mut session, &report, false).is_none());
+        assert!(session.deferred_prompt.is_none());
     }
 
     #[test]
