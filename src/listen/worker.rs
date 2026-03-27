@@ -702,7 +702,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
         if backlog_progress.is_some() {
             if let Some(branch) = branch.as_deref() {
-                if let Some(pull_request) = publish_listener_pull_request(
+                match publish_listener_pull_request(
                     &service,
                     &issue,
                     &workspace_path,
@@ -710,10 +710,15 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     PullRequestPublishMode::Draft,
                     last_review.as_ref(),
                 )
-                .await?
-                .map(PullRequestSummary::from)
+                .await
                 {
-                    session_context.pull_request = pull_request;
+                    Ok(Some(pr)) => {
+                        session_context.pull_request = PullRequestSummary::from(pr);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        eprintln!("draft PR publish failed; continuing worker loop: {err:#}");
+                    }
                 }
             }
 
@@ -2490,7 +2495,7 @@ fn agent_backed_review_enabled() -> bool {
 fn heuristic_review_report(
     issue: &IssueSummary,
     context: &ListenTurnContext<'_>,
-    meaningful_turn_progress: bool,
+    _meaningful_turn_progress: bool,
     turn_progress: &super::TurnProgress,
     has_existing_draft_pr: bool,
 ) -> Result<ReviewReport> {
@@ -2513,7 +2518,11 @@ fn heuristic_review_report(
         backlog_complete
             || (has_existing_draft_pr && acceptance.is_empty() && validation.is_empty())
     } else {
-        meaningful_turn_progress && acceptance.is_empty()
+        // Without a backlog checklist the heuristic does not have enough
+        // signal to declare completion.  Let the worker exhaust its turn
+        // budget; the agent-backed review path (METASTACK_LISTEN_AGENT_REVIEW=1)
+        // provides richer completion detection when needed.
+        false
     };
     let changed_items = turn_progress
         .implementation_entries

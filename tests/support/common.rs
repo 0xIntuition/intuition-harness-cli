@@ -1058,6 +1058,21 @@ fn dynamic_linear_response(
         }));
     }
 
+    if body.contains("mutation UpdateComment") {
+        return Ok(json!({
+            "data": {
+                "commentUpdate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-32",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    }
+
     if body.contains("mutation CreateAttachment") {
         return Ok(json!({
             "data": {
