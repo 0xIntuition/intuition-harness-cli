@@ -2220,7 +2220,7 @@ fn backlog_progress_for_issue_dir(
         if let Some(section) =
             marked_section_body(&index_contents, "metastack-listen-progress")
         {
-            return Ok(parse_checklist_progress(&section));
+            return Ok(parse_checklist_progress(section));
         }
     }
 
