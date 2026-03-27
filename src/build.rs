@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, Read, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -75,7 +75,6 @@ struct BuildSession {
     config: AppConfig,
     planning_meta: PlanningMeta,
     run_count: u32,
-    continuation: Option<AgentContinuation>,
     queued_prompts: Vec<String>,
 }
 
@@ -125,7 +124,6 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
         config,
         planning_meta,
         run_count: 0,
-        continuation: None,
         queued_prompts: Vec::new(),
     };
     let mut initial_prompt = effective_prompt;
@@ -217,15 +215,26 @@ fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<Str
         let workspace = args.workspace.as_ref().ok_or_else(|| {
             anyhow!("workspace identifier is required when `--dir` is not provided")
         })?;
-        let root = canonicalize_existing_dir(&args.root)?;
-        Ok((
-            sibling_workspace_root(&root)?.join(workspace),
-            args.prompt.clone(),
-        ))
+        let workspace_path = PathBuf::from(workspace);
+        if path_like_workspace_arg(&workspace_path) || workspace_path.exists() {
+            Ok((workspace_path, args.prompt.clone()))
+        } else {
+            let root = canonicalize_existing_dir(&args.root)?;
+            Ok((
+                sibling_workspace_root(&root)?.join(workspace),
+                args.prompt.clone(),
+            ))
+        }
     }
 }
 
 fn validate_git_repo(path: &Path) -> Result<PathBuf> {
+    if !path.exists() {
+        bail!("workspace directory does not exist: `{}`", path.display());
+    }
+    if !path.is_dir() {
+        bail!("workspace path is not a directory: `{}`", path.display());
+    }
     let canonical = canonicalize_existing_dir(path)
         .with_context(|| format!("failed to resolve workspace `{}`", path.display()))?;
     let output = Command::new("git")
@@ -253,6 +262,14 @@ fn validate_git_repo(path: &Path) -> Result<PathBuf> {
         );
     }
     Ok(PathBuf::from(top_level))
+}
+
+fn path_like_workspace_arg(path: &Path) -> bool {
+    path.is_absolute()
+        || path.components().count() > 1
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
 }
 
 fn provider_display(agent: &str, model: Option<&str>) -> String {
@@ -369,12 +386,11 @@ fn execute_build_agent(
 ) -> Result<BuildRunSummary> {
     let mut prompt = initial_prompt.to_string();
     let mut summary = BuildRunSummary::default();
-    let mut continuation = session.continuation.clone();
+    let mut continuation: Option<AgentContinuation> = None;
 
     loop {
         let outcome = execute_build_turn(session, args, &prompt, input_rx, continuation.as_ref())?;
         continuation = outcome.continuation.clone();
-        session.continuation = continuation.clone();
         merge_usage(&mut summary.usage, outcome.usage);
 
         if outcome.queued_prompts.is_empty() {
@@ -581,9 +597,9 @@ fn execute_build_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_deferred_queue, resolve_workspace_and_prompt};
+    use super::{apply_deferred_queue, path_like_workspace_arg, resolve_workspace_and_prompt};
     use crate::cli::BuildArgs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn build_args_use_dir_as_workspace_and_positional_as_prompt() {
@@ -612,5 +628,32 @@ mod tests {
         assert!(prompt.contains("first"));
         assert!(prompt.contains("current"));
         assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn workspace_resolution_accepts_path_like_positionals() {
+        let args = BuildArgs {
+            workspace: Some("workspace/MET-45".to_string()),
+            prompt: Some("run qa".to_string()),
+            root: PathBuf::from("."),
+            agent: None,
+            model: None,
+            reasoning: None,
+            dir: None,
+            max_turns: 20,
+            no_interactive: false,
+        };
+
+        let (workspace, prompt) =
+            resolve_workspace_and_prompt(&args).expect("resolution should succeed");
+        assert_eq!(workspace, PathBuf::from("workspace/MET-45"));
+        assert_eq!(prompt.as_deref(), Some("run qa"));
+    }
+
+    #[test]
+    fn path_like_workspace_detection_accepts_relative_paths() {
+        assert!(path_like_workspace_arg(Path::new("./MET-45")));
+        assert!(path_like_workspace_arg(Path::new("workspace/MET-45")));
+        assert!(!path_like_workspace_arg(Path::new("MET-45")));
     }
 }

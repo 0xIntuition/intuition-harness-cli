@@ -98,7 +98,8 @@ transport = "stdin"
         .stderr(predicate::str::contains("Run #1"))
         .stderr(predicate::str::contains(
             "Completion summary: status=success",
-        ));
+        ))
+        .stderr(predicate::str::contains("tokens unavailable"));
 
     assert_eq!(
         fs::read_to_string(output_dir.join("cwd.txt"))?,
