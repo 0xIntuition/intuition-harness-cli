@@ -59,16 +59,11 @@
 ## Full Quality Gate
 
 - `make quality`
-  - attempted
+  - passed
   - `cargo fmt --check` passed
   - `cargo clippy --all-targets --all-features -- -D warnings` passed
-  - the serial full-suite phase surfaced existing failures in `tests/listen.rs` before completion:
-    - `listen_worker_promotes_the_same_draft_pull_request_during_review_handoff`
-    - `listen_worker_publishes_a_pull_request_after_push_without_a_local_remote_tracking_ref`
-    - `listen_worker_publishes_the_initial_branch_pull_request_as_a_draft`
-    - `listen_worker_reuses_stored_codex_resume_handle`
-    - `listen_worker_reuses_stored_provider_native_resume_handle`
-  - ENG-10510 targeted validation and command proofs remained green
+  - the serial full suite now completes cleanly, including `tests/listen.rs`
+  - this rerun also confirms the CI-only `cargo fmt --check` drift is resolved for `src/config_resolution.rs`
 
 ## Acceptance Criteria Mapping
 
