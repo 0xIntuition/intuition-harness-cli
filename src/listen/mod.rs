@@ -2213,6 +2213,17 @@ fn backlog_progress_for_issue_dir(
         );
     }
 
+    let index_path = issue_dir.join("index.md");
+    if index_path.is_file() {
+        let index_contents = fs::read_to_string(&index_path)
+            .with_context(|| format!("failed to read `{}`", index_path.display()))?;
+        if let Some(section) =
+            marked_section_body(&index_contents, "metastack-listen-progress")
+        {
+            return Ok(parse_checklist_progress(&section));
+        }
+    }
+
     let mut progress = BacklogProgress::default();
     for entry in WalkDir::new(&issue_dir) {
         let entry = entry.with_context(|| {
@@ -2293,12 +2304,25 @@ fn checklist_item_label(line: &str) -> Option<String> {
     (!item.is_empty()).then(|| item.to_string())
 }
 
+fn marked_section_body<'a>(contents: &'a str, marker: &str) -> Option<&'a str> {
+    let start = format!("<!-- {marker}:start -->");
+    let end = format!("<!-- {marker}:end -->");
+    let start_index = contents.find(&start)?;
+    let body_start = start_index + start.len();
+    let remainder = contents.get(body_start..)?;
+    let end_offset = remainder.find(&end)?;
+    remainder.get(..end_offset).map(str::trim)
+}
+
 fn is_placeholder_checklist_label(label: &str) -> bool {
     let normalized = label.trim();
     normalized.eq_ignore_ascii_case("No completed items recorded yet.")
         || normalized.eq_ignore_ascii_case("No explicit validation status recorded.")
         || normalized.eq_ignore_ascii_case("Follow-up action 1")
         || normalized.eq_ignore_ascii_case("Follow-up action 2")
+        || normalized.eq_ignore_ascii_case("Task 1")
+        || normalized.eq_ignore_ascii_case("Task 2")
+        || normalized.eq_ignore_ascii_case("Task 3")
         || normalized.eq_ignore_ascii_case("Criterion 1")
         || normalized.eq_ignore_ascii_case("Criterion 2")
         || normalized.eq_ignore_ascii_case("Criterion 3")
@@ -4219,6 +4243,9 @@ mod tests {
             "\
 - [ ] Follow-up action 1
 - [ ] Follow-up action 2
+- [ ] Task 1
+- [ ] Task 2
+- [ ] Task 3
 - [ ] Criterion 1
 - [ ] No completed items recorded yet.
 - [ ] No explicit validation status recorded.
@@ -4245,6 +4272,28 @@ mod tests {
             progress.next_step.as_deref(),
             Some("Add regression coverage for live continuation")
         );
+    }
+
+    #[test]
+    fn marked_section_body_extracts_listener_progress_block() {
+        let body = "\
+prefix
+<!-- metastack-listen-progress:start -->
+## Listener Progress Checklist
+
+### Remaining
+
+- [x] No remaining implementation work is tracked locally.
+<!-- metastack-listen-progress:end -->
+suffix
+";
+
+        let section = super::marked_section_body(body, "metastack-listen-progress")
+            .expect("listener progress section should be found");
+
+        assert!(section.contains("## Listener Progress Checklist"));
+        assert!(!section.contains("prefix"));
+        assert!(!section.contains("suffix"));
     }
 
     #[test]
