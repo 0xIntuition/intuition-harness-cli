@@ -6210,6 +6210,7 @@ fn run_remediation_attempt(
             title: &pr_title,
             body_path: &body_path,
             mode: crate::github_pr::PullRequestPublishMode::Ready,
+            allow_create_replay_fallback: true,
         },
     )?;
 

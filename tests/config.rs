@@ -84,6 +84,56 @@ fn config_direct_updates_persist_fast_plan_defaults() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn config_direct_updates_persist_merge_recent_main_limit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--merge-recent-main-limit",
+            "12",
+        ])
+        .assert()
+        .success();
+
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    assert_eq!(parsed["merge"]["recent_main_limit"].as_integer(), Some(12));
+
+    Ok(())
+}
+
+#[test]
+fn config_rejects_invalid_merge_recent_main_limit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--merge-recent-main-limit",
+            "0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "merge recent-main limit must be between 1 and 50; got 0",
+        ));
+
+    Ok(())
+}
+
+#[test]
 fn config_json_updates_vim_mode_and_returns_effective_value() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

@@ -22,11 +22,13 @@ use crate::fs::{
     sibling_workspace_root, write_text_file,
 };
 use crate::github_pr::{
-    GhCli, PullRequestLifecycleAction, PullRequestPublishMode, PullRequestPublishRequest,
+    GhCli, PullRequestLifecycleAction, PullRequestLifecycleResult, PullRequestPublishMode,
+    PullRequestPublishRequest, RecentlyMergedPullRequest,
 };
 use crate::merge_dashboard::{
-    MergeDashboardAction, MergeDashboardData, MergeDashboardExit, MergeDashboardOptions,
-    MergeDashboardPullRequest, run_merge_dashboard,
+    MergeCheckpointData, MergeCheckpointExit, MergeDashboardAction, MergeDashboardData,
+    MergeDashboardExit, MergeDashboardOptions, MergeDashboardPullRequest,
+    run_merge_checkpoint_dashboard, run_merge_dashboard,
 };
 use crate::progress::{
     ProgressArtifact, ProgressOutputMode, ProgressStepDefinition, ProgressTracker,
@@ -39,6 +41,7 @@ const STEP_APPLY: &str = "merge_application";
 const STEP_VALIDATE: &str = "validation";
 const STEP_PUSH: &str = "push";
 const STEP_PUBLISH: &str = "publish_pr";
+const STEP_PREFIX: &str = "meta-merge";
 const VALIDATION_TEST_FAILURE_MARKERS: &[&str] = &[
     "test result: FAILED",
     "error: test failed, to rerun pass",
@@ -97,17 +100,75 @@ struct MergePlan {
     merge_order: Vec<u64>,
     conflict_hotspots: Vec<String>,
     summary: String,
+    #[serde(default)]
+    recent_main_numbers: Vec<u64>,
+    #[serde(default)]
+    steps: Vec<SequentialMergePlanStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MergeContextArtifact {
     run_id: String,
+    #[serde(default)]
+    mode: MergeMode,
     repository: GithubRepository,
     selected_pull_requests: Vec<GithubPullRequest>,
+    #[serde(default)]
+    checkpoints_enabled: bool,
+    #[serde(default)]
+    validation_commands: Vec<String>,
+    recent_main_limit: usize,
+    recent_main_count: usize,
+    recent_main_path: String,
     source_root: String,
     workspace_path: String,
-    aggregate_branch: String,
+    aggregate_branch: Option<String>,
     agent_resolution: AgentResolutionArtifact,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+enum MergeMode {
+    #[default]
+    Aggregate,
+    Sequential,
+}
+
+impl MergeMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Aggregate => "aggregate",
+            Self::Sequential => "sequential",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecentMainArtifact {
+    repository: String,
+    default_branch: String,
+    limit: usize,
+    pull_requests: Vec<RecentMainPullRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecentMainPullRequest {
+    number: u64,
+    title: String,
+    body: String,
+    url: String,
+    head_ref_name: String,
+    base_ref_name: String,
+    merged_at: String,
+    author: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequentialMergePlanStep {
+    pull_request: u64,
+    rationale: String,
+    #[serde(default)]
+    risks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,9 +191,17 @@ struct MergeProgressArtifact {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MergeStepRecord {
+    #[serde(default)]
+    step_index: Option<usize>,
     pull_request: u64,
     status: String,
     detail: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    base_branch: Option<String>,
+    #[serde(default)]
+    publication_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,12 +242,84 @@ struct ValidationFailureSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PublicationArtifact {
+struct AggregatePublicationArtifact {
     aggregate_branch: String,
     title: String,
     url: String,
     action: String,
     validation_success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequentialPublicationArtifact {
+    mode: MergeMode,
+    steps: Vec<SequentialPublicationRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequentialPublicationRecord {
+    step_index: usize,
+    pull_request: u64,
+    branch: String,
+    base_branch: String,
+    title: String,
+    url: String,
+    action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequentialMergeState {
+    run_id: String,
+    next_step_index: usize,
+    continue_without_checkpoints: bool,
+    steps: Vec<SequentialStepState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequentialStepState {
+    step_index: usize,
+    pull_request: u64,
+    branch: String,
+    base_branch: String,
+    status: SequentialStepStatus,
+    publication_url: Option<String>,
+    publication_action: Option<String>,
+    publication_number: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SequentialStepStatus {
+    Pending,
+    StoppedAtCheckpoint,
+    MergeApplied,
+    ValidationFailed,
+    ReadyToPublish,
+    PublicationFailed,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequentialStepContextArtifact {
+    step_index: usize,
+    total_steps: usize,
+    pull_request: GithubPullRequest,
+    branch: String,
+    base_branch: String,
+    checkpoints_enabled: bool,
+    continue_without_checkpoints: bool,
+    recent_main_numbers: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequentialStepProgressArtifact {
+    step_index: usize,
+    total_steps: usize,
+    pull_request: u64,
+    branch: String,
+    base_branch: String,
+    status: SequentialStepStatus,
+    detail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -218,34 +359,55 @@ fn list_open_pull_requests(gh: &GhCli, root: &Path) -> Result<Vec<GithubPullRequ
     )
 }
 
+fn list_recent_main_pull_requests(
+    gh: &GhCli,
+    root: &Path,
+    repository: &GithubRepository,
+    limit: usize,
+) -> Result<RecentMainArtifact> {
+    let pull_requests = gh
+        .list_recently_merged_pull_requests(root, &repository.default_branch, limit)?
+        .into_iter()
+        .map(RecentMainPullRequest::from)
+        .collect();
+    Ok(RecentMainArtifact {
+        repository: repository.name_with_owner.clone(),
+        default_branch: repository.default_branch.clone(),
+        limit,
+        pull_requests,
+    })
+}
+
+impl From<RecentlyMergedPullRequest> for RecentMainPullRequest {
+    fn from(value: RecentlyMergedPullRequest) -> Self {
+        Self {
+            number: value.number,
+            title: value.title,
+            body: value.body,
+            url: value.url,
+            head_ref_name: value.head_ref_name,
+            base_ref_name: value.base_ref_name,
+            merged_at: value.merged_at,
+            author: value.author.login,
+        }
+    }
+}
+
 pub async fn run_merge(args: &MergeArgs) -> Result<()> {
     let root = canonicalize_existing_dir(&args.root)?;
     let app_config = AppConfig::load()?;
     let _planning_meta = load_required_planning_meta(&root, "merge")?;
     ensure_planning_layout(&root, false)?;
+    let mode = if args.sequential {
+        MergeMode::Sequential
+    } else {
+        MergeMode::Aggregate
+    };
 
     let gh = GhCli;
     if let Some(run_id) = &args.resume_run {
         let run = resume_merge_run(&root, args, &gh, run_id)?;
-        let publication_verb = match run.publication.action.as_str() {
-            "updated" => "Updated",
-            _ => "Created",
-        };
-        if run.validation_success {
-            println!(
-                "{publication_verb} aggregate PR {} for {} pull request(s). Run artifacts saved in {}",
-                run.publication.url,
-                run.selected_count,
-                run.run_dir.display()
-            );
-        } else {
-            println!(
-                "{publication_verb} aggregate PR {} for {} pull request(s), but validation still needs attention. Run artifacts saved in {}",
-                run.publication.url,
-                run.selected_count,
-                run.run_dir.display()
-            );
-        }
+        println!("{}", run.summary);
         return Ok(());
     }
     let repository = resolve_repository(&gh, &root)?;
@@ -263,27 +425,15 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
     }
 
     let selected_numbers = if args.render_once {
-        let exit = run_merge_dashboard(
-            build_dashboard_data(&repository, &pull_requests),
-            MergeDashboardOptions {
-                render_once: true,
-                width: args.width,
-                height: args.height,
-                actions: args
-                    .events
-                    .iter()
-                    .copied()
-                    .map(MergeDashboardAction::from)
-                    .collect(),
-                vim_mode: app_config.vim_mode_enabled(),
-            },
+        let snapshot = render_merge_snapshot(
+            &root,
+            &gh,
+            &repository,
+            &pull_requests,
+            args,
+            &app_config,
+            mode,
         )?;
-        let MergeDashboardExit::Snapshot(snapshot) = exit else {
-            bail!(
-                "`{} merge --render-once` should only emit a snapshot",
-                crate::branding::COMMAND_NAME
-            );
-        };
         println!("{snapshot}");
         return Ok(());
     } else if args.no_interactive {
@@ -306,12 +456,12 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
             },
         )? {
             MergeDashboardExit::Selected(numbers) if numbers.is_empty() => {
-                println!("Merge canceled before execution. No aggregate branch or PR was created.");
+                println!("{}", merge_cancel_message(mode));
                 return Ok(());
             }
             MergeDashboardExit::Selected(numbers) => numbers,
             MergeDashboardExit::Cancelled => {
-                println!("Merge canceled before execution. No aggregate branch or PR was created.");
+                println!("{}", merge_cancel_message(mode));
                 return Ok(());
             }
             MergeDashboardExit::Snapshot(_) => unreachable!(),
@@ -330,27 +480,227 @@ pub async fn run_merge(args: &MergeArgs) -> Result<()> {
             )
         })?;
     let run = execute_merge_run(&root, args, &gh, &repository, selected_pull_requests)?;
-
-    let publication_verb = match run.publication.action.as_str() {
-        "updated" => "Updated",
-        _ => "Created",
-    };
-    if run.validation_success {
-        println!(
-            "{publication_verb} aggregate PR {} for {} pull request(s). Run artifacts saved in {}",
-            run.publication.url,
-            run.selected_count,
-            run.run_dir.display()
-        );
-    } else {
-        println!(
-            "{publication_verb} aggregate PR {} for {} pull request(s), but validation still needs attention. Run artifacts saved in {}",
-            run.publication.url,
-            run.selected_count,
-            run.run_dir.display()
-        );
-    }
+    println!("{}", run.summary);
     Ok(())
+}
+
+fn merge_cancel_message(mode: MergeMode) -> String {
+    match mode {
+        MergeMode::Aggregate => {
+            "Merge canceled before execution. No aggregate branch or PR was created.".to_string()
+        }
+        MergeMode::Sequential => {
+            "Merge canceled before execution. No sequential step branches or PRs were created."
+                .to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointDecision {
+    Approve,
+    ContinueRemaining,
+    Stop,
+}
+
+fn render_merge_snapshot(
+    root: &Path,
+    gh: &GhCli,
+    repository: &GithubRepository,
+    pull_requests: &[GithubPullRequest],
+    args: &MergeArgs,
+    app_config: &AppConfig,
+    mode: MergeMode,
+) -> Result<String> {
+    if mode == MergeMode::Sequential && args.checkpoints {
+        let selected = if !args.pull_requests.is_empty() {
+            resolve_selected_pull_requests(pull_requests, &args.pull_requests)?
+        } else if pull_requests.is_empty() {
+            Vec::new()
+        } else {
+            pull_requests.iter().take(2).cloned().collect()
+        };
+        let active = selected
+            .first()
+            .cloned()
+            .or_else(|| pull_requests.first().cloned())
+            .ok_or_else(|| {
+                anyhow!("no pull requests are available for sequential checkpoint rendering")
+            })?;
+        let next = selected.get(1).cloned();
+        let recent_main = list_recent_main_pull_requests(
+            gh,
+            root,
+            repository,
+            app_config.merge.recent_main_limit(),
+        )?;
+        let checkpoint = build_checkpoint_data(
+            repository,
+            &active,
+            next.as_ref(),
+            &MergePlan {
+                merge_order: selected.iter().map(|pr| pr.number).collect(),
+                conflict_hotspots: recent_main
+                    .pull_requests
+                    .iter()
+                    .map(|pr| pr.title.clone())
+                    .take(3)
+                    .collect(),
+                summary: "Sequential checkpoint snapshot".to_string(),
+                recent_main_numbers: recent_main
+                    .pull_requests
+                    .iter()
+                    .map(|pr| pr.number)
+                    .collect(),
+                steps: selected
+                    .iter()
+                    .map(|pr| SequentialMergePlanStep {
+                        pull_request: pr.number,
+                        rationale: format!(
+                            "Publish #{} as its own stacked step before moving to the next PR.",
+                            pr.number
+                        ),
+                        risks: vec![format!("stacks on `{}`", repository.default_branch)],
+                    })
+                    .collect(),
+            },
+            &recent_main,
+            1,
+            selected.len().max(1),
+        );
+        let exit = run_merge_checkpoint_dashboard(
+            checkpoint,
+            MergeDashboardOptions {
+                render_once: true,
+                width: args.width,
+                height: args.height,
+                actions: args
+                    .events
+                    .iter()
+                    .copied()
+                    .map(MergeDashboardAction::from)
+                    .collect(),
+                vim_mode: app_config.vim_mode_enabled(),
+            },
+        )?;
+        let MergeCheckpointExit::Snapshot(snapshot) = exit else {
+            bail!(
+                "`{} merge --render-once --sequential --checkpoints` should only emit a checkpoint snapshot",
+                crate::branding::COMMAND_NAME
+            );
+        };
+        return Ok(snapshot);
+    }
+
+    let exit = run_merge_dashboard(
+        build_dashboard_data(repository, pull_requests),
+        MergeDashboardOptions {
+            render_once: true,
+            width: args.width,
+            height: args.height,
+            actions: args
+                .events
+                .iter()
+                .copied()
+                .map(MergeDashboardAction::from)
+                .collect(),
+            vim_mode: app_config.vim_mode_enabled(),
+        },
+    )?;
+    let MergeDashboardExit::Snapshot(snapshot) = exit else {
+        bail!(
+            "`{} merge --render-once` should only emit a snapshot",
+            crate::branding::COMMAND_NAME
+        );
+    };
+    Ok(snapshot)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_checkpoint_decision(
+    repository: &GithubRepository,
+    active_pull_request: &GithubPullRequest,
+    next_pull_request: Option<&GithubPullRequest>,
+    plan: &MergePlan,
+    recent_main: &RecentMainArtifact,
+    step_index: usize,
+    total_steps: usize,
+    args: &MergeArgs,
+) -> Result<CheckpointDecision> {
+    let checkpoint = build_checkpoint_data(
+        repository,
+        active_pull_request,
+        next_pull_request,
+        plan,
+        recent_main,
+        step_index,
+        total_steps,
+    );
+    let exit = run_merge_checkpoint_dashboard(
+        checkpoint,
+        MergeDashboardOptions {
+            render_once: false,
+            width: args.width,
+            height: args.height,
+            actions: Vec::new(),
+            vim_mode: true,
+        },
+    )?;
+    Ok(match exit {
+        MergeCheckpointExit::Approve => CheckpointDecision::Approve,
+        MergeCheckpointExit::ContinueRemaining => CheckpointDecision::ContinueRemaining,
+        MergeCheckpointExit::Stop | MergeCheckpointExit::Snapshot(_) => CheckpointDecision::Stop,
+    })
+}
+
+fn build_checkpoint_data(
+    repository: &GithubRepository,
+    active_pull_request: &GithubPullRequest,
+    next_pull_request: Option<&GithubPullRequest>,
+    plan: &MergePlan,
+    recent_main: &RecentMainArtifact,
+    step_index: usize,
+    total_steps: usize,
+) -> MergeCheckpointData {
+    let step_plan = sequential_plan_step(plan, active_pull_request.number);
+    MergeCheckpointData {
+        title: format!(
+            "{} merge checkpoint ({}/{})",
+            crate::branding::COMMAND_NAME,
+            step_index,
+            total_steps
+        ),
+        repo_label: repository.name_with_owner.clone(),
+        base_branch: repository.default_branch.clone(),
+        step_index,
+        total_steps,
+        active_pull_request: dashboard_pull_request(active_pull_request),
+        next_pull_request: next_pull_request.map(dashboard_pull_request),
+        recent_main: recent_main
+            .pull_requests
+            .iter()
+            .take(5)
+            .map(|pr| format!("#{} {} [{}]", pr.number, pr.title, pr.merged_at))
+            .collect(),
+        risks: step_plan
+            .map(|step| step.risks.clone())
+            .unwrap_or_else(|| plan.conflict_hotspots.clone()),
+        rationale: step_plan
+            .map(|step| step.rationale.clone())
+            .unwrap_or_else(|| plan.summary.clone()),
+    }
+}
+
+fn dashboard_pull_request(pr: &GithubPullRequest) -> MergeDashboardPullRequest {
+    MergeDashboardPullRequest {
+        number: pr.number,
+        title: pr.title.clone(),
+        author: pr.author.login.clone(),
+        head_ref: pr.head_ref_name.clone(),
+        updated_at: pr.updated_at.clone(),
+        url: pr.url.clone(),
+        body: pr.body.clone(),
+    }
 }
 
 fn build_dashboard_data(
@@ -404,10 +754,7 @@ fn resolve_selected_pull_requests(
 }
 
 struct MergeExecution {
-    run_dir: PathBuf,
-    publication: PublicationArtifact,
-    selected_count: usize,
-    validation_success: bool,
+    summary: String,
 }
 
 struct MergeApplicationContext<'a> {
@@ -456,16 +803,46 @@ fn execute_merge_run(
     repository: &GithubRepository,
     selected_pull_requests: Vec<GithubPullRequest>,
 ) -> Result<MergeExecution> {
-    let paths = PlanningPaths::new(root);
-    ensure_dir(&paths.merge_runs_dir)?;
+    let merge_settings = AppConfig::load()?.merge;
+    let recent_main =
+        list_recent_main_pull_requests(gh, root, repository, merge_settings.recent_main_limit())?;
+    match if args.sequential {
+        MergeMode::Sequential
+    } else {
+        MergeMode::Aggregate
+    } {
+        MergeMode::Aggregate => execute_aggregate_merge_run(
+            root,
+            args,
+            gh,
+            repository,
+            selected_pull_requests,
+            merge_settings,
+            recent_main,
+        ),
+        MergeMode::Sequential => execute_sequential_merge_run(
+            root,
+            args,
+            gh,
+            repository,
+            selected_pull_requests,
+            merge_settings,
+            recent_main,
+        ),
+    }
+}
 
-    let (run_id, run_dir) = reserve_run_dir(&paths)?;
+fn start_merge_tracker(
+    repository: &GithubRepository,
+    run_dir: &Path,
+    args: &MergeArgs,
+) -> Result<ProgressTracker> {
     let progress_mode = if args.no_interactive {
         ProgressOutputMode::Text
     } else {
         ProgressOutputMode::Interactive
     };
-    let mut tracker = ProgressTracker::start(
+    ProgressTracker::start(
         format!(
             "{} merge progress ({})",
             crate::branding::COMMAND_NAME,
@@ -474,9 +851,25 @@ fn execute_merge_run(
         run_dir.join("progress.json"),
         &merge_progress_steps(),
         progress_mode,
-    )?;
+    )
+}
 
-    let aggregate_branch = format!("meta-merge/{run_id}");
+fn execute_aggregate_merge_run(
+    root: &Path,
+    args: &MergeArgs,
+    gh: &GhCli,
+    repository: &GithubRepository,
+    selected_pull_requests: Vec<GithubPullRequest>,
+    merge_settings: crate::config::MergeSettings,
+    recent_main: RecentMainArtifact,
+) -> Result<MergeExecution> {
+    let paths = PlanningPaths::new(root);
+    ensure_dir(&paths.merge_runs_dir)?;
+
+    let (run_id, run_dir) = reserve_run_dir(&paths)?;
+    let mut tracker = start_merge_tracker(repository, &run_dir, args)?;
+    let aggregate_branch = merge_branch_name(&run_id);
+
     tracker.start_step(
         STEP_PREPARE_WORKSPACE,
         format!(
@@ -504,20 +897,38 @@ fn execute_merge_run(
         ),
     )?;
 
-    let plan_prompt =
-        build_merge_plan_prompt(repository, &selected_pull_requests, &aggregate_branch);
+    write_json_artifact(&run_dir.join("recent-main.json"), &recent_main)?;
+    let plan_prompt = build_merge_plan_prompt(
+        repository,
+        &selected_pull_requests,
+        &recent_main,
+        MergeMode::Aggregate,
+        Some(&aggregate_branch),
+    );
     write_text_file(&run_dir.join("agent-plan-prompt.md"), &plan_prompt, true)?;
     let resolution = resolve_merge_agent_resolution(root, args, &plan_prompt)?;
+    let validation_commands = validation_commands(root, args);
     let context_artifact = MergeContextArtifact {
         run_id: run_id.clone(),
+        mode: MergeMode::Aggregate,
         repository: repository.clone(),
         selected_pull_requests: selected_pull_requests.clone(),
+        checkpoints_enabled: false,
+        validation_commands: validation_commands
+            .as_ref()
+            .ok()
+            .cloned()
+            .unwrap_or_default(),
+        recent_main_limit: recent_main.limit,
+        recent_main_count: recent_main.pull_requests.len(),
+        recent_main_path: run_dir.join("recent-main.json").display().to_string(),
         source_root: root.display().to_string(),
         workspace_path: workspace_path.display().to_string(),
-        aggregate_branch: aggregate_branch.clone(),
+        aggregate_branch: Some(aggregate_branch.clone()),
         agent_resolution: resolution,
     };
     write_json_artifact(&run_dir.join("context.json"), &context_artifact)?;
+
     tracker.start_step(
         STEP_PLAN,
         format!(
@@ -525,7 +936,7 @@ fn execute_merge_run(
             selected_pull_requests.len()
         ),
     )?;
-    let plan = match request_merge_plan(root, &workspace_path, args, &plan_prompt) {
+    let mut plan = match request_merge_plan(root, &workspace_path, args, &plan_prompt) {
         Ok(plan) => plan,
         Err(error) => {
             tracker.fail_step(
@@ -536,7 +947,12 @@ fn execute_merge_run(
             return Err(error);
         }
     };
-    if let Err(error) = validate_merge_plan(&plan, &selected_pull_requests) {
+    plan.recent_main_numbers = recent_main
+        .pull_requests
+        .iter()
+        .map(|pr| pr.number)
+        .collect();
+    if let Err(error) = validate_merge_plan(&plan, &selected_pull_requests, MergeMode::Aggregate) {
         tracker.fail_step(
             STEP_PLAN,
             format!("Planner output was invalid: {error:#}"),
@@ -548,12 +964,13 @@ fn execute_merge_run(
     tracker.complete_step(
         STEP_PLAN,
         format!(
-            "Merge order recorded as [{}].",
+            "Merge order recorded as [{}] with {} recent-main reference(s).",
             plan.merge_order
                 .iter()
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            recent_main.pull_requests.len()
         ),
     )?;
 
@@ -575,6 +992,7 @@ fn execute_merge_run(
             run_dir: &run_dir,
         },
         &mut tracker,
+        &recent_main,
     ) {
         Ok(progress) => progress,
         Err(error) => {
@@ -594,15 +1012,8 @@ fn execute_merge_run(
             progress.len()
         ),
     )?;
-    write_json_artifact(
-        &run_dir.join("merge-progress.json"),
-        &MergeProgressArtifact {
-            run: tracker.artifact().clone(),
-            steps: progress.clone(),
-        },
-    )?;
+    write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
 
-    let validation_commands = validation_commands(root, args);
     tracker.start_step(
         STEP_VALIDATE,
         match &validation_commands {
@@ -610,10 +1021,6 @@ fn execute_merge_run(
             Err(error) => format!("Preparing validation commands failed: {error:#}"),
         },
     )?;
-    let merge_settings = AppConfig::load()?.merge;
-    let max_validation_repair_attempts = merge_settings.validation_repair_attempts();
-    let max_validation_transient_retry_attempts =
-        merge_settings.validation_transient_retry_attempts();
     let validation = match validation_commands {
         Ok(commands) => match run_validation_until_passes(
             root,
@@ -622,221 +1029,6 @@ fn execute_merge_run(
             repository,
             &aggregate_branch,
             &selected_pull_requests,
-            &plan,
-            &run_dir,
-            &mut tracker,
-            commands,
-            max_validation_repair_attempts,
-            max_validation_transient_retry_attempts,
-        ) {
-            Ok(validation) => validation,
-            Err(error) => ValidationArtifact {
-                attempts: Vec::new(),
-                success: false,
-                repair_attempts: 0,
-                final_error: Some(format!("Validation execution failed: {error:#}")),
-            },
-        },
-        Err(error) => ValidationArtifact {
-            attempts: Vec::new(),
-            success: false,
-            repair_attempts: 0,
-            final_error: Some(format!("Validation setup failed: {error:#}")),
-        },
-    };
-    write_json_artifact(&run_dir.join("validation.json"), &validation)?;
-    if validation.success {
-        tracker.complete_step(
-            STEP_VALIDATE,
-            format!(
-                "Validation passed after {} attempt(s) across {} command(s).",
-                validation.attempts.len(),
-                validation
-                    .attempts
-                    .last()
-                    .map(|attempt| attempt.commands.len())
-                    .unwrap_or(0)
-            ),
-        )?;
-    } else {
-        tracker.fail_step(
-            STEP_VALIDATE,
-            validation.final_error.clone().unwrap_or_else(|| {
-                "Validation remained failing after automated recovery.".to_string()
-            }),
-            None,
-        )?;
-    }
-
-    tracker.start_step(
-        STEP_PUSH,
-        format!("Pushing aggregate branch `{aggregate_branch}` to origin."),
-    )?;
-    if let Err(error) = push_aggregate_branch_until_published(
-        &workspace_path,
-        &aggregate_branch,
-        merge_settings.publication_retry_attempts(),
-        &mut tracker,
-    ) {
-        tracker.fail_step(
-            STEP_PUSH,
-            format!("Push failed for `{aggregate_branch}`: {error:#}"),
-            None,
-        )?;
-        write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
-        return Err(error);
-    }
-    tracker.complete_step(
-        STEP_PUSH,
-        format!("Aggregate branch `{aggregate_branch}` is now on origin."),
-    )?;
-
-    let pr_title = aggregate_pr_title(&selected_pull_requests);
-    let pr_body = aggregate_pr_body(
-        repository,
-        &selected_pull_requests,
-        &plan,
-        &run_id,
-        &validation,
-    );
-    let pr_body_path = run_dir.join("aggregate-pr-body.md");
-    write_text_file(&pr_body_path, &pr_body, true)?;
-    tracker.start_step(
-        STEP_PUBLISH,
-        format!(
-            "Publishing the aggregate pull request into `{}`.",
-            repository.default_branch
-        ),
-    )?;
-    let publication = match publish_aggregate_pull_request_until_published(
-        gh,
-        &workspace_path,
-        repository,
-        &aggregate_branch,
-        &repository.default_branch,
-        &pr_title,
-        &pr_body_path,
-        merge_settings.publication_retry_attempts(),
-        &mut tracker,
-    ) {
-        Ok(publication) => publication,
-        Err(error) => {
-            tracker.fail_step(
-                STEP_PUBLISH,
-                format!("Aggregate PR publication failed: {error:#}"),
-                None,
-            )?;
-            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
-            return Err(error);
-        }
-    };
-    let publication_artifact = PublicationArtifact {
-        aggregate_branch,
-        title: pr_title,
-        url: publication.url,
-        action: publication.action.to_string(),
-        validation_success: validation.success,
-    };
-    write_json_artifact(&run_dir.join("publication.json"), &publication_artifact)?;
-    tracker.complete_step(
-        STEP_PUBLISH,
-        format!(
-            "{} aggregate pull request {}.",
-            match publication_artifact.action.as_str() {
-                "updated" => "Updated",
-                _ => "Created",
-            },
-            publication_artifact.url
-        ),
-    )?;
-    tracker.finish_success(format!(
-        "{} aggregate pull request {}. {}",
-        match publication_artifact.action.as_str() {
-            "updated" => "Updated",
-            _ => "Created",
-        },
-        publication_artifact.url,
-        if validation.success {
-            "Validation passed; review the run artifacts for planner, validation, and publication details.".to_string()
-        } else {
-            "Validation remains unresolved; review the run artifacts and aggregate PR for the current failure details.".to_string()
-        }
-    ))?;
-    write_json_artifact(
-        &run_dir.join("merge-progress.json"),
-        &MergeProgressArtifact {
-            run: tracker.artifact().clone(),
-            steps: progress,
-        },
-    )?;
-
-    Ok(MergeExecution {
-        run_dir,
-        publication: publication_artifact,
-        selected_count: selected_pull_requests.len(),
-        validation_success: validation.success,
-    })
-}
-
-fn write_merge_progress_artifact(
-    run_dir: &Path,
-    tracker: &ProgressTracker,
-    steps: &[MergeStepRecord],
-) -> Result<()> {
-    write_json_artifact(
-        &run_dir.join("merge-progress.json"),
-        &MergeProgressArtifact {
-            run: tracker.artifact().clone(),
-            steps: steps.to_vec(),
-        },
-    )
-}
-
-fn resume_merge_run(
-    root: &Path,
-    args: &MergeArgs,
-    gh: &GhCli,
-    run_id: &str,
-) -> Result<MergeExecution> {
-    let paths = PlanningPaths::new(root);
-    let run_dir = paths.merge_run_dir(run_id);
-    if !run_dir.is_dir() {
-        bail!(
-            "merge run `{run_id}` does not exist under `{}`",
-            paths.merge_runs_dir.display()
-        );
-    }
-
-    let context: MergeContextArtifact = read_json_artifact(&run_dir.join("context.json"))?;
-    let plan: MergePlan = read_json_artifact(&run_dir.join("plan.json"))?;
-    let mut progress: MergeProgressArtifact =
-        read_json_artifact(&run_dir.join("merge-progress.json"))?;
-    let workspace_path = PathBuf::from(&context.workspace_path);
-    if !workspace_path.is_dir() {
-        bail!(
-            "merge workspace for run `{run_id}` is missing at `{}`",
-            workspace_path.display()
-        );
-    }
-
-    let mut tracker =
-        ProgressTracker::resume(run_dir.join("progress.json"), ProgressOutputMode::Text)?;
-    tracker.update_detail(
-        STEP_VALIDATE,
-        format!("Resuming merge run `{run_id}` from the existing aggregate workspace."),
-        None,
-    )?;
-
-    let merge_settings = AppConfig::load()?.merge;
-    let validation_commands = validation_commands(root, args);
-    let validation = match validation_commands {
-        Ok(commands) => match run_validation_until_passes(
-            root,
-            &workspace_path,
-            args,
-            &context.repository,
-            &context.aggregate_branch,
-            &context.selected_pull_requests,
             &plan,
             &run_dir,
             &mut tracker,
@@ -885,32 +1077,37 @@ fn resume_merge_run(
 
     tracker.start_step(
         STEP_PUSH,
-        format!(
-            "Synchronizing aggregate branch `{}` to origin after resume.",
-            context.aggregate_branch
-        ),
+        format!("Pushing aggregate branch `{aggregate_branch}` to origin."),
     )?;
-    push_aggregate_branch_until_published(
+    if let Err(error) = push_branch_until_published(
         &workspace_path,
-        &context.aggregate_branch,
+        &aggregate_branch,
         merge_settings.publication_retry_attempts(),
         &mut tracker,
-    )?;
+        STEP_PUSH,
+        "Push attempt",
+    ) {
+        tracker.fail_step(
+            STEP_PUSH,
+            format!("Push failed for `{aggregate_branch}`: {error:#}"),
+            None,
+        )?;
+        write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
+        return Err(error);
+    }
     tracker.complete_step(
         STEP_PUSH,
-        format!(
-            "Aggregate branch `{}` is now on origin.",
-            context.aggregate_branch
-        ),
+        format!("Aggregate branch `{aggregate_branch}` is now on origin."),
     )?;
 
-    let pr_title = aggregate_pr_title(&context.selected_pull_requests);
+    let pr_title = aggregate_pr_title(&selected_pull_requests);
     let pr_body = aggregate_pr_body(
-        &context.repository,
-        &context.selected_pull_requests,
+        repository,
+        &selected_pull_requests,
         &plan,
-        &context.run_id,
+        &run_id,
         &validation,
+        &recent_main,
     );
     let pr_body_path = run_dir.join("aggregate-pr-body.md");
     write_text_file(&pr_body_path, &pr_body, true)?;
@@ -918,24 +1115,35 @@ fn resume_merge_run(
         STEP_PUBLISH,
         format!(
             "Publishing the aggregate pull request into `{}`.",
-            context.repository.default_branch
+            repository.default_branch
         ),
     )?;
-    let publication = publish_aggregate_pull_request_until_published(
+    let publication = match publish_aggregate_pull_request_until_published(
         gh,
         &workspace_path,
-        &context.repository,
-        &context.aggregate_branch,
-        &context.repository.default_branch,
+        repository,
+        &aggregate_branch,
+        &repository.default_branch,
         &pr_title,
         &pr_body_path,
         merge_settings.publication_retry_attempts(),
         &mut tracker,
-    )?;
-    let publication_artifact = PublicationArtifact {
-        aggregate_branch: context.aggregate_branch.clone(),
+    ) {
+        Ok(publication) => publication,
+        Err(error) => {
+            tracker.fail_step(
+                STEP_PUBLISH,
+                format!("Aggregate PR publication failed: {error:#}"),
+                None,
+            )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
+            return Err(error);
+        }
+    };
+    let publication_artifact = AggregatePublicationArtifact {
+        aggregate_branch,
         title: pr_title,
-        url: publication.url,
+        url: publication.url.clone(),
         action: publication.action.to_string(),
         validation_success: validation.success,
     };
@@ -964,16 +1172,1356 @@ fn resume_merge_run(
             "Validation remains unresolved; review the run artifacts and aggregate PR for the current failure details.".to_string()
         }
     ))?;
+    write_merge_progress_artifact(&run_dir, &tracker, &progress)?;
 
-    progress.run = tracker.artifact().clone();
-    write_json_artifact(&run_dir.join("merge-progress.json"), &progress)?;
+    let publication_verb = match publication_artifact.action.as_str() {
+        "updated" => "Updated",
+        _ => "Created",
+    };
+    let summary = if validation.success {
+        format!(
+            "{publication_verb} aggregate PR {} for {} pull request(s). Run artifacts saved in {}",
+            publication_artifact.url,
+            selected_pull_requests.len(),
+            run_dir.display()
+        )
+    } else {
+        format!(
+            "{publication_verb} aggregate PR {} for {} pull request(s), but validation still needs attention. Run artifacts saved in {}",
+            publication_artifact.url,
+            selected_pull_requests.len(),
+            run_dir.display()
+        )
+    };
 
-    Ok(MergeExecution {
-        run_dir,
-        publication: publication_artifact,
-        selected_count: context.selected_pull_requests.len(),
-        validation_success: validation.success,
-    })
+    Ok(MergeExecution { summary })
+}
+
+fn execute_sequential_merge_run(
+    root: &Path,
+    args: &MergeArgs,
+    gh: &GhCli,
+    repository: &GithubRepository,
+    selected_pull_requests: Vec<GithubPullRequest>,
+    merge_settings: crate::config::MergeSettings,
+    recent_main: RecentMainArtifact,
+) -> Result<MergeExecution> {
+    let paths = PlanningPaths::new(root);
+    ensure_dir(&paths.merge_runs_dir)?;
+
+    let (run_id, run_dir) = reserve_run_dir(&paths)?;
+    let mut tracker = start_merge_tracker(repository, &run_dir, args)?;
+    let workspace_branch = sequential_workspace_branch_name(&run_id);
+
+    tracker.start_step(
+        STEP_PREPARE_WORKSPACE,
+        format!(
+            "Preparing an isolated sequential workspace for `{workspace_branch}` from `origin/{}`.",
+            repository.default_branch
+        ),
+    )?;
+    let workspace_path =
+        match prepare_workspace(root, &run_id, &workspace_branch, &repository.default_branch) {
+            Ok(path) => path,
+            Err(error) => {
+                tracker.fail_step(
+                    STEP_PREPARE_WORKSPACE,
+                    format!("Workspace preparation failed: {error:#}"),
+                    None,
+                )?;
+                return Err(error);
+            }
+        };
+    tracker.complete_step(
+        STEP_PREPARE_WORKSPACE,
+        format!(
+            "Workspace ready: `{}` seeded from `origin/{}` for sequential step branches.",
+            workspace_path.display(),
+            repository.default_branch
+        ),
+    )?;
+
+    write_json_artifact(&run_dir.join("recent-main.json"), &recent_main)?;
+    let plan_prompt = build_merge_plan_prompt(
+        repository,
+        &selected_pull_requests,
+        &recent_main,
+        MergeMode::Sequential,
+        Some(&workspace_branch),
+    );
+    write_text_file(&run_dir.join("agent-plan-prompt.md"), &plan_prompt, true)?;
+    let resolution = resolve_merge_agent_resolution(root, args, &plan_prompt)?;
+    let validation_commands = validation_commands(root, args)?;
+    let context_artifact = MergeContextArtifact {
+        run_id: run_id.clone(),
+        mode: MergeMode::Sequential,
+        repository: repository.clone(),
+        selected_pull_requests: selected_pull_requests.clone(),
+        checkpoints_enabled: args.checkpoints,
+        validation_commands: validation_commands.clone(),
+        recent_main_limit: recent_main.limit,
+        recent_main_count: recent_main.pull_requests.len(),
+        recent_main_path: run_dir.join("recent-main.json").display().to_string(),
+        source_root: root.display().to_string(),
+        workspace_path: workspace_path.display().to_string(),
+        aggregate_branch: None,
+        agent_resolution: resolution,
+    };
+    write_json_artifact(&run_dir.join("context.json"), &context_artifact)?;
+
+    tracker.start_step(
+        STEP_PLAN,
+        format!(
+            "Drafting the sequential merge plan for {} selected pull request(s).",
+            selected_pull_requests.len()
+        ),
+    )?;
+    let mut plan = match request_merge_plan(root, &workspace_path, args, &plan_prompt) {
+        Ok(plan) => plan,
+        Err(error) => {
+            tracker.fail_step(
+                STEP_PLAN,
+                format!("Plan generation failed: {error:#}"),
+                None,
+            )?;
+            return Err(error);
+        }
+    };
+    plan.recent_main_numbers = recent_main
+        .pull_requests
+        .iter()
+        .map(|pr| pr.number)
+        .collect();
+    if let Err(error) = validate_merge_plan(&plan, &selected_pull_requests, MergeMode::Sequential) {
+        tracker.fail_step(
+            STEP_PLAN,
+            format!("Planner output was invalid: {error:#}"),
+            None,
+        )?;
+        return Err(error);
+    }
+    write_json_artifact(&run_dir.join("plan.json"), &plan)?;
+    tracker.complete_step(
+        STEP_PLAN,
+        format!(
+            "Sequential order recorded as [{}] with {} recent-main reference(s).",
+            plan.merge_order
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            recent_main.pull_requests.len()
+        ),
+    )?;
+
+    let mut state =
+        initialize_sequential_state(&run_id, repository, &selected_pull_requests, &plan);
+    write_json_artifact(&run_dir.join("state.json"), &state)?;
+    write_json_artifact(
+        &run_dir.join("publication.json"),
+        &SequentialPublicationArtifact {
+            mode: MergeMode::Sequential,
+            steps: Vec::new(),
+        },
+    )?;
+
+    let result = run_sequential_steps(
+        root,
+        args,
+        gh,
+        repository,
+        &workspace_path,
+        &run_dir,
+        &selected_pull_requests,
+        &plan,
+        &recent_main,
+        &validation_commands,
+        &merge_settings,
+        &mut tracker,
+        &mut state,
+    )?;
+    write_merge_progress_artifact(&run_dir, &tracker, &sequential_step_records(&state))?;
+
+    let summary = match result {
+        SequentialRunResult::Completed => {
+            tracker.finish_success(format!(
+                "Published {} sequential pull request(s). Review the per-step artifacts for validation and publication details.",
+                state
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == SequentialStepStatus::Completed)
+                    .count()
+            ))?;
+            format!(
+                "Published {} sequential pull request(s) for {} selected pull request(s). Run artifacts saved in {}",
+                state
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == SequentialStepStatus::Completed)
+                    .count(),
+                selected_pull_requests.len(),
+                run_dir.display()
+            )
+        }
+        SequentialRunResult::StoppedAtCheckpoint { next_step_index } => {
+            tracker.finish_success(format!(
+                "Sequential merge paused before step {}. Resume the run to continue publication.",
+                next_step_index + 1
+            ))?;
+            format!(
+                "Paused sequential merge before step {}/{}. Resume with `{} merge --resume-run {}`. Run artifacts saved in {}",
+                next_step_index + 1,
+                state.steps.len(),
+                crate::branding::COMMAND_NAME,
+                run_id,
+                run_dir.display()
+            )
+        }
+    };
+
+    Ok(MergeExecution { summary })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequentialRunResult {
+    Completed,
+    StoppedAtCheckpoint { next_step_index: usize },
+}
+
+fn initialize_sequential_state(
+    run_id: &str,
+    repository: &GithubRepository,
+    selected_pull_requests: &[GithubPullRequest],
+    plan: &MergePlan,
+) -> SequentialMergeState {
+    let by_number = selected_pull_requests
+        .iter()
+        .map(|pr| (pr.number, pr))
+        .collect::<BTreeMap<_, _>>();
+    let steps = plan
+        .merge_order
+        .iter()
+        .enumerate()
+        .map(|(index, number)| {
+            let branch = step_branch_name(run_id, index + 1, *number);
+            let base_branch = if index == 0 {
+                repository.default_branch.clone()
+            } else {
+                step_branch_name(run_id, index, plan.merge_order[index - 1])
+            };
+            let _ = by_number.get(number);
+            SequentialStepState {
+                step_index: index + 1,
+                pull_request: *number,
+                branch,
+                base_branch,
+                status: SequentialStepStatus::Pending,
+                publication_url: None,
+                publication_action: None,
+                publication_number: None,
+            }
+        })
+        .collect();
+    SequentialMergeState {
+        run_id: run_id.to_string(),
+        next_step_index: 0,
+        continue_without_checkpoints: false,
+        steps,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_sequential_steps(
+    root: &Path,
+    args: &MergeArgs,
+    gh: &GhCli,
+    repository: &GithubRepository,
+    workspace_path: &Path,
+    run_dir: &Path,
+    selected_pull_requests: &[GithubPullRequest],
+    plan: &MergePlan,
+    recent_main: &RecentMainArtifact,
+    validation_commands: &[String],
+    merge_settings: &crate::config::MergeSettings,
+    tracker: &mut ProgressTracker,
+    state: &mut SequentialMergeState,
+) -> Result<SequentialRunResult> {
+    let selected_by_number = selected_pull_requests
+        .iter()
+        .cloned()
+        .map(|pr| (pr.number, pr))
+        .collect::<BTreeMap<_, _>>();
+
+    while state.next_step_index < state.steps.len() {
+        let step_snapshot = state.steps[state.next_step_index].clone();
+        let step_pr = selected_by_number
+            .get(&step_snapshot.pull_request)
+            .cloned()
+            .ok_or_else(|| anyhow!("sequential step references unknown pull request"))?;
+        let step_dir = step_dir_path(
+            run_dir,
+            step_snapshot.step_index,
+            step_snapshot.pull_request,
+        );
+        ensure_dir(&step_dir)?;
+        write_json_artifact(
+            &step_dir.join("step-context.json"),
+            &SequentialStepContextArtifact {
+                step_index: step_snapshot.step_index,
+                total_steps: state.steps.len(),
+                pull_request: step_pr.clone(),
+                branch: step_snapshot.branch.clone(),
+                base_branch: step_snapshot.base_branch.clone(),
+                checkpoints_enabled: args.checkpoints,
+                continue_without_checkpoints: state.continue_without_checkpoints,
+                recent_main_numbers: recent_main
+                    .pull_requests
+                    .iter()
+                    .map(|pr| pr.number)
+                    .collect(),
+            },
+        )?;
+
+        if matches!(
+            step_snapshot.status,
+            SequentialStepStatus::Pending | SequentialStepStatus::StoppedAtCheckpoint
+        ) && args.checkpoints
+            && !state.continue_without_checkpoints
+        {
+            let next_pull_request = state
+                .steps
+                .get(state.next_step_index + 1)
+                .and_then(|next_step| selected_by_number.get(&next_step.pull_request));
+            match request_checkpoint_decision(
+                repository,
+                &step_pr,
+                next_pull_request,
+                plan,
+                recent_main,
+                step_snapshot.step_index,
+                state.steps.len(),
+                args,
+            )? {
+                CheckpointDecision::Approve => {}
+                CheckpointDecision::ContinueRemaining => {
+                    state.continue_without_checkpoints = true;
+                }
+                CheckpointDecision::Stop => {
+                    state.steps[state.next_step_index].status =
+                        SequentialStepStatus::StoppedAtCheckpoint;
+                    write_json_artifact(&run_dir.join("state.json"), state)?;
+                    write_step_progress(
+                        &step_dir,
+                        &step_snapshot,
+                        state.steps.len(),
+                        "Paused at checkpoint before applying the step.",
+                    )?;
+                    write_merge_progress_artifact(
+                        run_dir,
+                        tracker,
+                        &sequential_step_records(state),
+                    )?;
+                    return Ok(SequentialRunResult::StoppedAtCheckpoint {
+                        next_step_index: state.next_step_index,
+                    });
+                }
+            }
+        }
+
+        if matches!(
+            step_snapshot.status,
+            SequentialStepStatus::Pending | SequentialStepStatus::StoppedAtCheckpoint
+        ) {
+            tracker.start_step(
+                STEP_APPLY,
+                format!(
+                    "Step {}/{}: merging pull request #{} ({}) onto `{}`.",
+                    step_snapshot.step_index,
+                    state.steps.len(),
+                    step_pr.number,
+                    step_pr.title,
+                    step_snapshot.branch
+                ),
+            )?;
+            checkout_step_branch(
+                workspace_path,
+                repository,
+                &step_snapshot.branch,
+                &step_snapshot.base_branch,
+            )?;
+            apply_pull_request_step(
+                root,
+                workspace_path,
+                args,
+                repository,
+                &step_pr,
+                plan,
+                recent_main,
+                &step_dir,
+                tracker,
+            )
+            .with_context(|| {
+                format!(
+                    "sequential merge stopped while applying step {} for pull request #{}; run artifacts saved in {}",
+                    step_snapshot.step_index,
+                    step_pr.number,
+                    run_dir.display()
+                )
+            })?;
+            state.steps[state.next_step_index].status = SequentialStepStatus::MergeApplied;
+            write_json_artifact(&run_dir.join("state.json"), state)?;
+            write_step_progress(
+                &step_dir,
+                &state.steps[state.next_step_index],
+                state.steps.len(),
+                "Merge applied successfully.",
+            )?;
+            tracker.complete_step(
+                STEP_APPLY,
+                format!(
+                    "Step {}/{} merged pull request #{} onto `{}`.",
+                    step_snapshot.step_index,
+                    state.steps.len(),
+                    step_pr.number,
+                    step_snapshot.branch
+                ),
+            )?;
+            write_merge_progress_artifact(run_dir, tracker, &sequential_step_records(state))?;
+        }
+
+        if matches!(
+            state.steps[state.next_step_index].status,
+            SequentialStepStatus::MergeApplied | SequentialStepStatus::ValidationFailed
+        ) {
+            tracker.start_step(
+                STEP_VALIDATE,
+                format!(
+                    "Step {}/{}: validating branch `{}`.",
+                    step_snapshot.step_index,
+                    state.steps.len(),
+                    step_snapshot.branch
+                ),
+            )?;
+            let validation = run_validation_until_passes(
+                root,
+                workspace_path,
+                args,
+                repository,
+                &step_snapshot.branch,
+                selected_pull_requests,
+                plan,
+                &step_dir,
+                tracker,
+                sequential_validation_commands(validation_commands, state.next_step_index),
+                merge_settings.validation_repair_attempts(),
+                merge_settings.validation_transient_retry_attempts(),
+            )?;
+            write_json_artifact(&step_dir.join("validation.json"), &validation)?;
+            if !validation.success {
+                state.steps[state.next_step_index].status = SequentialStepStatus::ValidationFailed;
+                write_json_artifact(&run_dir.join("state.json"), state)?;
+                write_step_progress(
+                    &step_dir,
+                    &state.steps[state.next_step_index],
+                    state.steps.len(),
+                    validation
+                        .final_error
+                        .as_deref()
+                        .unwrap_or("Validation failed and the step remains resumable."),
+                )?;
+                write_merge_progress_artifact(run_dir, tracker, &sequential_step_records(state))?;
+                tracker.fail_step(
+                    STEP_VALIDATE,
+                    validation.final_error.clone().unwrap_or_else(|| {
+                        "Sequential step validation remained failing after automated recovery."
+                            .to_string()
+                    }),
+                    Some(step_pr.number),
+                )?;
+                return Err(anyhow!(
+                    "sequential validation failed for step {} (#{}). Resume the run after fixing the step. Run artifacts saved in {}",
+                    step_snapshot.step_index,
+                    step_pr.number,
+                    run_dir.display()
+                ));
+            }
+            state.steps[state.next_step_index].status = SequentialStepStatus::ReadyToPublish;
+            write_json_artifact(&run_dir.join("state.json"), state)?;
+            write_step_progress(
+                &step_dir,
+                &state.steps[state.next_step_index],
+                state.steps.len(),
+                "Validation passed and the step is ready to publish.",
+            )?;
+            tracker.complete_step(
+                STEP_VALIDATE,
+                format!(
+                    "Step {}/{} passed validation.",
+                    step_snapshot.step_index,
+                    state.steps.len()
+                ),
+            )?;
+            write_merge_progress_artifact(run_dir, tracker, &sequential_step_records(state))?;
+        }
+
+        if matches!(
+            state.steps[state.next_step_index].status,
+            SequentialStepStatus::ReadyToPublish | SequentialStepStatus::PublicationFailed
+        ) {
+            tracker.start_step(
+                STEP_PUSH,
+                format!(
+                    "Step {}/{}: pushing branch `{}` to origin.",
+                    step_snapshot.step_index,
+                    state.steps.len(),
+                    step_snapshot.branch
+                ),
+            )?;
+            push_branch_until_published(
+                workspace_path,
+                &step_snapshot.branch,
+                merge_settings.publication_retry_attempts(),
+                tracker,
+                STEP_PUSH,
+                "Step push attempt",
+            )?;
+            tracker.complete_step(
+                STEP_PUSH,
+                format!(
+                    "Step {}/{} pushed branch `{}` to origin.",
+                    step_snapshot.step_index,
+                    state.steps.len(),
+                    step_snapshot.branch
+                ),
+            )?;
+
+            let step_title =
+                sequential_step_pr_title(step_snapshot.step_index, state.steps.len(), &step_pr);
+            let step_body = sequential_step_pr_body(
+                repository,
+                &run_id_from_dir(run_dir)?,
+                step_snapshot.step_index,
+                state.steps.len(),
+                &step_pr,
+                &step_snapshot,
+                plan,
+                recent_main,
+            );
+            let body_path = step_dir.join("step-pr-body.md");
+            write_text_file(&body_path, &step_body, true)?;
+            tracker.start_step(
+                STEP_PUBLISH,
+                format!(
+                    "Step {}/{}: publishing pull request into `{}`.",
+                    step_snapshot.step_index,
+                    state.steps.len(),
+                    step_snapshot.base_branch
+                ),
+            )?;
+            match publish_sequential_pull_request_until_published(
+                gh,
+                workspace_path,
+                &step_snapshot,
+                &step_title,
+                &body_path,
+                merge_settings.publication_retry_attempts(),
+                tracker,
+            ) {
+                Ok(publication) => {
+                    state.steps[state.next_step_index].status = SequentialStepStatus::Completed;
+                    state.steps[state.next_step_index].publication_url =
+                        Some(publication.url.clone());
+                    state.steps[state.next_step_index].publication_action =
+                        Some(lifecycle_action_label(publication.action).to_string());
+                    state.steps[state.next_step_index].publication_number =
+                        Some(publication.number);
+                    write_json_artifact(
+                        &step_dir.join("publication.json"),
+                        &SequentialPublicationRecord {
+                            step_index: step_snapshot.step_index,
+                            pull_request: step_snapshot.pull_request,
+                            branch: step_snapshot.branch.clone(),
+                            base_branch: step_snapshot.base_branch.clone(),
+                            title: step_title.clone(),
+                            url: publication.url.clone(),
+                            action: lifecycle_action_label(publication.action).to_string(),
+                        },
+                    )?;
+                    write_step_progress(
+                        &step_dir,
+                        &state.steps[state.next_step_index],
+                        state.steps.len(),
+                        &format!("Published step PR {}.", publication.url),
+                    )?;
+                    tracker.complete_step(
+                        STEP_PUBLISH,
+                        format!(
+                            "Step {}/{} published pull request {}.",
+                            step_snapshot.step_index,
+                            state.steps.len(),
+                            publication.url
+                        ),
+                    )?;
+                    state.next_step_index += 1;
+                    write_json_artifact(&run_dir.join("state.json"), state)?;
+                    write_json_artifact(
+                        &run_dir.join("publication.json"),
+                        &SequentialPublicationArtifact {
+                            mode: MergeMode::Sequential,
+                            steps: sequential_publication_records(state, selected_pull_requests),
+                        },
+                    )?;
+                    write_merge_progress_artifact(
+                        run_dir,
+                        tracker,
+                        &sequential_step_records(state),
+                    )?;
+                }
+                Err(error) => {
+                    state.steps[state.next_step_index].status =
+                        SequentialStepStatus::PublicationFailed;
+                    write_json_artifact(&run_dir.join("state.json"), state)?;
+                    write_step_progress(
+                        &step_dir,
+                        &state.steps[state.next_step_index],
+                        state.steps.len(),
+                        "Publication failed after validation; resume will retry publication.",
+                    )?;
+                    write_merge_progress_artifact(
+                        run_dir,
+                        tracker,
+                        &sequential_step_records(state),
+                    )?;
+                    tracker.fail_step(
+                        STEP_PUBLISH,
+                        format!("Sequential step publication failed: {error:#}"),
+                        Some(step_pr.number),
+                    )?;
+                    return Err(anyhow!(
+                        "sequential publication failed for step {} (#{}). Resume the run to retry publication. Run artifacts saved in {}",
+                        step_snapshot.step_index,
+                        step_pr.number,
+                        run_dir.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(SequentialRunResult::Completed)
+}
+
+fn sequential_publication_records(
+    state: &SequentialMergeState,
+    selected_pull_requests: &[GithubPullRequest],
+) -> Vec<SequentialPublicationRecord> {
+    let titles = selected_pull_requests
+        .iter()
+        .map(|pr| (pr.number, pr.title.clone()))
+        .collect::<BTreeMap<_, _>>();
+    state
+        .steps
+        .iter()
+        .filter_map(|step| {
+            Some(SequentialPublicationRecord {
+                step_index: step.step_index,
+                pull_request: step.pull_request,
+                branch: step.branch.clone(),
+                base_branch: step.base_branch.clone(),
+                title: sequential_step_title_string(
+                    step.step_index,
+                    state.steps.len(),
+                    step.pull_request,
+                    titles.get(&step.pull_request)?,
+                ),
+                url: step.publication_url.clone()?,
+                action: step.publication_action.clone()?,
+            })
+        })
+        .collect()
+}
+
+fn sequential_step_records(state: &SequentialMergeState) -> Vec<MergeStepRecord> {
+    state
+        .steps
+        .iter()
+        .filter(|step| step.status != SequentialStepStatus::Pending)
+        .map(|step| MergeStepRecord {
+            step_index: Some(step.step_index),
+            pull_request: step.pull_request,
+            status: format!("{:?}", step.status).to_ascii_lowercase(),
+            detail: match step.status {
+                SequentialStepStatus::StoppedAtCheckpoint => {
+                    "Paused at checkpoint before merge.".to_string()
+                }
+                SequentialStepStatus::MergeApplied => "Merge applied.".to_string(),
+                SequentialStepStatus::ValidationFailed => {
+                    "Validation failed; resume will rerun validation.".to_string()
+                }
+                SequentialStepStatus::ReadyToPublish => {
+                    "Validation passed; step is ready to publish.".to_string()
+                }
+                SequentialStepStatus::PublicationFailed => {
+                    "Publication failed; resume will retry publication.".to_string()
+                }
+                SequentialStepStatus::Completed => format!(
+                    "Published {}",
+                    step.publication_url
+                        .clone()
+                        .unwrap_or_else(|| "step PR".to_string())
+                ),
+                SequentialStepStatus::Pending => String::new(),
+            },
+            branch: Some(step.branch.clone()),
+            base_branch: Some(step.base_branch.clone()),
+            publication_url: step.publication_url.clone(),
+        })
+        .collect()
+}
+
+fn write_step_progress(
+    step_dir: &Path,
+    step: &SequentialStepState,
+    total_steps: usize,
+    detail: &str,
+) -> Result<()> {
+    write_json_artifact(
+        &step_dir.join("step-progress.json"),
+        &SequentialStepProgressArtifact {
+            step_index: step.step_index,
+            total_steps,
+            pull_request: step.pull_request,
+            branch: step.branch.clone(),
+            base_branch: step.base_branch.clone(),
+            status: step.status,
+            detail: detail.to_string(),
+        },
+    )
+}
+
+fn run_id_from_dir(run_dir: &Path) -> Result<String> {
+    run_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("merge run directory is missing a valid run id"))
+}
+
+fn merge_branch_name(run_id: &str) -> String {
+    format!("{STEP_PREFIX}/{run_id}")
+}
+
+fn sequential_workspace_branch_name(run_id: &str) -> String {
+    format!("{STEP_PREFIX}/{run_id}-workspace")
+}
+
+fn step_branch_name(run_id: &str, step_index: usize, pull_request: u64) -> String {
+    format!("{STEP_PREFIX}/{run_id}/step-{step_index:02}-pr-{pull_request}")
+}
+
+fn step_dir_path(run_dir: &Path, step_index: usize, pull_request: u64) -> PathBuf {
+    run_dir
+        .join("steps")
+        .join(format!("{step_index:02}-pr-{pull_request}"))
+}
+
+fn sequential_plan_step(plan: &MergePlan, pull_request: u64) -> Option<&SequentialMergePlanStep> {
+    plan.steps
+        .iter()
+        .find(|step| step.pull_request == pull_request)
+}
+
+fn checkout_step_branch(
+    workspace_path: &Path,
+    repository: &GithubRepository,
+    branch: &str,
+    base_branch: &str,
+) -> Result<()> {
+    if base_branch == repository.default_branch {
+        run_git(
+            workspace_path,
+            &["fetch", "origin", repository.default_branch.as_str()],
+        )?;
+        run_git(
+            workspace_path,
+            &[
+                "checkout",
+                "-B",
+                branch,
+                &format!("origin/{}", repository.default_branch),
+            ],
+        )?;
+        return Ok(());
+    }
+
+    run_git(workspace_path, &["fetch", "origin", base_branch])?;
+    run_git(
+        workspace_path,
+        &["checkout", "-B", branch, &format!("origin/{base_branch}")],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_pull_request_step(
+    root: &Path,
+    workspace_path: &Path,
+    args: &MergeArgs,
+    repository: &GithubRepository,
+    pull_request: &GithubPullRequest,
+    plan: &MergePlan,
+    recent_main: &RecentMainArtifact,
+    step_dir: &Path,
+    tracker: &mut ProgressTracker,
+) -> Result<()> {
+    tracker.update_detail(
+        STEP_APPLY,
+        format!(
+            "Fetching pull request #{} ({}) into the sequential workspace.",
+            pull_request.number, pull_request.title
+        ),
+        Some(pull_request.number),
+    )?;
+    let fetch_ref = format!(
+        "+refs/pull/{}/head:refs/remotes/origin/pr/{}",
+        pull_request.number, pull_request.number
+    );
+    run_git(workspace_path, &["fetch", "origin", fetch_ref.as_str()])?;
+    let merge_target = format!("origin/pr/{}", pull_request.number);
+    tracker.update_detail(
+        STEP_APPLY,
+        format!(
+            "Merging pull request #{} ({}) onto the sequential step branch.",
+            pull_request.number, pull_request.title
+        ),
+        Some(pull_request.number),
+    )?;
+    match run_git(
+        workspace_path,
+        &["merge", "--no-ff", "--no-edit", merge_target.as_str()],
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let conflicted_files =
+                git_stdout(workspace_path, &["diff", "--name-only", "--diff-filter=U"])?;
+            if conflicted_files.trim().is_empty() {
+                return Err(error).with_context(|| {
+                    format!("failed to merge pull request #{}", pull_request.number)
+                });
+            }
+
+            tracker.update_detail(
+                STEP_APPLY,
+                format!(
+                    "Conflict assistance invoked for pull request #{} across {}.",
+                    pull_request.number,
+                    conflicted_files.replace('\n', ", ")
+                ),
+                Some(pull_request.number),
+            )?;
+            let resolution_prompt = build_conflict_prompt(
+                repository,
+                pull_request,
+                plan,
+                recent_main,
+                sequential_plan_step(plan, pull_request.number),
+                workspace_path,
+                conflicted_files.trim(),
+            )?;
+            write_text_file(
+                &step_dir.join("conflict-prompt.md"),
+                &resolution_prompt,
+                true,
+            )?;
+            let output = run_agent_capture_in_dir(
+                root,
+                workspace_path,
+                AgentConfigOverrides {
+                    provider: args.agent.clone(),
+                    model: args.model.clone(),
+                    reasoning: args.reasoning.clone(),
+                },
+                &resolution_prompt,
+                vec![(
+                    "METASTACK_MERGE_CONFLICT_PULL_REQUEST".to_string(),
+                    pull_request.number.to_string(),
+                )],
+            )?;
+            write_text_file(&step_dir.join("conflict-resolution.md"), &output, true)?;
+            run_git(workspace_path, &["add", "-A"])?;
+            let unresolved =
+                git_stdout(workspace_path, &["diff", "--name-only", "--diff-filter=U"])?;
+            if !unresolved.trim().is_empty() {
+                bail!(
+                    "merge conflict for pull request #{} remains unresolved after agent assistance: {}",
+                    pull_request.number,
+                    unresolved
+                );
+            }
+            run_git(workspace_path, &["commit", "--no-edit"])?;
+            Ok(())
+        }
+    }
+}
+
+fn sequential_step_pr_title(
+    step_index: usize,
+    total_steps: usize,
+    pull_request: &GithubPullRequest,
+) -> String {
+    sequential_step_title_string(
+        step_index,
+        total_steps,
+        pull_request.number,
+        &pull_request.title,
+    )
+}
+
+fn sequential_step_title_string(
+    step_index: usize,
+    total_steps: usize,
+    pull_request: u64,
+    title: &str,
+) -> String {
+    format!(
+        "{} merge step {step_index}/{total_steps}: #{} {}",
+        crate::branding::COMMAND_NAME,
+        pull_request,
+        title
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sequential_step_pr_body(
+    repository: &GithubRepository,
+    run_id: &str,
+    step_index: usize,
+    total_steps: usize,
+    pull_request: &GithubPullRequest,
+    step: &SequentialStepState,
+    plan: &MergePlan,
+    recent_main: &RecentMainArtifact,
+) -> String {
+    let step_plan = sequential_plan_step(plan, pull_request.number);
+    let mut lines = vec![
+        format!(
+            "# Sequential merge step {step_index}/{total_steps} for `{}`",
+            repository.name_with_owner
+        ),
+        String::new(),
+        format!("Run ID: `{run_id}`"),
+        format!(
+            "Source pull request: #{} {}",
+            pull_request.number, pull_request.title
+        ),
+        format!("Source URL: {}", pull_request.url),
+        format!("Publication branch: `{}`", step.branch),
+        format!("Publication base: `{}`", step.base_branch),
+        String::new(),
+        "Planner rationale:".to_string(),
+        step_plan
+            .map(|plan| plan.rationale.clone())
+            .unwrap_or_else(|| "No step-specific rationale was recorded.".to_string()),
+    ];
+    if let Some(step_plan) = step_plan
+        && !step_plan.risks.is_empty()
+    {
+        lines.push(String::new());
+        lines.push("Planner risks:".to_string());
+        for risk in &step_plan.risks {
+            lines.push(format!("- {risk}"));
+        }
+    }
+    if !recent_main.pull_requests.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "Recent merged-work context on `{}`:",
+            recent_main.default_branch
+        ));
+        for pr in recent_main.pull_requests.iter().take(5) {
+            lines.push(format!("- #{} {} ({})", pr.number, pr.title, pr.url));
+        }
+    }
+    lines.join("\n")
+}
+
+fn lifecycle_action_label(action: PullRequestLifecycleAction) -> &'static str {
+    match action {
+        PullRequestLifecycleAction::CreatedReady => "created",
+        PullRequestLifecycleAction::CreatedDraft => "created_draft",
+        PullRequestLifecycleAction::UpdatedExisting => "updated",
+        PullRequestLifecycleAction::PromotedToReady => "promoted_to_ready",
+        PullRequestLifecycleAction::AlreadyReady => "already_ready",
+    }
+}
+
+fn push_branch_until_published(
+    workspace_path: &Path,
+    branch: &str,
+    max_attempts: usize,
+    tracker: &mut ProgressTracker,
+    step_key: &str,
+    retry_label: &str,
+) -> Result<()> {
+    for attempt in 1..=max_attempts {
+        match run_git(
+            workspace_path,
+            &["push", "--set-upstream", "origin", branch],
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < max_attempts => {
+                tracker.update_detail(
+                    step_key,
+                    format!(
+                        "{retry_label} {attempt}/{max_attempts} for `{branch}` failed: {error:#}. Retrying."
+                    ),
+                    None,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("push retry loop terminated unexpectedly for `{branch}`")
+}
+
+fn publish_sequential_pull_request_until_published(
+    gh: &GhCli,
+    workspace_path: &Path,
+    step: &SequentialStepState,
+    title: &str,
+    body_path: &Path,
+    _max_attempts: usize,
+    tracker: &mut ProgressTracker,
+) -> Result<PullRequestLifecycleResult> {
+    tracker.update_detail(
+        STEP_PUBLISH,
+        "Sequential publication preserves the first publish failure so resume can retry without replaying completed steps.".to_string(),
+        Some(step.pull_request),
+    )?;
+    gh.publish_branch_pull_request(
+        workspace_path,
+        PullRequestPublishRequest {
+            head_branch: &step.branch,
+            base_branch: &step.base_branch,
+            title,
+            body_path,
+            mode: PullRequestPublishMode::Ready,
+            allow_create_replay_fallback: false,
+        },
+    )
+}
+
+fn write_merge_progress_artifact(
+    run_dir: &Path,
+    tracker: &ProgressTracker,
+    steps: &[MergeStepRecord],
+) -> Result<()> {
+    write_json_artifact(
+        &run_dir.join("merge-progress.json"),
+        &MergeProgressArtifact {
+            run: tracker.artifact().clone(),
+            steps: steps.to_vec(),
+        },
+    )
+}
+
+fn resume_merge_run(
+    root: &Path,
+    args: &MergeArgs,
+    gh: &GhCli,
+    run_id: &str,
+) -> Result<MergeExecution> {
+    let paths = PlanningPaths::new(root);
+    let run_dir = paths.merge_run_dir(run_id);
+    if !run_dir.is_dir() {
+        bail!(
+            "merge run `{run_id}` does not exist under `{}`",
+            paths.merge_runs_dir.display()
+        );
+    }
+
+    let context: MergeContextArtifact = read_json_artifact(&run_dir.join("context.json"))?;
+    let plan: MergePlan = read_json_artifact(&run_dir.join("plan.json"))?;
+    let recent_main = read_recent_main_artifact(&run_dir, &context)?;
+    let workspace_path = PathBuf::from(&context.workspace_path);
+    if !workspace_path.is_dir() {
+        bail!(
+            "merge workspace for run `{run_id}` is missing at `{}`",
+            workspace_path.display()
+        );
+    }
+
+    let merge_settings = AppConfig::load()?.merge;
+    let mut tracker =
+        ProgressTracker::resume(run_dir.join("progress.json"), ProgressOutputMode::Text)?;
+    match context.mode {
+        MergeMode::Aggregate => {
+            let aggregate_branch = context
+                .aggregate_branch
+                .as_deref()
+                .ok_or_else(|| anyhow!("aggregate merge context is missing `aggregate_branch`"))?;
+            let mut progress: MergeProgressArtifact =
+                read_json_artifact(&run_dir.join("merge-progress.json"))?;
+            tracker.update_detail(
+                STEP_VALIDATE,
+                format!("Resuming merge run `{run_id}` from the existing aggregate workspace."),
+                None,
+            )?;
+            let validation_commands = resumed_validation_commands(root, args, &context);
+            let validation = match validation_commands {
+                Ok(commands) => match run_validation_until_passes(
+                    root,
+                    &workspace_path,
+                    args,
+                    &context.repository,
+                    aggregate_branch,
+                    &context.selected_pull_requests,
+                    &plan,
+                    &run_dir,
+                    &mut tracker,
+                    commands,
+                    merge_settings.validation_repair_attempts(),
+                    merge_settings.validation_transient_retry_attempts(),
+                ) {
+                    Ok(validation) => validation,
+                    Err(error) => ValidationArtifact {
+                        attempts: Vec::new(),
+                        success: false,
+                        repair_attempts: 0,
+                        final_error: Some(format!("Validation execution failed: {error:#}")),
+                    },
+                },
+                Err(error) => ValidationArtifact {
+                    attempts: Vec::new(),
+                    success: false,
+                    repair_attempts: 0,
+                    final_error: Some(format!("Validation setup failed: {error:#}")),
+                },
+            };
+            write_json_artifact(&run_dir.join("validation.json"), &validation)?;
+            if validation.success {
+                tracker.complete_step(
+                    STEP_VALIDATE,
+                    format!(
+                        "Validation passed after {} attempt(s) across {} command(s).",
+                        validation.attempts.len(),
+                        validation
+                            .attempts
+                            .last()
+                            .map(|attempt| attempt.commands.len())
+                            .unwrap_or(0)
+                    ),
+                )?;
+            } else {
+                tracker.fail_step(
+                    STEP_VALIDATE,
+                    validation.final_error.clone().unwrap_or_else(|| {
+                        "Validation remained failing after automated recovery.".to_string()
+                    }),
+                    None,
+                )?;
+            }
+
+            tracker.start_step(
+                STEP_PUSH,
+                format!(
+                    "Synchronizing aggregate branch `{aggregate_branch}` to origin after resume."
+                ),
+            )?;
+            push_branch_until_published(
+                &workspace_path,
+                aggregate_branch,
+                merge_settings.publication_retry_attempts(),
+                &mut tracker,
+                STEP_PUSH,
+                "Push attempt",
+            )?;
+            tracker.complete_step(
+                STEP_PUSH,
+                format!("Aggregate branch `{aggregate_branch}` is now on origin."),
+            )?;
+
+            let pr_title = aggregate_pr_title(&context.selected_pull_requests);
+            let pr_body = aggregate_pr_body(
+                &context.repository,
+                &context.selected_pull_requests,
+                &plan,
+                &context.run_id,
+                &validation,
+                &recent_main,
+            );
+            let pr_body_path = run_dir.join("aggregate-pr-body.md");
+            write_text_file(&pr_body_path, &pr_body, true)?;
+            tracker.start_step(
+                STEP_PUBLISH,
+                format!(
+                    "Publishing the aggregate pull request into `{}`.",
+                    context.repository.default_branch
+                ),
+            )?;
+            let publication = publish_aggregate_pull_request_until_published(
+                gh,
+                &workspace_path,
+                &context.repository,
+                aggregate_branch,
+                &context.repository.default_branch,
+                &pr_title,
+                &pr_body_path,
+                merge_settings.publication_retry_attempts(),
+                &mut tracker,
+            )?;
+            let publication_artifact = AggregatePublicationArtifact {
+                aggregate_branch: aggregate_branch.to_string(),
+                title: pr_title,
+                url: publication.url.clone(),
+                action: publication.action.to_string(),
+                validation_success: validation.success,
+            };
+            write_json_artifact(&run_dir.join("publication.json"), &publication_artifact)?;
+            tracker.complete_step(
+                STEP_PUBLISH,
+                format!(
+                    "{} aggregate pull request {}.",
+                    match publication_artifact.action.as_str() {
+                        "updated" => "Updated",
+                        _ => "Created",
+                    },
+                    publication_artifact.url
+                ),
+            )?;
+            tracker.finish_success(format!(
+                "{} aggregate pull request {}. {}",
+                match publication_artifact.action.as_str() {
+                    "updated" => "Updated",
+                    _ => "Created",
+                },
+                publication_artifact.url,
+                if validation.success {
+                    "Validation passed; review the run artifacts for planner, validation, and publication details.".to_string()
+                } else {
+                    "Validation remains unresolved; review the run artifacts and aggregate PR for the current failure details.".to_string()
+                }
+            ))?;
+
+            progress.run = tracker.artifact().clone();
+            write_json_artifact(&run_dir.join("merge-progress.json"), &progress)?;
+            let publication_verb = match publication_artifact.action.as_str() {
+                "updated" => "Updated",
+                _ => "Created",
+            };
+            let summary = if validation.success {
+                format!(
+                    "{publication_verb} aggregate PR {} for {} pull request(s). Run artifacts saved in {}",
+                    publication_artifact.url,
+                    context.selected_pull_requests.len(),
+                    run_dir.display()
+                )
+            } else {
+                format!(
+                    "{publication_verb} aggregate PR {} for {} pull request(s), but validation still needs attention. Run artifacts saved in {}",
+                    publication_artifact.url,
+                    context.selected_pull_requests.len(),
+                    run_dir.display()
+                )
+            };
+            Ok(MergeExecution { summary })
+        }
+        MergeMode::Sequential => {
+            let mut state: SequentialMergeState = read_json_artifact(&run_dir.join("state.json"))?;
+            let validation_commands = resumed_validation_commands(root, args, &context)?;
+            tracker.update_detail(
+                STEP_APPLY,
+                format!(
+                    "Resuming sequential merge run `{run_id}` from step {}.",
+                    state.next_step_index + 1
+                ),
+                None,
+            )?;
+            let result = run_sequential_steps(
+                root,
+                args,
+                gh,
+                &context.repository,
+                &workspace_path,
+                &run_dir,
+                &context.selected_pull_requests,
+                &plan,
+                &recent_main,
+                &validation_commands,
+                &merge_settings,
+                &mut tracker,
+                &mut state,
+            )?;
+            write_merge_progress_artifact(&run_dir, &tracker, &sequential_step_records(&state))?;
+            let summary = match result {
+                SequentialRunResult::Completed => {
+                    tracker.finish_success(format!(
+                        "Published {} sequential pull request(s). Review the per-step artifacts for validation and publication details.",
+                        state
+                            .steps
+                            .iter()
+                            .filter(|step| step.status == SequentialStepStatus::Completed)
+                            .count()
+                    ))?;
+                    format!(
+                        "Published {} sequential pull request(s) for {} selected pull request(s). Run artifacts saved in {}",
+                        state
+                            .steps
+                            .iter()
+                            .filter(|step| step.status == SequentialStepStatus::Completed)
+                            .count(),
+                        context.selected_pull_requests.len(),
+                        run_dir.display()
+                    )
+                }
+                SequentialRunResult::StoppedAtCheckpoint { next_step_index } => {
+                    tracker.finish_success(format!(
+                        "Sequential merge paused before step {}. Resume the run to continue publication.",
+                        next_step_index + 1
+                    ))?;
+                    format!(
+                        "Paused sequential merge before step {}/{}. Resume with `{} merge --resume-run {}`. Run artifacts saved in {}",
+                        next_step_index + 1,
+                        state.steps.len(),
+                        crate::branding::COMMAND_NAME,
+                        run_id,
+                        run_dir.display()
+                    )
+                }
+            };
+            Ok(MergeExecution { summary })
+        }
+    }
+}
+
+fn read_recent_main_artifact(
+    run_dir: &Path,
+    context: &MergeContextArtifact,
+) -> Result<RecentMainArtifact> {
+    let path = run_dir.join("recent-main.json");
+    if path.is_file() {
+        read_json_artifact(&path)
+    } else {
+        Ok(RecentMainArtifact {
+            repository: context.repository.name_with_owner.clone(),
+            default_branch: context.repository.default_branch.clone(),
+            limit: context.recent_main_limit,
+            pull_requests: Vec::new(),
+        })
+    }
+}
+
+fn resumed_validation_commands(
+    root: &Path,
+    args: &MergeArgs,
+    context: &MergeContextArtifact,
+) -> Result<Vec<String>> {
+    if !args.validate.is_empty() {
+        return Ok(args.validate.clone());
+    }
+    if !context.validation_commands.is_empty() {
+        return Ok(context.validation_commands.clone());
+    }
+    validation_commands(root, args)
 }
 
 fn reserve_run_dir(paths: &PlanningPaths) -> Result<(String, PathBuf)> {
@@ -1084,23 +2632,61 @@ fn git_config_value(root: &Path, key: &str) -> Result<Option<String>> {
 fn build_merge_plan_prompt(
     repository: &GithubRepository,
     selected_pull_requests: &[GithubPullRequest],
-    aggregate_branch: &str,
+    recent_main: &RecentMainArtifact,
+    mode: MergeMode,
+    branch_hint: Option<&str>,
 ) -> String {
     let mut lines = vec![
         format!(
-            "Plan a one-shot aggregate merge run for `{}`.",
+            "Plan a {} merge run for `{}`.",
+            mode.label(),
             repository.name_with_owner
         ),
         format!("Base branch: `{}`", repository.default_branch),
-        format!("Aggregate branch: `{aggregate_branch}`"),
-        "Choose an explicit merge order and call out likely conflict hotspots before execution."
-            .to_string(),
+        match (mode, branch_hint) {
+            (MergeMode::Aggregate, Some(branch)) => format!("Aggregate branch: `{branch}`"),
+            (MergeMode::Sequential, Some(branch)) => {
+                format!("Workspace seed branch: `{branch}`")
+            }
+            (_, None) => "Branch details: use the run workspace defaults.".to_string(),
+        },
+        match mode {
+            MergeMode::Aggregate => {
+                "Choose an explicit merge order and call out likely conflict hotspots before execution."
+                    .to_string()
+            }
+            MergeMode::Sequential => "Choose an explicit merge order for one-PR-per-step publication. Include step rationales and risk notes, and assume step 1 targets the default branch while later steps target the previous successful step branch.".to_string(),
+        },
         String::new(),
         "Return strict JSON with this shape:".to_string(),
-        r#"{"merge_order":[101,102],"conflict_hotspots":["config.rs","README.md"],"summary":"why this order is safest"}"#.to_string(),
+        match mode {
+            MergeMode::Aggregate => {
+                r#"{"merge_order":[101,102],"conflict_hotspots":["config.rs","README.md"],"summary":"why this order is safest"}"#.to_string()
+            }
+            MergeMode::Sequential => r#"{"merge_order":[101,102],"conflict_hotspots":["config.rs","README.md"],"summary":"why this order is safest","steps":[{"pull_request":101,"rationale":"why step 1 goes first","risks":["touches config"]},{"pull_request":102,"rationale":"why step 2 follows","risks":["stacks on step 1 branch"]}]}"#.to_string(),
+        },
         String::new(),
-        "Selected pull requests:".to_string(),
+        format!(
+            "Recently merged pull requests on `{}` (bounded context, newest first):",
+            recent_main.default_branch
+        ),
     ];
+
+    if recent_main.pull_requests.is_empty() {
+        lines.push("- none recorded".to_string());
+    } else {
+        for pr in &recent_main.pull_requests {
+            lines.push(format!(
+                "- #{} {} | merged_at=`{}` | head=`{}` | author=`{}` | url={}",
+                pr.number, pr.title, pr.merged_at, pr.head_ref_name, pr.author, pr.url
+            ));
+            if !pr.body.trim().is_empty() {
+                lines.push(format!("  body: {}", truncate_single_line(&pr.body, 160)));
+            }
+        }
+    }
+
+    lines.extend([String::new(), "Selected pull requests:".to_string()]);
 
     for pr in selected_pull_requests {
         lines.push(format!(
@@ -1143,6 +2729,7 @@ fn request_merge_plan(
 fn validate_merge_plan(
     plan: &MergePlan,
     selected_pull_requests: &[GithubPullRequest],
+    mode: MergeMode,
 ) -> Result<()> {
     let expected = selected_pull_requests
         .iter()
@@ -1171,12 +2758,39 @@ fn validate_merge_plan(
         );
     }
 
+    if mode == MergeMode::Sequential {
+        if plan.steps.len() != plan.merge_order.len() {
+            bail!("sequential merge planner must return one step for each selected pull request");
+        }
+        let step_numbers = plan
+            .steps
+            .iter()
+            .map(|step| step.pull_request)
+            .collect::<Vec<_>>();
+        if step_numbers != plan.merge_order {
+            bail!(
+                "sequential merge planner steps must match merge_order exactly; expected [{}], got [{}]",
+                plan.merge_order
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                step_numbers
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     Ok(())
 }
 
 fn apply_pull_requests(
     context: MergeApplicationContext<'_>,
     tracker: &mut ProgressTracker,
+    recent_main: &RecentMainArtifact,
 ) -> Result<Vec<MergeStepRecord>> {
     let selected_by_number = context
         .selected_pull_requests
@@ -1222,9 +2836,13 @@ fn apply_pull_requests(
         ) {
             Ok(()) => {
                 steps.push(MergeStepRecord {
+                    step_index: None,
                     pull_request: pr.number,
                     status: "merged".to_string(),
                     detail: format!("Merged #{} into the aggregate branch", pr.number),
+                    branch: None,
+                    base_branch: None,
+                    publication_url: None,
                 });
                 tracker.update_detail(
                     STEP_APPLY,
@@ -1255,6 +2873,8 @@ fn apply_pull_requests(
                     context.repository,
                     pr,
                     context.plan,
+                    recent_main,
+                    sequential_plan_step(context.plan, pr.number),
                     context.workspace_path,
                     conflicted_files.trim(),
                 )?;
@@ -1302,6 +2922,7 @@ fn apply_pull_requests(
 
                 run_git(context.workspace_path, &["commit", "--no-edit"])?;
                 steps.push(MergeStepRecord {
+                    step_index: None,
                     pull_request: pr.number,
                     status: "conflict_resolved".to_string(),
                     detail: format!(
@@ -1309,6 +2930,9 @@ fn apply_pull_requests(
                         pr.number,
                         conflicted_files.replace('\n', ", ")
                     ),
+                    branch: None,
+                    base_branch: None,
+                    publication_url: None,
                 });
                 tracker.update_detail(
                     STEP_APPLY,
@@ -1329,12 +2953,25 @@ fn build_conflict_prompt(
     repository: &GithubRepository,
     pull_request: &GithubPullRequest,
     plan: &MergePlan,
+    recent_main: &RecentMainArtifact,
+    planned_step: Option<&SequentialMergePlanStep>,
     workspace_path: &Path,
     conflicted_files: &str,
 ) -> Result<String> {
     let head = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+    let recent_main_summary = if recent_main.pull_requests.is_empty() {
+        "none recorded".to_string()
+    } else {
+        recent_main
+            .pull_requests
+            .iter()
+            .take(5)
+            .map(|pr| format!("#{} {}", pr.number, pr.title))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     Ok(format!(
-        "Resolve an in-progress git merge conflict inside `{}` for `{}`.\nCurrent aggregate HEAD: `{}`\nPull request: #{} {}\nLikely hotspots from the planner: {}\nConflicted files:\n{}\n\nEdit the working tree in place, stage the resolved files, and leave the repository ready for `git commit --no-edit`. Then print a short Markdown summary of what you changed.",
+        "Resolve an in-progress git merge conflict inside `{}` for `{}`.\nCurrent aggregate HEAD: `{}`\nPull request: #{} {}\nLikely hotspots from the planner: {}\nRecent merged-work context on `{}`: {}\nStep-specific rationale: {}\nStep-specific risks: {}\nConflicted files:\n{}\n\nEdit the working tree in place, stage the resolved files, and leave the repository ready for `git commit --no-edit`. Then print a short Markdown summary of what you changed.",
         workspace_path.display(),
         repository.name_with_owner,
         head,
@@ -1345,6 +2982,20 @@ fn build_conflict_prompt(
         } else {
             plan.conflict_hotspots.join(", ")
         },
+        recent_main.default_branch,
+        recent_main_summary,
+        planned_step
+            .map(|step| step.rationale.clone())
+            .unwrap_or_else(|| "not provided".to_string()),
+        planned_step
+            .map(|step| {
+                if step.risks.is_empty() {
+                    "none recorded".to_string()
+                } else {
+                    step.risks.join(", ")
+                }
+            })
+            .unwrap_or_else(|| "none recorded".to_string()),
         conflicted_files
     ))
 }
@@ -1374,6 +3025,16 @@ fn validation_commands(root: &Path, args: &MergeArgs) -> Result<Vec<String>> {
         "no default validation command was inferred for `{}`; pass one or more `--validate <COMMAND>` flags",
         root.display()
     )
+}
+
+fn sequential_validation_commands(
+    validation_commands: &[String],
+    step_index: usize,
+) -> Vec<String> {
+    if validation_commands.is_empty() {
+        return Vec::new();
+    }
+    validation_commands[..validation_commands.len().min(step_index + 1)].to_vec()
 }
 
 fn makefile_has_target(contents: &str, target: &str) -> bool {
@@ -1797,34 +3458,6 @@ fn workspace_has_tracked_changes(workspace_path: &Path) -> Result<bool> {
         .is_empty())
 }
 
-fn push_aggregate_branch_until_published(
-    workspace_path: &Path,
-    aggregate_branch: &str,
-    max_attempts: usize,
-    tracker: &mut ProgressTracker,
-) -> Result<()> {
-    for attempt in 1..=max_attempts {
-        match run_git(
-            workspace_path,
-            &["push", "--set-upstream", "origin", aggregate_branch],
-        ) {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt < max_attempts => {
-                tracker.update_detail(
-                    STEP_PUSH,
-                    format!(
-                        "Push attempt {attempt}/{max_attempts} for `{aggregate_branch}` failed: {error:#}. Retrying."
-                    ),
-                    None,
-                )?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    bail!("push retry loop terminated unexpectedly for `{aggregate_branch}`")
-}
-
 #[allow(clippy::too_many_arguments)]
 fn publish_aggregate_pull_request_until_published(
     gh: &GhCli,
@@ -1953,6 +3586,7 @@ fn aggregate_pr_body(
     plan: &MergePlan,
     run_id: &str,
     validation: &ValidationArtifact,
+    recent_main: &RecentMainArtifact,
 ) -> String {
     let mut body = vec![
         format!("# Aggregate merge for `{}`", repository.name_with_owner),
@@ -1986,6 +3620,16 @@ fn aggregate_pr_body(
         body.push("Conflict hotspots called out before execution:".to_string());
         for hotspot in &plan.conflict_hotspots {
             body.push(format!("- {hotspot}"));
+        }
+    }
+    if !recent_main.pull_requests.is_empty() {
+        body.push(String::new());
+        body.push(format!(
+            "Recent merged-work context on `{}`:",
+            recent_main.default_branch
+        ));
+        for pr in recent_main.pull_requests.iter().take(5) {
+            body.push(format!("- #{} {} ({})", pr.number, pr.title, pr.url));
         }
     }
     body.join("\n")
@@ -2157,6 +3801,7 @@ impl GhCli {
                 title,
                 body_path,
                 mode: PullRequestPublishMode::Ready,
+                allow_create_replay_fallback: true,
             },
         )?;
 
@@ -2211,7 +3856,7 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use anyhow::Result;
     use chrono::TimeZone;
@@ -2221,9 +3866,10 @@ mod tests {
     use crate::fs::PlanningPaths;
 
     use super::{
-        GithubActor, GithubPullRequest, MergePlan, ValidationCommandRecord, reserve_run_dir_at,
-        targeted_validation_commands, validate_merge_plan, validation_commands,
-        validation_failure_summary,
+        AgentResolutionArtifact, GithubActor, GithubPullRequest, GithubRepository,
+        MergeContextArtifact, MergeMode, MergePlan, ValidationCommandRecord, reserve_run_dir_at,
+        resumed_validation_commands, sequential_validation_commands, targeted_validation_commands,
+        validate_merge_plan, validation_commands, validation_failure_summary,
     };
 
     fn empty_merge_args() -> MergeArgs {
@@ -2231,6 +3877,8 @@ mod tests {
             root: PathBuf::from("."),
             json: false,
             no_interactive: false,
+            sequential: false,
+            checkpoints: false,
             resume_run: None,
             pull_requests: Vec::new(),
             validate: Vec::new(),
@@ -2328,6 +3976,62 @@ mod tests {
     }
 
     #[test]
+    fn sequential_validation_commands_use_cumulative_prefix_for_each_step() {
+        let commands = vec![
+            "test -f one.txt".to_string(),
+            "test -f two.txt".to_string(),
+            "test -f three.txt".to_string(),
+        ];
+
+        assert_eq!(
+            sequential_validation_commands(&commands, 0),
+            vec!["test -f one.txt".to_string()]
+        );
+        assert_eq!(
+            sequential_validation_commands(&commands, 1),
+            vec!["test -f one.txt".to_string(), "test -f two.txt".to_string()]
+        );
+        assert_eq!(sequential_validation_commands(&commands, 5), commands);
+    }
+
+    #[test]
+    fn resumed_validation_commands_prefer_persisted_context_commands() {
+        let args = empty_merge_args();
+        let context = MergeContextArtifact {
+            run_id: "run-1".to_string(),
+            mode: MergeMode::Sequential,
+            repository: GithubRepository {
+                name_with_owner: "metastack-systems/metastack-cli".to_string(),
+                url: "https://github.com/metastack-systems/metastack-cli".to_string(),
+                default_branch: "main".to_string(),
+            },
+            selected_pull_requests: Vec::new(),
+            checkpoints_enabled: false,
+            validation_commands: vec!["test -f one.txt".to_string()],
+            recent_main_limit: 10,
+            recent_main_count: 0,
+            recent_main_path: "recent-main.json".to_string(),
+            source_root: ".".to_string(),
+            workspace_path: ".".to_string(),
+            aggregate_branch: None,
+            agent_resolution: AgentResolutionArtifact {
+                provider: "stub".to_string(),
+                model: None,
+                reasoning: None,
+                route_key: None,
+                family_key: None,
+                provider_source: "test".to_string(),
+                model_source: None,
+                reasoning_source: None,
+            },
+        };
+
+        let commands =
+            resumed_validation_commands(Path::new("."), &args, &context).expect("commands");
+        assert_eq!(commands, vec!["test -f one.txt".to_string()]);
+    }
+
+    #[test]
     fn validate_merge_plan_requires_the_full_selected_pull_request_set() {
         let selected = vec![
             GithubPullRequest {
@@ -2361,8 +4065,11 @@ mod tests {
                 merge_order: vec![101],
                 conflict_hotspots: Vec::new(),
                 summary: "subset".to_string(),
+                recent_main_numbers: Vec::new(),
+                steps: Vec::new(),
             },
             &selected,
+            MergeMode::Aggregate,
         )
         .expect_err("subset merge plan should fail");
 
@@ -2393,8 +4100,11 @@ mod tests {
                 merge_order: vec![101, 101],
                 conflict_hotspots: Vec::new(),
                 summary: "duplicate".to_string(),
+                recent_main_numbers: Vec::new(),
+                steps: Vec::new(),
             },
             &selected,
+            MergeMode::Aggregate,
         )
         .expect_err("duplicate merge plan should fail");
 

@@ -44,6 +44,20 @@ pub struct MergeDashboardData {
     pub pull_requests: Vec<MergeDashboardPullRequest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeCheckpointData {
+    pub title: String,
+    pub repo_label: String,
+    pub base_branch: String,
+    pub step_index: usize,
+    pub total_steps: usize,
+    pub active_pull_request: MergeDashboardPullRequest,
+    pub next_pull_request: Option<MergeDashboardPullRequest>,
+    pub recent_main: Vec<String>,
+    pub risks: Vec<String>,
+    pub rationale: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct MergeDashboardOptions {
     pub render_once: bool,
@@ -74,6 +88,14 @@ pub enum MergeDashboardExit {
     Selected(Vec<u64>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeCheckpointExit {
+    Snapshot(String),
+    Approve,
+    ContinueRemaining,
+    Stop,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     PullRequests,
@@ -90,6 +112,19 @@ struct MergeDashboardApp {
     selected: BTreeSet<usize>,
     completed: Option<Vec<u64>>,
     copy: CopyUiState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointFocus {
+    Details,
+    Actions,
+}
+
+#[derive(Debug, Clone)]
+struct MergeCheckpointApp {
+    data: MergeCheckpointData,
+    focus: CheckpointFocus,
+    action_index: usize,
 }
 
 pub fn run_merge_dashboard(
@@ -176,6 +211,60 @@ pub fn run_merge_dashboard(
     }
 }
 
+pub fn run_merge_checkpoint_dashboard(
+    data: MergeCheckpointData,
+    options: MergeDashboardOptions,
+) -> Result<MergeCheckpointExit> {
+    let _ = options.vim_mode;
+    if options.render_once {
+        return render_checkpoint_once(data, options).map(MergeCheckpointExit::Snapshot);
+    }
+
+    if !io::stdout().is_terminal() {
+        bail!(
+            "the interactive merge checkpoint requires a TTY; use `{cmd} merge --render-once --sequential --checkpoints` for deterministic proofs",
+            cmd = crate::branding::COMMAND_NAME
+        );
+    }
+
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen)?;
+    let _cleanup = TerminalCleanup;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let mut app = MergeCheckpointApp::new(data);
+
+    loop {
+        terminal.draw(|frame| render_checkpoint_dashboard(frame, &app))?;
+
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let action = match key.code {
+                    KeyCode::Char('q') => return Ok(MergeCheckpointExit::Stop),
+                    KeyCode::Up => Some(MergeDashboardAction::Up),
+                    KeyCode::Down => Some(MergeDashboardAction::Down),
+                    KeyCode::Tab => Some(MergeDashboardAction::Tab),
+                    KeyCode::Enter => Some(MergeDashboardAction::Enter),
+                    KeyCode::Esc | KeyCode::Backspace => Some(MergeDashboardAction::Back),
+                    _ => None,
+                };
+                if let Some(action) = action
+                    && let Some(exit) = app.apply(action)
+                {
+                    return Ok(exit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn render_once(data: MergeDashboardData, options: MergeDashboardOptions) -> Result<String> {
     let backend = TestBackend::new(options.width, options.height);
     let mut terminal = Terminal::new(backend)?;
@@ -190,6 +279,24 @@ fn render_once(data: MergeDashboardData, options: MergeDashboardOptions) -> Resu
     }
 
     terminal.draw(|frame| render_dashboard(frame, &app))?;
+    Ok(snapshot(terminal.backend()))
+}
+
+fn render_checkpoint_once(
+    data: MergeCheckpointData,
+    options: MergeDashboardOptions,
+) -> Result<String> {
+    let backend = TestBackend::new(options.width, options.height);
+    let mut terminal = Terminal::new(backend)?;
+    let mut app = MergeCheckpointApp::new(data);
+
+    for action in options.actions {
+        if app.apply(action).is_some() {
+            break;
+        }
+    }
+
+    terminal.draw(|frame| render_checkpoint_dashboard(frame, &app))?;
     Ok(snapshot(terminal.backend()))
 }
 
@@ -251,6 +358,60 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &MergeDashboardApp) {
     render_selection_summary(frame, sidebar[0], app);
     render_details(frame, sidebar[1], app);
     app.copy.render_export_overlay(frame, frame.area());
+}
+
+fn render_checkpoint_dashboard(frame: &mut Frame<'_>, app: &MergeCheckpointApp) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(0)])
+        .split(frame.area());
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(outer[1]);
+
+    let header = paragraph(
+        Text::from(vec![
+            Line::from(vec![
+                badge("checkpoint", Tone::Accent),
+                Span::raw(" "),
+                Span::styled(app.data.title.clone(), emphasis_style()),
+            ]),
+            Line::from(Span::styled(app.summary_line(), emphasis_style())),
+            Line::from(vec![
+                Span::styled("Repo ", label_style()),
+                Span::raw(app.data.repo_label.clone()),
+                Span::styled("  Base ", label_style()),
+                Span::raw(app.data.base_branch.clone()),
+            ]),
+            Line::from(pane_copy_help(
+                "Tab changes focus. Up/Down selects an action. Enter confirms the highlighted action.",
+            )),
+            key_hints(&[
+                ("Tab", "focus"),
+                ("Up/Down", "action"),
+                ("Enter", "confirm"),
+                ("Esc", "stop"),
+                ("q", "stop"),
+            ]),
+        ]),
+        panel_title("Merge Checkpoint", false),
+    );
+    frame.render_widget(header, outer[0]);
+
+    let detail = paragraph(
+        app.detail_text(),
+        panel_title("Step Details", app.focus == CheckpointFocus::Details),
+    )
+    .wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(detail, body[0]);
+
+    let actions = paragraph(
+        app.action_text(),
+        panel_title("Checkpoint Actions", app.focus == CheckpointFocus::Actions),
+    )
+    .wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(actions, body[1]);
 }
 
 fn render_pr_list(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
@@ -320,6 +481,125 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, app: &MergeDashboardApp) {
     )
     .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(details, area);
+}
+
+impl MergeCheckpointApp {
+    fn new(data: MergeCheckpointData) -> Self {
+        Self {
+            data,
+            focus: CheckpointFocus::Details,
+            action_index: 0,
+        }
+    }
+
+    fn apply(&mut self, action: MergeDashboardAction) -> Option<MergeCheckpointExit> {
+        match action {
+            MergeDashboardAction::Up => {
+                if self.focus == CheckpointFocus::Actions && self.action_index > 0 {
+                    self.action_index -= 1;
+                }
+            }
+            MergeDashboardAction::Down => {
+                if self.focus == CheckpointFocus::Actions && self.action_index < 2 {
+                    self.action_index += 1;
+                }
+            }
+            MergeDashboardAction::Tab => {
+                self.focus = match self.focus {
+                    CheckpointFocus::Details => CheckpointFocus::Actions,
+                    CheckpointFocus::Actions => CheckpointFocus::Details,
+                };
+            }
+            MergeDashboardAction::Enter => {
+                if self.focus == CheckpointFocus::Details {
+                    self.focus = CheckpointFocus::Actions;
+                } else {
+                    return Some(match self.action_index {
+                        0 => MergeCheckpointExit::Approve,
+                        1 => MergeCheckpointExit::ContinueRemaining,
+                        _ => MergeCheckpointExit::Stop,
+                    });
+                }
+            }
+            MergeDashboardAction::Back => return Some(MergeCheckpointExit::Stop),
+            MergeDashboardAction::PageUp
+            | MergeDashboardAction::PageDown
+            | MergeDashboardAction::Home
+            | MergeDashboardAction::End
+            | MergeDashboardAction::Toggle => {}
+        }
+        None
+    }
+
+    fn summary_line(&self) -> String {
+        format!(
+            "Step {}/{} is ready to review before publication continues.",
+            self.data.step_index, self.data.total_steps
+        )
+    }
+
+    fn detail_text(&self) -> String {
+        let mut lines = vec![
+            format!(
+                "Active pull request: #{} {}",
+                self.data.active_pull_request.number, self.data.active_pull_request.title
+            ),
+            format!("Author: {}", self.data.active_pull_request.author),
+            format!("Head ref: {}", self.data.active_pull_request.head_ref),
+            format!("URL: {}", self.data.active_pull_request.url),
+            String::new(),
+            "Planner rationale:".to_string(),
+            self.data.rationale.clone(),
+        ];
+        if !self.data.risks.is_empty() {
+            lines.push(String::new());
+            lines.push("Planner risks:".to_string());
+            for risk in &self.data.risks {
+                lines.push(format!("- {risk}"));
+            }
+        }
+        if let Some(next) = &self.data.next_pull_request {
+            lines.push(String::new());
+            lines.push(format!(
+                "Next planned step: #{} {}",
+                next.number, next.title
+            ));
+        }
+        if !self.data.recent_main.is_empty() {
+            lines.push(String::new());
+            lines.push("Recent merged-work context:".to_string());
+            for line in &self.data.recent_main {
+                lines.push(format!("- {line}"));
+            }
+        }
+        lines.join("\n")
+    }
+
+    fn action_text(&self) -> String {
+        let actions = [
+            (
+                "Approve the next step",
+                "Apply and publish only this step, then checkpoint again.",
+            ),
+            (
+                "Continue remaining steps",
+                "Disable further checkpoints for the rest of this run.",
+            ),
+            (
+                "Stop and resume later",
+                "Leave state on disk and exit without losing completed work.",
+            ),
+        ];
+        actions
+            .iter()
+            .enumerate()
+            .map(|(index, (label, description))| {
+                let prefix = if self.action_index == index { ">" } else { " " };
+                format!("{prefix} {label}\n  {description}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
 }
 
 impl MergeDashboardApp {

@@ -33,15 +33,8 @@ fn write_github_stub(
     pr_numbers: &[u64],
     create_url: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let pr_entries = pr_numbers
-        .iter()
-        .map(|number| {
-            format!(
-                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let pr_entries = github_open_pr_entries(pr_numbers);
+    let recent_main_entries = github_recent_main_entries();
     fs::write(
         path,
         format!(
@@ -53,6 +46,9 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   case " $* " in
+    *" --state merged "*)
+      printf '%s' '[{recent_main_entries}]'
+      ;;
     *" --head meta-merge/"*)
       printf '%s' '[]'
       ;;
@@ -86,15 +82,8 @@ fn write_github_update_stub(
     pr_numbers: &[u64],
     existing_url: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let pr_entries = pr_numbers
-        .iter()
-        .map(|number| {
-            format!(
-                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let pr_entries = github_open_pr_entries(pr_numbers);
+    let recent_main_entries = github_recent_main_entries();
     fs::write(
         path,
         format!(
@@ -106,6 +95,9 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   case " $* " in
+    *" --state merged "*)
+      printf '%s' '[{recent_main_entries}]'
+      ;;
     *" --head meta-merge/"*)
       printf '%s' '[{{"number":999,"url":"{existing_url}"}}]'
       ;;
@@ -139,15 +131,8 @@ fn write_github_retry_create_stub(
     pr_numbers: &[u64],
     create_url: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let pr_entries = pr_numbers
-        .iter()
-        .map(|number| {
-            format!(
-                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let pr_entries = github_open_pr_entries(pr_numbers);
+    let recent_main_entries = github_recent_main_entries();
     fs::write(
         path,
         format!(
@@ -164,6 +149,9 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   case " $* " in
+    *" --state merged "*)
+      printf '%s' '[{recent_main_entries}]'
+      ;;
     *" --head meta-merge/"*)
       printf '%s' '[]'
       ;;
@@ -203,15 +191,8 @@ fn write_github_persistent_pr_stub(
     pr_numbers: &[u64],
     create_url: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let pr_entries = pr_numbers
-        .iter()
-        .map(|number| {
-            format!(
-                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let pr_entries = github_open_pr_entries(pr_numbers);
+    let recent_main_entries = github_recent_main_entries();
     fs::write(
         path,
         format!(
@@ -228,6 +209,9 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   case " $* " in
+    *" --state merged "*)
+      printf '%s' '[{recent_main_entries}]'
+      ;;
     *" --head meta-merge/"*)
       if [ "$count" -ge 1 ]; then
         printf '%s' '[{{"number":999,"url":"{create_url}"}}]'
@@ -262,10 +246,172 @@ exit 1
 }
 
 #[cfg(unix)]
+fn github_open_pr_entries(pr_numbers: &[u64]) -> String {
+    pr_numbers
+        .iter()
+        .map(|number| {
+            format!(
+                r#"{{"number":{number},"title":"PR {number}","body":"Description for PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"feature/{number}","baseRefName":"main","updatedAt":"2026-03-16T18:00:00Z","author":{{"login":"kames"}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[cfg(unix)]
+fn github_recent_main_entries() -> String {
+    [9001_u64, 9002_u64]
+        .iter()
+        .map(|number| {
+            format!(
+                r#"{{"number":{number},"title":"Merged PR {number}","body":"Recent merged PR {number}","url":"https://github.com/metastack-systems/metastack-cli/pull/{number}","headRefName":"merged/{number}","baseRefName":"main","mergedAt":"2026-03-17T09:00:00Z","author":{{"login":"recent"}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[cfg(unix)]
+fn write_github_sequential_stub(
+    path: &std::path::Path,
+    pr_numbers: &[u64],
+) -> Result<(), Box<dyn Error>> {
+    let pr_entries = github_open_pr_entries(pr_numbers);
+    let recent_main_entries = github_recent_main_entries();
+    fs::write(
+        path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+count_file="${{TEST_OUTPUT_DIR:-.}}/gh-sequential-create-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  printf '%s' '{{"nameWithOwner":"metastack-systems/metastack-cli","url":"https://github.com/metastack-systems/metastack-cli","defaultBranchRef":{{"name":"main"}}}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  case " $* " in
+    *" --state merged "*)
+      printf '%s' '[{recent_main_entries}]'
+      ;;
+    *" --head meta-merge/"*)
+      printf '%s' '[]'
+      ;;
+    *)
+      printf '%s' '[{pr_entries}]'
+      ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  printf '%s' '{{"number":'"$((3000 + count))"',"url":"https://github.com/example/pull/'"$((3000 + count))"'","isDraft":false}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#
+        ),
+    )?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_github_sequential_resume_stub(
+    path: &std::path::Path,
+    pr_numbers: &[u64],
+) -> Result<(), Box<dyn Error>> {
+    let pr_entries = github_open_pr_entries(pr_numbers);
+    let recent_main_entries = github_recent_main_entries();
+    fs::write(
+        path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+count_file="${{TEST_OUTPUT_DIR:-.}}/gh-sequential-create-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  printf '%s' '{{"nameWithOwner":"metastack-systems/metastack-cli","url":"https://github.com/metastack-systems/metastack-cli","defaultBranchRef":{{"name":"main"}}}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  case " $* " in
+    *" --state merged "*)
+      printf '%s' '[{recent_main_entries}]'
+      ;;
+    *" --head meta-merge/"*)
+      printf '%s' '[]'
+      ;;
+    *)
+      printf '%s' '[{pr_entries}]'
+      ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  head=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--head" ]; then
+      head="$2"
+      shift 2
+      continue
+    fi
+    shift
+  done
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  case "$head" in
+    *"step-02-pr-"*)
+      if [ "$count" -eq 2 ]; then
+        printf '%s\n' 'temporary sequential publication failure' >&2
+        exit 1
+      fi
+      ;;
+  esac
+  printf '%s' '{{"number":'"$((4000 + count))"',"url":"https://github.com/example/pull/'"$((4000 + count))"'","isDraft":false}}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#
+        ),
+    )?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn write_agent_stub(path: &std::path::Path, planner_order: &[u64]) -> Result<(), Box<dyn Error>> {
     let order = planner_order
         .iter()
         .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let steps = planner_order
+        .iter()
+        .map(|number| {
+            format!(
+                r#"{{"pull_request":{number},"rationale":"Publish #{number} as its own sequential step.","risks":["stacks on the previous published branch"]}}"#
+            )
+        })
         .collect::<Vec<_>>()
         .join(",");
     fs::write(
@@ -274,10 +420,13 @@ fn write_agent_stub(path: &std::path::Path, planner_order: &[u64]) -> Result<(),
             r#"#!/bin/sh
 set -eu
 case "$METASTACK_AGENT_PROMPT" in
+  *"one-PR-per-step publication"*)
+    printf '%s' '{{"merge_order":[{order}],"conflict_hotspots":["shared.txt"],"summary":"Use the selected sequential order.","steps":[{steps}]}}'
+    ;;
   *"Return strict JSON"*)
     printf '%s' '{{"merge_order":[{order}],"conflict_hotspots":["shared.txt"],"summary":"Use the selected order."}}'
     ;;
-  *"Repair a failing aggregate merge validation"*)
+  *"Repair a failing "*)
     if [ -n "${{TEST_VALIDATE_FIX_FILE:-}}" ]; then
       printf 'fixed\n' > "$TEST_VALIDATE_FIX_FILE"
     fi
@@ -583,6 +732,88 @@ fn merge_render_once_handles_empty_discovery_state() -> Result<(), Box<dyn Error
 
 #[cfg(unix)]
 #[test]
+fn merge_render_once_sequential_checkpoints_show_recent_main_context() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_sequential_stub(&bin_dir.join("gh"), &[101, 102])?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "merge",
+            "--render-once",
+            "--sequential",
+            "--checkpoints",
+            "--events",
+            "tab,down",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Merge Checkpoint"))
+        .stdout(predicate::str::contains("Recent merged-work context"))
+        .stdout(predicate::str::contains("Next planned step"))
+        .stdout(predicate::str::contains("Continue remaining steps"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_rejects_invalid_checkpoint_flag_combinations() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    write_onboarded_config(&config_path, "")?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_stub(
+        &bin_dir.join("gh"),
+        &[101, 102],
+        "https://github.com/example/pull/999",
+    )?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args(["merge", "--checkpoints"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the following required arguments were not provided:\n  --sequential",
+        ));
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args(["merge", "--sequential", "--checkpoints", "--no-interactive"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the argument '--checkpoints' cannot be used with '--no-interactive'",
+        ));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn merge_requires_pull_request_selection_for_no_interactive_runs() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -790,6 +1021,193 @@ transport = "arg"
     let context = fs::read_to_string(run_dir.join("context.json"))?;
     assert!(context.contains("\"aggregate_branch\""));
     assert!(context.contains("-workspace/merge-runs/"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_executes_sequential_batch_and_writes_step_artifacts() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let agent_stub = temp.path().join("merge-agent-stub");
+    let output_dir = temp.path().join("output");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&output_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_sequential_stub(&bin_dir.join("gh"), &[11, 12])?;
+    write_agent_stub(&agent_stub, &[11, 12])?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "{}"
+transport = "arg"
+"#,
+            agent_stub.display()
+        ),
+    )?;
+
+    commit_and_push_pull_ref(&repo_root, "feature/11", "one.txt", "one\n", 11)?;
+    commit_and_push_pull_ref(&repo_root, "feature/12", "two.txt", "two\n", 12)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "merge",
+            "--no-interactive",
+            "--sequential",
+            "--pull-request",
+            "11",
+            "--pull-request",
+            "12",
+            "--validate",
+            "test -f one.txt",
+            "--validate",
+            "test -f two.txt",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Published 2 sequential pull request(s)",
+        ));
+
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
+    let mut run_dirs = fs::read_dir(&run_root)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    run_dirs.sort();
+    let run_dir = run_dirs.pop().expect("merge run should exist");
+
+    let state = fs::read_to_string(run_dir.join("state.json"))?;
+    let context = fs::read_to_string(run_dir.join("context.json"))?;
+    let publication = fs::read_to_string(run_dir.join("publication.json"))?;
+    let recent_main = fs::read_to_string(run_dir.join("recent-main.json"))?;
+    let step_one_publication = fs::read_to_string(run_dir.join("steps/01-pr-11/publication.json"))?;
+    let step_two_publication = fs::read_to_string(run_dir.join("steps/02-pr-12/publication.json"))?;
+
+    assert!(context.contains("\"mode\": \"sequential\""));
+    assert!(state.contains("\"next_step_index\": 2"));
+    assert!(publication.contains("\"pull_request\": 11"));
+    assert!(publication.contains("\"pull_request\": 12"));
+    assert!(recent_main.contains("\"number\": 9001"));
+    assert!(run_dir.join("steps/01-pr-11/step-context.json").is_file());
+    assert!(run_dir.join("steps/01-pr-11/step-progress.json").is_file());
+    assert!(run_dir.join("steps/01-pr-11/validation.json").is_file());
+    assert!(run_dir.join("steps/02-pr-12/step-context.json").is_file());
+    assert!(run_dir.join("steps/02-pr-12/step-progress.json").is_file());
+    assert!(run_dir.join("steps/02-pr-12/validation.json").is_file());
+    assert!(step_one_publication.contains("\"base_branch\": \"main\""));
+    assert!(step_two_publication.contains("\"base_branch\": \"meta-merge/"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn merge_resume_run_continues_from_first_incomplete_sequential_step() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let agent_stub = temp.path().join("merge-agent-stub");
+    let output_dir = temp.path().join("output");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&output_dir)?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(&repo_root, "{}")?;
+    write_github_sequential_resume_stub(&bin_dir.join("gh"), &[21, 22])?;
+    write_agent_stub(&agent_stub, &[21, 22])?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "{}"
+transport = "arg"
+"#,
+            agent_stub.display()
+        ),
+    )?;
+
+    commit_and_push_pull_ref(&repo_root, "feature/21", "one.txt", "one\n", 21)?;
+    commit_and_push_pull_ref(&repo_root, "feature/22", "two.txt", "two\n", 22)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "merge",
+            "--no-interactive",
+            "--sequential",
+            "--pull-request",
+            "21",
+            "--pull-request",
+            "22",
+            "--validate",
+            "test -f one.txt",
+            "--validate",
+            "test -f two.txt",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "sequential publication failed for step 2 (#22)",
+        ));
+
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
+    let mut run_dirs = fs::read_dir(&run_root)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    run_dirs.sort();
+    let run_dir = run_dirs.pop().expect("merge run should exist");
+    let run_id = run_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("run id should be utf-8")
+        .to_string();
+
+    let state = fs::read_to_string(run_dir.join("state.json"))?;
+    assert!(state.contains("\"next_step_index\": 1"));
+    assert!(state.contains("\"status\": \"completed\""));
+    assert!(state.contains("\"status\": \"publication_failed\""));
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args(["merge", "--resume-run", &run_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Published 2 sequential pull request(s)",
+        ));
+
+    let resumed_state = fs::read_to_string(run_dir.join("state.json"))?;
+    assert!(resumed_state.contains("\"next_step_index\": 2"));
+    assert_eq!(
+        fs::read_to_string(output_dir.join("gh-sequential-create-count.txt"))?,
+        "3"
+    );
 
     Ok(())
 }

@@ -27,7 +27,8 @@ pub use crate::config_resolution::{
 use crate::config_resolution::{
     config_path_from_env_or_home, default_linear_api_url, normalize_optional_ref,
     validate_agent_route_config, validate_merge_publication_retry_attempts,
-    validate_merge_validation_repair_attempts, validate_merge_validation_transient_retry_attempts,
+    validate_merge_recent_main_limit, validate_merge_validation_repair_attempts,
+    validate_merge_validation_transient_retry_attempts,
 };
 use crate::fs::PlanningPaths;
 
@@ -45,6 +46,7 @@ pub const DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT: usize = 6_000;
 pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
 pub const DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 pub const DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS: usize = 5;
+pub const DEFAULT_MERGE_RECENT_MAIN_LIMIT: usize = 10;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_IMPROVE: &str = "backlog.improve";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
@@ -278,6 +280,7 @@ pub struct MergeSettings {
     pub validation_repair_attempts: Option<usize>,
     pub validation_transient_retry_attempts: Option<usize>,
     pub publication_retry_attempts: Option<usize>,
+    pub recent_main_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -958,6 +961,11 @@ impl MergeSettings {
             .unwrap_or(DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS)
     }
 
+    pub fn recent_main_limit(&self) -> usize {
+        self.recent_main_limit
+            .unwrap_or(DEFAULT_MERGE_RECENT_MAIN_LIMIT)
+    }
+
     fn validate(&self) -> Result<()> {
         if let Some(limit) = self.validation_repair_attempts {
             validate_merge_validation_repair_attempts(limit)?;
@@ -967,6 +975,9 @@ impl MergeSettings {
         }
         if let Some(limit) = self.publication_retry_attempts {
             validate_merge_publication_retry_attempts(limit)?;
+        }
+        if let Some(limit) = self.recent_main_limit {
+            validate_merge_recent_main_limit(limit)?;
         }
         Ok(())
     }
@@ -1083,7 +1094,7 @@ mod tests {
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
         AppConfig, BacklogSettings, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
         DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
-        DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
+        DEFAULT_MERGE_RECENT_MAIN_LIMIT, DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
         InstallListenSettings, InstallPlanSettings, InstallUiSettings, ListenAssignmentScope,
         METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
@@ -1175,6 +1186,14 @@ mod tests {
         assert_eq!(
             MergeSettings::default().publication_retry_attempts(),
             DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn merge_recent_main_limit_defaults_to_ten() {
+        assert_eq!(
+            MergeSettings::default().recent_main_limit(),
+            DEFAULT_MERGE_RECENT_MAIN_LIMIT
         );
     }
 
@@ -1579,6 +1598,22 @@ mod tests {
         assert_eq!(
             config.validate().unwrap_err().to_string(),
             "merge publication retry attempt limit must be at least 1; got 0"
+        );
+    }
+
+    #[test]
+    fn app_config_validation_rejects_zero_merge_recent_main_limit() {
+        let config = AppConfig {
+            merge: MergeSettings {
+                recent_main_limit: Some(0),
+                ..MergeSettings::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "merge recent-main limit must be between 1 and 50; got 0"
         );
     }
 

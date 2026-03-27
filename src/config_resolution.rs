@@ -1030,6 +1030,16 @@ pub(crate) fn validate_merge_publication_retry_attempts(limit: usize) -> Result<
     }
 }
 
+pub(crate) fn validate_merge_recent_main_limit(limit: usize) -> Result<()> {
+    if (1..=50).contains(&limit) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "merge recent-main limit must be between 1 and 50; got {limit}"
+        ))
+    }
+}
+
 /// Validates the persisted backlog label list.
 pub fn validate_backlog_labels(labels: &[String]) -> Result<()> {
     for label in labels {

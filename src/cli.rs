@@ -38,7 +38,7 @@ pub enum Command {
     Runtime(RuntimeArgs),
     /// Open dashboard views for Linear work, agent sessions, team review, or sync ops.
     Dashboard(DashboardArgs),
-    /// Inspect open pull requests, batch them in a one-shot dashboard, and publish one aggregate PR.
+    /// Inspect open pull requests, batch them in a one-shot dashboard, and publish aggregate or sequential merge runs.
     Merge(MergeArgs),
     /// List and clean sibling listener workspace clones under the fixed `<repo>-workspace/` root.
     Workspace(WorkspaceArgs),
@@ -630,6 +630,16 @@ pub struct MergeArgs {
     /// Skip the one-shot dashboard and run the selected pull requests directly.
     #[arg(long, conflicts_with = "render_once")]
     pub no_interactive: bool,
+    /// Apply and publish the selected pull requests one step at a time.
+    #[arg(long, conflicts_with = "resume_run")]
+    pub sequential: bool,
+    /// Pause for review between sequential merge steps.
+    #[arg(
+        long,
+        requires = "sequential",
+        conflicts_with_all = ["json", "no_interactive", "resume_run"]
+    )]
+    pub checkpoints: bool,
     /// Resume an existing merge run by run id under `.metastack/merge-runs/<RUN_ID>/`.
     #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["json", "render_once", "pull_requests"])]
     pub resume_run: Option<String>,
@@ -956,6 +966,15 @@ pub struct ConfigArgs {
         )
     )]
     pub merge_publication_retry_attempts: Option<String>,
+    #[arg(
+        long,
+        help = concat!(
+            "Update how many recently merged default-branch pull requests `",
+            env!("BRAND_COMMAND_NAME"),
+            " merge` includes as planning context."
+        )
+    )]
+    pub merge_recent_main_limit: Option<String>,
     /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
     pub default_assignee: Option<String>,

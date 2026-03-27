@@ -332,6 +332,10 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         view.app_config.merge.publication_retry_attempts()
     ));
     lines.push(format!(
+        "Merge recent-main limit: {}",
+        view.app_config.merge.recent_main_limit()
+    ));
+    lines.push(format!(
         "Advanced route overrides: {}",
         render_route_override_summary(&view.app_config)
     ));
@@ -468,6 +472,7 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.merge_validation_repair_attempts.is_some()
         || args.merge_validation_transient_retry_attempts.is_some()
         || args.merge_publication_retry_attempts.is_some()
+        || args.merge_recent_main_limit.is_some()
         || args.default_assignee.is_some()
         || args.default_state.is_some()
         || args.default_priority.is_some()
@@ -612,6 +617,15 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             .map(|value| {
                 value.parse::<usize>().map_err(|error| {
                     anyhow!("merge publication retry attempt limit must be at least 1: {error}")
+                })
+            })
+            .transpose()?;
+    }
+    if let Some(limit) = &args.merge_recent_main_limit {
+        view.app_config.merge.recent_main_limit = normalize_optional(limit)
+            .map(|value| {
+                value.parse::<usize>().map_err(|error| {
+                    anyhow!("merge recent-main limit must be a positive integer: {error}")
                 })
             })
             .transpose()?;

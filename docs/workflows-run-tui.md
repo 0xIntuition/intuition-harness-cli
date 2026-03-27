@@ -19,6 +19,11 @@ The deterministic fallback remains available for scripts, CI, and tests via `--n
 - Dry run:
   - `--dry-run` stays headless and renders the resolved prompt/instructions without opening the wizard.
 
+## Related Snapshot Conventions
+
+- Merge checkpoints follow the same deterministic proof pattern even though they live in the merge dashboard instead of the workflow runner.
+- Use `meta merge --render-once --sequential --checkpoints --events ...` when you need a text proof of the sequential checkpoint surface with active-step, next-step, and recent-main context.
+
 ## Wizard Steps
 
 - One step per workflow parameter in front-matter order.

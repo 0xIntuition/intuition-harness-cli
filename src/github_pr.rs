@@ -5,6 +5,26 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct RecentlyMergedPullRequest {
+    pub(crate) number: u64,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) url: String,
+    #[serde(rename = "headRefName")]
+    pub(crate) head_ref_name: String,
+    #[serde(rename = "baseRefName")]
+    pub(crate) base_ref_name: String,
+    #[serde(rename = "mergedAt")]
+    pub(crate) merged_at: String,
+    pub(crate) author: PullRequestActor,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct PullRequestActor {
+    pub(crate) login: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PullRequestPublishMode {
     Ready,
@@ -35,6 +55,7 @@ pub(crate) struct PullRequestPublishRequest<'a> {
     pub(crate) title: &'a str,
     pub(crate) body_path: &'a Path,
     pub(crate) mode: PullRequestPublishMode,
+    pub(crate) allow_create_replay_fallback: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +70,32 @@ struct BranchPullRequest {
 }
 
 impl GhCli {
+    /// List recently merged pull requests targeting the provided base branch.
+    ///
+    /// Returns an error when `gh` cannot inspect the repository or decode the merged PR payload.
+    pub(crate) fn list_recently_merged_pull_requests(
+        &self,
+        workspace_path: &Path,
+        base_branch: &str,
+        limit: usize,
+    ) -> Result<Vec<RecentlyMergedPullRequest>> {
+        self.run_json(
+            workspace_path,
+            &[
+                "pr",
+                "list",
+                "--state",
+                "merged",
+                "--base",
+                base_branch,
+                "--limit",
+                &limit.to_string(),
+                "--json",
+                "number,title,body,url,headRefName,baseRefName,mergedAt,author",
+            ],
+        )
+    }
+
     fn view_pull_request_by_number(
         &self,
         workspace_path: &Path,
@@ -154,12 +201,12 @@ impl GhCli {
         if request.mode == PullRequestPublishMode::Draft {
             create_args.push("--draft");
         }
-        let created = self
-            .run_json::<BranchPullRequest>(
-                workspace_path,
-                &[&create_args[..], &["--json", "number,url,isDraft"]].concat(),
-            )
-            .or_else(|_| {
+        let created = match self.run_json::<BranchPullRequest>(
+            workspace_path,
+            &[&create_args[..], &["--json", "number,url,isDraft"]].concat(),
+        ) {
+            Ok(created) => created,
+            Err(_error) if request.allow_create_replay_fallback => {
                 self.run_plain(workspace_path, &create_args)?;
                 self.find_open_branch_pull_request_raw(
                     workspace_path,
@@ -171,8 +218,10 @@ impl GhCli {
                         "gh created a pull request for `{}` but no open PR was returned",
                         request.head_branch
                     )
-                })
-            })?;
+                })?
+            }
+            Err(error) => return Err(error),
+        };
 
         Ok(PullRequestLifecycleResult {
             number: created.number,

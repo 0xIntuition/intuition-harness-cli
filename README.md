@@ -29,7 +29,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
 - `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
-- `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
+- `meta merge` batches open GitHub PRs into isolated aggregate or sequential merge runs with resumable publication artifacts.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
 - `meta agents retro` analyzes shipped PRs for follow-up backlog opportunities and opens a plan-style Linear ticket curation flow.
@@ -192,7 +192,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
 | `meta runtime` | Configure install-scoped and repo-scoped defaults and supervise cron jobs |
 | `meta dashboard` | Open Linear, agents, team, or ops-oriented dashboard views |
-| `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish one aggregate PR |
+| `meta merge` | Discover open GitHub PRs, batch them in a one-shot dashboard, and publish either one aggregate PR or stacked sequential step PRs |
 | `meta workspace` | List, clean, and prune sibling workspace clones (listener, improve, review) under the fixed workspace root |
 | `meta upgrade` | Check and apply verified GitHub Release self-updates for release installs on macOS/Linux |
 
@@ -315,7 +315,7 @@ The persisted config can store:
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
 - global default provider/model/reasoning values for the built-in `codex` / `claude` catalog
-- install-scoped merge defaults under `[merge]`, including validation repair, transient retry, and publication retry caps for `meta merge`
+- install-scoped merge defaults under `[merge]`, including validation repair, transient retry, publication retry, and recent-main planning caps for `meta merge`
 - advanced family-level agent routing under `[agents.routing.families.<family>]`
 - advanced command-level agent routing under `[agents.routing.commands."<route>"]`
 
@@ -407,6 +407,7 @@ auto_assign = "viewer"
 validation_repair_attempts = 6
 validation_transient_retry_attempts = 3
 publication_retry_attempts = 5
+recent_main_limit = 10
 
 [agents.routing.families.backlog]
 provider = "claude"
@@ -514,7 +515,7 @@ Precedence is consistent across the CLI:
 
 ### `merge`
 
-Inspect open GitHub pull requests for the current checkout, select a batch in a one-shot ratatui dashboard, run an aggregate merge in an isolated workspace outside the source checkout, rerun validation, and open or update one aggregate PR back into the repository default branch.
+Inspect open GitHub pull requests for the current checkout, select a batch in a one-shot ratatui dashboard, and run either an aggregate or sequential merge in an isolated workspace outside the source checkout. Aggregate mode still validates one combined branch and opens or updates one aggregate PR into the repository default branch, while sequential mode validates and publishes one stacked step PR at a time.
 
 `meta merge` requires:
 
@@ -528,7 +529,9 @@ Common invocations:
 meta merge --json
 meta merge
 meta merge --render-once --events space,down,space,enter
+meta merge --render-once --sequential --checkpoints --events enter
 meta merge --no-interactive --pull-request 101 --pull-request 102 --validate "make quality"
+meta merge --no-interactive --sequential --pull-request 101 --pull-request 102 --validate "test -f one.txt" --validate "test -f two.txt"
 meta merge --resume-run 20260320T150254Z
 ```
 
@@ -539,25 +542,34 @@ Behavior summary:
 - The focused `meta merge` preview keeps the PR metadata header and now renders the selected PR body with the shared TUI markdown renderer, preserving headings, lists, blockquotes, fenced code blocks, and blank lines.
 - `--render-once` prints a deterministic dashboard snapshot for tests and proofs.
 - `--no-interactive` skips the dashboard and runs the selected `--pull-request` values directly while printing textual phase updates to stdout.
-- `--resume-run <RUN_ID>` reuses an existing aggregate branch and run artifact directory under `.metastack/merge-runs/<RUN_ID>/`, revalidates the preserved workspace, repushes the branch, and updates the aggregate PR instead of starting from scratch.
+- `--sequential` switches from one aggregate branch and PR to a stacked step flow. Step 1 publishes into the repository default branch, each later step publishes into the previous successful step branch, and the run writes resumable state plus per-step artifacts under `.metastack/merge-runs/<RUN_ID>/steps/`.
+- `--checkpoints` is only valid with `--sequential`. It opens a per-step review surface before each sequential step so you can approve the next step, stop with resume state preserved, or continue the remaining steps without further checkpoints. It conflicts with `--json` and `--no-interactive`, but it works with `--render-once` snapshot proofs.
+- `--resume-run <RUN_ID>` now resumes the persisted mode from `context.json`. Aggregate runs reuse the aggregate branch and update the aggregate PR; sequential runs continue from the first incomplete step without redoing completed merge, validation, push, or publication work.
 - `--validate <COMMAND>` overrides the post-merge validation commands. When omitted, `meta merge` prefers `make quality` when the repo Makefile exposes that target, otherwise `make all`, otherwise `cargo test` for Rust repositories.
+- Planner prompts, stored plans, and conflict-resolution prompts now include a bounded recent-main summary fetched from the remote default branch before planning starts. Tune the fetch size with `[merge].recent_main_limit` in install-scoped config.
 - Validation now narrows repeated failures before rerunning the full suite. When `make quality` reports a specific Rust test or clippy failure, `meta merge` first reruns the exact failing target, fingerprints the failure, and stops treating the same signature as transient once it repeats. That avoids wasting loops on deterministic failures that only looked flaky on the first pass.
 - Validation is no longer a hard publication gate. When validation stays red after bounded automated recovery, `meta merge` still pushes the aggregate branch, creates or updates the aggregate PR, and records the unresolved validation status in both the run artifacts and the PR body so repair work can continue without restarting the batch.
-- Push and aggregate PR publication retry on transient remote errors, and the install-scoped merge knobs now cover all three control points: `[merge].validation_repair_attempts`, `[merge].validation_transient_retry_attempts`, and `[merge].publication_retry_attempts`.
+- Aggregate push and PR publication still retry transient remote errors. Sequential publication preserves the first publish failure after validation so `--resume-run` can retry that step safely without replaying earlier completed steps.
+- The install-scoped merge knobs now cover all four control points: `[merge].validation_repair_attempts`, `[merge].validation_transient_retry_attempts`, `[merge].publication_retry_attempts`, and `[merge].recent_main_limit`.
 - Both interactive and non-interactive runs publish the same major phases: workspace preparation, plan generation, merge application, validation, push, and PR publication. Merge application also records finer-grained per-PR substeps such as the active pull request and whether conflict assistance ran.
 
 Each run writes local audit artifacts under `.metastack/merge-runs/<RUN_ID>/`, including:
 
-- `context.json` with the repository, selected PR set, aggregate branch, and isolated workspace path
+- `context.json` with the repository, selected PR set, resolved mode, persisted validation commands, recent-main metadata path, and isolated workspace path
+- `recent-main.json` with the bounded default-branch merged-PR context used for planning and conflict prompts
 - `agent-plan-prompt.md` with the exact planner prompt sent to the configured local agent
-- `plan.json` with the agent-selected merge order and conflict hotspots
+- `plan.json` with the agent-selected merge order and conflict hotspots, plus sequential step rationale and risk metadata when sequential mode is active
 - `progress.json` with the current phase, active substep detail, phase states, and the full structured event trail needed to reconstruct success and failure paths
-- `merge-progress.json` with the structured run snapshot plus per-PR outcomes
+- `merge-progress.json` with the structured run snapshot plus aggregate per-PR outcomes or sequential per-step outcomes
 - `validation.json` with each validation attempt, captured command output, and any repair commits recorded between attempts
 - `aggregate-pr-body.md` with the Markdown body used when creating or updating the aggregate PR
-- `publication.json` with the aggregate PR publication result
+- `state.json` for sequential runs, capturing the next incomplete step, checkpoint behavior, and publication chain
+- `publication.json` with either the aggregate PR result or the sequential step-publication summary
+- `steps/<NN>-pr-<NUMBER>/step-context.json`, `step-progress.json`, `validation.json`, `publication.json`, and `step-pr-body.md` for sequential runs
 - `conflict-prompt-pr-<NUMBER>.md` and `conflict-resolution-pr-<NUMBER>.md` when agent-assisted conflict handling was required
 - `validation-repair-prompt-attempt-<N>.md` and `validation-repair-output-attempt-<N>.md` when agent-assisted validation repair was required
+
+See [`docs/merge.md`](docs/merge.md) for the full aggregate-vs-sequential contract, checkpoint behavior, and artifact layout.
 
 ### `context scan`
 

@@ -1180,6 +1180,7 @@ where
             title: &title,
             body_path: &body_path,
             mode,
+            allow_create_replay_fallback: true,
         },
     )?;
     ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
@@ -1216,6 +1217,7 @@ where
             title: &title,
             body_path: &body_path,
             mode: PullRequestPublishMode::Draft,
+            allow_create_replay_fallback: true,
         },
     )? {
         gh.promote_pull_request_to_ready(workspace_path, existing.number)?
@@ -1228,6 +1230,7 @@ where
                 title: &title,
                 body_path: &body_path,
                 mode: PullRequestPublishMode::Ready,
+                allow_create_replay_fallback: true,
             },
         )?
     };

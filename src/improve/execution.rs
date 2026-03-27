@@ -156,6 +156,7 @@ fn publish_stacked_pr(
             title: &title,
             body_path: &body_path,
             mode: PullRequestPublishMode::Ready,
+            allow_create_replay_fallback: true,
         },
     )?;
 
