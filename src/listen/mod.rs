@@ -1549,6 +1549,15 @@ where
         for rendered in rendered_files {
             let path = issue_dir.join(&rendered.relative_path);
             if path.exists() {
+                if rendered.relative_path == INDEX_FILE_NAME {
+                    let existing = fs::read_to_string(&path)
+                        .with_context(|| format!("failed to read `{}`", path.display()))?;
+                    let updated = ensure_listen_progress_section(&existing);
+                    if updated != existing {
+                        fs::write(&path, updated)
+                            .with_context(|| format!("failed to write `{}`", path.display()))?;
+                    }
+                }
                 continue;
             }
 
