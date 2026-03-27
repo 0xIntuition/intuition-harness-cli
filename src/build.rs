@@ -11,6 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
+use crate::agents::resolution::ResolvedAgentInvocation;
 use crate::agents::{
     AgentContinuation, AgentExecutionOptions, AgentTokenUsage, apply_invocation_environment,
     apply_noninteractive_agent_environment, command_args_for_invocation_with_options,
@@ -47,6 +48,7 @@ struct BuildTurnReport {
     usage: Option<AgentTokenUsage>,
     queued_prompts: Vec<String>,
     cancelled: bool,
+    failure: Option<String>,
 }
 
 #[derive(Debug)]
@@ -144,29 +146,16 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
             continue;
         }
 
-        let queued_prompt = combine_queued_prompts(&report.queued_prompts);
-        if let Some(queued_prompt) = queued_prompt {
-            if session.agent == "codex" {
-                if let Some(continuation) = report.continuation.clone() {
-                    next_request = Some(BuildTurnRequest {
-                        prompt: queued_prompt,
-                        continuation: Some(continuation),
-                    });
-                    continue;
-                }
-                println!(
-                    "Queued follow-up could not resume the active Codex session; it will be prepended to the next build prompt."
-                );
-            } else {
-                println!(
-                    "Queued follow-up will be prepended to the next build prompt because `{}` does not use native build-session continuation.",
-                    session.agent
-                );
+        if let Some(request) = next_request_from_queued_prompts(&mut session, &report) {
+            next_request = Some(request);
+            continue;
+        }
+
+        if let Some(message) = report.failure.as_deref() {
+            if args.no_interactive {
+                bail!("{message}");
             }
-            session.deferred_prompt = Some(match session.deferred_prompt.take() {
-                Some(existing) => format!("{existing}\n\n{queued_prompt}"),
-                None => queued_prompt,
-            });
+            continue;
         }
 
         if args.no_interactive {
@@ -314,6 +303,11 @@ fn print_completion_summary(session: &BuildSession, report: &BuildTurnReport) {
         return;
     }
 
+    if let Some(message) = report.failure.as_deref() {
+        println!("[build run #{}] failed: {message}", session.run_count);
+        return;
+    }
+
     if let Some(usage) = report.usage.as_ref() {
         println!(
             "[build run #{}] completed successfully. tokens: in={} out={} total={}",
@@ -359,17 +353,37 @@ fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<B
         )
     })?;
     let invocation = resolve_agent_invocation_for_planning(&config, &planning_meta, &run_args)?;
+    let mut report = run_build_turn_attempt(
+        session,
+        &run_args,
+        &invocation,
+        request.continuation.as_ref(),
+    )?;
+    if should_retry_without_continuation(&invocation.agent, request.continuation.as_ref(), &report)
+    {
+        println!(
+            "Stored `{}` continuation was rejected; retrying this build prompt as a fresh run.",
+            invocation.agent
+        );
+        report = run_build_turn_attempt(session, &run_args, &invocation, None)?;
+    }
+    Ok(report)
+}
+
+fn run_build_turn_attempt(
+    session: &BuildSession,
+    run_args: &RunAgentArgs,
+    invocation: &ResolvedAgentInvocation,
+    continuation: Option<&AgentContinuation>,
+) -> Result<BuildTurnReport> {
     let options = AgentExecutionOptions {
         working_dir: Some(session.workspace_path.clone()),
         extra_env: Vec::new(),
         capture_output: invocation.builtin_provider,
-        continuation: request
-            .continuation
-            .as_ref()
-            .map(|state| state.session_id.clone()),
+        continuation: continuation.map(|state| state.session_id.clone()),
     };
-    let command_args = command_args_for_invocation_with_options(&invocation, options)?;
-    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
+    let command_args = command_args_for_invocation_with_options(invocation, options)?;
+    let attempted_command = validate_invocation_command_surface(invocation, &command_args)?;
 
     let mut command = Command::new(&invocation.command);
     command.current_dir(&session.workspace_path);
@@ -380,7 +394,7 @@ fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<B
     apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
-        &invocation,
+        invocation,
         &run_args.prompt,
         run_args.instructions.as_deref(),
     );
@@ -491,6 +505,7 @@ fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<B
             usage: None,
             queued_prompts: queued_prompts.into_iter().collect(),
             cancelled: true,
+            failure: None,
         });
     }
 
@@ -504,11 +519,17 @@ fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<B
             .lock()
             .map_err(|_| anyhow!("failed to lock captured build stderr"))?;
         let stderr_text = String::from_utf8_lossy(&stderr_guard);
-        bail!(
-            "agent `{}` exited unsuccessfully ({code}) while running `{attempted_command}`: {}",
-            invocation.agent,
-            stderr_text.trim()
-        );
+        return Ok(BuildTurnReport {
+            continuation: None,
+            usage: None,
+            queued_prompts: queued_prompts.into_iter().collect(),
+            cancelled: false,
+            failure: Some(format!(
+                "agent `{}` exited unsuccessfully ({code}) while running `{attempted_command}`: {}",
+                invocation.agent,
+                stderr_text.trim()
+            )),
+        });
     }
 
     let mut continuation = None;
@@ -533,7 +554,54 @@ fn run_build_turn(session: &BuildSession, request: BuildTurnRequest) -> Result<B
         usage,
         queued_prompts: queued_prompts.into_iter().collect(),
         cancelled: false,
+        failure: None,
     })
+}
+
+fn should_retry_without_continuation(
+    agent: &str,
+    continuation: Option<&AgentContinuation>,
+    report: &BuildTurnReport,
+) -> bool {
+    let Some(message) = report.failure.as_deref() else {
+        return false;
+    };
+    let Some(continuation) = continuation else {
+        return false;
+    };
+    if continuation.provider != agent {
+        return false;
+    }
+    crate::agent_provider::builtin_provider_adapter(agent)
+        .is_some_and(|provider| provider.is_invalid_resume_error(message))
+}
+
+fn next_request_from_queued_prompts(
+    session: &mut BuildSession,
+    report: &BuildTurnReport,
+) -> Option<BuildTurnRequest> {
+    let queued_prompt = combine_queued_prompts(&report.queued_prompts)?;
+    if session.agent == "codex" {
+        if let Some(continuation) = report.continuation.clone() {
+            return Some(BuildTurnRequest {
+                prompt: queued_prompt,
+                continuation: Some(continuation),
+            });
+        }
+        println!(
+            "Queued follow-up could not resume the active Codex session; it will be prepended to the next build prompt."
+        );
+    } else {
+        println!(
+            "Queued follow-up will be prepended to the next build prompt because `{}` does not use native build-session continuation.",
+            session.agent
+        );
+    }
+    session.deferred_prompt = Some(match session.deferred_prompt.take() {
+        Some(existing) => format!("{existing}\n\n{queued_prompt}"),
+        None => queued_prompt,
+    });
+    None
 }
 
 fn combine_queued_prompts(queued_prompts: &[String]) -> Option<String> {
@@ -664,7 +732,12 @@ fn cancel_child_process(child: &mut Child) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_path, resolve_build_workspace_path, resolve_initial_prompt};
+    use super::{
+        BuildSession, BuildTurnReport, combine_queued_prompts, looks_like_path,
+        next_request_from_queued_prompts, resolve_build_workspace_path, resolve_initial_prompt,
+        should_retry_without_continuation,
+    };
+    use crate::agents::AgentContinuation;
     use crate::cli::BuildArgs;
     use anyhow::Result;
     use std::fs;
@@ -682,6 +755,19 @@ mod tests {
             dir: None,
             max_turns: 20,
             no_interactive: false,
+        }
+    }
+
+    fn build_session(agent: &str) -> BuildSession {
+        BuildSession {
+            root: PathBuf::from("/repo"),
+            workspace_path: PathBuf::from("/repo-workspace/ENG-10507"),
+            agent: agent.to_string(),
+            model: None,
+            reasoning: None,
+            max_turns: 20,
+            run_count: 0,
+            deferred_prompt: None,
         }
     }
 
@@ -741,5 +827,90 @@ mod tests {
             explicit_dir.canonicalize()?
         );
         Ok(())
+    }
+
+    #[test]
+    fn next_request_from_queued_prompts_uses_codex_continuation_when_available() {
+        let mut session = build_session("codex");
+        let report = BuildTurnReport {
+            continuation: Some(AgentContinuation {
+                provider: "codex".to_string(),
+                session_id: "thread-123".to_string(),
+            }),
+            usage: None,
+            queued_prompts: vec!["keep going".to_string()],
+            cancelled: false,
+            failure: None,
+        };
+
+        let next = next_request_from_queued_prompts(&mut session, &report)
+            .expect("codex continuation should create an immediate follow-up request");
+
+        assert_eq!(next.prompt, "keep going");
+        assert_eq!(
+            next.continuation,
+            Some(AgentContinuation {
+                provider: "codex".to_string(),
+                session_id: "thread-123".to_string(),
+            })
+        );
+        assert!(session.deferred_prompt.is_none());
+    }
+
+    #[test]
+    fn next_request_from_queued_prompts_defers_when_continuation_is_unavailable() {
+        let mut session = build_session("claude");
+        let report = BuildTurnReport {
+            continuation: None,
+            usage: None,
+            queued_prompts: vec!["apply the queued fix".to_string()],
+            cancelled: false,
+            failure: None,
+        };
+
+        assert!(next_request_from_queued_prompts(&mut session, &report).is_none());
+        assert_eq!(
+            session.deferred_prompt.as_deref(),
+            Some("apply the queued fix")
+        );
+    }
+
+    #[test]
+    fn should_retry_without_continuation_only_for_invalid_resume_failures() {
+        let report = BuildTurnReport {
+            continuation: None,
+            usage: None,
+            queued_prompts: Vec::new(),
+            cancelled: false,
+            failure: Some(
+                "agent `claude` exited unsuccessfully (1) while running `claude -p`: --resume requires a valid session id"
+                    .to_string(),
+            ),
+        };
+
+        assert!(should_retry_without_continuation(
+            "claude",
+            Some(&AgentContinuation {
+                provider: "claude".to_string(),
+                session_id: "session-1".to_string(),
+            }),
+            &report,
+        ));
+        assert!(!should_retry_without_continuation(
+            "claude",
+            Some(&AgentContinuation {
+                provider: "codex".to_string(),
+                session_id: "session-1".to_string(),
+            }),
+            &report,
+        ));
+    }
+
+    #[test]
+    fn combine_queued_prompts_joins_multiple_entries() {
+        assert_eq!(
+            combine_queued_prompts(&["one".to_string(), "two".to_string()]).as_deref(),
+            Some("one\n\ntwo")
+        );
     }
 }
