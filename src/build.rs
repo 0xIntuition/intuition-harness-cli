@@ -664,9 +664,12 @@ fn cancel_child_process(child: &mut Child) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_path, resolve_initial_prompt};
+    use super::{looks_like_path, resolve_build_workspace_path, resolve_initial_prompt};
     use crate::cli::BuildArgs;
+    use anyhow::Result;
+    use std::fs;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     fn build_args() -> BuildArgs {
         BuildArgs {
@@ -700,5 +703,43 @@ mod tests {
         assert!(looks_like_path("/tmp/workspace"));
         assert!(looks_like_path("nested/workspace"));
         assert!(!looks_like_path("ENG-10507"));
+    }
+
+    #[test]
+    fn resolve_build_workspace_path_uses_sibling_workspace_for_ticket_ids() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let workspace_root = temp.path().join("repo-workspace");
+        let workspace_path = workspace_root.join("ENG-10507");
+        fs::create_dir_all(&repo_root)?;
+        fs::create_dir_all(&workspace_path)?;
+
+        let mut args = build_args();
+        args.workspace = Some("ENG-10507".to_string());
+
+        assert_eq!(
+            resolve_build_workspace_path(&repo_root, &args)?,
+            workspace_path.canonicalize()?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_build_workspace_path_prefers_explicit_dir() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let explicit_dir = temp.path().join("custom-workspace");
+        fs::create_dir_all(&repo_root)?;
+        fs::create_dir_all(&explicit_dir)?;
+
+        let mut args = build_args();
+        args.workspace = Some("ENG-10507".to_string());
+        args.dir = Some(explicit_dir.clone());
+
+        assert_eq!(
+            resolve_build_workspace_path(&repo_root, &args)?,
+            explicit_dir.canonicalize()?
+        );
+        Ok(())
     }
 }
