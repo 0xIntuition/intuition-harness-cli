@@ -48,7 +48,7 @@ use crate::config::{
     load_required_planning_meta, validate_fast_plan_question_limit,
 };
 use crate::context::load_workflow_contract;
-use crate::fs::canonicalize_existing_dir;
+use crate::fs::{canonicalize_existing_dir, write_text_file};
 use crate::linear::{
     IssueCreateSpec, IssueEditSpec, IssueSummary, LinearService, ReqwestLinearClient,
 };
@@ -2580,7 +2580,7 @@ fn build_review_app_with_addenda(
 fn build_review_refinement_app(review: ReviewApp) -> ReviewRefinementApp {
     ReviewRefinementApp {
         review,
-        addendum: InputFieldState::new(String::new()),
+        addendum: InputFieldState::multiline(String::new()),
         error: None,
     }
 }
@@ -3149,25 +3149,10 @@ fn handle_review_refinement_step_key(
             }
         }
         KeyCode::Enter => {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                if app.addendum.insert_newline() {
-                    app.error = None;
-                }
-                SessionAction::None
-            } else {
-                let addendum = app.addendum.display_value().trim().to_string();
-                if addendum.is_empty() {
-                    app.error =
-                        Some("Enter the refinement guidance before continuing.".to_string());
-                    SessionAction::None
-                } else {
-                    app.error = None;
-                    SessionAction::RefinePlan {
-                        review: app.review.clone(),
-                        addendum,
-                    }
-                }
+            if app.addendum.insert_newline() {
+                app.error = None;
             }
+            SessionAction::None
         }
         _ => {
             if app.addendum.handle_key_with_width(key, input_width) {
@@ -3658,7 +3643,7 @@ fn render_review_refinement_frame(frame: &mut Frame<'_>, app: &ReviewRefinementA
         frame,
         layout[1],
         app.error.as_deref(),
-        "Type the new context for the next draft. Enter rebuilds the preview. Shift+Enter inserts a newline. Ctrl+S also rebuilds. Esc returns to the review screen.",
+        "Type the new context for the next draft. Ctrl+S rebuilds the preview. Enter inserts a newline. Esc returns to the review screen.",
     );
 }
 
@@ -4151,6 +4136,16 @@ fn spawn_plan_refinement_job(
         let mut continuation = continuation;
         let mut addenda = review.addenda.clone();
         addenda.push(addendum.clone());
+        // Persist accumulated refinement guidance to .metastack/ for crash recovery
+        // and auditability (directory is gitignored).
+        let refinement_log_path = root.join(".metastack").join("plan-refinement-log.md");
+        let log_content = addenda
+            .iter()
+            .enumerate()
+            .map(|(i, a)| format!("## Refinement {}\n\n{}\n", i + 1, a))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = write_text_file(&refinement_log_path, &log_content, true);
         let outcome = refine_issue_plan_with_addendum(
             &root,
             &review.request,
@@ -5237,7 +5232,10 @@ mod tests {
 
         let action = handle_review_refinement_step_key(
             &mut app,
-            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            ),
             80,
         );
 
@@ -5246,6 +5244,37 @@ mod tests {
             app.error.as_deref(),
             Some("Enter the refinement guidance before continuing.")
         );
+    }
+
+    #[test]
+    fn refinement_editor_bare_enter_inserts_newline() {
+        let review = build_review_app(
+            "Plan a meta plan command".to_string(),
+            vec![],
+            vec![],
+            PlannedIssueSet {
+                summary: "Split the work.".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Add the review UI".to_string(),
+                    description: "Capture request.".to_string(),
+                    acceptance_criteria: vec![],
+                    priority: Some(2),
+                }],
+            },
+            1,
+        );
+        let mut app = build_review_refinement_app(review);
+        app.addendum.paste("first line");
+
+        let action = handle_review_refinement_step_key(
+            &mut app,
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            80,
+        );
+
+        assert!(matches!(action, SessionAction::None));
+        assert!(app.error.is_none());
+        assert!(app.addendum.display_value().contains('\n'));
     }
 
     #[test]
@@ -5277,7 +5306,10 @@ mod tests {
 
         let action = handle_review_refinement_step_key(
             &mut app,
-            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter),
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            ),
             80,
         );
 

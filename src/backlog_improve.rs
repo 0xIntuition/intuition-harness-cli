@@ -1362,30 +1362,9 @@ fn run_improvement_review_dashboard(
                         });
                     }
                 }
-                KeyCode::Enter
-                    if app.is_refining() && key.modifiers.contains(KeyModifiers::SHIFT) =>
-                {
+                KeyCode::Enter if app.is_refining() => {
                     if let Some(refinement) = app.refinement_input.as_mut() {
                         refinement.insert_newline();
-                    }
-                }
-                KeyCode::Enter
-                    if app.is_refining()
-                        && !key.modifiers.contains(KeyModifiers::SHIFT)
-                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    let Some(refinement) = app.refinement_input.as_ref() else {
-                        unreachable!("refinement mode should provide an editor");
-                    };
-                    let addendum = refinement.display_value().trim().to_string();
-                    if addendum.is_empty() {
-                        app.error =
-                            Some("Enter the refinement guidance before continuing.".to_string());
-                    } else {
-                        return Ok(ImprovementReviewExit::Refine {
-                            addendum,
-                            question_round: app.question_round + 1,
-                        });
                     }
                 }
                 KeyCode::Enter
@@ -1599,8 +1578,8 @@ fn review_key_hints(
     } else if refining {
         vec![
             ("Type", "refine"),
-            ("Enter", "rerun"),
-            ("Shift+Enter", "newline"),
+            ("Ctrl+S", "rerun"),
+            ("Enter", "newline"),
             ("Esc", "back"),
         ]
     } else {
@@ -1642,7 +1621,7 @@ fn render_decision_panel(app: &ImprovementReviewApp) -> Text<'static> {
     let status = if let Some(error) = app.error.as_deref() {
         error.to_string()
     } else if app.is_refining() {
-        "Enter will rerun the review with this refinement guidance.".to_string()
+        "Ctrl+S will rerun the review with this refinement guidance.".to_string()
     } else if !app.is_answering_questions() {
         format!("Enter will {}.", primary.verb)
     } else {
