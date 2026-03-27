@@ -5071,6 +5071,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
     assert!(backlog_index.starts_with("# Existing Technical Backlog\n\nDo not overwrite me.\n"));
     assert!(backlog_index.contains("<!-- metastack-listen-progress:start -->"));
     assert!(backlog_index.contains("## Listener Progress Checklist"));
+    assert!(!backlog_index.contains("Follow-up action 1"));
     assert!(!workspace_root.join("stale.txt").exists());
     assert_eq!(
         git_stdout(&workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"])?,

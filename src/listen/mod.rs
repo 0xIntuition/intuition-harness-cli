@@ -2241,6 +2241,9 @@ fn backlog_progress_for_issue_dir(
         {
             continue;
         }
+        if is_backlog_template_markdown(entry.path()) {
+            continue;
+        }
 
         let contents = fs::read_to_string(entry.path())
             .with_context(|| format!("failed to read `{}`", entry.path().display()))?;
@@ -2271,14 +2274,25 @@ fn parse_checklist_progress(contents: &str) -> BacklogProgress {
             progress.completed += 1;
             progress.total += 1;
         } else if trimmed.starts_with("- [ ] ") || trimmed.starts_with("* [ ] ") {
-            progress.total += 1;
-            if progress.next_step.is_none() {
-                progress.next_step = checklist_item_label(trimmed);
+            if let Some(label) = checklist_item_label(trimmed) {
+                if should_ignore_backlog_progress_item(&label) {
+                    continue;
+                }
+                progress.total += 1;
+                if progress.next_step.is_none() {
+                    progress.next_step = Some(label);
+                }
             }
         }
     }
 
     progress
+}
+
+fn is_backlog_template_markdown(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("template"))
 }
 
 fn checklist_item_label(line: &str) -> Option<String> {
@@ -2288,6 +2302,13 @@ fn checklist_item_label(line: &str) -> Option<String> {
         .trim_start_matches(|ch: char| ch.is_ascii_digit() || ch == '.' || ch == '\\')
         .trim();
     (!item.is_empty()).then(|| item.to_string())
+}
+
+fn should_ignore_backlog_progress_item(item: &str) -> bool {
+    item == "No completed items recorded yet."
+        || item == "No remaining items identified."
+        || item == "No explicit validation status recorded."
+        || item.starts_with("Follow-up action ")
 }
 
 fn extract_linear_acceptance_criteria(description: Option<&str>) -> Vec<String> {
@@ -4235,6 +4256,28 @@ mod tests {
         assert!(rendered.contains("<!-- metastack-listen-progress:start -->"));
         assert!(rendered.contains("## Listener Progress Checklist"));
         assert!(rendered.contains("<!-- metastack-listen-progress:end -->"));
+    }
+
+    #[test]
+    fn parse_checklist_progress_ignores_placeholder_items() {
+        let progress = super::parse_checklist_progress(
+            "## Listener Progress Checklist\n\n### Remaining\n\n- [ ] Follow-up action 1\n- [ ] Real remaining task\n\n### Validation\n\n- [ ] No explicit validation status recorded.\n",
+        );
+
+        assert_eq!(progress.total, 1);
+        assert_eq!(progress.completed, 0);
+        assert_eq!(progress.next_step.as_deref(), Some("Real remaining task"));
+    }
+
+    #[test]
+    fn is_backlog_template_markdown_matches_template_files() {
+        assert!(super::is_backlog_template_markdown(Path::new(
+            "artifacts/artifact-template.md"
+        )));
+        assert!(super::is_backlog_template_markdown(Path::new(
+            "context/context-note-template.md"
+        )));
+        assert!(!super::is_backlog_template_markdown(Path::new("index.md")));
     }
 
     #[test]
