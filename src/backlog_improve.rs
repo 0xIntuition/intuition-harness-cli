@@ -1448,7 +1448,12 @@ fn continue_issue_with_refinement(
         .join("\n");
     let _ = write_text_file(&refinement_path, &log_content, true);
 
-    let prompt = render_refinement_prompt(&issue_run.issue, &issue_run.output, &issue_run.refinement_history, addendum);
+    let prompt = render_refinement_prompt(
+        &issue_run.issue,
+        &issue_run.output,
+        &issue_run.refinement_history,
+        addendum,
+    );
     let report = run_agent_capture_with_continuation(
         &RunAgentArgs {
             root: Some(root.to_path_buf()),
@@ -1575,8 +1580,7 @@ fn run_improvement_review_dashboard(
                 match key.code {
                     // Refinement mode key handling
                     KeyCode::Char('s')
-                        if app.is_refining()
-                            && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        if app.is_refining() && key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
                         if let Some(ref input) = app.refinement_input {
                             let addendum = input.display_value().trim().to_string();
@@ -1702,9 +1706,7 @@ fn run_improvement_review_dashboard(
                             });
                         }
                     }
-                    KeyCode::Char('f')
-                        if app.questions.is_empty() && !app.is_refining() =>
-                    {
+                    KeyCode::Char('f') if app.questions.is_empty() && !app.is_refining() => {
                         app.begin_refinement();
                     }
                     KeyCode::Char('a')
@@ -1815,14 +1817,21 @@ fn render_improvement_review(
                 Span::styled(
                     format!(
                         "Issue {}/{}: {} {} | refinements {}",
-                        app.issue_position, app.issue_total, app.issue.identifier, app.issue.title,
+                        app.issue_position,
+                        app.issue_total,
+                        app.issue.identifier,
+                        app.issue.title,
                         app.refinement_history.len()
                     ),
                     emphasis_style(),
                 ),
             ]),
             Line::from(app.output.summary.clone()),
-            key_hints(&review_key_hints(route, !app.questions.is_empty(), app.is_refining())),
+            key_hints(&review_key_hints(
+                route,
+                !app.questions.is_empty(),
+                app.is_refining(),
+            )),
         ]),
         panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
@@ -1838,8 +1847,9 @@ fn render_improvement_review(
     .wrap(Wrap { trim: false });
     frame.render_widget(left, body[0]);
 
-    let right_focused =
-        app.questions.is_empty() && !app.is_refining() && app.review_focus == ImprovementReviewFocus::Proposal;
+    let right_focused = app.questions.is_empty()
+        && !app.is_refining()
+        && app.review_focus == ImprovementReviewFocus::Proposal;
     if app.is_refining() {
         render_improvement_refinement_panel(frame, app, body[1]);
     } else if !app.questions.is_empty() {
@@ -1878,11 +1888,7 @@ fn review_key_hints(
     refining: bool,
 ) -> Vec<(&'static str, &'static str)> {
     if refining {
-        vec![
-            ("Ctrl+S", "rerun"),
-            ("Enter", "newline"),
-            ("Esc", "back"),
-        ]
+        vec![("Ctrl+S", "rerun"), ("Enter", "newline"), ("Esc", "back")]
     } else if answering_questions {
         vec![
             ("Type", "answer"),
@@ -1945,10 +1951,7 @@ fn render_improvement_refinement_panel(
         ))];
         for (i, addendum) in app.refinement_history.iter().enumerate() {
             lines.push(Line::from(""));
-            lines.push(Line::styled(
-                format!("#{}", i + 1),
-                emphasis_style(),
-            ));
+            lines.push(Line::styled(format!("#{}", i + 1), emphasis_style()));
             lines.push(Line::from(addendum.clone()));
         }
         Text::from(lines)

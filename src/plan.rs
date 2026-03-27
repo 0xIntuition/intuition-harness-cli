@@ -4575,32 +4575,38 @@ fn spawn_plan_refinement_job(
     thread::spawn(move || {
         let mut continuation = continuation;
         let addendum = review.addenda.last().cloned().unwrap_or_default();
-        let outcome = refine_issue_plan(&root, &review, &addendum, &agent_overrides, &mut continuation)
-            .and_then(|plan| {
-                // Persist accumulated refinement guidance for crash recovery
-                let refinement_log_path = root
-                    .join(branding::PROJECT_DIR)
-                    .join("plan-refinement-log.md");
-                let log_content = addenda
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| format!("## Refinement {}\n\n{}\n", i + 1, a))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let _ = write_text_file(&refinement_log_path, &log_content, true);
+        let outcome = refine_issue_plan(
+            &root,
+            &review,
+            &addendum,
+            &agent_overrides,
+            &mut continuation,
+        )
+        .and_then(|plan| {
+            // Persist accumulated refinement guidance for crash recovery
+            let refinement_log_path = root
+                .join(branding::PROJECT_DIR)
+                .join("plan-refinement-log.md");
+            let log_content = addenda
+                .iter()
+                .enumerate()
+                .map(|(i, a)| format!("## Refinement {}\n\n{}\n", i + 1, a))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _ = write_text_file(&refinement_log_path, &log_content, true);
 
-                if plan.issues.is_empty() {
-                    bail!("planning agent returned no issues to create");
-                }
-                Ok(PlanWorkerOutcome::Review(build_review_app_with_addenda(
-                    review.request,
-                    review.request_attachments,
-                    review.follow_ups,
-                    plan,
-                    revision,
-                    addenda,
-                )))
-            });
+            if plan.issues.is_empty() {
+                bail!("planning agent returned no issues to create");
+            }
+            Ok(PlanWorkerOutcome::Review(build_review_app_with_addenda(
+                review.request,
+                review.request_attachments,
+                review.follow_ups,
+                plan,
+                revision,
+                addenda,
+            )))
+        });
         let _ = sender.send(PlanWorkerReport {
             continuation,
             outcome,
@@ -4627,7 +4633,10 @@ fn refine_issue_plan(
             model: overrides.model.clone(),
             reasoning: overrides.reasoning.clone(),
             transport: None,
-            attachments: collect_prompt_attachments(&review.request_attachments, &review.follow_ups),
+            attachments: collect_prompt_attachments(
+                &review.request_attachments,
+                &review.follow_ups,
+            ),
         },
         continuation,
     )?;
@@ -4691,19 +4700,18 @@ mod tests {
         PlanSessionApp, PlanStage, PlanWorkerOutcome, PlanWorkerReport, PlannedIssueDraft,
         PlannedIssueSet, PlanningAgentOverrides, QuestionAnswer, QuestionsApp, RequestApp,
         ReviewApp, ReviewFocus, ReviewRefinementApp, ReviewSubmissionAction,
-        SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app,
-        build_review_refinement_app, handle_questions_step_key,
-        handle_questions_step_key_with_viewport, handle_questions_step_mouse,
-        handle_questions_step_paste, handle_request_step_key,
+        SKIPPED_FOLLOW_UP_LABEL, SessionAction, build_review_app, build_review_refinement_app,
+        handle_questions_step_key, handle_questions_step_key_with_viewport,
+        handle_questions_step_mouse, handle_questions_step_paste, handle_request_step_key,
         handle_request_step_key_with_viewport, handle_request_step_mouse,
         handle_request_step_paste, handle_review_refinement_step_key, handle_review_step_key,
         handle_review_step_mouse, next_incomplete_question, parse_agent_json,
-        process_pending_plan_job, questions_answer_input_viewport,
-        render_issue_merge_prompt, render_issue_refinement_prompt, render_loading_frame,
-        render_plan_session, render_question_prompt, render_questions_form_frame,
-        render_request_form_frame, render_review_form_frame, request_input_viewport,
-        review_kept_indices, review_layout, review_marker, review_merge_groups,
-        review_submission_action, selected_issue_plan, snapshot,
+        process_pending_plan_job, questions_answer_input_viewport, render_issue_merge_prompt,
+        render_issue_refinement_prompt, render_loading_frame, render_plan_session,
+        render_question_prompt, render_questions_form_frame, render_request_form_frame,
+        render_review_form_frame, request_input_viewport, review_kept_indices, review_layout,
+        review_marker, review_merge_groups, review_submission_action, selected_issue_plan,
+        snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::copy::CopyUiState;
@@ -6183,11 +6191,13 @@ mod tests {
 
         assert!(matches!(action, SessionAction::None));
         assert!(refinement.error.is_some());
-        assert!(refinement
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("Enter the refinement guidance"));
+        assert!(
+            refinement
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Enter the refinement guidance")
+        );
     }
 
     #[test]
@@ -6222,10 +6232,9 @@ mod tests {
 
         // Type guidance
         for ch in "Add more detail".chars() {
-            refinement.addendum.handle_key_with_width(
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
-                80,
-            );
+            refinement
+                .addendum
+                .handle_key_with_width(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), 80);
         }
 
         let action = handle_review_refinement_step_key(
