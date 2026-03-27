@@ -12,4 +12,4 @@
 
 - `intu listen` must not overwrite the primary Linear issue description.
 - Focused proofs covered the `agents build` help surface, sibling-workspace resolution, explicit `--dir` execution, build-route config resolution, working-directory enforcement, and git-repo validation failures.
-- A later `make quality` sweep reran the new `agents build` coverage and the targeted lint/unit gates cleanly; the aggregate run also printed a listen-suite failure marker, but the first surfaced listen case passed when rerun in isolation.
+- A later `make quality` sweep reran the new `agents build` coverage and the targeted lint/unit gates cleanly, but the aggregate run did not finish during observation because the existing `listen_once_relaunches_agent_until_issue_leaves_active_states` integration test continued running for an extended period. The same listen case also remained active when rerun in isolation with `cargo test --test listen listen_once_relaunches_agent_until_issue_leaves_active_states -- --nocapture`.
