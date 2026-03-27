@@ -48,6 +48,19 @@ struct BranchPullRequest {
     is_draft: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PullRequestCheck {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) state: String,
+    #[serde(default)]
+    pub(crate) bucket: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) link: Option<String>,
+}
+
 impl GhCli {
     fn view_pull_request_by_number(
         &self,
@@ -329,6 +342,30 @@ impl GhCli {
             workspace_path,
             &["pr", "edit", &number.to_string(), "--add-label", label],
         )
+    }
+
+    /// Returns failing CI or status checks for the provided pull request number.
+    ///
+    /// Returns an error when `gh` cannot inspect the pull request checks.
+    pub(crate) fn failing_pull_request_checks(
+        &self,
+        workspace_path: &Path,
+        number: u64,
+    ) -> Result<Vec<PullRequestCheck>> {
+        let checks = self.run_json::<Vec<PullRequestCheck>>(
+            workspace_path,
+            &[
+                "pr",
+                "checks",
+                &number.to_string(),
+                "--json",
+                "name,state,bucket,description,link",
+            ],
+        )?;
+        Ok(checks
+            .into_iter()
+            .filter(|check| check.bucket.eq_ignore_ascii_case("fail"))
+            .collect())
     }
 
     fn find_open_branch_pull_request_raw(

@@ -30,13 +30,18 @@ use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resol
 use crate::fs::sibling_workspace_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
-    GhCli, PullRequestLifecycleResult, PullRequestPublishMode, PullRequestPublishRequest,
+    GhCli, PullRequestCheck, PullRequestLifecycleResult, PullRequestPublishMode,
+    PullRequestPublishRequest,
 };
 use crate::linear::{
     AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
     ReqwestLinearClient, WorkflowState,
 };
 use crate::repo_target::RepoTarget;
+use crate::validation::{
+    ResolvedValidationProfile, ValidationCommandRecord, resolve_validation_profile,
+    run_validation_commands,
+};
 use crate::workflow_contract::render_workflow_contract_for_listen;
 use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
@@ -100,7 +105,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         .with_context(|| format!("failed to open `{}`", log_path.display()))?;
     let branch = current_workspace_branch(&workspace_path).ok();
     let worker_pid = std::process::id();
-    let mut turns_completed = 0u32;
+    let mut turns_completed =
+        load_existing_turn_count(&source_root, project_selector, &args.issue)?;
     let mut issue = load_worker_issue(&service, &args.issue).await?;
     let backlog_issue = match args.backlog_issue.as_deref() {
         Some(identifier) => Some(load_worker_backlog_issue(
@@ -147,6 +153,15 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let _initial_meaningful_progress = workspace_has_meaningful_progress(&workspace_path, true)?;
     let mut stalled_turns = 0u32;
     let mut last_review: Option<ReviewReport> = None;
+    let mut remaining_validation_repair_turns = PlanningMeta::load(&workspace_path)
+        .with_context(|| {
+            format!(
+                "failed to load repo validation settings from `{}`",
+                workspace_path.display()
+            )
+        })?
+        .validation
+        .repair_attempts();
     if let Err(error) = preflight::run_listen_preflight(
         &service,
         &linear_config,
@@ -564,6 +579,35 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             )
             .await?;
             if final_review.approved {
+                let review = match run_pre_pr_validation_gate(
+                    &service,
+                    PrePrValidationGateContext {
+                        issue: &issue,
+                        turn_context: &turn_context,
+                        phase_context: WorkerPhaseContext {
+                            source_root: &source_root,
+                            project_selector,
+                            session_context: &session_context,
+                            provider_session_id: provider_session_id.as_deref(),
+                            log_path: &log_path,
+                        },
+                        turns_completed,
+                        pr_mutation_description: "review-ready PR promotion",
+                    },
+                    &review,
+                    &mut remaining_validation_repair_turns,
+                )
+                .await?
+                {
+                    ValidationGateOutcome::Passed(review) => review,
+                    ValidationGateOutcome::Retry(review) => {
+                        last_review = Some(review);
+                        continue;
+                    }
+                    ValidationGateOutcome::Exhausted => {
+                        return Ok(());
+                    }
+                };
                 write_listen_session(
                     &source_root,
                     project_selector,
@@ -618,6 +662,51 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 session_context.pull_request = pull_request
                     .map(PullRequestSummary::from)
                     .unwrap_or_default();
+                if let Some(number) = session_context.pull_request.number {
+                    let failing_checks =
+                        GhCli.failing_pull_request_checks(&workspace_path, number)?;
+                    if !failing_checks.is_empty() {
+                        let budget_exhausted = remaining_validation_repair_turns == 0;
+                        let remaining_after_failure =
+                            remaining_validation_repair_turns.saturating_sub(1);
+                        let follow_up_review = review_for_ci_failure(
+                            Some(&review),
+                            number,
+                            &failing_checks,
+                            remaining_after_failure,
+                        );
+                        sync_review_tracking(&service, &issue, &turn_context, &follow_up_review)
+                            .await?;
+                        last_review = Some(follow_up_review);
+                        append_worker_log(
+                            &log_path,
+                            "pull request checks",
+                            &render_check_failure_lines(number, &failing_checks),
+                        )?;
+                        if budget_exhausted {
+                            write_listen_session(
+                                &source_root,
+                                project_selector,
+                                build_worker_session(
+                                    &issue,
+                                    SessionPhase::Blocked,
+                                    compact_blocked_summary(
+                                        "Blocked | CI repair budget exhausted",
+                                        issue.description.as_deref(),
+                                        &log_path,
+                                    ),
+                                    &session_context,
+                                    turns_completed,
+                                    provider_session_id.as_deref(),
+                                    &session_context.canonical,
+                                ),
+                            )?;
+                            return Ok(());
+                        }
+                        remaining_validation_repair_turns -= 1;
+                        continue;
+                    }
+                }
                 let transitioned_issue =
                     try_transition_issue_to_review_state(&service, &issue).await?;
                 if let Some(backlog_issue) = backlog_issue.as_ref()
@@ -702,18 +791,100 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
         if backlog_progress.is_some() {
             if let Some(branch) = branch.as_deref() {
+                let review = last_review.as_ref().ok_or_else(|| {
+                    anyhow!("listen review tracking was unavailable before draft PR publication")
+                })?;
+                let review = match run_pre_pr_validation_gate(
+                    &service,
+                    PrePrValidationGateContext {
+                        issue: &issue,
+                        turn_context: &turn_context,
+                        phase_context: WorkerPhaseContext {
+                            source_root: &source_root,
+                            project_selector,
+                            session_context: &session_context,
+                            provider_session_id: provider_session_id.as_deref(),
+                            log_path: &log_path,
+                        },
+                        turns_completed,
+                        pr_mutation_description: "draft PR publication",
+                    },
+                    review,
+                    &mut remaining_validation_repair_turns,
+                )
+                .await?
+                {
+                    ValidationGateOutcome::Passed(review) => review,
+                    ValidationGateOutcome::Retry(review) => {
+                        last_review = Some(review);
+                        continue;
+                    }
+                    ValidationGateOutcome::Exhausted => {
+                        return Ok(());
+                    }
+                };
                 if let Some(pull_request) = publish_listener_pull_request(
                     &service,
                     &issue,
                     &workspace_path,
                     branch,
                     PullRequestPublishMode::Draft,
-                    last_review.as_ref(),
+                    Some(&review),
                 )
                 .await?
                 .map(PullRequestSummary::from)
                 {
                     session_context.pull_request = pull_request;
+                    if let Some(number) = session_context.pull_request.number {
+                        let failing_checks =
+                            GhCli.failing_pull_request_checks(&workspace_path, number)?;
+                        if !failing_checks.is_empty() {
+                            let budget_exhausted = remaining_validation_repair_turns == 0;
+                            let remaining_after_failure =
+                                remaining_validation_repair_turns.saturating_sub(1);
+                            let follow_up_review = review_for_ci_failure(
+                                last_review.as_ref(),
+                                number,
+                                &failing_checks,
+                                remaining_after_failure,
+                            );
+                            sync_review_tracking(
+                                &service,
+                                &issue,
+                                &turn_context,
+                                &follow_up_review,
+                            )
+                            .await?;
+                            last_review = Some(follow_up_review);
+                            append_worker_log(
+                                &log_path,
+                                "pull request checks",
+                                &render_check_failure_lines(number, &failing_checks),
+                            )?;
+                            if budget_exhausted {
+                                write_listen_session(
+                                    &source_root,
+                                    project_selector,
+                                    build_worker_session(
+                                        &issue,
+                                        SessionPhase::Blocked,
+                                        compact_blocked_summary(
+                                            "Blocked | CI repair budget exhausted",
+                                            issue.description.as_deref(),
+                                            &log_path,
+                                        ),
+                                        &session_context,
+                                        turns_completed,
+                                        provider_session_id.as_deref(),
+                                        &session_context.canonical,
+                                    ),
+                                )?;
+                                return Ok(());
+                            }
+                            remaining_validation_repair_turns -= 1;
+                            continue;
+                        }
+                    }
                 }
             }
 
@@ -918,6 +1089,20 @@ struct FinalReviewReport {
     risks: Vec<String>,
     #[serde(default)]
     notes: Vec<String>,
+}
+
+enum ValidationGateOutcome {
+    Passed(ReviewReport),
+    Retry(ReviewReport),
+    Exhausted,
+}
+
+struct PrePrValidationGateContext<'a> {
+    issue: &'a IssueSummary,
+    turn_context: &'a ListenTurnContext<'a>,
+    phase_context: WorkerPhaseContext<'a>,
+    turns_completed: u32,
+    pr_mutation_description: &'a str,
 }
 
 impl From<PullRequestLifecycleResult> for PullRequestSummary {
@@ -1241,6 +1426,301 @@ where
     ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
     ensure_listener_pull_request_attachment(service, issue, &pull_request).await?;
     Ok(Some(pull_request))
+}
+
+fn load_listen_validation_profile(workspace_path: &Path) -> Result<ResolvedValidationProfile> {
+    let planning_meta = PlanningMeta::load(workspace_path)
+        .with_context(|| format!("failed to load `{}`", workspace_path.display()))?;
+    resolve_validation_profile(workspace_path, &planning_meta, &[])
+}
+
+fn append_worker_log(log_path: &Path, section: &str, lines: &[String]) -> Result<()> {
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    writeln!(log, "\n--- listen {section} @ {} ---", now_timestamp())
+        .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+    for line in lines {
+        writeln!(log, "{line}")
+            .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+    }
+    Ok(())
+}
+
+fn render_validation_result_lines(records: &[ValidationCommandRecord]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for record in records {
+        lines.push(format!(
+            "command={} exit_code={}",
+            record.command, record.exit_code
+        ));
+        if let Some(excerpt) = output_excerpt(&record.stderr) {
+            lines.push(format!("stderr: {excerpt}"));
+        }
+        if let Some(excerpt) = output_excerpt(&record.stdout) {
+            lines.push(format!("stdout: {excerpt}"));
+        }
+    }
+    lines
+}
+
+fn output_excerpt(text: &str) -> Option<String> {
+    let excerpt = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if excerpt.is_empty() {
+        None
+    } else if excerpt.len() > 240 {
+        Some(format!("{}...", &excerpt[..237]))
+    } else {
+        Some(excerpt)
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, item: impl Into<String>) {
+    let item = item.into();
+    if !values.iter().any(|existing| existing == &item) {
+        values.push(item);
+    }
+}
+
+fn review_with_validation_success(
+    review: &ReviewReport,
+    profile: &ResolvedValidationProfile,
+) -> ReviewReport {
+    let mut updated = review.clone();
+    push_unique(
+        &mut updated.validation_completed,
+        format!(
+            "Local validation profile `{}` passed: {}",
+            profile
+                .profile_label
+                .as_deref()
+                .unwrap_or(profile.source.label()),
+            profile.commands.join(" && ")
+        ),
+    );
+    updated
+}
+
+fn review_for_validation_failure(
+    review: &ReviewReport,
+    profile: &ResolvedValidationProfile,
+    records: &[ValidationCommandRecord],
+    remaining_repair_turns: usize,
+    pr_mutation_description: &str,
+) -> ReviewReport {
+    let mut follow_up = review.clone();
+    follow_up.complete = false;
+    follow_up.summary = format!(
+        "Validation failed before {pr_mutation_description}; repair is required before PR mutation."
+    );
+    push_unique(
+        &mut follow_up.remaining_items,
+        format!(
+            "Repair the local validation failure and rerun the validation gate before {pr_mutation_description}."
+        ),
+    );
+    push_unique(
+        &mut follow_up.validation_remaining,
+        format!(
+            "Local validation profile `{}` must pass: {}",
+            profile
+                .profile_label
+                .as_deref()
+                .unwrap_or(profile.source.label()),
+            profile.commands.join(" && ")
+        ),
+    );
+    for record in records.iter().filter(|record| record.exit_code != 0) {
+        push_unique(
+            &mut follow_up.risks,
+            format!(
+                "Validation command `{}` failed with exit code {}.",
+                record.command, record.exit_code
+            ),
+        );
+        if let Some(excerpt) =
+            output_excerpt(&record.stderr).or_else(|| output_excerpt(&record.stdout))
+        {
+            push_unique(
+                &mut follow_up.notes,
+                format!("Validation failure detail: {excerpt}"),
+            );
+        }
+    }
+    push_unique(
+        &mut follow_up.notes,
+        format!("Validation repair turns remaining after this retry: {remaining_repair_turns}"),
+    );
+    follow_up
+}
+
+async fn run_pre_pr_validation_gate(
+    service: &LinearService<ReqwestLinearClient>,
+    gate_context: PrePrValidationGateContext<'_>,
+    review: &ReviewReport,
+    remaining_validation_repair_turns: &mut usize,
+) -> Result<ValidationGateOutcome> {
+    let validation_profile =
+        load_listen_validation_profile(gate_context.turn_context.workspace_path)?;
+    write_listen_session(
+        gate_context.phase_context.source_root,
+        gate_context.phase_context.project_selector,
+        build_worker_session(
+            gate_context.issue,
+            SessionPhase::Validating,
+            compact_session_summary([
+                Some(format!(
+                    "Validating before {} with {}",
+                    gate_context.pr_mutation_description,
+                    validation_profile.source.label()
+                )),
+                Some(format!(
+                    "see {}",
+                    gate_context.phase_context.log_path.display()
+                )),
+            ]),
+            gate_context.phase_context.session_context,
+            gate_context.turns_completed,
+            gate_context.phase_context.provider_session_id,
+            &gate_context.phase_context.session_context.canonical,
+        ),
+    )?;
+    append_worker_log(
+        gate_context.phase_context.log_path,
+        "validation profile",
+        &validation_profile.diagnostics_lines(),
+    )?;
+    let validation_records = run_validation_commands(
+        gate_context.turn_context.workspace_path,
+        &validation_profile.commands,
+    )?;
+    append_worker_log(
+        gate_context.phase_context.log_path,
+        "validation results",
+        &render_validation_result_lines(&validation_records),
+    )?;
+    if validation_records
+        .iter()
+        .all(|record| record.exit_code == 0)
+    {
+        return Ok(ValidationGateOutcome::Passed(
+            review_with_validation_success(review, &validation_profile),
+        ));
+    }
+
+    let budget_exhausted = *remaining_validation_repair_turns == 0;
+    let remaining_after_failure = remaining_validation_repair_turns.saturating_sub(1);
+    let follow_up_review = review_for_validation_failure(
+        review,
+        &validation_profile,
+        &validation_records,
+        remaining_after_failure,
+        gate_context.pr_mutation_description,
+    );
+    sync_review_tracking(
+        service,
+        gate_context.issue,
+        gate_context.turn_context,
+        &follow_up_review,
+    )
+    .await?;
+    if budget_exhausted {
+        write_listen_session(
+            gate_context.phase_context.source_root,
+            gate_context.phase_context.project_selector,
+            build_worker_session(
+                gate_context.issue,
+                SessionPhase::Blocked,
+                compact_blocked_summary(
+                    "Blocked | validation failed and repair budget exhausted",
+                    gate_context.issue.description.as_deref(),
+                    gate_context.phase_context.log_path,
+                ),
+                gate_context.phase_context.session_context,
+                gate_context.turns_completed,
+                gate_context.phase_context.provider_session_id,
+                &gate_context.phase_context.session_context.canonical,
+            ),
+        )?;
+        return Ok(ValidationGateOutcome::Exhausted);
+    }
+
+    *remaining_validation_repair_turns -= 1;
+    Ok(ValidationGateOutcome::Retry(follow_up_review))
+}
+
+fn review_for_ci_failure(
+    previous_review: Option<&ReviewReport>,
+    pull_request_number: u64,
+    checks: &[PullRequestCheck],
+    remaining_repair_turns: usize,
+) -> ReviewReport {
+    let mut follow_up = previous_review.cloned().unwrap_or_default();
+    follow_up.complete = false;
+    follow_up.summary = format!(
+        "GitHub CI failed for PR #{pull_request_number}; repair the existing branch PR and rerun local validation."
+    );
+    push_unique(
+        &mut follow_up.remaining_items,
+        format!(
+            "Repair failing GitHub checks on PR #{pull_request_number} and update the same PR."
+        ),
+    );
+    push_unique(
+        &mut follow_up.validation_remaining,
+        format!(
+            "Post-publication CI must pass for PR #{pull_request_number} before review handoff."
+        ),
+    );
+    for check in checks {
+        push_unique(
+            &mut follow_up.risks,
+            format!("Failing check `{}` is still red.", check.name),
+        );
+        let mut detail = format!("Check `{}` reported `{}`.", check.name, check.state);
+        if let Some(description) = check
+            .description
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            detail.push_str(&format!(" {description}"));
+        }
+        if let Some(link) = check.link.as_deref().filter(|value| !value.is_empty()) {
+            detail.push_str(&format!(" ({link})"));
+        }
+        push_unique(&mut follow_up.notes, detail);
+    }
+    push_unique(
+        &mut follow_up.notes,
+        format!("Validation repair turns remaining after this retry: {remaining_repair_turns}"),
+    );
+    follow_up
+}
+
+fn render_check_failure_lines(number: u64, checks: &[PullRequestCheck]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "pull request #{number} has {} failing check(s)",
+        checks.len()
+    )];
+    for check in checks {
+        let mut line = format!(
+            "check={} bucket={} state={}",
+            check.name, check.bucket, check.state
+        );
+        if let Some(link) = check.link.as_deref().filter(|value| !value.is_empty()) {
+            line.push_str(&format!(" link={link}"));
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 fn build_listen_run_args(
@@ -2086,6 +2566,12 @@ fn render_review_delta_block(review: &ReviewReport) -> String {
             lines.push(format!("- {item}"));
         }
     }
+    if !review.notes.is_empty() {
+        lines.push("Notes:".to_string());
+        for item in &review.notes {
+            lines.push(format!("- {item}"));
+        }
+    }
     if lines.is_empty() {
         "- No explicit remaining work captured.".to_string()
     } else {
@@ -2401,13 +2887,38 @@ async fn sync_review_tracking(
     review: &ReviewReport,
 ) -> Result<()> {
     let body = render_review_workpad(issue, context, review);
-    let _ = match service
-        .update_workpad_comment_by_id(context.workpad_comment_id, body.clone())
-        .await
-    {
-        Ok(comment) => comment,
-        Err(_) => service.upsert_workpad_comment(issue, body).await?,
-    };
+    for attempt in 0..3 {
+        match service
+            .update_workpad_comment_by_id(context.workpad_comment_id, body.clone())
+            .await
+        {
+            Ok(_) => break,
+            Err(error) if attempt < 2 && is_transient_linear_read_failure(&error) => {
+                sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            Err(_) => {
+                let mut updated = false;
+                for upsert_attempt in 0..3 {
+                    match service.upsert_workpad_comment(issue, body.clone()).await {
+                        Ok(_) => {
+                            updated = true;
+                            break;
+                        }
+                        Err(error)
+                            if upsert_attempt < 2 && is_transient_linear_read_failure(&error) =>
+                        {
+                            sleep(Duration::from_millis(100)).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if updated {
+                    break;
+                }
+            }
+        }
+    }
     if let Some(backlog_issue) = context.backlog_issue {
         sync_backlog_progress_section(context.workspace_path, &backlog_issue.identifier, review)?;
     }
@@ -2801,6 +3312,21 @@ fn load_existing_latest_resume_handle(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .and_then(|session| session.latest_resume_handle))
+}
+
+fn load_existing_turn_count(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<u32> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.turns)
+        .unwrap_or(0))
 }
 
 fn load_existing_session_origin(

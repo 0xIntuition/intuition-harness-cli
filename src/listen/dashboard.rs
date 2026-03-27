@@ -1384,6 +1384,9 @@ fn phase_style(phase: SessionPhase) -> Style {
         SessionPhase::FinalReview => Style::default()
             .fg(Color::Blue)
             .add_modifier(Modifier::BOLD),
+        SessionPhase::Validating => Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
         SessionPhase::Publishing => Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),

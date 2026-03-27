@@ -53,6 +53,7 @@ use crate::output::render_json_success;
 use crate::scaffold::ensure_planning_layout;
 use crate::tui::copy::copy_overlay_viewport;
 use crate::tui::keybindings::is_copy_key;
+use crate::validation::resolve_validation_profile;
 pub use state::{
     ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, PendingIssue,
     PullRequestStatus, PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
@@ -3014,6 +3015,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let planning_meta = load_required_planning_meta(&root, "listen")?;
     ensure_planning_layout(&root, false)?;
     let app_config = AppConfig::load()?;
+    let validation_profile = resolve_validation_profile(&root, &planning_meta, &[]);
     let poll_interval_seconds =
         resolve_listen_poll_interval_seconds(args, &planning_meta, &app_config);
     let mut listen_settings = planning_meta.listen.clone();
@@ -3175,6 +3177,17 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                             }),
                         )
                     );
+                    match &validation_profile {
+                        Ok(profile) => {
+                            for line in profile.diagnostics_lines() {
+                                println!("- {line}");
+                            }
+                        }
+                        Err(error) => {
+                            println!("- Validation profile: unresolved");
+                            bail!("{error}");
+                        }
+                    }
                     return Ok(());
                 }
                 Err(error) => {
@@ -4179,8 +4192,10 @@ mod tests {
         assert_eq!(SessionPhase::Claimed.display_label(), "Claimed");
         assert_eq!(SessionPhase::BriefReady.display_label(), "Brief Ready");
         assert_eq!(SessionPhase::Running.display_label(), "Running");
+        assert_eq!(SessionPhase::Validating.display_label(), "Validating");
         assert_eq!(SessionPhase::Completed.display_label(), "Completed");
         assert_eq!(SessionPhase::Blocked.html_class(), "danger");
+        assert_eq!(SessionPhase::Validating.html_class(), "active");
         assert_eq!(SessionPhase::Completed.html_class(), "success");
     }
 

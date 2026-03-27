@@ -664,6 +664,7 @@ fn wait_for_terminal_session_state(path: &Path) -> Result<(), Box<dyn Error>> {
             && !contents.contains("\"phase\": \"running\"")
             && !contents.contains("\"phase\": \"reviewing\"")
             && !contents.contains("\"phase\": \"final_review\"")
+            && !contents.contains("\"phase\": \"validating\"")
             && !contents.contains("\"phase\": \"publishing\"")
         {
             return Ok(());
@@ -671,9 +672,11 @@ fn wait_for_terminal_session_state(path: &Path) -> Result<(), Box<dyn Error>> {
         thread::sleep(Duration::from_millis(100));
     }
 
+    let final_contents = fs::read_to_string(path).unwrap_or_else(|_| "<unreadable>".to_string());
     Err(format!(
-        "timed out waiting for `{}` to reach a terminal session state",
-        path.display()
+        "timed out waiting for `{}` to reach a terminal session state; final contents: {}",
+        path.display(),
+        final_contents
     )
     .into())
 }
