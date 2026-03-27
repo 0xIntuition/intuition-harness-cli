@@ -3832,6 +3832,7 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     assert!(state.contains("\"issue_identifier\": \"MET-21\""));
     assert!(
         state.contains("\"phase\": \"running\"")
+            || state.contains("\"phase\": \"reviewing\"")
             || state.contains("\"phase\": \"blocked\"")
             || state.contains("\"phase\": \"completed\""),
         "expected an active or finished worker phase in state: {state}"
@@ -5066,10 +5067,10 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload.txt"
     create_comment_mock.assert_calls(0);
 
     wait_for_path(&stub_dir.join("payload.txt"))?;
-    assert_eq!(
-        fs::read_to_string(backlog_dir.join("index.md"))?,
-        "# Existing Technical Backlog\n\nDo not overwrite me.\n"
-    );
+    let backlog_index = fs::read_to_string(backlog_dir.join("index.md"))?;
+    assert!(backlog_index.starts_with("# Existing Technical Backlog\n\nDo not overwrite me.\n"));
+    assert!(backlog_index.contains("<!-- metastack-listen-progress:start -->"));
+    assert!(backlog_index.contains("## Listener Progress Checklist"));
     assert!(!workspace_root.join("stale.txt").exists());
     assert_eq!(
         git_stdout(&workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"])?,
@@ -5816,6 +5817,11 @@ mkdir -p src
 printf '// turn %s\n' "$count" > "src/turn-$count.rs"
 "#,
             )?;
+            write_listen_github_stub(
+                &bin_dir.join("gh"),
+                "none",
+                "https://github.com/example/repo/pull/321",
+            )?;
             let mut permissions = fs::metadata(&stub_path)?.permissions();
             permissions.set_mode(0o755);
             fs::set_permissions(&stub_path, permissions)?;
@@ -5975,6 +5981,11 @@ printf '{"type":"result","subtype":"success","result":"claude listen ok","sessio
     let mut permissions = fs::metadata(&claude_path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&claude_path, permissions)?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
 
