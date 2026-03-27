@@ -141,7 +141,7 @@ transport = "arg"
     );
     assert_eq!(
         fs::read_to_string(stub_dir.join("provider-source.txt"))?,
-        "explicit_override"
+        "command_route:agents.build"
     );
 
     Ok(())
