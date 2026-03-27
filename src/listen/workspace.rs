@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::config::ListenRefreshPolicy;
-use crate::fs::{ensure_workspace_path_is_safe, sibling_workspace_root};
+use crate::fs::{ensure_workspace_path_is_safe, ticket_workspace_root};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketWorkspaceProvisioning {
@@ -67,10 +67,6 @@ pub fn ensure_ticket_workspace(
             false,
         ),
     }
-}
-
-fn ticket_workspace_root(root: &Path) -> Result<PathBuf> {
-    sibling_workspace_root(root)
 }
 
 fn clone_workspace(

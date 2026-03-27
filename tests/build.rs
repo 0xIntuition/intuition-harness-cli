@@ -180,6 +180,60 @@ transport = "stdin"
 
 #[cfg(unix)]
 #[test]
+fn agents_build_preserves_explicit_nested_workspace_directory() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let workspace_dir = temp.path().join("workspace");
+    let nested_dir = workspace_dir.join("qa").join("focus");
+    let output_dir = temp.path().join("output");
+    let config_path = temp.path().join("metastack.toml");
+    let stub_path = temp.path().join("build-agent-stub");
+
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&output_dir)?;
+    init_git_repo(&workspace_dir)?;
+    fs::create_dir_all(&nested_dir)?;
+    write_build_stub(&stub_path)?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "build-stub"
+
+[agents.commands.build-stub]
+command = "{}"
+transport = "stdin"
+"#,
+            stub_path.display()
+        )
+        .as_str(),
+    )?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "agents",
+            "build",
+            "--dir",
+            nested_dir.to_string_lossy().as_ref(),
+            "run qa",
+            "--no-interactive",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(output_dir.join("cwd.txt"))?,
+        nested_dir.canonicalize()?.display().to_string()
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn agents_build_rejects_non_git_directories() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

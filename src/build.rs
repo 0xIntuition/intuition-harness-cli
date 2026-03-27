@@ -17,7 +17,7 @@ use crate::agents::{
 };
 use crate::cli::{BuildArgs, RunAgentArgs};
 use crate::config::{AGENT_ROUTE_AGENTS_BUILD, AppConfig, PlanningMeta, PromptTransport};
-use crate::fs::{canonicalize_existing_dir, sibling_workspace_root};
+use crate::fs::{canonicalize_existing_dir, ticket_workspace_root};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -220,10 +220,7 @@ fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<Str
             Ok((workspace_path, args.prompt.clone()))
         } else {
             let root = canonicalize_existing_dir(&args.root)?;
-            Ok((
-                sibling_workspace_root(&root)?.join(workspace),
-                args.prompt.clone(),
-            ))
+            Ok((ticket_workspace_root(&root)?.join(workspace), args.prompt.clone()))
         }
     }
 }
@@ -240,7 +237,7 @@ fn validate_git_repo(path: &Path) -> Result<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
         .arg(&canonical)
-        .args(["rev-parse", "--show-toplevel"])
+        .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .with_context(|| {
             format!(
@@ -254,14 +251,14 @@ fn validate_git_repo(path: &Path) -> Result<PathBuf> {
             canonical.display()
         );
     }
-    let top_level = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if top_level.is_empty() {
+    let is_inside_work_tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if is_inside_work_tree != "true" {
         bail!(
             "workspace directory is not a git repository: `{}`",
             canonical.display()
         );
     }
-    Ok(PathBuf::from(top_level))
+    Ok(canonical)
 }
 
 fn path_like_workspace_arg(path: &Path) -> bool {
