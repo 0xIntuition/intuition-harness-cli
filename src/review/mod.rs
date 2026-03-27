@@ -1078,15 +1078,13 @@ fn run_review_interactive(
                             );
                         }
                     }
+                } else if app.copy.export_active() {
+                    let _ = app
+                        .copy
+                        .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?));
                 } else {
-                    if app.copy.export_active() {
-                        let _ = app
-                            .copy
-                            .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?));
-                    } else {
-                        let viewport = interactive_preview_viewport(terminal.size()?);
-                        let _ = app.handle_preview_mouse(mouse, viewport);
-                    }
+                    let viewport = interactive_preview_viewport(terminal.size()?);
+                    let _ = app.handle_preview_mouse(mouse, viewport);
                 }
             }
             _ => {}
