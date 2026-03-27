@@ -225,6 +225,13 @@ pub struct IssueUpdateRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct IssueRelationCreateRequest {
+    pub issue_id: String,
+    pub related_issue_id: String,
+    pub relation_type: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct AttachmentCreateRequest {
     pub issue_id: String,
     pub title: String,

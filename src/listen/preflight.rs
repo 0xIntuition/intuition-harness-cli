@@ -562,6 +562,13 @@ mod tests {
             unreachable!("unused in preflight tests")
         }
 
+        async fn create_issue_relation(
+            &self,
+            _: crate::linear::IssueRelationCreateRequest,
+        ) -> Result<()> {
+            unreachable!("unused in preflight tests")
+        }
+
         async fn update_comment(&self, _: &str, _: String) -> Result<IssueComment> {
             unreachable!("unused in preflight tests")
         }

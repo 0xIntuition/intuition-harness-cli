@@ -269,6 +269,7 @@ fn meta_backlog_spec_help_exposes_new_subcommand() {
         .success()
         .stdout(predicate::str::contains("\n  spec "))
         .stdout(predicate::str::contains("\n  plan "))
+        .stdout(predicate::str::contains("\n  split "))
         .stdout(predicate::str::contains("\n  tech "))
         .stdout(predicate::str::contains("\n  sync "))
         .stdout(predicate::str::contains(format!(
@@ -279,6 +280,29 @@ fn meta_backlog_spec_help_exposes_new_subcommand() {
             "{} backlog tech MET-35",
             branding::COMMAND_NAME
         )));
+}
+
+#[test]
+fn backlog_split_help_describes_inverse_planning_workflow() {
+    cli()
+        .args(["backlog", "split", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("IDENTIFIER"))
+        .stdout(predicate::str::contains("--no-interactive"))
+        .stdout(predicate::str::contains("--assignee"))
+        .stdout(predicate::str::contains("--label"))
+        .stdout(predicate::str::contains("--render-once").not());
+}
+
+#[test]
+fn backlog_tech_help_no_longer_advertises_split_alias() {
+    cli()
+        .args(["backlog", "tech", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("split").not())
+        .stdout(predicate::str::contains("Usage: intu backlog tech"));
 }
 
 #[test]

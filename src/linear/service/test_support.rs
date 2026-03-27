@@ -5,9 +5,9 @@ use std::sync::{
 
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueAssigneeFilter, IssueComment,
-    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, IssueSummary,
-    IssueUpdateRequest, LabelRef, LinearClient, ProjectRef, ProjectSummary, TeamRef, TeamSummary,
-    UserRef, WorkflowState,
+    IssueCreateRequest, IssueLabelCreateRequest, IssueListFilters, IssueRelationCreateRequest,
+    IssueSummary, IssueUpdateRequest, LabelRef, LinearClient, ProjectRef, ProjectSummary, TeamRef,
+    TeamSummary, UserRef, WorkflowState,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -25,6 +25,7 @@ pub(super) struct FakeLinearClient {
     pub(super) create_requests: Arc<Mutex<Vec<IssueCreateRequest>>>,
     pub(super) update_requests: Arc<Mutex<Vec<(String, IssueUpdateRequest)>>>,
     pub(super) created_issue_labels: Arc<Mutex<Vec<IssueLabelCreateRequest>>>,
+    pub(super) created_issue_relations: Arc<Mutex<Vec<IssueRelationCreateRequest>>>,
     pub(super) created_comments: Arc<Mutex<Vec<(String, String)>>>,
     pub(super) updated_comments: Arc<Mutex<Vec<(String, String)>>>,
     pub(super) list_issues_calls: Arc<AtomicUsize>,
@@ -209,6 +210,14 @@ impl LinearClient for FakeLinearClient {
             user_name: None,
             resolved_at: None,
         })
+    }
+
+    async fn create_issue_relation(&self, request: IssueRelationCreateRequest) -> Result<()> {
+        self.created_issue_relations
+            .lock()
+            .expect("mutex poisoned")
+            .push(request);
+        Ok(())
     }
 
     async fn upload_file(

@@ -42,7 +42,7 @@ use crate::cli::{RunAgentArgs, TechnicalArgs};
 use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
 };
-use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, AppConfig, load_required_planning_meta};
+use crate::config::{AGENT_ROUTE_BACKLOG_TECH, AppConfig, load_required_planning_meta};
 use crate::context::load_workflow_contract;
 use crate::fs::{canonicalize_existing_dir, display_path};
 use crate::linear::browser::{
@@ -1166,7 +1166,7 @@ fn generate_backlog_files(
     )?;
     let output = run_agent_capture(&RunAgentArgs {
         root: Some(root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_BACKLOG_SPLIT.to_string()),
+        route_key: Some(AGENT_ROUTE_BACKLOG_TECH.to_string()),
         agent: None,
         prompt,
         instructions: None,

@@ -6258,6 +6258,13 @@ suffix
             unreachable!("create_comment is not used in this test")
         }
 
+        async fn create_issue_relation(
+            &self,
+            _request: crate::linear::IssueRelationCreateRequest,
+        ) -> Result<()> {
+            unreachable!("create_issue_relation is not used in this test")
+        }
+
         async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
             unreachable!("update_comment is not used in this test")
         }
@@ -6466,6 +6473,13 @@ suffix
 
         async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
             unreachable!("create_comment is not used in this test")
+        }
+
+        async fn create_issue_relation(
+            &self,
+            _request: crate::linear::IssueRelationCreateRequest,
+        ) -> Result<()> {
+            unreachable!("create_issue_relation is not used in this test")
         }
 
         async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {

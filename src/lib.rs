@@ -35,6 +35,7 @@ mod scan_dashboard;
 mod scan_prompts;
 mod session_runtime;
 mod setup;
+mod split;
 mod sync_command;
 mod sync_dashboard;
 mod technical;
@@ -88,6 +89,7 @@ use crate::review::{run_retro, run_review};
 use crate::scaffold::run_scaffold;
 use crate::scan::run_scan;
 use crate::setup::run_setup;
+use crate::split::run_split;
 use crate::sync_command::{
     run_sync_dashboard_command, run_sync_link, run_sync_pull, run_sync_push, run_sync_status,
 };
@@ -177,6 +179,14 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             BacklogCommands::Improve(args) => {
                 run_backlog_improve(&args).await?;
+            }
+            BacklogCommands::Split(args) => {
+                let report = run_split(&args).await?;
+                if args.no_interactive {
+                    println!("{}", report.render_json()?);
+                } else {
+                    println!("{}", report.render());
+                }
             }
             BacklogCommands::Tech(args) => {
                 let report = run_technical(&args).await?;

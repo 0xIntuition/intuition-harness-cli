@@ -105,6 +105,12 @@ pub(super) struct AttachmentMutationPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct IssueRelationCreatePayload {
+    #[serde(rename = "issueRelationCreate")]
+    pub(super) issue_relation_create: SuccessNode,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct SuccessOnlyPayload {
     #[serde(rename = "attachmentDelete")]
     pub(super) success_payload: SuccessNode,

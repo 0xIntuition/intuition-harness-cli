@@ -5,8 +5,8 @@ use reqwest::Client;
 use crate::config::LinearConfig;
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
-    IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
-    ProjectSummary, TeamSummary, UserRef,
+    IssueLabelCreateRequest, IssueListFilters, IssueRelationCreateRequest, IssueSummary,
+    IssueUpdateRequest, LabelRef, ProjectSummary, TeamSummary, UserRef,
 };
 
 mod attachments;
@@ -17,6 +17,7 @@ mod labels;
 mod model;
 mod pagination;
 mod projects;
+mod relations;
 mod teams;
 #[cfg(test)]
 mod tests;
@@ -52,6 +53,7 @@ pub trait LinearClient: Send + Sync {
         &self,
         request: AttachmentCreateRequest,
     ) -> Result<AttachmentSummary>;
+    async fn create_issue_relation(&self, request: IssueRelationCreateRequest) -> Result<()>;
     async fn delete_attachment(&self, attachment_id: &str) -> Result<()>;
     async fn download_file(&self, url: &str) -> Result<Vec<u8>>;
 }
@@ -150,6 +152,10 @@ impl LinearClient for ReqwestLinearClient {
         request: AttachmentCreateRequest,
     ) -> Result<AttachmentSummary> {
         self.create_attachment_resource(request).await
+    }
+
+    async fn create_issue_relation(&self, request: IssueRelationCreateRequest) -> Result<()> {
+        self.create_issue_relation_resource(request).await
     }
 
     async fn delete_attachment(&self, attachment_id: &str) -> Result<()> {

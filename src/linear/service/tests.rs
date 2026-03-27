@@ -523,6 +523,13 @@ impl LinearClient for DuplicateThenVisibleLabelClient {
         unreachable!("create_comment is not used in these tests")
     }
 
+    async fn create_issue_relation(
+        &self,
+        _request: crate::linear::IssueRelationCreateRequest,
+    ) -> Result<()> {
+        unreachable!("create_issue_relation is not used in these tests")
+    }
+
     async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
         unreachable!("update_comment is not used in these tests")
     }
@@ -623,6 +630,13 @@ impl LinearClient for DuplicateLabelClient {
 
     async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
         unreachable!("create_comment is not used in these tests")
+    }
+
+    async fn create_issue_relation(
+        &self,
+        _request: crate::linear::IssueRelationCreateRequest,
+    ) -> Result<()> {
+        unreachable!("create_issue_relation is not used in these tests")
     }
 
     async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
@@ -736,6 +750,13 @@ impl LinearClient for DuplicateThenWorkspaceVisibleLabelClient {
 
     async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
         unreachable!("create_comment is not used in these tests")
+    }
+
+    async fn create_issue_relation(
+        &self,
+        _request: crate::linear::IssueRelationCreateRequest,
+    ) -> Result<()> {
+        unreachable!("create_issue_relation is not used in these tests")
     }
 
     async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {

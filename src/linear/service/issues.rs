@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::linear::{
     IssueAssigneeFilter, IssueCreateRequest, IssueCreateSpec, IssueEditContext, IssueEditSpec,
-    IssueListFilters, IssueSummary, IssueUpdateRequest, LinearClient,
+    IssueListFilters, IssueRelationCreateRequest, IssueSummary, IssueUpdateRequest, LinearClient,
 };
 
 use super::{
@@ -261,6 +261,21 @@ where
                     parent_id,
                 },
             )
+            .await
+    }
+
+    pub async fn create_issue_relation(
+        &self,
+        issue_id: &str,
+        related_issue_id: &str,
+        relation_type: &str,
+    ) -> Result<()> {
+        self.client
+            .create_issue_relation(IssueRelationCreateRequest {
+                issue_id: issue_id.to_string(),
+                related_issue_id: related_issue_id.to_string(),
+                relation_type: relation_type.to_string(),
+            })
             .await
     }
 }

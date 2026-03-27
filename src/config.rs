@@ -54,6 +54,7 @@ pub const DEFAULT_LISTEN_RETRY_MAX_BACKOFF_SECONDS: u64 = 60;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_IMPROVE: &str = "backlog.improve";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
+pub const AGENT_ROUTE_BACKLOG_TECH: &str = "backlog.tech";
 pub const AGENT_ROUTE_BACKLOG_SPEC: &str = "backlog.spec";
 pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
 pub const AGENT_ROUTE_CONTEXT_RELOAD: &str = "context.reload";
@@ -1232,11 +1233,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
-        AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
-        AppConfig, BacklogSettings, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
-        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS,
-        DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS, DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
+        AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AGENT_ROUTE_BACKLOG_TECH,
+        AgentConfigOverrides, AgentConfigSource, AgentRouteConfig, AgentRouteScope,
+        AgentRoutingSettings, AgentSettings, AppConfig, BacklogSettings,
+        DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
+        DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
+        DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
         InstallListenSettings, InstallPlanSettings, InstallUiSettings, ListenAssignmentScope,
         METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
@@ -2061,6 +2063,46 @@ mod tests {
         assert!(matches!(
             split.provider_source,
             super::AgentConfigSource::FamilyRoute(_)
+        ));
+    }
+
+    #[test]
+    fn resolve_agent_route_falls_back_to_legacy_split_command_defaults_for_tech() {
+        let config = AppConfig {
+            agents: AgentSettings {
+                default_agent: Some("codex".to_string()),
+                default_model: Some("gpt-5.4".to_string()),
+                default_reasoning: Some("medium".to_string()),
+                routing: AgentRoutingSettings {
+                    families: BTreeMap::new(),
+                    commands: BTreeMap::from([(
+                        AGENT_ROUTE_BACKLOG_SPLIT.to_string(),
+                        AgentRouteConfig {
+                            provider: Some("claude".to_string()),
+                            model: Some("opus".to_string()),
+                            reasoning: Some("high".to_string()),
+                        },
+                    )]),
+                },
+                commands: BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+
+        let resolved = resolve_agent_route(
+            &config,
+            &PlanningMeta::default(),
+            AGENT_ROUTE_BACKLOG_TECH,
+            Default::default(),
+        )
+        .expect("tech route should resolve through the legacy split override");
+
+        assert_eq!(resolved.provider, "claude");
+        assert_eq!(resolved.model.as_deref(), Some("opus"));
+        assert_eq!(resolved.reasoning.as_deref(), Some("high"));
+        assert!(matches!(
+            resolved.provider_source,
+            super::AgentConfigSource::CommandRoute(_)
         ));
     }
 

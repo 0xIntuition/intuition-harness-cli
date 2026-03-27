@@ -209,8 +209,10 @@ pub enum BacklogCommands {
     Plan(PlanArgs),
     /// Review repo-scoped backlog issues for hygiene gaps and optionally apply improvements.
     Improve(BacklogImproveArgs),
+    /// Split an existing issue into multiple planned child tickets plus an umbrella parent rewrite.
+    Split(SplitArgs),
     /// Create a backlog sub-issue and local planning files from a parent issue.
-    #[command(name = "tech", visible_alias = "split", visible_alias = "derive")]
+    #[command(name = "tech", visible_alias = "derive")]
     Tech(TechnicalArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
@@ -1470,6 +1472,90 @@ pub struct TechnicalArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct SplitArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Existing parent issue identifier to split, for example MET-35.
+    #[arg(value_name = "IDENTIFIER")]
+    pub issue: String,
+    /// Override the Linear workflow state attached to created child backlog issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Override the Linear priority attached to created child backlog issues (1-4).
+    #[arg(long)]
+    pub priority: Option<u8>,
+    /// Add one or more extra Linear labels to created child backlog issues.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Override the assignee attached to created child backlog issues. Supports `viewer`, user IDs, names, and emails.
+    #[arg(long)]
+    pub assignee: Option<String>,
+    /// Skip the ratatui workflow and emit a proposal instead of prompting.
+    #[arg(long, conflicts_with = "render_once")]
+    pub no_interactive: bool,
+    /// Override the configured default agent/provider for split generation.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for split generation.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for split generation.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+    /// Render the split review flow once to an in-memory buffer and print the snapshot.
+    #[arg(long, hide = true, conflicts_with = "no_interactive")]
+    pub render_once: bool,
+    /// Apply scripted split-review actions before a render-once snapshot.
+    #[arg(long, hide = true, value_delimiter = ',', value_parser = parse_split_review_event)]
+    pub events: Vec<SplitReviewEventArg>,
+    /// Snapshot width when --render-once is set.
+    #[arg(long, hide = true, default_value_t = 120)]
+    pub width: u16,
+    /// Snapshot height when --render-once is set.
+    #[arg(long, hide = true, default_value_t = 32)]
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitReviewEventArg {
+    Enter,
+    Left,
+    Up,
+    Down,
+    Space,
+    Paste(String),
+}
+
+fn parse_split_review_event(raw: &str) -> Result<SplitReviewEventArg, String> {
+    SplitReviewEventArg::from_str(raw)
+}
+
+impl FromStr for SplitReviewEventArg {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let normalized = raw.trim();
+        if normalized.is_empty() {
+            return Err("split render-once events cannot be empty".to_string());
+        }
+
+        match normalized {
+            "enter" => Ok(Self::Enter),
+            "left" => Ok(Self::Left),
+            "up" => Ok(Self::Up),
+            "down" => Ok(Self::Down),
+            "space" => Ok(Self::Space),
+            _ => normalized
+                .strip_prefix("paste=")
+                .map(|text| Self::Paste(text.to_string()))
+                .ok_or_else(|| {
+                    "split render-once events must be one of `enter`, `left`, `up`, `down`, `space`, or `paste=TEXT`".to_string()
+                }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct BacklogSpecArgs {
     #[command(flatten)]
     pub root: RepositoryRootArgs,
@@ -2168,6 +2254,7 @@ impl Cli {
         match &self.command {
             Command::Backlog(args) => match &args.command {
                 BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
+                BacklogCommands::Split(args) if args.no_interactive => Some("backlog.split"),
                 BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
                 BacklogCommands::Sync(args) if args.no_interactive || args.json => {
                     Some("backlog.sync")
@@ -2282,7 +2369,8 @@ fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
     let (command, rest) = tokens.split_first()?;
     match command.as_str() {
         "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
-        "tech" | "split" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "split" if has_flag(rest, "--no-interactive") => Some("backlog.split"),
+        "tech" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
         "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
             Some("backlog.sync")
         }
