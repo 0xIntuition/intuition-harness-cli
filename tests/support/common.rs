@@ -658,15 +658,53 @@ fn wait_for_file_substring_with_timeout(
 #[cfg(unix)]
 fn wait_for_terminal_session_state(path: &Path) -> Result<(), Box<dyn Error>> {
     for _ in 0..300 {
-        if let Ok(contents) = fs::read_to_string(path)
-            && !contents.contains("\"phase\": \"claimed\"")
-            && !contents.contains("\"phase\": \"brief_ready\"")
-            && !contents.contains("\"phase\": \"running\"")
-            && !contents.contains("\"phase\": \"reviewing\"")
-            && !contents.contains("\"phase\": \"final_review\"")
-            && !contents.contains("\"phase\": \"publishing\"")
-        {
-            return Ok(());
+        if let Ok(contents) = fs::read_to_string(path) {
+            let active_phase_present = contents.contains("\"phase\": \"claimed\"")
+                || contents.contains("\"phase\": \"brief_ready\"")
+                || contents.contains("\"phase\": \"running\"")
+                || contents.contains("\"phase\": \"reviewing\"")
+                || contents.contains("\"phase\": \"final_review\"")
+                || contents.contains("\"phase\": \"publishing\"");
+            if !active_phase_present {
+                return Ok(());
+            }
+
+            if let Ok(state) = serde_json::from_str::<Value>(&contents) {
+                let live_active_session = state
+                    .get("sessions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|session| {
+                        matches!(
+                            session.get("phase").and_then(Value::as_str),
+                            Some(
+                                "claimed"
+                                    | "brief_ready"
+                                    | "running"
+                                    | "reviewing"
+                                    | "final_review"
+                                    | "publishing"
+                            )
+                        )
+                    })
+                    .any(|session| {
+                        session
+                            .get("pid")
+                            .and_then(Value::as_u64)
+                            .map(|pid| {
+                                ProcessCommand::new("ps")
+                                    .args(["-p", &pid.to_string()])
+                                    .output()
+                                    .map(|output| output.status.success())
+                                    .unwrap_or(true)
+                            })
+                            .unwrap_or(false)
+                    });
+                if !live_active_session {
+                    return Ok(());
+                }
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }

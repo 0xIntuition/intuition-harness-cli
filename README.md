@@ -371,6 +371,7 @@ Supported command route keys:
 - `context.scan`
 - `context.reload`
 - `linear.issues.refine`
+- `agents.build`
 - `agents.listen`
 - `agents.workflows.run`
 - `runtime.cron.prompt`
@@ -1202,6 +1203,23 @@ Examples:
 meta agents execute MET-45 --team MET --project "MetaStack CLI"
 meta agents execute MET-45 --root . --max-turns 10
 meta agents execute MET-45 --root . --json
+```
+
+### `agents build`
+
+Run a foreground workspace QA loop with the configured built-in or custom agent provider. Unlike `meta agents execute`, `meta agents build` does not provision a Linear ticket workspace, bootstrap a workpad, or launch a background worker. It resolves an existing workspace directory, runs the selected agent directly inside that directory, streams provider stdout/stderr to the terminal, and then re-prompts for the next instruction in the same workspace.
+
+`meta agents build` resolves provider, model, and reasoning with the same precedence as the other agent-backed commands: explicit CLI overrides, then the `agents.build` command route, then repo defaults, then global defaults from `meta runtime config`.
+
+When the active provider is Codex, mid-run queued input is delivered through the same live build session by resuming the captured thread handle after the current turn completes. Other providers keep queued input in memory and prepend it to the next interactive build prompt instead of persisting any continuation state.
+
+Examples:
+
+```bash
+meta agents build MET-45 "fix the auth bug"
+meta agents build --dir /path/to/workspace "tighten the failing CLI test"
+meta agents build MET-45
+meta agents build --dir /path/to/workspace "repair the lint failure" --no-interactive
 ```
 
 ### `agents listen`

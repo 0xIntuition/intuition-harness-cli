@@ -354,6 +354,8 @@ pub enum AgentsCommands {
     Listen(ListenArgs),
     /// Execute a one-off headless agent run for a single Linear issue.
     Execute(ExecuteArgs),
+    /// Run an interactive headless agent loop against a resolved workspace directory.
+    Build(BuildArgs),
     /// Review open GitHub PRs through a guided one-shot dashboard with explicit human approval.
     Review(ReviewArgs),
     /// Analyze merged work for follow-up Linear tickets through a guided retro dashboard.
@@ -403,6 +405,37 @@ pub struct ExecuteArgs {
     /// Emit result as JSON on completion.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BuildArgs {
+    /// Workspace selector: a ticket ID like MET-45 or an explicit path.
+    #[arg(value_name = "WORKSPACE")]
+    pub workspace: Option<String>,
+    /// Initial prompt to send to the agent before entering the loop.
+    #[arg(value_name = "PROMPT")]
+    pub prompt: Option<String>,
+    /// Repository root used for workspace resolution and repo-scoped agent defaults.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Override the configured default agent/provider for this run.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for this run.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for this run.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+    /// Explicit workspace directory path; bypasses ticket-based resolution.
+    #[arg(long, value_name = "PATH")]
+    pub dir: Option<PathBuf>,
+    /// Maximum number of agent runs to allow before the loop exits.
+    #[arg(long, default_value_t = 20)]
+    pub max_turns: u32,
+    /// Run a single prompt and exit without entering the interactive loop.
+    #[arg(long)]
+    pub no_interactive: bool,
 }
 
 #[derive(Debug, Clone, Args)]

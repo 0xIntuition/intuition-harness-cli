@@ -102,7 +102,12 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let worker_pid = std::process::id();
     let mut turns_completed = 0u32;
     let mut issue = load_worker_issue(&service, &args.issue).await?;
-    let backlog_issue = match args.backlog_issue.as_deref() {
+    let backlog_issue_identifier = args.backlog_issue.clone().or(load_existing_backlog_issue_identifier(
+        &source_root,
+        project_selector,
+        &args.issue,
+    )?);
+    let backlog_issue = match backlog_issue_identifier.as_deref() {
         Some(identifier) => Some(load_worker_backlog_issue(
             &workspace_path,
             identifier,
@@ -2438,7 +2443,7 @@ fn render_review_workpad(
         String::new(),
     ];
     if review.completed_items.is_empty() {
-        lines.push("- [ ] No completed items recorded yet.".to_string());
+        lines.push("_None recorded yet._".to_string());
     } else {
         for item in &review.completed_items {
             lines.push(format!("- [x] {item}"));
@@ -2446,7 +2451,7 @@ fn render_review_workpad(
     }
     lines.extend([String::new(), "### Remaining".to_string(), String::new()]);
     if review.remaining_items.is_empty() {
-        lines.push("- [x] No remaining items identified.".to_string());
+        lines.push("_None currently identified._".to_string());
     } else {
         for item in &review.remaining_items {
             lines.push(format!("- [ ] {item}"));
@@ -2460,7 +2465,7 @@ fn render_review_workpad(
         lines.push(format!("- [ ] {item}"));
     }
     if review.validation_completed.is_empty() && review.validation_remaining.is_empty() {
-        lines.push("- [ ] No explicit validation status recorded.".to_string());
+        lines.push("_No explicit validation status recorded._".to_string());
     }
     let visible_notes = review
         .notes
@@ -2613,7 +2618,7 @@ fn render_backlog_progress_section(review: &ReviewReport) -> String {
         String::new(),
     ];
     if review.completed_items.is_empty() {
-        lines.push("- [ ] No completed items recorded yet.".to_string());
+        lines.push("_None recorded yet._".to_string());
     } else {
         for item in &review.completed_items {
             lines.push(format!("- [x] {item}"));
@@ -2621,7 +2626,7 @@ fn render_backlog_progress_section(review: &ReviewReport) -> String {
     }
     lines.extend([String::new(), "### Remaining".to_string(), String::new()]);
     if review.remaining_items.is_empty() {
-        lines.push("- [x] No remaining items identified.".to_string());
+        lines.push("_None currently identified._".to_string());
     } else {
         for item in &review.remaining_items {
             lines.push(format!("- [ ] {item}"));
@@ -2635,7 +2640,7 @@ fn render_backlog_progress_section(review: &ReviewReport) -> String {
         lines.push(format!("- [ ] {item}"));
     }
     if review.validation_completed.is_empty() && review.validation_remaining.is_empty() {
-        lines.push("- [ ] No explicit validation status recorded.".to_string());
+        lines.push("_No explicit validation status recorded._".to_string());
     }
     lines.join("\n")
 }
@@ -2833,12 +2838,27 @@ fn load_existing_pull_request(
         .unwrap_or_default())
 }
 
+fn load_existing_backlog_issue_identifier(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<String>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.backlog_issue_identifier))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LatestResumeHandle, Path, ResumeProvider, Value, WorkerSessionContext,
+        LatestResumeHandle, Path, ResumeProvider, ReviewReport, Value, WorkerSessionContext,
         build_worker_session, continuation_id_for_invocation, parse_claude_resume_handle,
         parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
+        render_backlog_progress_section,
     };
     use crate::linear::{IssueSummary, TeamRef};
     use crate::listen::{
@@ -2994,6 +3014,27 @@ mod tests {
         assert_eq!(third.canonical.tokens.input, Some(120));
         assert_eq!(third.canonical.tokens.output, Some(45));
         assert_eq!(third.canonical.tokens.total(), Some(165));
+    }
+
+    #[test]
+    fn render_backlog_progress_section_uses_prose_empty_states() {
+        let rendered = render_backlog_progress_section(&ReviewReport {
+            summary: "summary".to_string(),
+            complete: false,
+            completed_items: Vec::new(),
+            remaining_items: Vec::new(),
+            validation_completed: Vec::new(),
+            validation_remaining: Vec::new(),
+            risks: Vec::new(),
+            notes: Vec::new(),
+        });
+
+        assert!(rendered.contains("_None recorded yet._"));
+        assert!(rendered.contains("_None currently identified._"));
+        assert!(rendered.contains("_No explicit validation status recorded._"));
+        assert!(!rendered.contains("No completed items recorded yet."));
+        assert!(!rendered.contains("No remaining items identified."));
+        assert!(!rendered.contains("- [ ] No explicit validation status recorded."));
     }
 
     #[test]

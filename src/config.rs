@@ -53,6 +53,7 @@ pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
 pub const AGENT_ROUTE_CONTEXT_RELOAD: &str = "context.reload";
 pub const AGENT_ROUTE_LINEAR_ISSUES_REFINE: &str = "linear.issues.refine";
 pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
+pub const AGENT_ROUTE_AGENTS_BUILD: &str = "agents.build";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
 pub const AGENT_ROUTE_AGENTS_REVIEW: &str = "agents.review";

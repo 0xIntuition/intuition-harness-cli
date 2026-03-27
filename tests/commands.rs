@@ -136,17 +136,22 @@ fn workspace_help_lists_lifecycle_commands() {
 }
 
 #[test]
-fn agents_help_lists_listen_execute_and_workflows() {
+fn agents_help_lists_build_execute_and_workflows() {
     cli()
         .args(["agents", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  listen "))
         .stdout(predicate::str::contains("\n  execute "))
+        .stdout(predicate::str::contains("\n  build "))
         .stdout(predicate::str::contains("\n  improve "))
         .stdout(predicate::str::contains("\n  workflows "))
         .stdout(predicate::str::contains(format!(
             "{} agents execute MET-45",
+            branding::COMMAND_NAME
+        )))
+        .stdout(predicate::str::contains(format!(
+            "{} agents build MET-45 \"fix the auth bug\"",
             branding::COMMAND_NAME
         )));
 }
@@ -162,6 +167,24 @@ fn agents_execute_help_describes_one_off_run() {
         .stdout(predicate::str::contains("--root"))
         .stdout(predicate::str::contains("--max-turns"))
         .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--agent"))
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--reasoning"));
+}
+
+#[test]
+fn agents_build_help_describes_workspace_loop_flags() {
+    cli()
+        .args(["agents", "build", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive headless agent loop"))
+        .stdout(predicate::str::contains("[WORKSPACE]"))
+        .stdout(predicate::str::contains("[PROMPT]"))
+        .stdout(predicate::str::contains("--root"))
+        .stdout(predicate::str::contains("--dir"))
+        .stdout(predicate::str::contains("--max-turns"))
+        .stdout(predicate::str::contains("--no-interactive"))
         .stdout(predicate::str::contains("--agent"))
         .stdout(predicate::str::contains("--model"))
         .stdout(predicate::str::contains("--reasoning"));
