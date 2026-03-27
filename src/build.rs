@@ -17,8 +17,8 @@ use crate::agents::{
 };
 use crate::cli::{BuildArgs, RunAgentArgs};
 use crate::config::{
-    AGENT_ROUTE_AGENTS_BUILD, AppConfig, PlanningMeta, PromptTransport, resolve_agent_config,
-    AgentConfigOverrides, normalize_agent_name,
+    AGENT_ROUTE_AGENTS_BUILD, AgentConfigOverrides, AppConfig, PlanningMeta, PromptTransport,
+    normalize_agent_name, resolve_agent_config,
 };
 use crate::fs::{canonicalize_existing_dir, sibling_workspace_root};
 
@@ -35,7 +35,10 @@ extern "C" fn sigint_handler(_: libc::c_int) {
 /// Installs a custom SIGINT handler that sets the [`INTERRUPTED`] flag instead of terminating.
 fn install_sigint_handler() {
     unsafe {
-        libc::signal(libc::SIGINT, sigint_handler as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            sigint_handler as *const () as libc::sighandler_t,
+        );
     }
 }
 
@@ -60,10 +63,9 @@ fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<Str
         let prompt = args.prompt.clone().or_else(|| args.workspace.clone());
         Ok((dir.clone(), prompt))
     } else {
-        let workspace_id = args
-            .workspace
-            .as_ref()
-            .ok_or_else(|| anyhow!("workspace identifier is required when --dir is not provided"))?;
+        let workspace_id = args.workspace.as_ref().ok_or_else(|| {
+            anyhow!("workspace identifier is required when --dir is not provided")
+        })?;
         let root = canonicalize_existing_dir(&args.root)?;
         let workspace_root = sibling_workspace_root(&root)?;
         let workspace_dir = workspace_root.join(workspace_id);
@@ -74,16 +76,10 @@ fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<Str
 /// Validates that the given path exists and is a git repository.
 fn validate_git_repo(path: &Path) -> Result<()> {
     if !path.exists() {
-        bail!(
-            "workspace directory does not exist: `{}`",
-            path.display()
-        );
+        bail!("workspace directory does not exist: `{}`", path.display());
     }
     if !path.is_dir() {
-        bail!(
-            "workspace path is not a directory: `{}`",
-            path.display()
-        );
+        bail!("workspace path is not a directory: `{}`", path.display());
     }
     let git_dir = path.join(".git");
     if !git_dir.exists() {
@@ -207,7 +203,10 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
             match stdin.lock().read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) => {
-                    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
+                    let trimmed = line
+                        .trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .to_string();
                     if input_tx.send(trimmed).is_err() {
                         break;
                     }
@@ -270,11 +269,13 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
         let full_prompt = if session.queued_prompts.is_empty() {
             prompt
         } else {
-            let queued = session.queued_prompts.drain(..).collect::<Vec<_>>().join("\n");
+            let queued = session
+                .queued_prompts
+                .drain(..)
+                .collect::<Vec<_>>()
+                .join("\n");
             eprintln!("[note] Prepending queued input from previous run as context");
-            format!(
-                "[Context from queued input during previous run]\n{queued}\n\n{prompt}"
-            )
+            format!("[Context from queued input during previous run]\n{queued}\n\n{prompt}")
         };
 
         // Status line.
@@ -412,19 +413,17 @@ fn execute_build_agent(
     let mut raw_stdout = String::new();
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(chunk) => {
-                match chunk.stream {
-                    OutputStream::Stdout => {
-                        raw_stdout.push_str(&chunk.text);
-                        print!("{}", chunk.text);
-                        io::stdout().flush().ok();
-                    }
-                    OutputStream::Stderr => {
-                        eprint!("{}", chunk.text);
-                        io::stderr().flush().ok();
-                    }
+            Ok(chunk) => match chunk.stream {
+                OutputStream::Stdout => {
+                    raw_stdout.push_str(&chunk.text);
+                    print!("{}", chunk.text);
+                    io::stdout().flush().ok();
                 }
-            }
+                OutputStream::Stderr => {
+                    eprint!("{}", chunk.text);
+                    io::stderr().flush().ok();
+                }
+            },
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Check for interruption.
                 if INTERRUPTED.load(Ordering::SeqCst) {
@@ -468,13 +467,10 @@ fn execute_build_agent(
     if invocation.builtin_provider {
         if let Some(provider) = builtin_provider_adapter(&invocation.agent) {
             if let Ok(parsed) = provider.parse_capture_output(&raw_stdout) {
-                session.continuation =
-                    parsed
-                        .continuation
-                        .map(|session_id| AgentContinuation {
-                            provider: invocation.agent.clone(),
-                            session_id,
-                        });
+                session.continuation = parsed.continuation.map(|session_id| AgentContinuation {
+                    provider: invocation.agent.clone(),
+                    session_id,
+                });
             }
         }
     }

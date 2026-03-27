@@ -1,11 +1,11 @@
 mod agent_provider;
 mod agents;
 mod backlog;
-mod build;
 mod backlog_defaults;
 mod backlog_improve;
 mod backlog_spec;
 pub mod branding;
+mod build;
 mod cli;
 mod codebase_context;
 mod config;
@@ -52,8 +52,8 @@ use clap::Parser;
 use clap::error::ErrorKind;
 
 use crate::backlog_improve::run_backlog_improve;
-use crate::build::run_build;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
+use crate::build::run_build;
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
     DashboardEventArg, IssueCreateEventArg, IssueEditEventArg, LinearCommands,
