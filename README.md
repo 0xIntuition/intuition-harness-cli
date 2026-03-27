@@ -1218,6 +1218,13 @@ ceremony. Interactive TTY runs are now workspace-dashboard-first:
 - The status pane now shows whether the selected workspace is clean or dirty, which files are
   currently changed, and what changed during the last run so engineers get direct confirmation that
   the agent is editing the intended checkout.
+- Before each run starts, the dashboard fetches `origin`, rebases the selected workspace branch on
+  top of its upstream branch, and surfaces that sync progress in the live output pane. If the
+  rebase hits conflicts, the same configured build agent is prompted to resolve the conflicted
+  files in place and leave the workspace ready for `git rebase --continue`.
+- After a successful run, the dashboard stages the resulting workspace changes, creates a
+  prompt-derived commit, and pushes the active branch back to GitHub with `--force-with-lease` so
+  rebased workspace branches stay publishable without leaving the TUI flow.
 
 Passing `MET-45` or another workspace selector preselects that workspace in the dashboard, and
 passing both a workspace and a prompt auto-starts the first run there. When the resolved provider

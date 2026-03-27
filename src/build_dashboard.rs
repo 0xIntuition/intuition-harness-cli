@@ -150,6 +150,7 @@ struct BuildRunEntry {
     output: String,
     usage: Option<AgentTokenUsage>,
     resumed_turns: u32,
+    sync_summary: String,
     change_summary: String,
     publish_summary: String,
 }
@@ -207,8 +208,26 @@ enum BuildEvent {
     Complete {
         usage: Option<AgentTokenUsage>,
         continuation: Option<AgentContinuation>,
+        sync_summary: String,
     },
-    Failed(String),
+    Failed {
+        error: String,
+        sync_summary: String,
+    },
+}
+
+struct AgentRunResult {
+    usage: Option<AgentTokenUsage>,
+    continuation: Option<AgentContinuation>,
+}
+
+struct BuildExecutionContext {
+    config: AppConfig,
+    planning_meta: PlanningMeta,
+    args: BuildArgs,
+    workspace_dir: PathBuf,
+    interrupt_flag: Arc<AtomicBool>,
+    event_tx: mpsc::Sender<BuildEvent>,
 }
 
 struct BuildDashboardApp {
@@ -358,6 +377,7 @@ impl BuildDashboardApp {
             output: String::new(),
             usage: None,
             resumed_turns: u32::from(continuation.is_some()),
+            sync_summary: "Sync pending...".to_string(),
             change_summary: "Waiting for workspace changes...".to_string(),
             publish_summary: "Publish pending...".to_string(),
         });
@@ -380,12 +400,16 @@ impl BuildDashboardApp {
         ));
 
         spawn_agent_thread(
-            invocation,
+            BuildExecutionContext {
+                config: self.config.clone(),
+                planning_meta: self.planning_meta.clone(),
+                args: self.args.clone(),
+                workspace_dir: self.workspaces[workspace_index].path.clone(),
+                interrupt_flag: Arc::clone(&self.interrupt_flag),
+                event_tx: self.event_tx.clone(),
+            },
             prompt,
-            self.workspaces[workspace_index].path.clone(),
             continuation,
-            Arc::clone(&self.interrupt_flag),
-            self.event_tx.clone(),
         );
         Ok(())
     }
@@ -405,16 +429,20 @@ impl BuildDashboardApp {
                 BuildEvent::Complete {
                     usage,
                     continuation,
+                    sync_summary,
                 } => {
-                    self.complete_active_run(RunStatus::Success, usage, continuation);
+                    self.complete_active_run(RunStatus::Success, usage, continuation, sync_summary);
                 }
-                BuildEvent::Failed(error) => {
+                BuildEvent::Failed {
+                    error,
+                    sync_summary,
+                } => {
                     let status = if self.interrupt_flag.load(Ordering::SeqCst) {
                         RunStatus::Interrupted
                     } else {
                         RunStatus::Failure(error.clone())
                     };
-                    self.complete_active_run(status, None, None);
+                    self.complete_active_run(status, None, None, sync_summary);
                     self.sticky_status = Some(error);
                 }
             }
@@ -426,6 +454,7 @@ impl BuildDashboardApp {
         status: RunStatus,
         usage: Option<AgentTokenUsage>,
         continuation: Option<AgentContinuation>,
+        sync_summary: String,
     ) {
         let active_workspace = self.active_workspace;
         self.agent_running = false;
@@ -457,6 +486,7 @@ impl BuildDashboardApp {
             if let Some(run) = self.workspaces[index].runs.last_mut() {
                 run.status = status;
                 run.usage = usage;
+                run.sync_summary = sync_summary;
                 run.change_summary = change_summary;
                 run.publish_summary = publish_summary;
             }
@@ -1385,8 +1415,16 @@ fn workspace_status_text(app: &BuildDashboardApp) -> Text<'static> {
         if let Some(run) = workspace.selected_run() {
             lines.push(Line::from(String::new()));
             lines.push(Line::from(vec![
+                Span::styled("Sync ", muted_style()),
+                Span::raw(run.sync_summary.clone()),
+            ]));
+            lines.push(Line::from(vec![
                 Span::styled("Last run ", muted_style()),
                 Span::raw(run.change_summary.clone()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Run status ", muted_style()),
+                Span::raw(run.status.label().to_string()),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("Publish ", muted_style()),
@@ -1441,28 +1479,235 @@ fn render_file_excerpt(files: &[String]) -> String {
     }
 }
 
-fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run `git {}`", args.join(" ")))?;
-    if !output.status.success() {
+fn sync_workspace_before_run(context: &BuildExecutionContext) -> Result<String> {
+    let workspace_path = context.workspace_dir.as_path();
+    let snapshot = inspect_workspace_git(workspace_path)?;
+    if snapshot.is_detached {
+        bail!("sync aborted because the workspace HEAD is detached");
+    }
+    if !snapshot.clean() {
         bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
+            "sync aborted because `{}` has local file changes; commit, push, or clean the workspace before running another build",
+            workspace_path.display()
         );
     }
+
+    let branch = snapshot.branch.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        bail!("sync aborted because the workspace branch could not be resolved");
+    }
+
+    send_build_output(
+        &context.event_tx,
+        format!("[sync] Fetching latest refs for `{branch}` from origin...\n"),
+    );
+    run_git(workspace_path, &["fetch", "--prune", "origin"])
+        .with_context(|| format!("failed to fetch latest changes for `{branch}`"))?;
+
+    let Some(upstream) = resolve_workspace_upstream(workspace_path, branch)? else {
+        send_build_output(
+            &context.event_tx,
+            format!("[sync] No upstream branch configured for `{branch}`. Skipping pull.\n"),
+        );
+        return Ok(format!("sync skipped; `{branch}` has no upstream branch"));
+    };
+
+    let before_head = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+    let before_upstream = git_stdout(workspace_path, &["rev-parse", "--short", &upstream])?;
+    if before_head == before_upstream {
+        send_build_output(
+            &context.event_tx,
+            format!("[sync] `{branch}` is already current with `{upstream}`.\n"),
+        );
+        return Ok(format!(
+            "already current with `{upstream}` at {before_head}"
+        ));
+    }
+
+    send_build_output(
+        &context.event_tx,
+        format!("[sync] Rebasing `{branch}` onto `{upstream}`...\n"),
+    );
+    rebase_workspace_with_agent_assistance(context, branch, &upstream)?;
+    let after_head = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+    send_build_output(
+        &context.event_tx,
+        format!("[sync] Workspace synced. HEAD is now `{after_head}` on `{branch}`.\n"),
+    );
+    Ok(format!(
+        "rebased `{branch}` onto `{upstream}` ({before_head} -> {after_head})"
+    ))
+}
+
+fn rebase_workspace_with_agent_assistance(
+    context: &BuildExecutionContext,
+    branch: &str,
+    upstream: &str,
+) -> Result<()> {
+    let workspace_path = context.workspace_dir.as_path();
+    let mut continue_rebase = false;
+    loop {
+        if context.interrupt_flag.load(Ordering::SeqCst) {
+            bail!("agent interrupted by user");
+        }
+
+        let rebase_command = if continue_rebase {
+            vec!["rebase", "--continue"]
+        } else {
+            vec!["rebase", upstream]
+        };
+        let rebase_result =
+            run_git_with_env(workspace_path, &rebase_command, &[("GIT_EDITOR", "true")]);
+        match rebase_result {
+            Ok(()) => {
+                if rebase_in_progress(workspace_path)? {
+                    continue_rebase = true;
+                    continue;
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                let conflicted_files =
+                    git_stdout(workspace_path, &["diff", "--name-only", "--diff-filter=U"])
+                        .unwrap_or_default();
+                if conflicted_files.trim().is_empty() {
+                    return Err(error)
+                        .with_context(|| format!("failed to rebase `{branch}` onto `{upstream}`"));
+                }
+
+                send_build_output(
+                    &context.event_tx,
+                    format!(
+                        "[sync] Rebase conflict detected in {}. Launching agent assistance...\n",
+                        conflicted_files.replace('\n', ", ")
+                    ),
+                );
+                let resolution_prompt = build_rebase_conflict_prompt(
+                    workspace_path,
+                    branch,
+                    upstream,
+                    conflicted_files.trim(),
+                )?;
+                let _ = run_build_prompt_subprocess(context, &resolution_prompt, None)?;
+                run_git(workspace_path, &["add", "-A"])
+                    .context("failed to stage agent conflict resolution changes")?;
+                let unresolved =
+                    git_stdout(workspace_path, &["diff", "--name-only", "--diff-filter=U"])?;
+                if !unresolved.trim().is_empty() {
+                    bail!(
+                        "rebase conflict remains unresolved after agent assistance: {}",
+                        unresolved
+                    );
+                }
+
+                send_build_output(
+                    &context.event_tx,
+                    "[sync] Conflict edits staged. Continuing rebase...\n".to_string(),
+                );
+                continue_rebase = true;
+            }
+        }
+    }
+}
+
+fn build_rebase_conflict_prompt(
+    workspace_path: &Path,
+    branch: &str,
+    upstream: &str,
+    conflicted_files: &str,
+) -> Result<String> {
+    let head = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+    Ok(format!(
+        "Resolve an in-progress git rebase conflict inside `{}`.\nBranch: `{}`\nTarget upstream: `{}`\nCurrent HEAD: `{}`\nConflicted files:\n{}\n\nEdit the workspace in place, stage the resolved files, and leave the repository ready for `git rebase --continue`. Then print a short Markdown summary of what you changed.",
+        workspace_path.display(),
+        branch,
+        upstream,
+        head,
+        conflicted_files
+    ))
+}
+
+fn resolve_workspace_upstream(workspace_path: &Path, branch: &str) -> Result<Option<String>> {
+    if let Ok(upstream) = git_stdout(
+        workspace_path,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    ) {
+        return Ok(Some(upstream));
+    }
+
+    let origin_ref = format!("refs/remotes/origin/{branch}");
+    if !git_succeeds(
+        workspace_path,
+        &["show-ref", "--verify", "--quiet", &origin_ref],
+    )? {
+        return Ok(None);
+    }
+
+    let upstream = format!("origin/{branch}");
+    run_git(
+        workspace_path,
+        &["branch", "--set-upstream-to", &upstream, branch],
+    )
+    .with_context(|| format!("failed to set upstream for `{branch}`"))?;
+    Ok(Some(upstream))
+}
+
+fn rebase_in_progress(workspace_path: &Path) -> Result<bool> {
+    let git_dir = git_dir_path(workspace_path)?;
+    Ok(git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists())
+}
+
+fn git_dir_path(workspace_path: &Path) -> Result<PathBuf> {
+    let git_dir = git_stdout(workspace_path, &["rev-parse", "--git-dir"])?;
+    let path = PathBuf::from(&git_dir);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        workspace_path.join(path)
+    })
+}
+
+fn send_build_output(event_tx: &mpsc::Sender<BuildEvent>, text: String) {
+    let _ = event_tx.send(BuildEvent::Output(text));
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+    let output = git_output(root, args, &[])?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<()> {
+    let _ = git_output(root, args, &[])?;
+    Ok(())
+}
+
+fn run_git_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<()> {
+    let _ = git_output(root, args, env)?;
+    Ok(())
+}
+
+fn git_succeeds(root: &Path, args: &[&str]) -> Result<bool> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(args)
+        .output()
+        .with_context(|| format!("failed to run `git {}`", args.join(" ")))?;
+    Ok(output.status.success())
+}
+
+fn git_output(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<std::process::Output> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .with_context(|| format!("failed to run `git {}`", args.join(" ")))?;
     if !output.status.success() {
@@ -1472,7 +1717,7 @@ fn run_git(root: &Path, args: &[&str]) -> Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(())
+    Ok(output)
 }
 
 fn publish_workspace_changes(
@@ -1514,17 +1759,25 @@ fn publish_workspace_changes(
     .is_ok();
 
     if has_upstream {
-        run_git(workspace_path, &["push"])
+        run_git(workspace_path, &["push", "--force-with-lease"])
             .with_context(|| format!("failed to push branch `{branch}`"))?;
     } else {
         run_git(
             workspace_path,
-            &["push", "--set-upstream", "origin", branch],
+            &[
+                "push",
+                "--set-upstream",
+                "origin",
+                branch,
+                "--force-with-lease",
+            ],
         )
         .with_context(|| format!("failed to push branch `{branch}` to origin"))?;
     }
 
-    Ok(format!("committed {commit_sha} and pushed `{branch}`"))
+    Ok(format!(
+        "committed {commit_sha} and pushed `{branch}` with --force-with-lease"
+    ))
 }
 
 fn build_commit_message(prompt: &str) -> String {
@@ -1636,35 +1889,70 @@ fn status_viewport(area: Rect) -> Rect {
 }
 
 fn spawn_agent_thread(
-    invocation: crate::agents::resolution::ResolvedAgentInvocation,
+    context: BuildExecutionContext,
     prompt: String,
-    workspace_dir: PathBuf,
     continuation: Option<AgentContinuation>,
-    interrupt_flag: Arc<AtomicBool>,
-    event_tx: mpsc::Sender<BuildEvent>,
 ) {
     thread::spawn(move || {
-        if let Err(error) = run_agent_subprocess(
-            &invocation,
-            &prompt,
-            &workspace_dir,
-            continuation.as_ref(),
-            &interrupt_flag,
-            &event_tx,
-        ) {
-            let _ = event_tx.send(BuildEvent::Failed(error.to_string()));
+        let sync_summary = match sync_workspace_before_run(&context) {
+            Ok(summary) => summary,
+            Err(error) => {
+                let _ = context.event_tx.send(BuildEvent::Failed {
+                    error: error.to_string(),
+                    sync_summary: format!("sync failed: {error}"),
+                });
+                return;
+            }
+        };
+
+        let result = run_build_prompt_subprocess(&context, &prompt, continuation.as_ref());
+        match result {
+            Ok(result) => {
+                let _ = context.event_tx.send(BuildEvent::Complete {
+                    usage: result.usage,
+                    continuation: result.continuation,
+                    sync_summary,
+                });
+            }
+            Err(error) => {
+                let _ = context.event_tx.send(BuildEvent::Failed {
+                    error: error.to_string(),
+                    sync_summary,
+                });
+            }
         }
     });
+}
+
+fn run_build_prompt_subprocess(
+    context: &BuildExecutionContext,
+    prompt: &str,
+    continuation: Option<&AgentContinuation>,
+) -> Result<AgentRunResult> {
+    let invocation = resolve_build_invocation(
+        &context.config,
+        &context.planning_meta,
+        &context.args,
+        prompt,
+    )?;
+    run_agent_subprocess(
+        &invocation,
+        prompt,
+        context.workspace_dir.as_path(),
+        continuation,
+        &context.interrupt_flag,
+        &context.event_tx,
+    )
 }
 
 fn run_agent_subprocess(
     invocation: &crate::agents::resolution::ResolvedAgentInvocation,
     prompt: &str,
-    workspace_dir: &PathBuf,
+    workspace_dir: &Path,
     continuation: Option<&AgentContinuation>,
     interrupt_flag: &Arc<AtomicBool>,
     event_tx: &mpsc::Sender<BuildEvent>,
-) -> Result<()> {
+) -> Result<AgentRunResult> {
     let continuation_session_id = continuation
         .filter(|state| state.provider == invocation.agent)
         .map(|state| state.session_id.clone());
@@ -1672,7 +1960,7 @@ fn run_agent_subprocess(
     let command_args = command_args_for_invocation_with_options(
         invocation,
         AgentExecutionOptions {
-            working_dir: Some(workspace_dir.clone()),
+            working_dir: Some(workspace_dir.to_path_buf()),
             extra_env: Vec::new(),
             capture_output,
             continuation: continuation_session_id,
@@ -1734,9 +2022,7 @@ fn run_agent_subprocess(
                 if interrupt_flag.load(Ordering::SeqCst) {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ =
-                        event_tx.send(BuildEvent::Failed("agent interrupted by user".to_string()));
-                    return Ok(());
+                    bail!("agent interrupted by user");
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1746,8 +2032,7 @@ fn run_agent_subprocess(
     if interrupt_flag.load(Ordering::SeqCst) {
         let _ = child.kill();
         let _ = child.wait();
-        let _ = event_tx.send(BuildEvent::Failed("agent interrupted by user".to_string()));
-        return Ok(());
+        bail!("agent interrupted by user");
     }
 
     let status = child
@@ -1778,11 +2063,10 @@ fn run_agent_subprocess(
         );
     }
 
-    let _ = event_tx.send(BuildEvent::Complete {
+    Ok(AgentRunResult {
         usage,
         continuation,
-    });
-    Ok(())
+    })
 }
 
 fn spawn_reader(mut reader: impl Read + Send + 'static, output_tx: mpsc::Sender<String>) {
@@ -1897,6 +2181,7 @@ mod tests {
                 output: Some(25),
             }),
             resumed_turns: 0,
+            sync_summary: "rebased `feature/met-45` onto `origin/feature/met-45`".to_string(),
             change_summary:
                 "workspace now has 1 changed file(s), 1 new during this run (src/lib.rs)"
                     .to_string(),
