@@ -10,21 +10,14 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::agent_provider::builtin_provider_adapter;
 use crate::agents::{
-    AgentContinuation, AgentExecutionOptions, apply_invocation_environment,
+    AgentContinuation, AgentExecutionOptions, AgentTokenUsage, apply_invocation_environment,
     apply_noninteractive_agent_environment, command_args_for_invocation_with_options,
     render_invocation_diagnostics, resolve_agent_invocation_for_planning,
     validate_invocation_command_surface,
 };
 use crate::cli::{BuildArgs, RunAgentArgs};
-use crate::config::{
-    AGENT_ROUTE_AGENTS_BUILD, AgentConfigOverrides, AppConfig, PlanningMeta, PromptTransport,
-    normalize_agent_name, resolve_agent_config,
-};
+use crate::config::{AGENT_ROUTE_AGENTS_BUILD, AppConfig, PlanningMeta, PromptTransport};
 use crate::fs::{canonicalize_existing_dir, sibling_workspace_root};
-
-// ---------------------------------------------------------------------------
-// SIGINT handling
-// ---------------------------------------------------------------------------
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -32,8 +25,9 @@ extern "C" fn sigint_handler(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// Installs a custom SIGINT handler that sets the [`INTERRUPTED`] flag instead of terminating.
+/// Installs a SIGINT handler that interrupts only the active build subprocess.
 fn install_sigint_handler() {
+    // SAFETY: the process-global SIGINT handler only flips an atomic flag, which is signal-safe.
     unsafe {
         libc::signal(
             libc::SIGINT,
@@ -42,90 +36,13 @@ fn install_sigint_handler() {
     }
 }
 
-/// Restores the default SIGINT handler (process termination).
+/// Restores the default SIGINT behavior while waiting at the interactive prompt.
 fn restore_default_sigint() {
+    // SAFETY: restoring the default disposition is the intended `libc::signal` contract.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Workspace resolution
-// ---------------------------------------------------------------------------
-
-/// Resolves the workspace directory and effective prompt from [`BuildArgs`].
-///
-/// When `--dir` is provided, uses it as the workspace directory and re-interprets the positional
-/// `workspace` argument as the prompt if no explicit prompt was given. When `--dir` is absent,
-/// resolves the positional `workspace` as a ticket ID via the sibling workspace root.
-fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<String>)> {
-    if let Some(dir) = &args.dir {
-        let prompt = args.prompt.clone().or_else(|| args.workspace.clone());
-        Ok((dir.clone(), prompt))
-    } else {
-        let workspace_id = args.workspace.as_ref().ok_or_else(|| {
-            anyhow!("workspace identifier is required when --dir is not provided")
-        })?;
-        let root = canonicalize_existing_dir(&args.root)?;
-        let workspace_root = sibling_workspace_root(&root)?;
-        let workspace_dir = workspace_root.join(workspace_id);
-        Ok((workspace_dir, args.prompt.clone()))
-    }
-}
-
-/// Validates that the given path exists and is a git repository.
-fn validate_git_repo(path: &Path) -> Result<()> {
-    if !path.exists() {
-        bail!("workspace directory does not exist: `{}`", path.display());
-    }
-    if !path.is_dir() {
-        bail!("workspace path is not a directory: `{}`", path.display());
-    }
-    let git_dir = path.join(".git");
-    if !git_dir.exists() {
-        bail!(
-            "workspace directory is not a git repository: `{}`",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Provider display name
-// ---------------------------------------------------------------------------
-
-/// Resolves a human-readable provider label for the status line.
-fn resolve_provider_display(
-    config: &AppConfig,
-    planning_meta: &PlanningMeta,
-    args: &BuildArgs,
-) -> String {
-    let resolved = resolve_agent_config(
-        config,
-        planning_meta,
-        Some(AGENT_ROUTE_AGENTS_BUILD),
-        AgentConfigOverrides {
-            provider: args.agent.clone(),
-            model: args.model.clone(),
-            reasoning: args.reasoning.clone(),
-        },
-    );
-    match resolved {
-        Ok(r) => {
-            let name = normalize_agent_name(&r.provider);
-            match r.model {
-                Some(model) => format!("{name} ({model})"),
-                None => name,
-            }
-        }
-        Err(_) => "unknown".to_string(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Output streaming helpers
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
 enum OutputStream {
@@ -139,31 +56,18 @@ struct OutputChunk {
     text: String,
 }
 
-fn spawn_output_reader(
-    mut reader: impl Read + Send + 'static,
-    stream: OutputStream,
-    sender: mpsc::Sender<OutputChunk>,
-) {
-    thread::spawn(move || {
-        let mut buffer = [0u8; 1024];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => {
-                    let text = String::from_utf8_lossy(&buffer[..count]).to_string();
-                    if sender.send(OutputChunk { stream, text }).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
+#[derive(Debug, Default, Clone)]
+struct BuildRunSummary {
+    usage: Option<AgentTokenUsage>,
+    resumed_turns: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Build session
-// ---------------------------------------------------------------------------
+#[derive(Debug, Default)]
+struct BuildRunOutcome {
+    usage: Option<AgentTokenUsage>,
+    continuation: Option<AgentContinuation>,
+    queued_prompts: Vec<String>,
+}
 
 /// In-memory session state for the interactive build loop.
 struct BuildSession {
@@ -175,26 +79,26 @@ struct BuildSession {
     queued_prompts: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
 /// Runs the `agents build` command.
 ///
-/// Resolves the workspace directory from the provided ticket ID or explicit `--dir` path, validates
-/// it is a git repository, resolves the provider/model/reasoning configuration via the standard
-/// precedence chain with the `agents.build` route key, and enters an interactive prompt loop that
-/// spawns headless agent runs.
+/// Resolves the workspace directory from the provided ticket ID or explicit `--dir` path,
+/// validates that the target is a git repository, resolves the provider/model/reasoning settings
+/// through the `agents.build` route, and enters an interactive prompt loop that launches
+/// headless agent runs inside that workspace.
+///
+/// Returns an error when workspace resolution fails, the workspace is not a git repository,
+/// `--no-interactive` is used without an initial prompt, provider resolution fails, or a
+/// non-interactive agent run exits unsuccessfully.
 pub async fn run_build(args: &BuildArgs) -> Result<()> {
     let (workspace_dir, effective_prompt) = resolve_workspace_and_prompt(args)?;
-    validate_git_repo(&workspace_dir)?;
+    if args.no_interactive && effective_prompt.is_none() {
+        bail!("`--no-interactive` requires a prompt");
+    }
 
+    let workspace_dir = validate_git_repo(&workspace_dir)?;
     let config = AppConfig::load()?;
     let planning_meta = PlanningMeta::load(&args.root).unwrap_or_default();
-    let provider_display = resolve_provider_display(&config, &planning_meta, args);
 
-    // Spawn a dedicated stdin reader thread so that user input can be collected both at the
-    // interactive prompt and while an agent is running (queued input).
     let (input_tx, input_rx) = mpsc::channel::<String>();
     thread::spawn(move || {
         let stdin = io::stdin();
@@ -224,18 +128,15 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
         continuation: None,
         queued_prompts: Vec::new(),
     };
-
     let mut initial_prompt = effective_prompt;
 
     loop {
-        // --- Obtain the next prompt ---
-        let prompt = if let Some(p) = initial_prompt.take() {
-            p
+        let prompt = if let Some(prompt) = initial_prompt.take() {
+            prompt
         } else {
             if args.no_interactive {
                 break;
             }
-            // At the prompt, restore default SIGINT so Ctrl+C exits.
             restore_default_sigint();
             eprint!("build> ");
             io::stderr().flush().ok();
@@ -250,7 +151,6 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
             }
         };
 
-        // Check max-turns limit.
         if session.run_count >= args.max_turns {
             eprintln!(
                 "Reached maximum number of runs ({}). Exiting.",
@@ -261,46 +161,45 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
 
         session.run_count += 1;
         INTERRUPTED.store(false, Ordering::SeqCst);
-
-        // Install custom SIGINT handler so Ctrl+C during agent execution does not exit the loop.
         install_sigint_handler();
 
-        // Prepend queued prompts from the previous run if any.
-        let full_prompt = if session.queued_prompts.is_empty() {
-            prompt
-        } else {
-            let queued = session
-                .queued_prompts
-                .drain(..)
-                .collect::<Vec<_>>()
-                .join("\n");
-            eprintln!("[note] Prepending queued input from previous run as context");
-            format!("[Context from queued input during previous run]\n{queued}\n\n{prompt}")
-        };
+        let full_prompt = apply_deferred_queue(prompt, &mut session.queued_prompts);
+        let invocation = resolve_build_invocation(&session, args, &full_prompt)?;
 
-        // Status line.
         eprintln!(
             "─── Run #{} | {} | {} ───",
             session.run_count,
             session.workspace_dir.display(),
-            &provider_display,
+            provider_display(&invocation.agent, invocation.model.as_deref()),
         );
 
-        // Execute the agent.
         let result = execute_build_agent(&mut session, args, &full_prompt, &input_rx);
-
         match &result {
-            Ok(()) => eprintln!("─── Run #{} complete ───", session.run_count),
+            Ok(summary) => {
+                eprintln!(
+                    "Completion summary: status=success, {}",
+                    render_summary(summary)
+                );
+                eprintln!(
+                    "─── Run #{} complete ({}) ───",
+                    session.run_count,
+                    render_summary(summary)
+                );
+            }
             Err(_) if INTERRUPTED.load(Ordering::SeqCst) => {
+                eprintln!("Completion summary: status=interrupted");
                 eprintln!("─── Run #{} interrupted ───", session.run_count);
             }
-            Err(e) => eprintln!("─── Run #{} failed: {e} ───", session.run_count),
+            Err(error) => {
+                eprintln!("Completion summary: status=failure");
+                eprintln!("─── Run #{} failed: {error} ───", session.run_count);
+            }
         }
 
         if args.no_interactive {
-            if let Err(e) = result {
+            if let Err(error) = result {
                 if !INTERRUPTED.load(Ordering::SeqCst) {
-                    return Err(e);
+                    return Err(error);
                 }
             }
             break;
@@ -310,20 +209,122 @@ pub async fn run_build(args: &BuildArgs) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Agent execution
-// ---------------------------------------------------------------------------
+fn resolve_workspace_and_prompt(args: &BuildArgs) -> Result<(PathBuf, Option<String>)> {
+    if let Some(dir) = &args.dir {
+        let prompt = args.prompt.clone().or_else(|| args.workspace.clone());
+        Ok((dir.clone(), prompt))
+    } else {
+        let workspace = args.workspace.as_ref().ok_or_else(|| {
+            anyhow!("workspace identifier is required when `--dir` is not provided")
+        })?;
+        let root = canonicalize_existing_dir(&args.root)?;
+        Ok((
+            sibling_workspace_root(&root)?.join(workspace),
+            args.prompt.clone(),
+        ))
+    }
+}
 
-/// Executes a single agent run with streaming output.
-///
-/// Resolves the full agent invocation, spawns the subprocess, streams stdout/stderr to the
-/// terminal, and collects any queued user input received during execution.
-fn execute_build_agent(
-    session: &mut BuildSession,
+fn validate_git_repo(path: &Path) -> Result<PathBuf> {
+    let canonical = canonicalize_existing_dir(path)
+        .with_context(|| format!("failed to resolve workspace `{}`", path.display()))?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&canonical)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to inspect git metadata for workspace `{}`",
+                canonical.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "workspace directory is not a git repository: `{}`",
+            canonical.display()
+        );
+    }
+    let top_level = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if top_level.is_empty() {
+        bail!(
+            "workspace directory is not a git repository: `{}`",
+            canonical.display()
+        );
+    }
+    Ok(PathBuf::from(top_level))
+}
+
+fn provider_display(agent: &str, model: Option<&str>) -> String {
+    match model {
+        Some(model) => format!("{agent} ({model})"),
+        None => agent.to_string(),
+    }
+}
+
+fn render_summary(summary: &BuildRunSummary) -> String {
+    let mut parts = Vec::new();
+    match &summary.usage {
+        Some(usage) => {
+            let input = usage
+                .input
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string());
+            let output = usage
+                .output
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string());
+            let total = add_optional_u64(usage.input, usage.output)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string());
+            parts.push(format!("tokens in={input} out={output} total={total}"));
+        }
+        None => parts.push("tokens unavailable".to_string()),
+    }
+    if summary.resumed_turns > 0 {
+        parts.push(format!("resumed {} time(s)", summary.resumed_turns));
+    }
+    parts.join(", ")
+}
+
+fn add_optional_u64(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(lhs + rhs),
+        (Some(lhs), None) => Some(lhs),
+        (None, Some(rhs)) => Some(rhs),
+        (None, None) => None,
+    }
+}
+
+fn merge_usage(existing: &mut Option<AgentTokenUsage>, update: Option<AgentTokenUsage>) {
+    let Some(update) = update else {
+        return;
+    };
+    match existing {
+        Some(existing) => {
+            existing.input = add_optional_u64(existing.input, update.input);
+            existing.output = add_optional_u64(existing.output, update.output);
+        }
+        None => *existing = Some(update),
+    }
+}
+
+fn apply_deferred_queue(prompt: String, queued_prompts: &mut Vec<String>) -> String {
+    if queued_prompts.is_empty() {
+        return prompt;
+    }
+    let queued = std::mem::take(queued_prompts).join("\n");
+    eprintln!("[note] Prepending queued input from the previous run as context.");
+    format!(
+        "[Queued follow-up context from the previous run]\n{queued}\n\nCurrent request:\n{prompt}"
+    )
+}
+
+fn resolve_build_invocation(
+    session: &BuildSession,
     args: &BuildArgs,
     prompt: &str,
-    input_rx: &mpsc::Receiver<String>,
-) -> Result<()> {
+) -> Result<crate::agents::resolution::ResolvedAgentInvocation> {
     let run_args = RunAgentArgs {
         root: Some(args.root.clone()),
         route_key: Some(AGENT_ROUTE_AGENTS_BUILD.to_string()),
@@ -335,37 +336,115 @@ fn execute_build_agent(
         transport: None,
         attachments: Vec::new(),
     };
+    resolve_agent_invocation_for_planning(&session.config, &session.planning_meta, &run_args)
+}
 
-    let invocation =
-        resolve_agent_invocation_for_planning(&session.config, &session.planning_meta, &run_args)?;
+fn spawn_output_reader(
+    mut reader: impl Read + Send + 'static,
+    stream: OutputStream,
+    sender: mpsc::Sender<OutputChunk>,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let text = String::from_utf8_lossy(&buffer[..count]).to_string();
+                    if sender.send(OutputChunk { stream, text }).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
 
-    // Log resolved invocation diagnostics to stderr when METASTACK_DEBUG is set.
+fn execute_build_agent(
+    session: &mut BuildSession,
+    args: &BuildArgs,
+    initial_prompt: &str,
+    input_rx: &mpsc::Receiver<String>,
+) -> Result<BuildRunSummary> {
+    let mut prompt = initial_prompt.to_string();
+    let mut summary = BuildRunSummary::default();
+    let mut continuation = session.continuation.clone();
+
+    loop {
+        let outcome = execute_build_turn(session, args, &prompt, input_rx, continuation.as_ref())?;
+        continuation = outcome.continuation.clone();
+        session.continuation = continuation.clone();
+        merge_usage(&mut summary.usage, outcome.usage);
+
+        if outcome.queued_prompts.is_empty() {
+            break;
+        }
+
+        let invocation = resolve_build_invocation(session, args, &prompt)?;
+        if invocation.builtin_provider && invocation.agent == "codex" {
+            if let Some(active_continuation) = continuation.as_ref() {
+                summary.resumed_turns += 1;
+                let queued = outcome.queued_prompts.join("\n");
+                eprintln!(
+                    "[note] Resuming Codex session `{}` with queued input.",
+                    active_continuation.session_id
+                );
+                prompt = format!(
+                    "[Queued follow-up while the previous turn was still running]\n{queued}"
+                );
+                continue;
+            }
+            eprintln!(
+                "[note] Codex did not expose a continuation handle; queued input will be applied on the next run."
+            );
+        } else {
+            eprintln!(
+                "[note] {} does not support live continuation; queued input will be applied on the next run.",
+                provider_display(&invocation.agent, invocation.model.as_deref())
+            );
+        }
+
+        session.queued_prompts.extend(outcome.queued_prompts);
+        break;
+    }
+
+    Ok(summary)
+}
+
+fn execute_build_turn(
+    session: &BuildSession,
+    args: &BuildArgs,
+    prompt: &str,
+    input_rx: &mpsc::Receiver<String>,
+    continuation: Option<&AgentContinuation>,
+) -> Result<BuildRunOutcome> {
+    let invocation = resolve_build_invocation(session, args, prompt)?;
+
     if std::env::var_os("METASTACK_DEBUG").is_some() {
         for line in render_invocation_diagnostics(&invocation) {
             eprintln!("[debug] {line}");
         }
     }
 
-    let continuation_session_id = session
-        .continuation
-        .as_ref()
-        .filter(|c| c.provider == invocation.agent)
-        .map(|c| c.session_id.clone());
-
+    let continuation_session_id = continuation
+        .filter(|state| state.provider == invocation.agent)
+        .map(|state| state.session_id.clone());
+    let capture_output = invocation.builtin_provider && invocation.agent == "codex";
     let command_args = command_args_for_invocation_with_options(
         &invocation,
         AgentExecutionOptions {
             working_dir: Some(session.workspace_dir.clone()),
             extra_env: Vec::new(),
-            capture_output: invocation.builtin_provider,
+            capture_output,
             continuation: continuation_session_id,
         },
     )?;
-
     let attempted = validate_invocation_command_surface(&invocation, &command_args)?;
 
     let mut command = Command::new(&invocation.command);
     command.args(&command_args);
+    command.current_dir(&session.workspace_dir);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -379,23 +458,21 @@ fn execute_build_agent(
         )
     })?;
 
-    // Write prompt payload to stdin for Stdin transport providers.
     if invocation.transport == PromptTransport::Stdin {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(invocation.payload.as_bytes())
-                .with_context(|| {
-                    format!(
-                        "failed to write prompt payload to agent `{}`",
-                        invocation.agent
-                    )
-                })?;
-        }
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to open stdin for agent `{}`", invocation.agent))?;
+        stdin
+            .write_all(invocation.payload.as_bytes())
+            .with_context(|| {
+                format!(
+                    "failed to write prompt payload to agent `{}`",
+                    invocation.agent
+                )
+            })?;
     }
-    // Drop stdin handle so the agent can proceed.
-    drop(child.stdin.take());
 
-    // Spawn output reader threads.
     let stdout = child
         .stdout
         .take()
@@ -404,13 +481,15 @@ fn execute_build_agent(
         .stderr
         .take()
         .ok_or_else(|| anyhow!("failed to open stderr for agent `{}`", invocation.agent))?;
-
     let (sender, receiver) = mpsc::channel();
     spawn_output_reader(stdout, OutputStream::Stdout, sender.clone());
     spawn_output_reader(stderr, OutputStream::Stderr, sender);
 
-    // Stream output to terminal and handle queued input / interruption.
     let mut raw_stdout = String::new();
+    let mut raw_stderr = String::new();
+    let mut queued_prompts = Vec::new();
+    let mut codex_resume_noted = false;
+
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => match chunk.stream {
@@ -420,12 +499,12 @@ fn execute_build_agent(
                     io::stdout().flush().ok();
                 }
                 OutputStream::Stderr => {
+                    raw_stderr.push_str(&chunk.text);
                     eprint!("{}", chunk.text);
                     io::stderr().flush().ok();
                 }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Check for interruption.
                 if INTERRUPTED.load(Ordering::SeqCst) {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -435,24 +514,29 @@ fn execute_build_agent(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        // Drain any queued user input received during agent execution.
-        while let Ok(msg) = input_rx.try_recv() {
-            if !msg.is_empty() {
-                eprintln!("[queued] {msg}");
-                session.queued_prompts.push(msg);
+        while let Ok(message) = input_rx.try_recv() {
+            if message.is_empty() {
+                continue;
             }
+            eprintln!("[queued] {message}");
+            if capture_output && !codex_resume_noted {
+                eprintln!(
+                    "[note] queued input will resume the active Codex session after this turn completes."
+                );
+                codex_resume_noted = true;
+            }
+            queued_prompts.push(message);
         }
     }
 
-    // Final drain of queued input after output streams close.
-    while let Ok(msg) = input_rx.try_recv() {
-        if !msg.is_empty() {
-            eprintln!("[queued] {msg}");
-            session.queued_prompts.push(msg);
+    while let Ok(message) = input_rx.try_recv() {
+        if message.is_empty() {
+            continue;
         }
+        eprintln!("[queued] {message}");
+        queued_prompts.push(message);
     }
 
-    // Check for late interruption.
     if INTERRUPTED.load(Ordering::SeqCst) {
         let _ = child.kill();
         let _ = child.wait();
@@ -463,11 +547,16 @@ fn execute_build_agent(
         .wait()
         .with_context(|| format!("failed to wait for agent `{}`", invocation.agent))?;
 
-    // Attempt to parse continuation handle from captured output (builtin providers only).
-    if invocation.builtin_provider {
+    let mut outcome = BuildRunOutcome {
+        usage: None,
+        continuation: None,
+        queued_prompts,
+    };
+    if capture_output {
         if let Some(provider) = builtin_provider_adapter(&invocation.agent) {
             if let Ok(parsed) = provider.parse_capture_output(&raw_stdout) {
-                session.continuation = parsed.continuation.map(|session_id| AgentContinuation {
+                outcome.usage = parsed.usage;
+                outcome.continuation = parsed.continuation.map(|session_id| AgentContinuation {
                     provider: invocation.agent.clone(),
                     session_id,
                 });
@@ -478,13 +567,50 @@ fn execute_build_agent(
     if !status.success() {
         let code = status
             .code()
-            .map(|v| v.to_string())
+            .map(|value| value.to_string())
             .unwrap_or_else(|| "terminated by signal".to_string());
         bail!(
-            "agent `{}` exited unsuccessfully ({code})",
+            "agent `{}` exited unsuccessfully ({code}) while running `{attempted}`: {}",
             invocation.agent,
+            raw_stderr.trim()
         );
     }
 
-    Ok(())
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_deferred_queue, resolve_workspace_and_prompt};
+    use crate::cli::BuildArgs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn build_args_use_dir_as_workspace_and_positional_as_prompt() {
+        let args = BuildArgs {
+            workspace: Some("fix auth".to_string()),
+            prompt: None,
+            root: PathBuf::from("."),
+            agent: None,
+            model: None,
+            reasoning: None,
+            dir: Some(PathBuf::from("/tmp/workspace")),
+            max_turns: 20,
+            no_interactive: false,
+        };
+
+        let (workspace, prompt) =
+            resolve_workspace_and_prompt(&args).expect("resolution should succeed");
+        assert_eq!(workspace, PathBuf::from("/tmp/workspace"));
+        assert_eq!(prompt.as_deref(), Some("fix auth"));
+    }
+
+    #[test]
+    fn queued_prompts_are_prepended_once() {
+        let mut queued = vec!["first".to_string(), "second".to_string()];
+        let prompt = apply_deferred_queue("current".to_string(), &mut queued);
+        assert!(prompt.contains("first"));
+        assert!(prompt.contains("current"));
+        assert!(queued.is_empty());
+    }
 }

@@ -136,13 +136,14 @@ fn workspace_help_lists_lifecycle_commands() {
 }
 
 #[test]
-fn agents_help_lists_listen_execute_and_workflows() {
+fn agents_help_lists_listen_execute_build_and_workflows() {
     cli()
         .args(["agents", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\n  listen "))
         .stdout(predicate::str::contains("\n  execute "))
+        .stdout(predicate::str::contains("\n  build "))
         .stdout(predicate::str::contains("\n  improve "))
         .stdout(predicate::str::contains("\n  workflows "))
         .stdout(predicate::str::contains(format!(
@@ -174,6 +175,24 @@ fn agents_execute_requires_issue_id() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("<ISSUE_ID>"));
+}
+
+#[test]
+fn agents_build_help_describes_workspace_loop_and_flags() {
+    cli()
+        .args(["agents", "build", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive prompt loop"))
+        .stdout(predicate::str::contains("[WORKSPACE]"))
+        .stdout(predicate::str::contains("[PROMPT]"))
+        .stdout(predicate::str::contains("--root"))
+        .stdout(predicate::str::contains("--dir"))
+        .stdout(predicate::str::contains("--max-turns"))
+        .stdout(predicate::str::contains("--no-interactive"))
+        .stdout(predicate::str::contains("--agent"))
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--reasoning"));
 }
 
 #[test]
