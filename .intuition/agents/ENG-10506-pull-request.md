@@ -3,20 +3,28 @@
 ## Summary
 - Linear issue: https://linear.app/0xintuition/issue/ENG-10506/add-agents-build-command-interactive-headless-agent-loop-for-workspace
 - Published automatically by `intu agents listen` for `ENG-10506`
-- Latest listener review: placeholder checklist items are ignored when summarizing ENG-10506 packet progress.
+- Latest listener review: `agents build` implementation and focused validation are complete; listener progress now reads from the managed backlog block instead of backlog packet templates.
 
 ## Lifecycle
 - Initial publication uses a draft PR for unattended work in progress.
 - The same PR is promoted to ready for review during the existing review handoff.
 
 ## Completed In This Branch
+- Changed `src/build.rs`
+- Changed `src/cli.rs`
+- Changed `src/lib.rs`
+- Changed `src/config.rs`
+- Changed `src/config_resolution.rs`
 - Changed `src/listen/mod.rs`
-- Changed `.intuition/agents/ENG-10506-pull-request.md`
-- Changed `.intuition/backlog/ENG-10506/artifacts/artifact-template.md`
+- Changed `tests/build.rs`
+- Changed `tests/commands.rs`
+- Changed `README.md`
+- Changed `WORKFLOW.md`
 - Changed `.intuition/backlog/ENG-10506/index.md`
+- Changed `.intuition/backlog/ENG-10506/specification.md`
 - Changed `.intuition/backlog/ENG-10506/validation.md`
-- Changed `?? .intuition/backlog/ENG-10506/artifacts/artifact-template.md`
-- Taught listen checklist parsing to ignore placeholder `Follow-up action`, `Task`, and `Criterion` items.
+- Taught listen backlog-progress tracking to read the managed `metastack-listen-progress` block from `index.md`.
+- Kept placeholder `Follow-up action`, `Task`, and `Criterion` checklist items from surfacing as real remaining work.
 
 ## Remaining Work
 - No remaining implementation work is tracked locally.
