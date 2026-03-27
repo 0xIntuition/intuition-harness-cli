@@ -102,7 +102,12 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let worker_pid = std::process::id();
     let mut turns_completed = 0u32;
     let mut issue = load_worker_issue(&service, &args.issue).await?;
-    let backlog_issue = match args.backlog_issue.as_deref() {
+    let backlog_issue_identifier = args.backlog_issue.clone().or(load_existing_backlog_issue_identifier(
+        &source_root,
+        project_selector,
+        &args.issue,
+    )?);
+    let backlog_issue = match backlog_issue_identifier.as_deref() {
         Some(identifier) => Some(load_worker_backlog_issue(
             &workspace_path,
             identifier,
@@ -2831,6 +2836,20 @@ fn load_existing_pull_request(
         .find(|session| session.issue_matches(issue_identifier))
         .map(|session| session.pull_request)
         .unwrap_or_default())
+}
+
+fn load_existing_backlog_issue_identifier(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<String>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.backlog_issue_identifier))
 }
 
 #[cfg(test)]
