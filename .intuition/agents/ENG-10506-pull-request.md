@@ -3,7 +3,7 @@
 ## Summary
 - Linear issue: https://linear.app/0xintuition/issue/ENG-10506/add-agents-build-command-interactive-headless-agent-loop-for-workspace
 - Published automatically by `intu agents listen` for `ENG-10506`
-- Latest listener review: `agents build` implementation and focused validation are complete; listener progress now reads from the managed backlog block instead of backlog packet templates.
+- Latest listener review: `agents build` implementation and focused validation are complete, and ticket packet owners/reviewers are now recorded in `contacts.md`.
 
 ## Lifecycle
 - Initial publication uses a draft PR for unattended work in progress.
@@ -11,20 +11,15 @@
 
 ## Completed In This Branch
 - Changed `src/build.rs`
-- Changed `src/cli.rs`
-- Changed `src/lib.rs`
-- Changed `src/config.rs`
-- Changed `src/config_resolution.rs`
+- Changed `src/fs.rs`
 - Changed `src/listen/mod.rs`
+- Changed `src/listen/workspace.rs`
 - Changed `tests/build.rs`
-- Changed `tests/commands.rs`
-- Changed `README.md`
-- Changed `WORKFLOW.md`
+- Changed `.intuition/agents/ENG-10506-pull-request.md`
+- Changed `.intuition/backlog/ENG-10506/contacts.md`
 - Changed `.intuition/backlog/ENG-10506/index.md`
-- Changed `.intuition/backlog/ENG-10506/specification.md`
-- Changed `.intuition/backlog/ENG-10506/validation.md`
-- Taught listen backlog-progress tracking to read the managed `metastack-listen-progress` block from `index.md`.
-- Kept placeholder `Follow-up action`, `Task`, and `Criterion` checklist items from surfacing as real remaining work.
+- Preserved explicit nested workspace directories when validating git worktrees for `agents build`.
+- Confirmed the ticket owner/reviewer fields in the local backlog contact sheet.
 
 ## Remaining Work
 - No remaining implementation work is tracked locally.

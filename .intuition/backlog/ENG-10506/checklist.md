@@ -6,7 +6,7 @@ Last updated: 2026-03-26
 
 - [x] Confirm scope and non-goals in `index.md`.
 - [x] Confirm contract boundaries in `specification.md`.
-- [ ] Confirm owners/reviewers in `contacts.md`.
+- [x] Confirm owners/reviewers in `contacts.md`.
 
 ## 2. Implementation Tasks by Area
 
