@@ -48,6 +48,7 @@ enum BuildFocus {
     Workspaces,
     Runs,
     Output,
+    Status,
     Prompt,
 }
 
@@ -150,6 +151,7 @@ struct BuildRunEntry {
     usage: Option<AgentTokenUsage>,
     resumed_turns: u32,
     change_summary: String,
+    publish_summary: String,
 }
 
 impl BuildRunEntry {
@@ -219,6 +221,7 @@ struct BuildDashboardApp {
     focus: BuildFocus,
     prompt: InputFieldState,
     output_scroll: ScrollState,
+    status_scroll: ScrollState,
     copy: CopyUiState,
     agent_running: bool,
     active_workspace: Option<usize>,
@@ -253,6 +256,7 @@ impl BuildDashboardApp {
             focus: BuildFocus::Workspaces,
             prompt: InputFieldState::multiline(String::new()),
             output_scroll: ScrollState::default(),
+            status_scroll: ScrollState::default(),
             copy: CopyUiState::default(),
             agent_running: false,
             active_workspace: None,
@@ -355,6 +359,7 @@ impl BuildDashboardApp {
             usage: None,
             resumed_turns: u32::from(continuation.is_some()),
             change_summary: "Waiting for workspace changes...".to_string(),
+            publish_summary: "Publish pending...".to_string(),
         });
         self.workspaces[workspace_index].selected_run = self.workspaces[workspace_index]
             .runs
@@ -433,11 +438,27 @@ impl BuildDashboardApp {
                 .unwrap_or_else(|_| self.workspaces[index].git.clone());
             let before_snapshot = self.current_run_before_snapshot.take().unwrap_or_default();
             let change_summary = summarize_change_delta(&before_snapshot, &after_snapshot);
-            self.workspaces[index].git = after_snapshot;
+            let publish_summary = if matches!(status, RunStatus::Success) {
+                publish_workspace_changes(
+                    &self.workspaces[index].path,
+                    &after_snapshot,
+                    self.workspaces[index]
+                        .runs
+                        .last()
+                        .map(|run| run.prompt.as_str())
+                        .unwrap_or("update workspace"),
+                )
+                .unwrap_or_else(|error| format!("publish failed: {error}"))
+            } else {
+                "publish skipped".to_string()
+            };
+            self.workspaces[index].git =
+                inspect_workspace_git(&self.workspaces[index].path).unwrap_or(after_snapshot);
             if let Some(run) = self.workspaces[index].runs.last_mut() {
                 run.status = status;
                 run.usage = usage;
                 run.change_summary = change_summary;
+                run.publish_summary = publish_summary;
             }
         }
 
@@ -549,6 +570,9 @@ impl BuildDashboardApp {
                 .unwrap_or_else(|| {
                     CopyPayload::from_text("build output", "No run selected.".into())
                 }),
+            BuildFocus::Status => {
+                CopyPayload::from_text("workspace status", plain_status_text(self).into())
+            }
             BuildFocus::Prompt => self.prompt.copy_payload("build prompt"),
         }
     }
@@ -652,6 +676,9 @@ pub(crate) fn run_build_dashboard(options: BuildDashboardOptions) -> Result<()> 
                     BuildFocus::Output => {
                         handle_output_keys(&mut app, key, output_viewport(size.into()))
                     }
+                    BuildFocus::Status => {
+                        handle_status_keys(&mut app, key, status_viewport(size.into()))
+                    }
                     BuildFocus::Prompt => {
                         handle_prompt_keys(&mut app, key, prompt_viewport(size.into()))?
                     }
@@ -673,14 +700,21 @@ pub(crate) fn run_build_dashboard(options: BuildDashboardOptions) -> Result<()> 
                     let _ = app
                         .copy
                         .handle_export_mouse(mouse, copy_overlay_viewport(size.into()));
-                } else if app.focus == BuildFocus::Output
-                    && let Some(workspace) = app.selected_workspace()
-                    && let Some(run) = workspace.selected_run()
-                {
-                    let viewport = output_viewport(size.into());
-                    let rows = wrapped_rows(&run.output, viewport.width.max(1)).max(1);
+                } else if app.focus == BuildFocus::Output {
+                    if let Some(workspace) = app.selected_workspace()
+                        && let Some(run) = workspace.selected_run()
+                    {
+                        let viewport = output_viewport(size.into());
+                        let rows = wrapped_rows(&run.output, viewport.width.max(1)).max(1);
+                        let _ = app
+                            .output_scroll
+                            .apply_mouse_in_viewport(mouse, viewport, rows);
+                    }
+                } else if app.focus == BuildFocus::Status {
+                    let viewport = status_viewport(size.into());
+                    let rows = wrapped_rows(&plain_status_text(&app), viewport.width.max(1)).max(1);
                     let _ = app
-                        .output_scroll
+                        .status_scroll
                         .apply_mouse_in_viewport(mouse, viewport, rows);
                 }
             }
@@ -769,7 +803,7 @@ fn handle_output_keys(
     viewport: Rect,
 ) {
     match key.code {
-        KeyCode::Tab => app.focus = BuildFocus::Prompt,
+        KeyCode::Tab => app.focus = BuildFocus::Status,
         KeyCode::Esc => app.focus = BuildFocus::Runs,
         _ => {
             if let Some(workspace) = app.selected_workspace()
@@ -778,6 +812,21 @@ fn handle_output_keys(
                 let rows = wrapped_rows(&run.output, viewport.width.max(1)).max(1);
                 let _ = app.output_scroll.apply_key_in_viewport(key, viewport, rows);
             }
+        }
+    }
+}
+
+fn handle_status_keys(
+    app: &mut BuildDashboardApp,
+    key: crossterm::event::KeyEvent,
+    viewport: Rect,
+) {
+    match key.code {
+        KeyCode::Tab => app.focus = BuildFocus::Prompt,
+        KeyCode::Esc => app.focus = BuildFocus::Output,
+        _ => {
+            let rows = wrapped_rows(&plain_status_text(app), viewport.width.max(1)).max(1);
+            let _ = app.status_scroll.apply_key_in_viewport(key, viewport, rows);
         }
     }
 }
@@ -882,7 +931,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &BuildDashboardApp) {
             ("Tab", "cycle panes"),
             ("Enter", "choose/send"),
             ("Shift+Enter", "newline"),
-            ("PgUp/PgDn", "scroll output"),
+            ("PgUp/PgDn", "scroll output/status"),
             ("Ctrl+C", "stop/quit"),
             ("Ctrl+Y", "copy"),
         ]),
@@ -1008,6 +1057,7 @@ fn render_runs(frame: &mut Frame<'_>, area: Rect, app: &BuildDashboardApp) {
                     Span::raw("  "),
                     Span::styled(run.change_summary.clone(), muted_style()),
                 ]),
+                Line::from(Span::styled(run.publish_summary.clone(), muted_style())),
             ]))
         })
         .collect::<Vec<_>>();
@@ -1065,53 +1115,21 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &BuildDashboardApp) {
 
 fn render_workspace_status(frame: &mut Frame<'_>, area: Rect, app: &BuildDashboardApp) {
     let block = Block::default()
-        .title(panel_title("Workspace Status", false))
+        .title(panel_title(
+            "Workspace Status",
+            app.focus == BuildFocus::Status,
+        ))
         .borders(Borders::ALL)
+        .border_style(if app.focus == BuildFocus::Status {
+            emphasis_style()
+        } else {
+            Style::default()
+        })
         .padding(Padding::new(1, 1, 0, 0));
-
-    let text = if let Some(workspace) = app.selected_workspace() {
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Workspace ", muted_style()),
-                Span::styled(workspace.name.clone(), emphasis_style()),
-            ]),
-            Line::from(vec![
-                Span::styled("Path ", muted_style()),
-                Span::raw(workspace.path.display().to_string()),
-            ]),
-        ];
-        for line in workspace.git.detail_lines() {
-            lines.push(Line::from(line));
-        }
-        if let Some(run) = workspace.selected_run() {
-            lines.push(Line::from(String::new()));
-            lines.push(Line::from(vec![
-                Span::styled("Last run ", muted_style()),
-                Span::raw(run.change_summary.clone()),
-            ]));
-            if matches!(run.status, RunStatus::Running) {
-                lines.push(Line::from(vec![
-                    Span::styled("Live output ", muted_style()),
-                    Span::raw(format!("{} bytes streamed", app.current_output_bytes)),
-                ]));
-            }
-        }
-        if !workspace.git.changed_files.is_empty() {
-            lines.push(Line::from(String::new()));
-            lines.push(Line::from(Span::styled("Changed files:", emphasis_style())));
-            for file in workspace.git.changed_files.iter().take(5) {
-                lines.push(Line::from(format!("- {file}")));
-            }
-        }
-        Text::from(lines)
-    } else {
-        Text::from("No workspace selected.")
-    };
-
-    frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
-        area,
-    );
+    let paragraph =
+        scrollable_paragraph_with_block(workspace_status_text(app), block, &app.status_scroll)
+            .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn render_prompt(frame: &mut Frame<'_>, area: Rect, app: &BuildDashboardApp) {
@@ -1166,7 +1184,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &BuildDashboardApp) {
             } else if app.pending_continuation.is_some() {
                 "Next compatible run can resume the previous Codex session.".to_string()
             } else {
-                "Select a workspace, review its history, then send the next update request."
+                "Select a workspace, review its history and status, then send the next update request."
                     .to_string()
             }
         })
@@ -1349,6 +1367,65 @@ fn summarize_change_delta(before: &WorkspaceGitSnapshot, after: &WorkspaceGitSna
     parts.join(", ")
 }
 
+fn workspace_status_text(app: &BuildDashboardApp) -> Text<'static> {
+    if let Some(workspace) = app.selected_workspace() {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Workspace ", muted_style()),
+                Span::styled(workspace.name.clone(), emphasis_style()),
+            ]),
+            Line::from(vec![
+                Span::styled("Path ", muted_style()),
+                Span::raw(workspace.path.display().to_string()),
+            ]),
+        ];
+        for line in workspace.git.detail_lines() {
+            lines.push(Line::from(line));
+        }
+        if let Some(run) = workspace.selected_run() {
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from(vec![
+                Span::styled("Last run ", muted_style()),
+                Span::raw(run.change_summary.clone()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Publish ", muted_style()),
+                Span::raw(run.publish_summary.clone()),
+            ]));
+            if matches!(run.status, RunStatus::Running) {
+                lines.push(Line::from(vec![
+                    Span::styled("Live output ", muted_style()),
+                    Span::raw(format!("{} bytes streamed", app.current_output_bytes)),
+                ]));
+            }
+        }
+        if !workspace.git.changed_files.is_empty() {
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from(Span::styled("Changed files:", emphasis_style())));
+            for file in &workspace.git.changed_files {
+                lines.push(Line::from(format!("- {file}")));
+            }
+        }
+        Text::from(lines)
+    } else {
+        Text::from("No workspace selected.")
+    }
+}
+
+fn plain_status_text(app: &BuildDashboardApp) -> String {
+    workspace_status_text(app)
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn render_file_excerpt(files: &[String]) -> String {
     let preview = files.iter().take(3).cloned().collect::<Vec<_>>();
     if preview.is_empty() {
@@ -1379,6 +1456,85 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_git(root: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run `git {}`", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn publish_workspace_changes(
+    workspace_path: &Path,
+    after_snapshot: &WorkspaceGitSnapshot,
+    prompt: &str,
+) -> Result<String> {
+    if after_snapshot.clean() {
+        return Ok("no publish needed; workspace is clean".to_string());
+    }
+    if after_snapshot.is_detached {
+        bail!("publish skipped because the workspace HEAD is detached");
+    }
+    let branch = after_snapshot.branch.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        bail!("publish skipped because the workspace branch could not be resolved");
+    }
+
+    run_git(workspace_path, &["add", "-A"])?;
+    let staged = git_stdout(workspace_path, &["diff", "--cached", "--name-only"])?;
+    if staged.trim().is_empty() {
+        return Ok("no publish needed; nothing staged after git add".to_string());
+    }
+
+    let commit_message = build_commit_message(prompt);
+    run_git(workspace_path, &["commit", "-m", &commit_message])
+        .with_context(|| "failed to commit workspace changes")?;
+    let commit_sha = git_stdout(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+
+    let has_upstream = git_stdout(
+        workspace_path,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .is_ok();
+
+    if has_upstream {
+        run_git(workspace_path, &["push"])
+            .with_context(|| format!("failed to push branch `{branch}`"))?;
+    } else {
+        run_git(
+            workspace_path,
+            &["push", "--set-upstream", "origin", branch],
+        )
+        .with_context(|| format!("failed to push branch `{branch}` to origin"))?;
+    }
+
+    Ok(format!("committed {commit_sha} and pushed `{branch}`"))
+}
+
+fn build_commit_message(prompt: &str) -> String {
+    let first_line = prompt.lines().next().unwrap_or("update workspace").trim();
+    let suffix: String = if first_line.is_empty() {
+        "update workspace".to_string()
+    } else {
+        first_line.chars().take(60).collect()
+    };
+    format!("meta agents build: {suffix}")
 }
 
 fn workspace_has_unpushed_commits(workspace_path: &Path) -> Result<bool> {
@@ -1446,6 +1602,36 @@ fn output_viewport(area: Rect) -> Rect {
         y: detail[0].y.saturating_add(1),
         width: detail[0].width.saturating_sub(4),
         height: detail[0].height.saturating_sub(2),
+    }
+}
+
+fn status_viewport(area: Rect) -> Rect {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(12),
+            Constraint::Length(6),
+            Constraint::Length(2),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(29),
+            Constraint::Percentage(27),
+            Constraint::Percentage(44),
+        ])
+        .split(outer[1]);
+    let detail = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(body[2]);
+    Rect {
+        x: detail[1].x.saturating_add(2),
+        y: detail[1].y.saturating_add(1),
+        width: detail[1].width.saturating_sub(4),
+        height: detail[1].height.saturating_sub(2),
     }
 }
 
@@ -1714,9 +1900,11 @@ mod tests {
             change_summary:
                 "workspace now has 1 changed file(s), 1 new during this run (src/lib.rs)"
                     .to_string(),
+            publish_summary: "committed abc123 and pushed `feature/met-45`".to_string(),
         });
         let snapshot = render_dashboard_snapshot(app, 140, 36).expect("snapshot");
         assert!(snapshot.contains("fix auth"));
         assert!(snapshot.contains("1 changed"));
+        assert!(snapshot.contains("pushed"));
     }
 }
