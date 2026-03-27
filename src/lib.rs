@@ -1,6 +1,7 @@
 mod agent_provider;
 mod agents;
 mod backlog;
+mod build;
 mod backlog_defaults;
 mod backlog_improve;
 mod backlog_spec;
@@ -51,6 +52,7 @@ use clap::Parser;
 use clap::error::ErrorKind;
 
 use crate::backlog_improve::run_backlog_improve;
+use crate::build::run_build;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::cli::{
     AgentsCommands, BacklogCommands, Cli, Command, ConfigEventArg, DashboardCommands,
@@ -264,6 +266,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             AgentsCommands::Improve(args) => {
                 run_improve(&args).await?;
+            }
+            AgentsCommands::Build(args) => {
+                run_build(&args).await?;
             }
             AgentsCommands::Workflows(args) => {
                 println!("{}", run_workflows(&args).await?);

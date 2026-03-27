@@ -360,6 +360,8 @@ pub enum AgentsCommands {
     Retro(RetroArgs),
     /// Improve an existing PR by running an agent in an isolated workspace and publishing a stacked PR.
     Improve(ImproveArgs),
+    /// Launch a headless agent in a workspace directory with an interactive prompt loop.
+    Build(BuildArgs),
     /// List, explain, and run reusable workflow playbooks.
     #[command(alias = "workflow")]
     Workflows(WorkflowsArgs),
@@ -403,6 +405,38 @@ pub struct ExecuteArgs {
     /// Emit result as JSON on completion.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BuildArgs {
+    /// Workspace identifier: a Linear ticket ID (e.g. MET-45) resolved to its sibling workspace
+    /// path. Not required when `--dir` is provided.
+    #[arg(value_name = "WORKSPACE")]
+    pub workspace: Option<String>,
+    /// Prompt to send for the first agent run. If omitted, enters the interactive prompt directly.
+    #[arg(value_name = "PROMPT")]
+    pub prompt: Option<String>,
+    /// Repository root used to resolve sibling workspace paths.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    pub root: PathBuf,
+    /// Override the configured default agent/provider for this session.
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Override the configured default model for this session.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Override the resolved built-in reasoning option for this session.
+    #[arg(long)]
+    pub reasoning: Option<String>,
+    /// Explicit workspace directory path, bypassing ticket-based resolution.
+    #[arg(long, value_name = "PATH")]
+    pub dir: Option<PathBuf>,
+    /// Maximum number of agent runs in the interactive session.
+    #[arg(long, default_value_t = 20)]
+    pub max_turns: u32,
+    /// Run a single prompt and exit without entering the interactive loop.
+    #[arg(long)]
+    pub no_interactive: bool,
 }
 
 #[derive(Debug, Clone, Args)]
