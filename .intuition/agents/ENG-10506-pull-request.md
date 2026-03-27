@@ -3,7 +3,7 @@
 ## Summary
 - Linear issue: https://linear.app/0xintuition/issue/ENG-10506/add-agents-build-command-interactive-headless-agent-loop-for-workspace
 - Published automatically by `intu agents listen` for `ENG-10506`
-- Latest listener review: Heuristic review detected branch changes, but additional ticket work remains.
+- Latest listener review: `agents build` implementation and focused validation are complete; placeholder backlog artifacts no longer create false remaining-work signals.
 
 ## Lifecycle
 - Initial publication uses a draft PR for unattended work in progress.
@@ -21,7 +21,7 @@
 - Reconciled the listener packet so remaining-work tracking matches the completed `agents build` implementation.
 
 ## Remaining Work
-- No remaining ticket-local follow-up actions are recorded in the workspace packet.
+- No remaining implementation work is tracked locally.
 
 ## Issue Context
 # Add `agents build` command — interactive headless agent loop for workspace QA
