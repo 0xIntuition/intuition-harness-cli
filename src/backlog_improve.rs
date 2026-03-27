@@ -72,6 +72,7 @@ const PROPOSAL_JSON_FILE: &str = "proposal.json";
 const PROPOSAL_MARKDOWN_FILE: &str = "proposal.md";
 const FOLLOW_UP_ANSWERS_FILE: &str = "follow-up-answers.md";
 const SUMMARY_FILE: &str = "summary.json";
+const REFINEMENT_GUIDANCE_FILE: &str = "refinement-guidance.md";
 const MAX_FOLLOW_UP_QUESTION_ROUNDS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -205,6 +206,7 @@ struct ImprovementIssueRun {
     proposal_markdown_path: PathBuf,
     started_at: String,
     output: ImprovementOutput,
+    refinement_history: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +233,8 @@ struct ImprovementReviewApp {
     review_focus: ImprovementReviewFocus,
     recommendation_scroll: ScrollState,
     proposal_scroll: ScrollState,
+    refinement_history: Vec<String>,
+    refinement_input: Option<InputFieldState>,
     error: Option<String>,
 }
 
@@ -250,6 +254,10 @@ enum ImprovementReviewExit {
     },
     FollowUp {
         answers: Vec<(String, String)>,
+        question_round: usize,
+    },
+    Refine {
+        addendum: String,
         question_round: usize,
     },
 }
@@ -624,6 +632,7 @@ async fn run_interactive_improvement_session(
                 issue,
                 &issue_run.output,
                 question_round,
+                issue_run.refinement_history.clone(),
             )? {
                 ImprovementReviewExit::Cancelled => {
                     return Ok(render_improvement_reports(root, &reports));
@@ -698,6 +707,30 @@ async fn run_interactive_improvement_session(
                             issue_position: index + 1,
                             issue_total: issues.len(),
                             question_round: next_question_round,
+                        },
+                    )?
+                    else {
+                        return Ok(render_improvement_reports(root, &reports));
+                    };
+                    issue_run = next_issue_run;
+                }
+                ImprovementReviewExit::Refine {
+                    addendum,
+                    question_round: refine_question_round,
+                } => {
+                    question_round = refine_question_round;
+                    let Some(next_issue_run) = continue_issue_with_refinement_loading(
+                        &mut terminal,
+                        root,
+                        issue_run,
+                        args,
+                        &addendum,
+                        &mut continuation,
+                        instructions.as_deref(),
+                        ImprovementReviewProgress {
+                            issue_position: index + 1,
+                            issue_total: issues.len(),
+                            question_round: refine_question_round,
                         },
                     )?
                     else {
@@ -1334,6 +1367,170 @@ fn continue_issue_with_follow_up(
     Ok(issue_run)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn continue_issue_with_refinement_loading(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    root: &Path,
+    issue_run: ImprovementIssueRun,
+    args: &BacklogImproveArgs,
+    addendum: &str,
+    continuation: &mut Option<AgentContinuation>,
+    instructions: Option<&str>,
+    progress: ImprovementReviewProgress,
+) -> Result<Option<ImprovementIssueRun>> {
+    let issue_identifier = issue_run.issue.identifier.clone();
+    let root = root.to_path_buf();
+    let args = args.clone();
+    let addendum = addendum.to_string();
+    let instructions = instructions.map(str::to_string);
+    let continuation_for_job = continuation.take();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation_for_job;
+        let result = continue_issue_with_refinement(
+            &root,
+            issue_run,
+            &args,
+            &addendum,
+            &mut continuation,
+            instructions.as_deref(),
+            progress,
+        )
+        .map(|issue_run| (issue_run, continuation));
+        let _ = sender.send(result);
+    });
+
+    let mut loading = LoadingPanelData {
+        title: "Backlog Improve [refinement]".to_string(),
+        message: format!("Refining {issue_identifier}"),
+        detail: format!(
+            "Issue {}/{}: rerunning the recommendation with your refinement guidance.",
+            progress.issue_position, progress.issue_total
+        ),
+        spinner_index: 0,
+        status_line: agent_loading_status_line().to_string(),
+    };
+
+    match wait_for_improvement_loading_job(
+        terminal,
+        &mut loading,
+        &receiver,
+        read_improvement_loading_event,
+    )? {
+        ImprovementLoadingOutcome::Completed((issue_run, next_continuation)) => {
+            *continuation = next_continuation;
+            Ok(Some(issue_run))
+        }
+        ImprovementLoadingOutcome::Cancelled => Ok(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continue_issue_with_refinement(
+    root: &Path,
+    mut issue_run: ImprovementIssueRun,
+    args: &BacklogImproveArgs,
+    addendum: &str,
+    continuation: &mut Option<AgentContinuation>,
+    instructions: Option<&str>,
+    _progress: ImprovementReviewProgress,
+) -> Result<ImprovementIssueRun> {
+    issue_run.refinement_history.push(addendum.to_string());
+
+    // Persist refinement guidance
+    let refinement_path = issue_run.run_dir.join(REFINEMENT_GUIDANCE_FILE);
+    let log_content = issue_run
+        .refinement_history
+        .iter()
+        .enumerate()
+        .map(|(i, a)| format!("## Refinement {}\n\n{}\n", i + 1, a))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = write_text_file(&refinement_path, &log_content, true);
+
+    let prompt = render_refinement_prompt(&issue_run.issue, &issue_run.output, &issue_run.refinement_history, addendum);
+    let report = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_IMPROVE.to_string()),
+            agent: args.agent.clone(),
+            prompt,
+            instructions: instructions.map(str::to_string),
+            model: args.model.clone(),
+            reasoning: args.reasoning.clone(),
+            transport: None,
+            attachments: Vec::new(),
+        },
+        continuation,
+    )
+    .with_context(|| {
+        format!(
+            "{} backlog improve requires a configured local agent to continue backlog issue review",
+            branding::COMMAND_NAME
+        )
+    })?;
+    let parsed: ImprovementOutput =
+        parse_agent_json(&report.stdout, "backlog improvement refinement")?;
+    let normalized = normalize_improvement_output(&issue_run.issue, parsed)?;
+    issue_run.output = normalized;
+    write_text_file(
+        &issue_run.proposal_json_path,
+        &serde_json::to_string_pretty(&issue_run.output)
+            .context("failed to encode refined backlog improvement proposal")?,
+        true,
+    )?;
+    write_text_file(
+        &issue_run.proposal_markdown_path,
+        &render_proposal_markdown(args.mode, &issue_run.output),
+        true,
+    )?;
+
+    Ok(issue_run)
+}
+
+fn render_refinement_prompt(
+    issue: &IssueSummary,
+    output: &ImprovementOutput,
+    history: &[String],
+    addendum: &str,
+) -> String {
+    let history_block = if history.len() > 1 {
+        let previous = &history[..history.len() - 1];
+        previous
+            .iter()
+            .enumerate()
+            .map(|(i, a)| format!("{}. {}", i + 1, a))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    } else {
+        String::new()
+    };
+    let proposal_json = serde_json::to_string_pretty(output).unwrap_or_default();
+    format!(
+        "Continue the backlog improvement review for `{}`.\n\n\
+Previous route: `{}`\n\
+Summary: {}\n\
+Recommendation: {}\n\n\
+Current proposal JSON:\n{proposal_json}\n\n\
+{}\
+New refinement guidance:\n{addendum}\n\n\
+Revise the proposal according to the refinement guidance. Preserve aspects that the guidance does not address. \
+Reassess the issue using the same JSON schema as before.",
+        issue.identifier,
+        output.route().as_str(),
+        output.summary,
+        output
+            .recommendation
+            .as_deref()
+            .unwrap_or("No extra recommendation text provided."),
+        if history_block.is_empty() {
+            String::new()
+        } else {
+            format!("Previous refinement guidance:\n{history_block}\n\n")
+        },
+    )
+}
+
 fn run_improvement_review_dashboard(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     issue_position: usize,
@@ -1341,6 +1538,7 @@ fn run_improvement_review_dashboard(
     issue: &IssueSummary,
     output: &ImprovementOutput,
     question_round: usize,
+    refinement_history: Vec<String>,
 ) -> Result<ImprovementReviewExit> {
     let mut app = ImprovementReviewApp::new(
         issue_position,
@@ -1348,6 +1546,7 @@ fn run_improvement_review_dashboard(
         issue.clone(),
         output.clone(),
         question_round,
+        refinement_history,
     );
     let mut copy = CopyUiState::default();
     let mut review_viewports = ReviewViewports::default();
@@ -1374,7 +1573,46 @@ fn run_improvement_review_dashboard(
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc if app.questions.is_empty() => {
+                    // Refinement mode key handling
+                    KeyCode::Char('s')
+                        if app.is_refining()
+                            && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(ref input) = app.refinement_input {
+                            let addendum = input.display_value().trim().to_string();
+                            if addendum.is_empty() {
+                                app.error = Some(
+                                    "Enter the refinement guidance before continuing.".to_string(),
+                                );
+                            } else {
+                                return Ok(ImprovementReviewExit::Refine {
+                                    addendum,
+                                    question_round: app.question_round,
+                                });
+                            }
+                        }
+                    }
+                    KeyCode::Enter if app.is_refining() => {
+                        if let Some(ref mut refinement) = app.refinement_input {
+                            refinement.insert_newline();
+                        }
+                    }
+                    KeyCode::Esc if app.is_refining() => {
+                        app.refinement_input = None;
+                        app.error = None;
+                    }
+                    _ if app.is_refining() => {
+                        if let Some(ref mut refinement) = app.refinement_input {
+                            let input_width = 60;
+                            if refinement.handle_key_with_width(key, input_width) {
+                                app.error = None;
+                            }
+                        }
+                    }
+                    // Normal mode key handling
+                    KeyCode::Char('q') | KeyCode::Esc
+                        if app.questions.is_empty() && !app.is_refining() =>
+                    {
                         return Ok(ImprovementReviewExit::Cancelled);
                     }
                     KeyCode::Esc => {
@@ -1463,6 +1701,11 @@ fn run_improvement_review_dashboard(
                                 question_round: app.question_round + 1,
                             });
                         }
+                    }
+                    KeyCode::Char('f')
+                        if app.questions.is_empty() && !app.is_refining() =>
+                    {
+                        app.begin_refinement();
                     }
                     KeyCode::Char('a')
                         if app.questions.is_empty()
@@ -1571,14 +1814,15 @@ fn render_improvement_review(
                 Span::raw(" "),
                 Span::styled(
                     format!(
-                        "Issue {}/{}: {} {}",
-                        app.issue_position, app.issue_total, app.issue.identifier, app.issue.title
+                        "Issue {}/{}: {} {} | refinements {}",
+                        app.issue_position, app.issue_total, app.issue.identifier, app.issue.title,
+                        app.refinement_history.len()
                     ),
                     emphasis_style(),
                 ),
             ]),
             Line::from(app.output.summary.clone()),
-            key_hints(&review_key_hints(route, !app.questions.is_empty())),
+            key_hints(&review_key_hints(route, !app.questions.is_empty(), app.is_refining())),
         ]),
         panel_title(format!("{} backlog improve", branding::COMMAND_NAME), false),
     );
@@ -1595,22 +1839,25 @@ fn render_improvement_review(
     frame.render_widget(left, body[0]);
 
     let right_focused =
-        app.questions.is_empty() && app.review_focus == ImprovementReviewFocus::Proposal;
-    let right = if app.questions.is_empty() {
-        scrollable_content_paragraph(
+        app.questions.is_empty() && !app.is_refining() && app.review_focus == ImprovementReviewFocus::Proposal;
+    if app.is_refining() {
+        render_improvement_refinement_panel(frame, app, body[1]);
+    } else if !app.questions.is_empty() {
+        let right = paragraph(
+            render_questions_panel(app),
+            panel_title("Follow-up Questions", true),
+        )
+        .wrap(Wrap { trim: false });
+        frame.render_widget(right, body[1]);
+    } else {
+        let right = scrollable_content_paragraph(
             render_review_comparison(app),
             panel_title("Before / After", right_focused),
             &app.proposal_scroll,
         )
-        .wrap(Wrap { trim: false })
-    } else {
-        paragraph(
-            render_questions_panel(app),
-            panel_title("Follow-up Questions", true),
-        )
-        .wrap(Wrap { trim: false })
-    };
-    frame.render_widget(right, body[1]);
+        .wrap(Wrap { trim: false });
+        frame.render_widget(right, body[1]);
+    }
 
     let footer = paragraph(
         render_decision_panel(app, copy_status),
@@ -1628,8 +1875,15 @@ fn render_improvement_review(
 fn review_key_hints(
     route: ImprovementRoute,
     answering_questions: bool,
+    refining: bool,
 ) -> Vec<(&'static str, &'static str)> {
-    if answering_questions {
+    if refining {
+        vec![
+            ("Ctrl+S", "rerun"),
+            ("Enter", "newline"),
+            ("Esc", "back"),
+        ]
+    } else if answering_questions {
         vec![
             ("Type", "answer"),
             ("Enter", "save/next"),
@@ -1643,6 +1897,7 @@ fn review_key_hints(
                 vec![
                     ("Tab", "focus"),
                     ("Enter", "apply"),
+                    ("f", "refine"),
                     ("s", "skip"),
                     ("r", "reject"),
                     ("q", "exit"),
@@ -1652,6 +1907,7 @@ fn review_key_hints(
                 vec![
                     ("Tab", "focus"),
                     ("Enter", "answer questions"),
+                    ("f", "refine"),
                     ("s", "skip"),
                     ("r", "reject"),
                     ("q", "exit"),
@@ -1660,11 +1916,65 @@ fn review_key_hints(
             _ => vec![
                 ("Tab", "focus"),
                 ("Enter", "accept"),
+                ("f", "refine"),
                 ("s", "skip"),
                 ("r", "reject"),
                 ("q", "exit"),
             ],
         }
+    }
+}
+
+fn render_improvement_refinement_panel(
+    frame: &mut Frame<'_>,
+    app: &ImprovementReviewApp,
+    area: Rect,
+) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Min(0)])
+        .split(area);
+
+    // History panel
+    let history_text = if app.refinement_history.is_empty() {
+        Text::from("No previous refinements. Type guidance below and press Ctrl+S to rerun.")
+    } else {
+        let mut lines = vec![Line::from(format!(
+            "Previous refinements ({})",
+            app.refinement_history.len()
+        ))];
+        for (i, addendum) in app.refinement_history.iter().enumerate() {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                format!("#{}", i + 1),
+                emphasis_style(),
+            ));
+            lines.push(Line::from(addendum.clone()));
+        }
+        Text::from(lines)
+    };
+    let history = paragraph(history_text, panel_title("Refinement History", false))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(history, layout[0]);
+
+    // Addendum input
+    if let Some(ref input) = app.refinement_input {
+        let input_block = panel(panel_title("Refinement Guidance", true));
+        let inner = Rect::new(
+            layout[1].x.saturating_add(1),
+            layout[1].y.saturating_add(1),
+            layout[1].width.saturating_sub(2).max(1),
+            layout[1].height.saturating_sub(2).max(1),
+        );
+        let rendered = input.render_with_viewport(
+            "Describe what to change...",
+            true,
+            inner.width,
+            inner.height,
+        );
+        let widget = rendered.paragraph(input_block);
+        frame.render_widget(widget, layout[1]);
+        rendered.set_cursor(frame, inner);
     }
 }
 
@@ -1674,6 +1984,8 @@ fn render_decision_panel(app: &ImprovementReviewApp, copy_status: Option<&str>) 
         error.to_string()
     } else if let Some(status) = copy_status {
         status.to_string()
+    } else if app.is_refining() {
+        "Ctrl+S will rerun the review with this refinement guidance.".to_string()
     } else if app.questions.is_empty() {
         format!("Enter will {}.", primary.verb)
     } else {
@@ -2514,6 +2826,7 @@ impl ImprovementReviewApp {
         issue: IssueSummary,
         mut output: ImprovementOutput,
         question_round: usize,
+        refinement_history: Vec<String>,
     ) -> Self {
         if output.route() == ImprovementRoute::NeedsQuestions
             && output.follow_up_questions.len() > 5
@@ -2531,8 +2844,19 @@ impl ImprovementReviewApp {
             review_focus: ImprovementReviewFocus::Proposal,
             recommendation_scroll: ScrollState::default(),
             proposal_scroll: ScrollState::default(),
+            refinement_history,
+            refinement_input: None,
             error: None,
         }
+    }
+
+    fn is_refining(&self) -> bool {
+        self.refinement_input.is_some()
+    }
+
+    fn begin_refinement(&mut self) {
+        self.refinement_input = Some(InputFieldState::multiline(String::new()));
+        self.error = None;
     }
 
     fn recommendation_content_rows(&self, width: u16) -> usize {
@@ -2875,6 +3199,7 @@ fn analyze_issue(
         proposal_markdown_path,
         started_at,
         output: normalized,
+        refinement_history: Vec::new(),
     })
 }
 
@@ -4132,6 +4457,7 @@ mod tests {
                 },
             },
             0,
+            Vec::new(),
         );
 
         let snapshot = review_dashboard_snapshot(&app, 140, 40);
@@ -4162,6 +4488,7 @@ mod tests {
                 },
             },
             0,
+            Vec::new(),
         );
 
         let snapshot = review_dashboard_snapshot(&app, 140, 40);
@@ -4189,6 +4516,7 @@ mod tests {
                 proposal: ImprovementProposal::default(),
             },
             0,
+            Vec::new(),
         );
 
         assert_eq!(app.recommendation_scroll.offset(), 0);
@@ -4401,5 +4729,55 @@ mod tests {
     fn strip_ansi_escapes_handles_mixed_content() {
         let input = "\x1b[1m{\"key\":\x1b[32m\"value\"\x1b[0m}\x1b[0m";
         assert_eq!(strip_ansi_escapes(input), "{\"key\":\"value\"}");
+    }
+
+    #[test]
+    fn review_dashboard_shows_refinement_editor_and_iteration_state() {
+        let issue = demo_issue("ENG-10170", "Test Ticket");
+        let app = ImprovementReviewApp::new(
+            1,
+            1,
+            issue,
+            ImprovementOutput {
+                summary: "Summary.".to_string(),
+                needs_improvement: true,
+                route: Some(ImprovementRoute::ReadyForUpdate),
+                recommendation: Some("Apply changes.".to_string()),
+                findings: ImprovementFindings::default(),
+                context_requirements: Vec::new(),
+                follow_up_questions: Vec::new(),
+                proposal: ImprovementProposal::default(),
+            },
+            0,
+            vec!["First refinement".to_string()],
+        );
+
+        let snapshot = review_dashboard_snapshot(&app, 140, 40);
+        assert!(snapshot.contains("refinements 1"));
+    }
+
+    #[test]
+    fn refinement_prompt_preserves_previous_guidance() {
+        let issue = demo_issue("ENG-10170", "Test Ticket");
+        let output = ImprovementOutput {
+            summary: "Summary.".to_string(),
+            needs_improvement: true,
+            route: Some(ImprovementRoute::ReadyForUpdate),
+            recommendation: Some("Apply changes.".to_string()),
+            findings: ImprovementFindings::default(),
+            context_requirements: Vec::new(),
+            follow_up_questions: Vec::new(),
+            proposal: ImprovementProposal::default(),
+        };
+        let history = vec![
+            "Add error handling".to_string(),
+            "Consider edge cases".to_string(),
+        ];
+
+        let prompt = render_refinement_prompt(&issue, &output, &history, "Make it faster");
+
+        assert!(prompt.contains("ENG-10170"));
+        assert!(prompt.contains("Add error handling"));
+        assert!(prompt.contains("Make it faster"));
     }
 }
