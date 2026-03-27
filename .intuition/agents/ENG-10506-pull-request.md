@@ -3,7 +3,7 @@
 ## Summary
 - Linear issue: https://linear.app/0xintuition/issue/ENG-10506/add-agents-build-command-interactive-headless-agent-loop-for-workspace
 - Published automatically by `intu agents listen` for `ENG-10506`
-- Latest listener review: Heuristic review found remaining work.
+- Latest listener review: `agents build` implementation and focused validation are complete.
 
 ## Lifecycle
 - Initial publication uses a draft PR for unattended work in progress.
@@ -20,6 +20,7 @@
 - Changed `README.md`
 - Changed `WORKFLOW.md`
 - Changed `.intuition/backlog/ENG-10506/index.md`
+- Changed `.intuition/backlog/ENG-10506/specification.md`
 - Changed `.intuition/backlog/ENG-10506/validation.md`
 
 ## Remaining Work
