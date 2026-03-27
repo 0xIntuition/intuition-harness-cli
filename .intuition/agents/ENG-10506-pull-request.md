@@ -3,22 +3,23 @@
 ## Summary
 - Linear issue: https://linear.app/0xintuition/issue/ENG-10506/add-agents-build-command-interactive-headless-agent-loop-for-workspace
 - Published automatically by `intu agents listen` for `ENG-10506`
-- Latest listener review: ticket-local checklist cleanup is complete and no implementation work remains in the workspace packet.
+- Latest listener review: Heuristic review detected branch changes, but additional ticket work remains.
 
 ## Lifecycle
 - Initial publication uses a draft PR for unattended work in progress.
 - The same PR is promoted to ready for review during the existing review handoff.
 
 ## Completed In This Branch
+- Changed `M src/build.rs`
+- Changed `M src/cli.rs`
+- Changed `M src/listen/mod.rs`
 - Changed `.intuition/agents/ENG-10506-pull-request.md`
 - Changed `.intuition/backlog/ENG-10506/checklist.md`
-- Changed `.intuition/backlog/ENG-10506/contacts.md`
 - Changed `.intuition/backlog/ENG-10506/index.md`
-- Changed `?? .intuition/backlog/ENG-10506/contacts.md`
-- Marked the generic consumer-side transform checklist item complete because `agents build` did not introduce a separate consumer transform layer.
+- Changed `M .intuition/backlog/ENG-10506/checklist.md`
 
 ## Remaining Work
-- No remaining implementation work is tracked locally.
+- No explicit validation status recorded.
 
 ## Issue Context
 # Add `agents build` command — interactive headless agent loop for workspace QA
