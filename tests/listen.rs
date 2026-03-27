@@ -3850,6 +3850,10 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     assert!(state.contains("\"issue_identifier\": \"MET-21\""));
     assert!(
         state.contains("\"phase\": \"running\"")
+            || state.contains("\"phase\": \"reviewing\"")
+            || state.contains("\"phase\": \"final-review\"")
+            || state.contains("\"phase\": \"validating\"")
+            || state.contains("\"phase\": \"publishing\"")
             || state.contains("\"phase\": \"blocked\"")
             || state.contains("\"phase\": \"completed\""),
         "expected an active or finished worker phase in state: {state}"
