@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-0f172a" alt="Supported platforms" />
     <img src="https://img.shields.io/badge/built%20with-Rust-f74c00" alt="Built with Rust" />
   </p>
-  <p><a href="#install-intu">Install</a> · <a href="#quick-start">Quick Start</a> · <a href="#command-overview">Commands</a> · <a href="#command-reference">Reference</a></p>
+  <p><a href="#install-intu">Install</a> · <a href="#quick-start">Quick Start</a> · <a href="#the-intuition-workspace">Workspace</a> · <a href="#command-overview">Commands</a> · <a href="#command-reference">Reference</a></p>
 </div>
 
 The Intuition CLI (`intu`) is a Rust terminal tool for engineers who want repository planning context, Linear workflows, and agent-backed automation to stay close to the code.
@@ -145,40 +145,174 @@ sandbox_mode = "danger-full-access"
 - Built-in Claude listen runs should not inherit `ANTHROPIC_API_KEY`; headless listen is expected to use the local Claude subscription instead of an API-key override.
 - Run `intu agents listen --check` to validate the active listen provider prerequisites plus Linear reachability/auth without starting the daemon.
 
-`intu runtime setup` bootstraps the repo-local `.intuition/` workspace:
+## The `.intuition/` Workspace
+
+`intu runtime setup` bootstraps a `.intuition/` directory at the root of your repository. This directory is the single source of truth for all repo-scoped planning state, agent artifacts, and automation config. It is safe to commit to version control.
+
+### Directory Structure
 
 ```text
 .intuition/
-  SPEC.md
-  README.md
-  meta.json
-  agents/
-    README.md
-    briefs/
-    sessions/
-  backlog/
-    README.md
-    _TEMPLATE/
-      README.md
-      index.md
-      checklist.md
-      contacts.md
-      decisions.md
-      proposed-prs.md
-      risks.md
-      specification.md
-      implementation.md
-      validation.md
-      context/
-      tasks/
-      artifacts/
-  codebase/
-    README.md
-  workflows/
-    README.md
-  cron/
-    README.md
+├── SPEC.md                   # Repository specification (goals, features, non-goals)
+├── README.md                 # Short overview of the workspace layout
+├── meta.json                 # Repo-scoped defaults (Linear team, project, agent config)
+├── agents/
+│   ├── briefs/               # Deterministic kickoff prompts from `intu agents kickoff`
+│   │   └── <ISSUE>.md        # One brief per Linear issue
+│   └── sessions/             # Repo-local agent logs (e.g. scan.log from `intu context scan`)
+├── backlog/
+│   ├── _TEMPLATE/            # Canonical backlog item template seeded by `intu runtime setup`
+│   │   ├── index.md          # Summary, scope, milestones, next actions
+│   │   ├── specification.md  # Technical contract and acceptance criteria
+│   │   ├── implementation.md # Concrete implementation touchpoints
+│   │   ├── validation.md     # Command proofs and evidence notes
+│   │   ├── checklist.md      # Execution checklist by area
+│   │   ├── contacts.md       # Owners, reviewers, escalation points
+│   │   ├── decisions.md      # Decision log
+│   │   ├── risks.md          # Risk register and open questions
+│   │   ├── proposed-prs.md   # PR slices and merge sequencing
+│   │   ├── artifacts/        # Outputs and evidence produced during execution
+│   │   ├── context/          # Research and background notes
+│   │   └── tasks/            # Workstream-level implementation plans
+│   └── <ISSUE>/              # One directory per Linear issue (mirrors _TEMPLATE structure)
+│       ├── .linear.json      # Linear metadata (issue ID, team, project, sync hashes)
+│       ├── index.md          # Used as the Linear issue description
+│       ├── specification.md
+│       ├── implementation.md
+│       ├── validation.md
+│       ├── checklist.md
+│       ├── contacts.md
+│       ├── decisions.md
+│       ├── risks.md
+│       ├── proposed-prs.md
+│       ├── artifacts/
+│       │   ├── improvement/  # Artifacts from `intu backlog improve` runs
+│       │   └── refinement/   # Artifacts from `intu linear issues refine` runs
+│       ├── context/
+│       └── tasks/
+├── codebase/                 # Generated repository context from `intu context scan`
+│   ├── SCAN.md               # Deterministic scan fact base
+│   ├── ARCHITECTURE.md       # High-level architecture overview
+│   ├── CONCERNS.md           # Known concerns and tech debt
+│   ├── CONVENTIONS.md        # Code conventions and patterns
+│   ├── INTEGRATIONS.md       # External integrations
+│   ├── STACK.md              # Technology stack summary
+│   ├── STRUCTURE.md          # Directory and module structure
+│   └── TESTING.md            # Test strategy and coverage
+├── cron/                     # Repository-local cron jobs managed by `intu runtime cron`
+│   ├── <NAME>.md             # One Markdown file per job (YAML front matter + notes)
+│   └── .runtime/             # Scheduler PID, per-run logs, and persisted run state
+├── workflows/                # Repo-local workflow playbooks consumed by `intu agents workflows`
+│   └── <NAME>.md             # Markdown with YAML front matter (name, provider, parameters)
+└── merge-runs/               # Audit artifacts from `intu merge` runs
+    └── <RUN_ID>/             # One directory per merge batch
 ```
+
+### `meta.json` — Repo-scoped Configuration
+
+`meta.json` stores repo-scoped defaults that override install-scoped config. A freshly scaffolded file looks like:
+
+```json
+{
+  "linear": {
+    "team": null,
+    "project_id": null
+  }
+}
+```
+
+After running `intu runtime setup --team ENG --project "My Project"`, it resolves the project name to a Linear project ID and saves both:
+
+```json
+{
+  "linear": {
+    "team": "ENG",
+    "project_id": "project-42"
+  },
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "reasoning": "medium"
+  },
+  "listen": {
+    "poll_interval_seconds": 30
+  }
+}
+```
+
+Repo-dependent commands such as `intu backlog plan`, `intu backlog tech`, `intu backlog sync`, and `intu agents listen` require `meta.json` to be present and point back to `intu runtime setup` when it is missing.
+
+### `SPEC.md` — Repository Specification
+
+Created or refined by `intu backlog spec`. This file describes what the repository builds and contains four required headings: `OVERVIEW`, `GOALS`, `FEATURES`, and `NON-GOALS`. The agent uses it as context for planning and backlog generation. On first run, the CLI interviews you and drafts the spec. On later runs, it loads the existing spec and revises it based on requested changes.
+
+### `backlog/` — Planning Packets
+
+Each Linear issue tracked by Intuition gets its own directory under `backlog/<ISSUE>/`. The directory mirrors the `_TEMPLATE/` structure and is created by commands like `intu backlog plan`, `intu backlog tech`, and `intu agents listen`.
+
+Key conventions:
+
+- `index.md` is used as the Linear issue description when creating or syncing issues.
+- `.linear.json` stores issue metadata (identifier, team, project, sync hashes) and is excluded from hash calculations during sync.
+- `artifacts/improvement/<RUN_ID>/` and `artifacts/refinement/<RUN_ID>/` store immutable before/after snapshots from improvement and refinement runs.
+- `intu backlog sync pull` hydrates the local packet from Linear, including images and discussion context. `intu backlog sync push` sends checklist status back.
+
+### `codebase/` — Generated Context
+
+Populated by `intu context scan`. The CLI writes a deterministic `SCAN.md` fact base, then asks the configured agent to author higher-level context documents (`ARCHITECTURE.md`, `CONVENTIONS.md`, etc.). These files feed into agent prompts for planning, execution, and review commands. Run `intu context doctor` to check for missing or stale context.
+
+### `cron/` — Repository-local Cron Jobs
+
+Each job is a Markdown file with YAML front matter defining the schedule, command, agent, and optional workflow steps. Use `intu runtime cron init` to create a job, `intu runtime cron start` to launch the scheduler daemon, and `intu runtime cron status` to check health. Jobs support single-step legacy mode and multi-step workflow mode with retries, approval checkpoints, and conditional branching.
+
+### `workflows/` — Reusable Playbooks
+
+Repo-local workflow playbooks loaded by `intu agents workflows`. Each playbook is a Markdown file with YAML front matter defining the workflow name, default provider, parameter contract, validation steps, and optional instructions. Template variables like `{repo_root}`, `{workflow_contract}`, and `{context_bundle}` are resolved at run time.
+
+Example playbook:
+
+```markdown
+---
+name: release-triage
+summary: Investigate a release blocker and propose next actions.
+provider: codex
+parameters:
+  - name: incident
+    description: Human-readable incident summary.
+    required: true
+validation:
+  - Confirm impact, scope, and current owner.
+instructions: |
+  Keep the report concise and action-oriented.
+---
+Incident summary:
+{incident}
+```
+
+### `merge-runs/` — Merge Audit Trail
+
+Created by `intu merge`. Each run writes structured audit artifacts (context, plan, progress, validation attempts, aggregate PR body) under `merge-runs/<RUN_ID>/`. Use `--resume-run <RUN_ID>` to reuse an existing aggregate branch.
+
+### Bootstrapping the Workspace
+
+```bash
+# 1. Save install-scoped Linear auth and agent defaults (once per machine)
+intu runtime config
+
+# 2. Scaffold .intuition/ and save repo defaults (once per repository)
+intu runtime setup --team ENG --project "My Project"
+
+# 3. Create or refine the repository specification
+intu backlog spec --root .
+
+# 4. Generate codebase context for agent prompts
+intu context scan
+
+# 5. Verify context health
+intu context doctor
+```
+
+After bootstrapping, the workspace is ready for backlog planning (`intu backlog plan`), issue syncing (`intu backlog sync`), agent execution (`intu agents listen`), and workflow automation (`intu agents workflows`).
 
 ## Command Overview
 
