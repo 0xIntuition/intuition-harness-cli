@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-0f172a" alt="Supported platforms" />
     <img src="https://img.shields.io/badge/built%20with-Rust-f74c00" alt="Built with Rust" />
   </p>
-  <p><a href="#install-intu">Install</a> · <a href="#quick-start">Quick Start</a> · <a href="#the-intuition-workspace">Workspace</a> · <a href="#command-overview">Commands</a> · <a href="#command-reference">Reference</a></p>
+  <p><a href="#install-intu">Install</a> · <a href="#quick-start">Quick Start</a> · <a href="#the-intuition-workspace">Workspace</a> · <a href="#command-overview">Commands</a> · <a href="#command-reference">Reference</a> · <a href="#branding-and-white-labeling">Branding</a></p>
 </div>
 
 The Intuition CLI (`intu`) is a Rust terminal tool for engineers who want repository planning context, Linear workflows, and agent-backed automation to stay close to the code.
@@ -354,6 +354,73 @@ Make sure Cargo's bin directory is on your `PATH`:
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
+
+## Branding and White-Labeling
+
+The CLI reads its command name, workspace folder name, and display name from the
+`[package.metadata.branding]` section in `Cargo.toml`. Forking teams can white-label the
+entire CLI by editing these three values and rebuilding — no source changes required.
+
+### Branding fields
+
+Open `Cargo.toml` and locate the branding block:
+
+```toml
+[package.metadata.branding]
+command_name = "intu"        # CLI binary name shown in help, examples, and error messages
+project_dir  = ".intuition"  # Local workspace folder created by `runtime setup`
+display_name = "Intuition"   # Human-readable product name used in display text
+```
+
+| Field | What it controls | Example custom value |
+|---|---|---|
+| `command_name` | Binary name, help text, and every usage example | `"acme"` |
+| `project_dir` | Folder created by `runtime setup` (e.g. `.intuition/`) | `".acme"` |
+| `display_name` | Product name in headings, prompts, and TUI chrome | `"Acme Dev"` |
+
+### Steps to rebrand
+
+1. **Edit the branding block** in `Cargo.toml` with your desired values.
+
+2. **Update the binary name and default-run** so Cargo produces the right executable:
+
+   ```toml
+   default-run = "acme"
+
+   [[bin]]
+   name = "acme"
+   path = "src/main.rs"
+   ```
+
+3. **Update the exclude list** if you changed `project_dir`, so the workspace folder is not
+   packaged in the crate:
+
+   ```toml
+   exclude = [
+       ".github/",
+       "docs/",
+       "tests/",
+       "scripts/",
+       "Makefile",
+       # Must match [package.metadata.branding] project_dir
+       ".acme/",
+       "AGENTS.md",
+       "WORKFLOW.md",
+   ]
+   ```
+
+4. **Rebuild**:
+
+   ```bash
+   cargo install --path . --force
+   ```
+
+After the build, every help screen, error message, generated artifact, and workspace path
+will reflect the new branding. The build script (`build.rs`) reads the branding values at
+compile time and injects them as environment variables (`BRAND_COMMAND_NAME`,
+`BRAND_PROJECT_DIR`, `BRAND_DISPLAY_NAME`), which the `src/branding.rs` constants expose to
+the rest of the codebase. Template placeholders like `{{brand.command_name}}` in
+`src/artifacts/**/*.md` are also expanded during the build.
 
 ## Common Workflow
 
