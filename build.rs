@@ -136,6 +136,10 @@ Examples:\n\
   {cmd} agents listen --team MET --project \"MetaStack CLI\"\n\
   {cmd} agents execute MET-45 --team MET --project \"MetaStack CLI\"\n\
   {cmd} agents execute MET-45 --root . --max-turns 10\n\
+  {cmd} agents build\n\
+  {cmd} agents build MET-45 \"fix the auth bug\"\n\
+  {cmd} agents build --dir ../metastack-cli-workspace/MET-45\n\
+  {cmd} agents build --dir ../metastack-cli-workspace/MET-45 \"run focused QA\" --no-interactive\n\
   {cmd} agents review 42 --root .\n\
   {cmd} agents review 42 --root . --dry-run\n\
   {cmd} agents review --root .\n\

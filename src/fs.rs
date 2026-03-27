@@ -202,6 +202,13 @@ pub fn sibling_workspace_root(root: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!("{repo_name}-workspace")))
 }
 
+/// Resolves the root directory that stores per-ticket sibling workspaces for a repository.
+///
+/// Returns an error when the repository name or parent directory cannot be resolved.
+pub fn ticket_workspace_root(root: &Path) -> Result<PathBuf> {
+    sibling_workspace_root(root)
+}
+
 pub fn ensure_workspace_path_is_safe(
     source_root: &Path,
     workspace_root: &Path,
@@ -277,7 +284,7 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::{ensure_workspace_path_is_safe, sibling_workspace_root};
+    use super::{ensure_workspace_path_is_safe, sibling_workspace_root, ticket_workspace_root};
 
     #[test]
     fn sibling_workspace_root_uses_repo_parent_and_name() -> Result<()> {
@@ -288,6 +295,19 @@ mod tests {
         let workspace_root = sibling_workspace_root(&repo_root)?;
 
         assert_eq!(workspace_root, temp.path().join("demo-repo-workspace"));
+        Ok(())
+    }
+
+    #[test]
+    fn ticket_workspace_root_matches_sibling_workspace_root() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("demo-repo");
+        std::fs::create_dir_all(&repo_root)?;
+
+        assert_eq!(
+            ticket_workspace_root(&repo_root)?,
+            temp.path().join("demo-repo-workspace")
+        );
         Ok(())
     }
 

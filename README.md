@@ -365,6 +365,7 @@ Supported route families:
 
 Supported command route keys:
 
+- `backlog.spec`
 - `backlog.plan`
 - `backlog.improve`
 - `backlog.split`
@@ -372,6 +373,7 @@ Supported command route keys:
 - `context.reload`
 - `linear.issues.refine`
 - `agents.listen`
+- `agents.build`
 - `agents.workflows.run`
 - `runtime.cron.prompt`
 - `merge.run`
@@ -1204,6 +1206,43 @@ meta agents execute MET-45 --root . --max-turns 10
 meta agents execute MET-45 --root . --json
 ```
 
+### `agents build`
+
+Run an agent directly inside an existing workspace checkout without the Linear listener/bootstrap
+ceremony. Interactive TTY runs are now workspace-dashboard-first:
+
+- Bare `meta agents build` opens the sibling workspace inventory under `<repo>-workspace/`, shows
+  each available checkout, and lets you switch between workspaces before sending prompts.
+- Selecting a workspace keeps its run history, live output, and current git status visible in the
+  same session so you can move between multiple PR/ticket clones without restarting the command.
+- The status pane now shows whether the selected workspace is clean or dirty, which files are
+  currently changed, and what changed during the last run so engineers get direct confirmation that
+  the agent is editing the intended checkout.
+- Before each run starts, the dashboard fetches `origin`, rebases the selected workspace branch on
+  top of its upstream branch, and surfaces that sync progress in the live output pane. If the
+  rebase hits conflicts, the same configured build agent is prompted to resolve the conflicted
+  files in place and leave the workspace ready for `git rebase --continue`.
+- After a successful run, the dashboard stages the resulting workspace changes, creates a
+  prompt-derived commit, and pushes the active branch back to GitHub with `--force-with-lease` so
+  rebased workspace branches stay publishable without leaving the TUI flow.
+
+Passing `MET-45` or another workspace selector preselects that workspace in the dashboard, and
+passing both a workspace and a prompt auto-starts the first run there. When the resolved provider
+exposes a continuation handle, the dashboard keeps that resume state available for the next
+compatible run in the same session. Use `--no-interactive` when you want a one-shot scripted run
+with an explicit workspace and prompt.
+
+Examples:
+
+```bash
+meta agents build
+meta agents build MET-45 "fix the auth bug"
+meta agents build --dir ../repo-workspace/MET-45 "tighten the failing tests"
+meta agents build --dir ../repo-workspace/MET-45
+meta agents build --dir ../repo-workspace/MET-45 --agent codex --model gpt-5.4
+meta agents build --dir ../repo-workspace/MET-45 "run the focused QA pass" --no-interactive
+```
+
 ### `agents listen`
 
 Run the unattended agent daemon. The listener watches Todo issues, applies repo-scoped label and assignee filters, moves newly claimed work to `In Progress`, prepares a per-ticket standalone clone under a sibling `-workspace` directory, bootstraps a `## Codex Workpad` comment on the Linear issue, downloads issue attachments into a local attachment-context manifest under `.metastack/agents/issue-context/<TICKET>/`, and launches a supervised listen worker inside that workspace. The worker now follows an explicit phased loop: one execution turn tries to complete as much of the Linear ticket as possible, a review phase compares the current workspace against the Linear ticket acceptance criteria and validation requirements, continuation turns receive only the remaining-work delta, and a final review runs before PR publication and the Linear review transition. The first turn keeps the prompt focused on the Linear ticket and core repo instructions, references large legacy overlay files instead of inlining them, and tells the agent to execute the ticket directly rather than expanding it into extra planning or backlog maintenance. Existing local backlog files are treated as lightweight tracking only unless the ticket explicitly asks for more; after each review phase, the listener updates both the active workpad comment and a managed progress checklist section in the local backlog `index.md`. When the ticket branch is pushed, shared automation creates or updates that branch PR as a draft, keeps the `metastack` label attached, and promotes the same PR to ready for review during the existing review handoff without demoting an already-ready PR on continuation. If no matching open branch PR exists during handoff, the worker leaves the PR state as `none` and continues safely without creating a new review PR at completion time.
@@ -1389,7 +1428,7 @@ Reference:
 Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents build`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
