@@ -19,7 +19,7 @@ Last updated: 2026-03-26
 ### Area: Consumer Integrations
 
 - [x] Update consuming apps/services.
-- [ ] Remove consumer-side ad hoc transforms.
+- [x] Remove consumer-side ad hoc transforms.
 - [ ] Add integration compatibility tests.
 
 ### Area: Tooling and Docs
