@@ -2744,6 +2744,17 @@ fn build_review_app_with_addenda(
     }
 }
 
+fn rebuild_review_app(review: ReviewApp, plan: PlannedIssueSet, revision: usize) -> ReviewApp {
+    build_review_app_with_addenda(
+        review.request,
+        review.request_attachments,
+        review.follow_ups,
+        plan,
+        revision,
+        review.addenda,
+    )
+}
+
 fn build_review_refinement_app(review: ReviewApp) -> ReviewRefinementApp {
     ReviewRefinementApp {
         review,
@@ -4341,12 +4352,8 @@ fn spawn_plan_revision_job(
             if plan.issues.is_empty() {
                 bail!("planning agent returned no issues to create");
             }
-            Ok(PlanWorkerOutcome::Review(build_review_app(
-                review.request,
-                review.request_attachments,
-                review.follow_ups,
-                plan,
-                revision,
+            Ok(PlanWorkerOutcome::Review(rebuild_review_app(
+                review, plan, revision,
             )))
         });
         let _ = sender.send(PlanWorkerReport {
@@ -4598,13 +4605,10 @@ fn spawn_plan_refinement_job(
             if plan.issues.is_empty() {
                 bail!("planning agent returned no issues to create");
             }
-            Ok(PlanWorkerOutcome::Review(build_review_app_with_addenda(
-                review.request,
-                review.request_attachments,
-                review.follow_ups,
-                plan,
-                revision,
-                addenda,
+            let mut review = review;
+            review.addenda = addenda;
+            Ok(PlanWorkerOutcome::Review(rebuild_review_app(
+                review, plan, revision,
             )))
         });
         let _ = sender.send(PlanWorkerReport {
@@ -4706,12 +4710,12 @@ mod tests {
         handle_request_step_key_with_viewport, handle_request_step_mouse,
         handle_request_step_paste, handle_review_refinement_step_key, handle_review_step_key,
         handle_review_step_mouse, next_incomplete_question, parse_agent_json,
-        process_pending_plan_job, questions_answer_input_viewport, render_issue_merge_prompt,
-        render_issue_refinement_prompt, render_loading_frame, render_plan_session,
-        render_question_prompt, render_questions_form_frame, render_request_form_frame,
-        render_review_form_frame, request_input_viewport, review_kept_indices, review_layout,
-        review_marker, review_merge_groups, review_submission_action, selected_issue_plan,
-        snapshot,
+        process_pending_plan_job, questions_answer_input_viewport, rebuild_review_app,
+        render_issue_merge_prompt, render_issue_refinement_prompt, render_loading_frame,
+        render_plan_session, render_question_prompt, render_questions_form_frame,
+        render_request_form_frame, render_review_form_frame, request_input_viewport,
+        review_kept_indices, review_layout, review_marker, review_merge_groups,
+        review_submission_action, selected_issue_plan, snapshot,
     };
     use crate::config::DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT;
     use crate::tui::copy::CopyUiState;
@@ -6264,5 +6268,38 @@ mod tests {
         // Should succeed even without codebase context files (degrades gracefully)
         // Just verify the function doesn't panic
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn rebuild_review_app_preserves_existing_refinement_history() {
+        let mut review = demo_review_app();
+        review
+            .addenda
+            .push("Keep database migrations split out".to_string());
+        review
+            .addenda
+            .push("Tighten acceptance criteria wording".to_string());
+
+        let rebuilt = rebuild_review_app(
+            review,
+            PlannedIssueSet {
+                summary: "Regenerated plan".to_string(),
+                issues: vec![PlannedIssueDraft {
+                    title: "Combined ticket".to_string(),
+                    description: "Merged output.".to_string(),
+                    acceptance_criteria: vec!["Done".to_string()],
+                    priority: Some(1),
+                }],
+            },
+            2,
+        );
+
+        assert_eq!(
+            rebuilt.addenda,
+            vec![
+                "Keep database migrations split out".to_string(),
+                "Tighten acceptance criteria wording".to_string()
+            ]
+        );
     }
 }

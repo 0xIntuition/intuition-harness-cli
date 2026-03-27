@@ -1313,7 +1313,12 @@ fn continue_issue_with_follow_up(
         &render_follow_up_answers_markdown(answers),
         true,
     )?;
-    let prompt = render_follow_up_prompt(&issue_run.issue, &issue_run.output, answers);
+    let prompt = render_follow_up_prompt(
+        &issue_run.issue,
+        &issue_run.output,
+        &issue_run.refinement_history,
+        answers,
+    );
     let report = run_agent_capture_with_continuation(
         &RunAgentArgs {
             root: Some(root.to_path_buf()),
@@ -1510,7 +1515,10 @@ fn render_refinement_prompt(
     } else {
         String::new()
     };
-    let proposal_json = serde_json::to_string_pretty(output).unwrap_or_default();
+    let proposal_json = match serde_json::to_string_pretty(output) {
+        Ok(json) => json,
+        Err(_) => "{}".to_string(),
+    };
     format!(
         "Continue the backlog improvement review for `{}`.\n\n\
 Previous route: `{}`\n\
@@ -2330,6 +2338,7 @@ fn render_follow_up_answers_markdown(answers: &[(String, String)]) -> String {
 fn render_follow_up_prompt(
     issue: &IssueSummary,
     output: &ImprovementOutput,
+    refinement_history: &[String],
     answers: &[(String, String)],
 ) -> String {
     let answers_block = answers
@@ -2338,8 +2347,20 @@ fn render_follow_up_prompt(
         .map(|(index, (question, answer))| format!("{}. Q: {}\nA: {}", index + 1, question, answer))
         .collect::<Vec<_>>()
         .join("\n\n");
+    let refinement_block = if refinement_history.is_empty() {
+        String::new()
+    } else {
+        let history = refinement_history
+            .iter()
+            .enumerate()
+            .map(|(index, addendum)| format!("{}. {}", index + 1, addendum))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!("Previous refinement guidance:\n{history}\n\n")
+    };
+    let proposal_json = serde_json::to_string_pretty(output).unwrap_or_default();
     format!(
-        "Continue the backlog improvement review for `{}`.\n\nPrevious route: `{}`\nSummary: {}\nRecommendation: {}\n\nFollow-up answers:\n{}\n\nReassess the issue using the same JSON schema as before. If the answers are sufficient, prefer `ready_for_update` with a concrete proposal. Only return `needs_questions` again when a remaining blocker is material.",
+        "Continue the backlog improvement review for `{}`.\n\nPrevious route: `{}`\nSummary: {}\nRecommendation: {}\n\n{}Current proposal JSON:\n{proposal_json}\n\nFollow-up answers:\n{}\n\nReassess the issue using the same JSON schema as before. If the answers are sufficient, prefer `ready_for_update` with a concrete proposal. Only return `needs_questions` again when a remaining blocker is material.",
         issue.identifier,
         output.route().as_str(),
         output.summary,
@@ -2347,6 +2368,7 @@ fn render_follow_up_prompt(
             .recommendation
             .as_deref()
             .unwrap_or("No extra recommendation text provided."),
+        refinement_block,
         answers_block
     )
 }
@@ -4782,5 +4804,42 @@ mod tests {
         assert!(prompt.contains("ENG-10170"));
         assert!(prompt.contains("Add error handling"));
         assert!(prompt.contains("Make it faster"));
+    }
+
+    #[test]
+    fn follow_up_prompt_preserves_refinement_guidance_and_current_proposal() {
+        let issue = demo_issue("ENG-10170", "Test Ticket");
+        let output = ImprovementOutput {
+            summary: "Summary.".to_string(),
+            needs_improvement: true,
+            route: Some(ImprovementRoute::NeedsQuestions),
+            recommendation: Some("Need one more confirmation.".to_string()),
+            findings: ImprovementFindings::default(),
+            context_requirements: Vec::new(),
+            follow_up_questions: vec!["Which component owns retries?".to_string()],
+            proposal: ImprovementProposal {
+                title: Some("Refined title".to_string()),
+                description: Some("Updated description".to_string()),
+                ..ImprovementProposal::default()
+            },
+        };
+
+        let prompt = render_follow_up_prompt(
+            &issue,
+            &output,
+            &[
+                "Keep the rollout small".to_string(),
+                "Do not change the external API".to_string(),
+            ],
+            &[(
+                "Which component owns retries?".to_string(),
+                "The listener worker does.".to_string(),
+            )],
+        );
+
+        assert!(prompt.contains("Keep the rollout small"));
+        assert!(prompt.contains("Do not change the external API"));
+        assert!(prompt.contains("\"title\": \"Refined title\""));
+        assert!(prompt.contains("The listener worker does."));
     }
 }
