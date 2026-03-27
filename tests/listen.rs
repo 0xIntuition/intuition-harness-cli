@@ -6250,6 +6250,11 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
     let mut permissions = fs::metadata(&claude_path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&claude_path, permissions)?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
@@ -6400,6 +6405,11 @@ printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"
     let mut permissions = fs::metadata(&codex_path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&codex_path, permissions)?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
@@ -8735,6 +8745,11 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
     let mut permissions = fs::metadata(&claude_path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&claude_path, permissions)?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
@@ -8945,6 +8960,11 @@ printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"
     let mut permissions = fs::metadata(&codex_path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&codex_path, permissions)?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
