@@ -1,5 +1,73 @@
 # Validation — MET-45
 
+## ENG-10505: Shared validation profiles and listen repair gates
+
+### Command Proofs
+
+- `cargo test --test config -- --test-threads=1`
+- `cargo test --test merge -- --test-threads=1`
+- `cargo test --test listen listen_check_reports_codex_config_status_and_linear_api_validation -- --exact`
+- `cargo test --test listen listen_sessions_inspect_renders_validating_phase -- --exact`
+- `cargo test --test listen listen_worker_retries_failed_pre_pr_validation_and_blocks_when_budget_is_exhausted -- --exact`
+- `cargo test --test listen listen_worker_repairs_failing_pr_checks_and_reuses_the_same_pull_request -- --exact`
+- `cargo test --test listen listen_check_reports_viewer_only_scope_in_preflight_summary -- --exact`
+- `cargo test --test listen listen_once_blocks_after_repeated_noop_turns -- --exact`
+- `cargo test --test listen listen_once_bootstraps_workspace_clone_workpad_and_agent_session -- --exact`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `make quality`
+
+### Results
+
+- `cargo test --test config -- --test-threads=1`
+  - passed
+  - covered repo-scoped validation defaults and retry-budget validation constraints
+
+- `cargo test --test merge -- --test-threads=1`
+  - passed
+  - proved merge now prefers repo-scoped validation profiles before heuristic fallback
+
+- `cargo test --test listen listen_check_reports_codex_config_status_and_linear_api_validation -- --exact`
+  - passed
+  - proved `meta agents listen --check --root .` reports validation profile source, optional label, and commands
+
+- `cargo test --test listen listen_sessions_inspect_renders_validating_phase -- --exact`
+  - passed
+  - proved persisted session inspection renders `Validating`
+
+- `cargo test --test listen listen_worker_retries_failed_pre_pr_validation_and_blocks_when_budget_is_exhausted -- --exact`
+  - passed
+  - proved pre-PR validation failure re-enters the repair loop, consumes the dedicated retry budget, and blocks PR mutation when exhausted
+
+- `cargo test --test listen listen_worker_repairs_failing_pr_checks_and_reuses_the_same_pull_request -- --exact`
+  - passed
+  - proved post-PR CI failure reuses the same branch PR, reruns local validation, and preserves `metastack` label mutations on the reused PR
+
+- `cargo test --test listen listen_check_reports_viewer_only_scope_in_preflight_summary -- --exact`
+  - passed
+  - regression proof that `--check` still succeeds for minimal repo fixtures when validation is explicitly configured
+
+- `cargo test --test listen listen_once_blocks_after_repeated_noop_turns -- --exact`
+  - passed
+  - regression proof that minimal listener workers still block on repeated no-op turns when validation is explicitly configured
+
+- `cargo test --test listen listen_once_bootstraps_workspace_clone_workpad_and_agent_session -- --exact`
+  - passed
+  - regression proof that listener bootstrap, inspect, list, and resume flows still work with the new phase set
+
+- `cargo clippy --all-targets --all-features -- -D warnings`
+  - passed
+
+- `make quality`
+  - reached `fmt`, `clippy`, and the full `cargo test -- --test-threads=1` phase
+  - the run was still inside the long listen integration tail when this validation record was updated, so no clean terminal `make quality` result is recorded yet
+
+### Focused Proof Notes
+
+- Shared resolver evidence is also captured in [`.intuition/backlog/ENG-10505/artifacts/snapshot-listen-validation-gates-2026-03-26.md`](.intuition/backlog/ENG-10505/artifacts/snapshot-listen-validation-gates-2026-03-26.md).
+- `SessionPhase::Validating` is now represented in worker state, inspect output, and dashboard styling.
+- The legacy `WORKFLOW.md`, repo `README.md`, and `docs/listen-phased-execution-spec.md` were updated to describe the validating phase plus the pre-PR and post-PR repair loop.
+- Local `ENG-10292` packet material was not present in this workspace, so no packet-local doc sync was performed; that descoping note is recorded in the artifact snapshot linked above.
+
 ## MET-113: `meta agents improve` TUI workflow
 
 ### Command Proofs
