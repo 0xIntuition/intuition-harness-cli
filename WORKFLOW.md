@@ -225,12 +225,12 @@ Use this only when completion is blocked by missing required tools or missing au
     - Do not include PR URL in the workpad comment; keep PR linkage on the issue via attachment/link fields.
     - Add a short `### Confusions` section at the bottom when any part of task execution was unclear/confusing, with concise bullets.
     - Do not post any additional completion summary comment.
-11. Before moving to `Human Review`, poll PR feedback and checks:
+11. Before moving to `Human Review`, inspect PR feedback and the current PR check snapshot:
     - Read the PR `Manual QA Plan` comment (when present) and use it to sharpen CLI/runtime test coverage for the current change.
     - Run the full PR feedback sweep protocol.
-    - Confirm PR checks are passing (green) after the latest changes.
+    - Confirm there are no currently failing PR checks after the latest changes.
+    - If the current check snapshot is red, repair the branch, rerun local validation, and update the same PR before proceeding.
     - Confirm every required ticket-provided validation/test-plan item is explicitly marked complete in the workpad.
-    - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
 12. Only then move issue to `Human Review`.
     - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.
