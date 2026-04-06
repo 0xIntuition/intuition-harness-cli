@@ -59,7 +59,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `meta agents workflows run` is TUI-first on interactive TTY runs: launch the guided wizard by default, land on the review/export dashboard after generation, keep inline edit/save flows inside the same TUI session, and reserve `--no-interactive` for scripted or test fallback runs that pass explicit `--param` values.
 - Multi-phase built-in command runs may capture a provider-native continuation handle and reuse it later in the same command run, but that continuation is run-scoped only: do not persist it under `.metastack/`, attach humans to it, or couple it to listen-worker session state.
 - `meta backlog improve` should keep interactive TTY runs inside one guided dashboard flow: analyze one issue at a time, classify it as `no_update_needed`, `ready_for_update`, `needs_planning`, or `needs_questions`, and require an explicit human accept/reject decision before any local or Linear mutation happens.
-- During `meta listen`, once the ticket branch is pushed the shared automation path creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and promotes that same PR to ready during the existing review handoff. Continuation runs must leave an already-ready PR unchanged, and review handoff must safely leave PR state as `none` when no matching open branch PR exists.
+- During `meta listen`, once the ticket branch is pushed the shared automation path creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and promotes that same PR to ready during the existing review handoff. Before any PR create, edit, or ready-promotion mutation, the worker must pass the shared local validation profile resolved from CLI override, repo config, or built-in heuristics. If post-publication GitHub checks fail, the worker must repair the same PR, rerun local validation, and avoid creating a duplicate branch PR. Continuation runs must leave an already-ready PR unchanged, and review handoff must safely leave PR state as `none` when no matching open branch PR exists.
 - Default scope is the full top-level repository directory for that root, including monorepos. Only narrow the scope when the user explicitly requests a subproject.
 - Planning, backlog creation, and code changes must stay within that target repository. Do not spill into sibling repositories or parent directories.
 - For `meta listen`, the provided workspace checkout is the only local write root for implementation, validation, and backlog updates, even though the repository identity still comes from the active project checkout.
@@ -225,12 +225,12 @@ Use this only when completion is blocked by missing required tools or missing au
     - Do not include PR URL in the workpad comment; keep PR linkage on the issue via attachment/link fields.
     - Add a short `### Confusions` section at the bottom when any part of task execution was unclear/confusing, with concise bullets.
     - Do not post any additional completion summary comment.
-11. Before moving to `Human Review`, poll PR feedback and checks:
+11. Before moving to `Human Review`, inspect PR feedback and the current PR check snapshot:
     - Read the PR `Manual QA Plan` comment (when present) and use it to sharpen CLI/runtime test coverage for the current change.
     - Run the full PR feedback sweep protocol.
-    - Confirm PR checks are passing (green) after the latest changes.
+    - Confirm there are no currently failing PR checks after the latest changes.
+    - If the current check snapshot is red, repair the branch, rerun local validation, and update the same PR before proceeding.
     - Confirm every required ticket-provided validation/test-plan item is explicitly marked complete in the workpad.
-    - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
 12. Only then move issue to `Human Review`.
     - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.

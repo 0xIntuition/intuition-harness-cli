@@ -26,8 +26,9 @@ pub use crate::config_resolution::{
 };
 use crate::config_resolution::{
     config_path_from_env_or_home, default_linear_api_url, normalize_optional_ref,
-    validate_agent_route_config, validate_merge_publication_retry_attempts,
-    validate_merge_validation_repair_attempts, validate_merge_validation_transient_retry_attempts,
+    validate_agent_route_config, validate_listen_validation_repair_attempts,
+    validate_merge_publication_retry_attempts, validate_merge_validation_repair_attempts,
+    validate_merge_validation_transient_retry_attempts,
 };
 use crate::fs::PlanningPaths;
 
@@ -45,6 +46,7 @@ pub const DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT: usize = 6_000;
 pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
 pub const DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 pub const DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS: usize = 5;
+pub const DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS: usize = 2;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_IMPROVE: &str = "backlog.improve";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
@@ -87,6 +89,8 @@ pub struct PlanningMeta {
     pub agent: PlanningAgentSettings,
     #[serde(default)]
     pub listen: PlanningListenSettings,
+    #[serde(default, skip_serializing_if = "PlanningValidationSettings::is_empty")]
+    pub validation: PlanningValidationSettings,
     #[serde(default)]
     pub plan: PlanningPlanSettings,
     #[serde(default)]
@@ -215,6 +219,14 @@ pub struct PlanningListenSettings {
     /// Show or hide the preview/detail pane in the interactive dashboard.
     #[serde(default)]
     pub dashboard_preview: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningValidationSettings {
+    #[serde(default)]
+    pub commands: Vec<String>,
+    pub repair_attempts: Option<usize>,
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -835,6 +847,7 @@ impl PlanningMeta {
         if let Some(limit) = self.plan.fast_questions {
             validate_fast_plan_question_limit(limit)?;
         }
+        self.validation.validate()?;
         self.sync.validate()?;
         Ok(())
     }
@@ -871,6 +884,50 @@ impl PlanningListenSettings {
     /// Whether the preview/detail pane is enabled in the interactive dashboard (default: true).
     pub fn dashboard_preview_enabled(&self) -> bool {
         self.dashboard_preview.unwrap_or(true)
+    }
+}
+
+impl PlanningValidationSettings {
+    fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+            && self.repair_attempts.is_none()
+            && normalize_optional_ref(self.profile.as_deref()).is_none()
+    }
+
+    /// Returns the repo-scoped listen validation repair-turn budget, falling back to the built-in default.
+    pub fn repair_attempts(&self) -> usize {
+        self.repair_attempts
+            .unwrap_or(DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS)
+    }
+
+    /// Returns the optional repo-scoped validation profile label used in diagnostics.
+    pub fn profile_label(&self) -> Option<String> {
+        normalize_optional_ref(self.profile.as_deref())
+            .as_deref()
+            .map(str::to_string)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self
+            .commands
+            .iter()
+            .any(|command| command.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "repo validation commands cannot contain empty entries"
+            ));
+        }
+        if let Some(limit) = self.repair_attempts {
+            validate_listen_validation_repair_attempts(limit)?;
+        }
+        if self
+            .profile
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(anyhow!("repo validation profile label cannot be empty"));
+        }
+        Ok(())
     }
 }
 
@@ -1083,16 +1140,17 @@ mod tests {
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AgentConfigOverrides,
         AgentConfigSource, AgentRouteConfig, AgentRouteScope, AgentRoutingSettings, AgentSettings,
         AppConfig, BacklogSettings, DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT,
-        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
-        DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
+        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS,
+        DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS, DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
         InstallListenSettings, InstallPlanSettings, InstallUiSettings, ListenAssignmentScope,
         METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
         PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
-        PlanningSyncSettings, VelocityAutoAssign, VelocityDefaults, is_no_agent_selected_error,
-        no_agent_selected_route_key, normalize_agent_route_key, parse_listen_required_labels_csv,
-        resolve_agent_config, resolve_agent_route, validate_agent_reasoning,
-        validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+        PlanningSyncSettings, PlanningValidationSettings, VelocityAutoAssign, VelocityDefaults,
+        is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
+        parse_listen_required_labels_csv, resolve_agent_config, resolve_agent_route,
+        validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
+        validate_listen_poll_interval_seconds,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1176,6 +1234,14 @@ mod tests {
         assert_eq!(
             MergeSettings::default().publication_retry_attempts(),
             DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn listen_validation_repair_attempts_default_to_two() {
+        assert_eq!(
+            PlanningValidationSettings::default().repair_attempts(),
+            DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS
         );
     }
 
@@ -1511,6 +1577,38 @@ mod tests {
         assert_eq!(
             config.validate().unwrap_err().to_string(),
             "merge validation repair attempt limit must be at least 1; got 0"
+        );
+    }
+
+    #[test]
+    fn planning_meta_validation_rejects_excessive_listen_validation_repair_attempts() {
+        let meta = PlanningMeta {
+            validation: PlanningValidationSettings {
+                repair_attempts: Some(11),
+                ..PlanningValidationSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+
+        assert_eq!(
+            meta.validate().unwrap_err().to_string(),
+            "listen validation repair attempt limit must be between 0 and 10; got 11"
+        );
+    }
+
+    #[test]
+    fn planning_meta_validation_rejects_empty_validation_commands() {
+        let meta = PlanningMeta {
+            validation: PlanningValidationSettings {
+                commands: vec!["cargo test".to_string(), " ".to_string()],
+                ..PlanningValidationSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+
+        assert_eq!(
+            meta.validate().unwrap_err().to_string(),
+            "repo validation commands cannot contain empty entries"
         );
     }
 

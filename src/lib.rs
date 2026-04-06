@@ -41,6 +41,7 @@ mod technical;
 mod text_diff;
 mod tui;
 mod upgrade;
+mod validation;
 mod workflow_contract;
 mod workflows;
 mod workspace;

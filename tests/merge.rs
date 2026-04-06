@@ -1159,6 +1159,89 @@ transport = "arg"
 
 #[cfg(unix)]
 #[test]
+fn merge_uses_repo_configured_validation_profile_before_heuristics() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let agent_stub = temp.path().join("merge-agent-stub");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::write(
+        repo_root.join("Makefile"),
+        ".PHONY: quality\nquality:\n\ttest -f should-not-run\n",
+    )?;
+    fs::write(repo_root.join("README.md"), "# repo\n")?;
+    init_repo_with_origin(&repo_root)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "validation": {
+    "commands": ["test -f configured.txt"],
+    "profile": "repo-proof",
+    "repair_attempts": 2
+  }
+}
+"#,
+    )?;
+    write_github_stub(
+        &bin_dir.join("gh"),
+        &[21, 22],
+        "https://github.com/example/pull/4999",
+    )?;
+    write_agent_stub(&agent_stub, &[21, 22])?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "{}"
+transport = "arg"
+"#,
+            agent_stub.display()
+        ),
+    )?;
+
+    commit_and_push_pull_ref(&repo_root, "feature/21", "configured.txt", "ok\n", 21)?;
+    commit_and_push_pull_ref(&repo_root, "feature/22", "two.txt", "two\n", 22)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", prepend_path(&bin_dir)?)
+        .args([
+            "merge",
+            "--no-interactive",
+            "--pull-request",
+            "21",
+            "--pull-request",
+            "22",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created aggregate PR https://github.com/example/pull/4999",
+        ));
+
+    let run_root = repo_root.join(format!("{}/merge-runs", branding::PROJECT_DIR));
+    let mut run_dirs = fs::read_dir(&run_root)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    run_dirs.sort();
+    let run_dir = run_dirs.pop().expect("merge run should exist");
+
+    let validation = fs::read_to_string(run_dir.join("validation.json"))?;
+    assert!(validation.contains("\"command\": \"test -f configured.txt\""));
+    assert!(!validation.contains("\"command\": \"make quality\""));
+    assert!(validation.contains("\"exit_code\": 0"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn merge_repairs_validation_failures_and_publishes() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

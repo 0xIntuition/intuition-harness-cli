@@ -29,7 +29,8 @@ Each listener cycle for an active ticket follows these phases:
 1. `execute`
 2. `review`
 3. `continue` or `final_review`
-4. `publish`
+4. `validate`
+5. `publish`
 
 ### Execute
 
@@ -93,6 +94,27 @@ When the review phase reports `complete = true`, the listener runs one more fast
 
 If final review fails, the missing items become the next continuation delta and execution resumes.
 
+### Validate
+
+Before any PR create, PR edit, or ready-promotion mutation, the listener resolves one shared local
+validation profile with this precedence:
+
+- CLI override when a command path exposes one
+- repo-scoped `.metastack/meta.json` `validation.commands`
+- built-in repository heuristics (`make quality`, then `make all`, then `cargo test`)
+
+The resolved profile includes source diagnostics plus an optional repo-scoped profile label. The
+listener writes the active profile to worker logs, surfaces it in `meta agents listen --check`,
+and records `Validating` as an explicit session phase in persisted state and dashboard summaries.
+
+If local validation fails:
+
+- stdout/stderr excerpts are captured in the worker log
+- the review delta is rewritten with concise repair context
+- the workpad and local backlog progress mirror that repair context
+- a dedicated repo-scoped repair-turn budget is decremented before the worker re-enters `execute`
+- PR mutation is blocked when the validation repair budget is exhausted
+
 ### Publish
 
 When final review approves the work:
@@ -101,6 +123,18 @@ When final review approves the work:
 - the `metastack` label is preserved
 - the PR is attached to Linear
 - the Linear ticket is moved from `In Progress` to the review-style state
+
+The same validation gate also runs before draft PR publication or draft PR refreshes on
+continuation turns.
+
+After draft or ready publication, the listener inspects the active branch PR for failing GitHub
+checks or commit statuses. If CI is red:
+
+- the same PR is kept in place instead of creating a duplicate
+- concise failing-check details are added to the next continuation delta
+- the worker re-enters `execute`
+- local validation runs again before the next PR mutation
+- the same repair-turn budget gates additional retries
 
 ## Tracking Artifacts
 

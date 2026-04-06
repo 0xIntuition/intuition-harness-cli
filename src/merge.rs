@@ -32,6 +32,10 @@ use crate::progress::{
     ProgressArtifact, ProgressOutputMode, ProgressStepDefinition, ProgressTracker,
 };
 use crate::scaffold::ensure_planning_layout;
+use crate::validation::{
+    ValidationCommandRecord, resolve_validation_profile,
+    run_validation_commands as run_shared_validation_commands,
+};
 
 const STEP_PREPARE_WORKSPACE: &str = "prepare_workspace";
 const STEP_PLAN: &str = "plan_generation";
@@ -148,14 +152,6 @@ struct ValidationAttemptRecord {
     attempt: usize,
     commands: Vec<ValidationCommandRecord>,
     repair: Option<ValidationRepairRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ValidationCommandRecord {
-    command: String,
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -602,11 +598,15 @@ fn execute_merge_run(
         },
     )?;
 
-    let validation_commands = validation_commands(root, args);
+    let validation_profile = resolved_validation_profile(root, args);
     tracker.start_step(
         STEP_VALIDATE,
-        match &validation_commands {
-            Ok(commands) => format!("Running validation command(s): {}", commands.join(" && ")),
+        match &validation_profile {
+            Ok(profile) => format!(
+                "Running validation command(s): {} (source: {}).",
+                profile.commands.join(" && "),
+                profile.source.label()
+            ),
             Err(error) => format!("Preparing validation commands failed: {error:#}"),
         },
     )?;
@@ -614,8 +614,8 @@ fn execute_merge_run(
     let max_validation_repair_attempts = merge_settings.validation_repair_attempts();
     let max_validation_transient_retry_attempts =
         merge_settings.validation_transient_retry_attempts();
-    let validation = match validation_commands {
-        Ok(commands) => match run_validation_until_passes(
+    let validation = match validation_profile {
+        Ok(profile) => match run_validation_until_passes(
             root,
             &workspace_path,
             args,
@@ -625,7 +625,7 @@ fn execute_merge_run(
             &plan,
             &run_dir,
             &mut tracker,
-            commands,
+            profile.commands,
             max_validation_repair_attempts,
             max_validation_transient_retry_attempts,
         ) {
@@ -828,9 +828,9 @@ fn resume_merge_run(
     )?;
 
     let merge_settings = AppConfig::load()?.merge;
-    let validation_commands = validation_commands(root, args);
-    let validation = match validation_commands {
-        Ok(commands) => match run_validation_until_passes(
+    let validation_profile = resolved_validation_profile(root, args);
+    let validation = match validation_profile {
+        Ok(profile) => match run_validation_until_passes(
             root,
             &workspace_path,
             args,
@@ -840,7 +840,7 @@ fn resume_merge_run(
             &plan,
             &run_dir,
             &mut tracker,
-            commands,
+            profile.commands,
             merge_settings.validation_repair_attempts(),
             merge_settings.validation_transient_retry_attempts(),
         ) {
@@ -1349,67 +1349,19 @@ fn build_conflict_prompt(
     ))
 }
 
-fn validation_commands(root: &Path, args: &MergeArgs) -> Result<Vec<String>> {
-    if !args.validate.is_empty() {
-        return Ok(args.validate.clone());
-    }
-
-    let makefile = root.join("Makefile");
-    if makefile.is_file() {
-        let contents = fs::read_to_string(&makefile)
-            .with_context(|| format!("failed to read `{}`", makefile.display()))?;
-        if makefile_has_target(&contents, "quality") {
-            return Ok(vec!["make quality".to_string()]);
-        }
-        if makefile_has_target(&contents, "all") {
-            return Ok(vec!["make all".to_string()]);
-        }
-    }
-
-    if root.join("Cargo.toml").is_file() {
-        return Ok(vec!["cargo test".to_string()]);
-    }
-
-    bail!(
-        "no default validation command was inferred for `{}`; pass one or more `--validate <COMMAND>` flags",
-        root.display()
-    )
-}
-
-fn makefile_has_target(contents: &str, target: &str) -> bool {
-    contents.lines().any(|line| {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') || trimmed.starts_with('\t') || trimmed.is_empty() {
-            return false;
-        }
-
-        trimmed
-            .split_once(':')
-            .map(|(name, _)| name.trim() == target)
-            .unwrap_or(false)
-    })
+fn resolved_validation_profile(
+    root: &Path,
+    args: &MergeArgs,
+) -> Result<crate::validation::ResolvedValidationProfile> {
+    let planning_meta = PlanningMeta::load(root)?;
+    resolve_validation_profile(root, &planning_meta, &args.validate)
 }
 
 fn run_validation_commands(
     workspace_path: &Path,
     commands: Vec<String>,
 ) -> Result<Vec<ValidationCommandRecord>> {
-    let mut records = Vec::new();
-    for command in commands {
-        let output = Command::new("/bin/sh")
-            .arg("-lc")
-            .arg(&command)
-            .current_dir(workspace_path)
-            .output()
-            .with_context(|| format!("failed to run validation command `{command}`"))?;
-        records.push(ValidationCommandRecord {
-            command,
-            exit_code: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-    Ok(records)
+    run_shared_validation_commands(workspace_path, &commands)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2222,7 +2174,7 @@ mod tests {
 
     use super::{
         GithubActor, GithubPullRequest, MergePlan, ValidationCommandRecord, reserve_run_dir_at,
-        targeted_validation_commands, validate_merge_plan, validation_commands,
+        resolved_validation_profile, targeted_validation_commands, validate_merge_plan,
         validation_failure_summary,
     };
 
@@ -2270,7 +2222,7 @@ mod tests {
             ".PHONY: all quality\nall: quality\nquality:\n\tcargo test\n",
         )?;
 
-        let commands = validation_commands(temp.path(), &empty_merge_args())?;
+        let commands = resolved_validation_profile(temp.path(), &empty_merge_args())?.commands;
 
         assert_eq!(commands, vec!["make quality"]);
         Ok(())
@@ -2284,7 +2236,7 @@ mod tests {
             ".PHONY: all\nall:\n\tcargo test\n",
         )?;
 
-        let commands = validation_commands(temp.path(), &empty_merge_args())?;
+        let commands = resolved_validation_profile(temp.path(), &empty_merge_args())?.commands;
 
         assert_eq!(commands, vec!["make all"]);
         Ok(())

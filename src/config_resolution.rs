@@ -1005,6 +1005,16 @@ pub(crate) fn validate_merge_validation_repair_attempts(limit: usize) -> Result<
     }
 }
 
+pub(crate) fn validate_listen_validation_repair_attempts(limit: usize) -> Result<()> {
+    if limit <= 10 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen validation repair attempt limit must be between 0 and 10; got {limit}"
+        ))
+    }
+}
+
 /// Validates the persisted default backlog priority.
 pub fn validate_backlog_default_priority(priority: u8) -> Result<()> {
     if (1..=4).contains(&priority) {

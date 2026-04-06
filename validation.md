@@ -1,4 +1,74 @@
-# Validation — MET-45
+# Validation Evidence
+
+## ENG-10505: Shared validation profiles and listen repair gates
+
+### Command Proofs
+
+- `cargo test --test config -- --test-threads=1`
+- `cargo test --test merge -- --test-threads=1`
+- `cargo test --test listen listen_check_reports_codex_config_status_and_linear_api_validation -- --exact`
+- `cargo test --test listen listen_sessions_inspect_renders_validating_phase -- --exact`
+- `cargo test --test listen listen_worker_retries_failed_pre_pr_validation_and_blocks_when_budget_is_exhausted -- --exact`
+- `cargo test --test listen listen_worker_repairs_failing_pr_checks_and_reuses_the_same_pull_request -- --exact`
+- `cargo test --test listen listen_check_reports_viewer_only_scope_in_preflight_summary -- --exact`
+- `cargo test --test listen listen_once_blocks_after_repeated_noop_turns -- --exact`
+- `cargo test --test listen listen_once_bootstraps_workspace_clone_workpad_and_agent_session -- --exact`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `make quality`
+
+### Results
+
+Validated locally on 2026-04-06 in the ENG-10505 workspace after merging the current `origin/main`.
+
+- `cargo test --test config -- --test-threads=1`
+  - passed
+  - covered repo-scoped validation defaults and retry-budget validation constraints
+
+- `cargo test --test merge -- --test-threads=1`
+  - passed
+  - proved merge now prefers repo-scoped validation profiles before heuristic fallback
+
+- `cargo test --test listen listen_check_reports_codex_config_status_and_linear_api_validation -- --exact`
+  - passed
+  - proved `meta agents listen --check --root .` reports validation profile source, optional label, and commands
+
+- `cargo test --test listen listen_sessions_inspect_renders_validating_phase -- --exact`
+  - passed
+  - proved persisted session inspection renders `Validating`
+
+- `cargo test --test listen listen_worker_retries_failed_pre_pr_validation_and_blocks_when_budget_is_exhausted -- --exact`
+  - passed
+  - proved pre-PR validation failure re-enters the repair loop, consumes the dedicated retry budget, and blocks PR mutation when exhausted
+
+- `cargo test --test listen listen_worker_repairs_failing_pr_checks_and_reuses_the_same_pull_request -- --exact`
+  - passed
+  - proved post-PR CI failure reuses the same branch PR, reruns local validation, and preserves the `metastack` label plus Linear attachment path on the reused PR lifecycle
+
+- `cargo test --test listen listen_check_reports_viewer_only_scope_in_preflight_summary -- --exact`
+  - passed
+  - regression proof that `--check` still succeeds for minimal repo fixtures when validation is explicitly configured
+
+- `cargo test --test listen listen_once_blocks_after_repeated_noop_turns -- --exact`
+  - passed
+  - regression proof that minimal listener workers still block on repeated no-op turns when validation is explicitly configured
+
+- `cargo test --test listen listen_once_bootstraps_workspace_clone_workpad_and_agent_session -- --exact`
+  - passed
+  - regression proof that listener bootstrap, inspect, list, and resume flows still work with the new phase set
+
+- `cargo clippy --all-targets --all-features -- -D warnings`
+  - passed
+
+- `make quality`
+  - passed
+  - covered `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and the full `cargo test -- --test-threads=1` suite
+
+### Focused Proof Notes
+
+- Shared resolver evidence and the scope/non-goals note are captured in [`artifacts/snapshot-listen-validation-gates-2026-04-06.md`](artifacts/snapshot-listen-validation-gates-2026-04-06.md) and indexed from [`artifacts/README.md`](artifacts/README.md).
+- `SessionPhase::Validating` is represented in worker state, inspect output, and dashboard styling.
+- The legacy [`WORKFLOW.md`](WORKFLOW.md), repo [`README.md`](README.md), and [`docs/listen-phased-execution-spec.md`](docs/listen-phased-execution-spec.md) describe the validating phase plus the pre-PR and post-PR repair loop.
+- The local ENG-10292 packet referenced in the ticket text was not present in this workspace, so no packet-local sync was performed on this branch.
 
 ## MET-113: `meta agents improve` TUI workflow
 

@@ -488,6 +488,7 @@ pub enum SessionPhase {
     Running,
     Reviewing,
     FinalReview,
+    Validating,
     Publishing,
     Paused,
     Completed,
@@ -502,6 +503,7 @@ impl SessionPhase {
             Self::Running => "running",
             Self::Reviewing => "reviewing",
             Self::FinalReview => "final-review",
+            Self::Validating => "validating",
             Self::Publishing => "publishing",
             Self::Paused => "paused",
             Self::Completed => "completed",
@@ -516,6 +518,7 @@ impl SessionPhase {
             Self::Running => "Running",
             Self::Reviewing => "Reviewing",
             Self::FinalReview => "Final Review",
+            Self::Validating => "Validating",
             Self::Publishing => "Publishing",
             Self::Paused => "Paused",
             Self::Completed => "Completed",
@@ -531,6 +534,7 @@ impl SessionPhase {
             Self::Running => "active",
             Self::Reviewing => "active",
             Self::FinalReview => "active",
+            Self::Validating => "active",
             Self::Publishing => "active",
             Self::Paused => "warning",
             Self::Completed => "success",
@@ -575,6 +579,7 @@ impl ListenState {
                     SessionPhase::Claimed
                         | SessionPhase::BriefReady
                         | SessionPhase::Running
+                        | SessionPhase::Validating
                         | SessionPhase::Paused
                         | SessionPhase::Completed
                         | SessionPhase::Blocked
