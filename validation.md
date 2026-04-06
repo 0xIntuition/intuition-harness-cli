@@ -1,4 +1,4 @@
-# Validation — MET-45
+# Validation Evidence
 
 ## ENG-10505: Shared validation profiles and listen repair gates
 
@@ -17,6 +17,8 @@
 - `make quality`
 
 ### Results
+
+Validated locally on 2026-04-06 in the ENG-10505 workspace after merging the current `origin/main`.
 
 - `cargo test --test config -- --test-threads=1`
   - passed
@@ -40,7 +42,7 @@
 
 - `cargo test --test listen listen_worker_repairs_failing_pr_checks_and_reuses_the_same_pull_request -- --exact`
   - passed
-  - proved post-PR CI failure reuses the same branch PR, reruns local validation, and preserves `metastack` label mutations on the reused PR
+  - proved post-PR CI failure reuses the same branch PR, reruns local validation, and preserves the `metastack` label plus Linear attachment path on the reused PR lifecycle
 
 - `cargo test --test listen listen_check_reports_viewer_only_scope_in_preflight_summary -- --exact`
   - passed
@@ -58,15 +60,15 @@
   - passed
 
 - `make quality`
-  - reached `fmt`, `clippy`, and the full `cargo test -- --test-threads=1` phase
-  - the run was still inside the long listen integration tail when this validation record was updated, so no clean terminal `make quality` result is recorded yet
+  - passed
+  - covered `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and the full `cargo test -- --test-threads=1` suite
 
 ### Focused Proof Notes
 
-- Shared resolver evidence is also captured in [`.intuition/backlog/ENG-10505/artifacts/snapshot-listen-validation-gates-2026-03-26.md`](.intuition/backlog/ENG-10505/artifacts/snapshot-listen-validation-gates-2026-03-26.md).
-- `SessionPhase::Validating` is now represented in worker state, inspect output, and dashboard styling.
-- The legacy `WORKFLOW.md`, repo `README.md`, and `docs/listen-phased-execution-spec.md` were updated to describe the validating phase plus the pre-PR and post-PR repair loop.
-- Local `ENG-10292` packet material was not present in this workspace, so no packet-local doc sync was performed; that descoping note is recorded in the artifact snapshot linked above.
+- Shared resolver evidence and the scope/non-goals note are captured in [`artifacts/snapshot-listen-validation-gates-2026-04-06.md`](artifacts/snapshot-listen-validation-gates-2026-04-06.md) and indexed from [`artifacts/README.md`](artifacts/README.md).
+- `SessionPhase::Validating` is represented in worker state, inspect output, and dashboard styling.
+- The legacy [`WORKFLOW.md`](WORKFLOW.md), repo [`README.md`](README.md), and [`docs/listen-phased-execution-spec.md`](docs/listen-phased-execution-spec.md) describe the validating phase plus the pre-PR and post-PR repair loop.
+- The local ENG-10292 packet referenced in the ticket text was not present in this workspace, so no packet-local sync was performed on this branch.
 
 ## MET-113: `meta agents improve` TUI workflow
 
