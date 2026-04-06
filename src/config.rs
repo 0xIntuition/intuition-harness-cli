@@ -58,6 +58,7 @@ pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
 pub const AGENT_ROUTE_AGENTS_REVIEW: &str = "agents.review";
+pub const AGENT_ROUTE_AGENTS_BUILD: &str = "agents.build";
 pub const AGENT_ROUTE_MERGE: &str = "merge.run";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

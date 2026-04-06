@@ -823,7 +823,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         return Ok(());
                     }
                 };
-                if let Some(pull_request) = publish_listener_pull_request(
+                match publish_listener_pull_request(
                     &service,
                     &issue,
                     &workspace_path,
@@ -831,59 +831,64 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     PullRequestPublishMode::Draft,
                     Some(&review),
                 )
-                .await?
-                .map(PullRequestSummary::from)
+                .await
                 {
-                    session_context.pull_request = pull_request;
-                    if let Some(number) = session_context.pull_request.number {
-                        let failing_checks =
-                            GhCli.failing_pull_request_checks(&workspace_path, number)?;
-                        if !failing_checks.is_empty() {
-                            let budget_exhausted = remaining_validation_repair_turns == 0;
-                            let remaining_after_failure =
-                                remaining_validation_repair_turns.saturating_sub(1);
-                            let follow_up_review = review_for_ci_failure(
-                                last_review.as_ref(),
-                                number,
-                                &failing_checks,
-                                remaining_after_failure,
-                            );
-                            sync_review_tracking(
-                                &service,
-                                &issue,
-                                &turn_context,
-                                &follow_up_review,
-                            )
-                            .await?;
-                            last_review = Some(follow_up_review);
-                            append_worker_log(
-                                &log_path,
-                                "pull request checks",
-                                &render_check_failure_lines(number, &failing_checks),
-                            )?;
-                            if budget_exhausted {
-                                write_listen_session(
-                                    &source_root,
-                                    project_selector,
-                                    build_worker_session(
-                                        &issue,
-                                        SessionPhase::Blocked,
-                                        compact_blocked_summary(
-                                            "Blocked | CI repair budget exhausted",
-                                            issue.description.as_deref(),
-                                            &log_path,
-                                        ),
-                                        &session_context,
-                                        turns_completed,
-                                        provider_session_id.as_deref(),
-                                        &session_context.canonical,
-                                    ),
+                    Ok(Some(pull_request)) => {
+                        session_context.pull_request = PullRequestSummary::from(pull_request);
+                        if let Some(number) = session_context.pull_request.number {
+                            let failing_checks =
+                                GhCli.failing_pull_request_checks(&workspace_path, number)?;
+                            if !failing_checks.is_empty() {
+                                let budget_exhausted = remaining_validation_repair_turns == 0;
+                                let remaining_after_failure =
+                                    remaining_validation_repair_turns.saturating_sub(1);
+                                let follow_up_review = review_for_ci_failure(
+                                    Some(&review),
+                                    number,
+                                    &failing_checks,
+                                    remaining_after_failure,
+                                );
+                                sync_review_tracking(
+                                    &service,
+                                    &issue,
+                                    &turn_context,
+                                    &follow_up_review,
+                                )
+                                .await?;
+                                last_review = Some(follow_up_review);
+                                append_worker_log(
+                                    &log_path,
+                                    "pull request checks",
+                                    &render_check_failure_lines(number, &failing_checks),
                                 )?;
-                                return Ok(());
+                                if budget_exhausted {
+                                    write_listen_session(
+                                        &source_root,
+                                        project_selector,
+                                        build_worker_session(
+                                            &issue,
+                                            SessionPhase::Blocked,
+                                            compact_blocked_summary(
+                                                "Blocked | CI repair budget exhausted",
+                                                issue.description.as_deref(),
+                                                &log_path,
+                                            ),
+                                            &session_context,
+                                            turns_completed,
+                                            provider_session_id.as_deref(),
+                                            &session_context.canonical,
+                                        ),
+                                    )?;
+                                    return Ok(());
+                                }
+                                remaining_validation_repair_turns -= 1;
+                                continue;
                             }
-                            remaining_validation_repair_turns -= 1;
-                            continue;
                         }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        eprintln!("draft PR publish failed; continuing worker loop: {err:#}");
                     }
                 }
             }
@@ -3001,7 +3006,7 @@ fn agent_backed_review_enabled() -> bool {
 fn heuristic_review_report(
     issue: &IssueSummary,
     context: &ListenTurnContext<'_>,
-    meaningful_turn_progress: bool,
+    _meaningful_turn_progress: bool,
     turn_progress: &super::TurnProgress,
     has_existing_draft_pr: bool,
 ) -> Result<ReviewReport> {
@@ -3024,7 +3029,11 @@ fn heuristic_review_report(
         backlog_complete
             || (has_existing_draft_pr && acceptance.is_empty() && validation.is_empty())
     } else {
-        meaningful_turn_progress && acceptance.is_empty()
+        // Without a backlog checklist the heuristic does not have enough
+        // signal to declare completion.  Let the worker exhaust its turn
+        // budget; the agent-backed review path (METASTACK_LISTEN_AGENT_REVIEW=1)
+        // provides richer completion detection when needed.
+        false
     };
     let changed_items = turn_progress
         .implementation_entries
