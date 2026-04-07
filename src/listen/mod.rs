@@ -45,7 +45,7 @@ use crate::config::{
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{
     IssueAssigneeFilter, IssueComment, IssueEditSpec, IssueListFilters, IssueSummary, LinearClient,
-    LinearService, ReqwestLinearClient, UserRef,
+    LinearService, ReqwestLinearClient, UserRef, classify_linear_failure,
 };
 use crate::listen::workpad::{extract_requirements, render_bootstrap_workpad};
 use crate::listen::workspace::{TicketWorkspace, ensure_ticket_workspace};
@@ -55,9 +55,10 @@ use crate::tui::copy::copy_overlay_viewport;
 use crate::tui::keybindings::is_copy_key;
 use crate::validation::resolve_validation_profile;
 pub use state::{
-    ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, PendingIssue,
-    PullRequestStatus, PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
-    TurnPromptMode, TurnTokenSnapshot,
+    ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, LinearFailureSnapshot,
+    PendingIssue, PendingLinearSync, PendingPullRequestAttachment, PullRequestStatus,
+    PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage, TurnPromptMode,
+    TurnTokenSnapshot,
 };
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label};
 use store::{
@@ -90,6 +91,7 @@ pub struct ListenDashboardData {
     pub session_details: HashMap<String, ListenSessionDetail>,
     pub notes: Vec<String>,
     pub state_file: String,
+    pub degraded: Option<LinearFailureSnapshot>,
     pub show_active_issues: bool,
     pub show_preview: bool,
     #[serde(skip_serializing)]
@@ -110,6 +112,7 @@ impl ListenDashboardData {
             format!("Runtime: {}", self.runtime.runtime),
             format!("Tokens: {}", self.runtime.tokens),
             format!("Rate Limits: {}", self.runtime.rate_limits),
+            format!("Linear status: {}", self.runtime.linear_status),
             format!("Project: {}", self.runtime.project),
             format!("Watching: {}", self.watch_scope),
             format!("Dashboard: {}", self.runtime.dashboard),
@@ -175,6 +178,7 @@ pub struct ListenRuntimeSummary {
     pub runtime: String,
     pub tokens: String,
     pub rate_limits: String,
+    pub linear_status: String,
     pub project: String,
     pub dashboard: String,
     pub dashboard_refresh: String,
@@ -238,6 +242,7 @@ struct ListenCycleData {
     notes: Vec<String>,
     state_file: String,
     rate_limits: Option<String>,
+    degraded: Option<LinearFailureSnapshot>,
 }
 
 impl ListenCycleData {
@@ -257,6 +262,7 @@ impl ListenCycleData {
             ],
             state_file,
             rate_limits: None,
+            degraded: None,
         }
     }
 
@@ -361,6 +367,7 @@ impl ListenCycleData {
                         )
                             .to_string(),
                     }),
+                    pending_linear_sync: None,
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(9_614_112),
@@ -408,6 +415,7 @@ impl ListenCycleData {
                         )
                             .to_string(),
                     }),
+                    pending_linear_sync: None,
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(8_380_959),
@@ -438,6 +446,7 @@ impl ListenCycleData {
             rate_limits: Some(
                 "codex | primary 12% / reset 1,773,515,901s | secondary 8% / reset 1,773,855,871s | credits n/a".to_string(),
             ),
+            degraded: None,
         }
     }
 
@@ -446,6 +455,17 @@ impl ListenCycleData {
         state: ListenState,
         session_details: HashMap<String, ListenSessionDetail>,
     ) {
+        let replace_linear_snapshot = !state.pending_issues.is_empty()
+            || !state.active_issues.is_empty()
+            || state.degraded.is_some()
+            || (self.pending_issues.is_empty()
+                && self.active_issues.is_empty()
+                && self.degraded.is_none());
+        if replace_linear_snapshot {
+            self.pending_issues = state.pending_issues.clone();
+            self.active_issues = state.active_issues.clone();
+            self.degraded = state.degraded.clone();
+        }
         self.sessions = state.sorted_sessions();
         self.session_details = session_details;
     }
@@ -497,6 +517,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     id: "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
                         .to_string(),
                 }),
+                pending_linear_sync: None,
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
                     backlog_path: Some(format!("{}/backlog/MET-14", crate::branding::PROJECT_DIR)),
@@ -593,6 +614,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     id: "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
                         .to_string(),
                 }),
+                pending_linear_sync: None,
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-17".to_string()),
                     backlog_path: None,
@@ -1178,15 +1200,24 @@ impl<C> AgentDaemon<C>
 where
     C: LinearClient,
 {
+    async fn run_cycle_resilient(&self) -> Result<ListenCycleData> {
+        match self.run_cycle().await {
+            Ok(cycle) => Ok(cycle),
+            Err(error) => self.build_degraded_cycle(&error),
+        }
+    }
+
     async fn run_cycle(&self) -> Result<ListenCycleData> {
         self.store.ensure_layout()?;
         let mut state = self.store.load_state()?;
-        let pending = self.service.list_issues(self.filters.clone()).await?;
+        let viewer = self.resolve_cycle_viewer().await?;
+        let filters = self.filters_with_viewer(viewer.as_ref());
+        let pending = self.service.list_issues(filters.clone()).await?;
         let in_progress_issues = self
             .service
             .list_issues(IssueListFilters {
                 state: Some(IN_PROGRESS_STATE.to_string()),
-                ..self.filters.clone()
+                ..filters.clone()
             })
             .await
             .unwrap_or_default();
@@ -1207,7 +1238,10 @@ where
                 format_required_label_filter(required_labels)
             ));
         }
-        notes.push(format!("Watching: {}.", self.watch_scope_label()));
+        notes.push(format!(
+            "Watching: {}.",
+            self.watch_scope_label_with(viewer.as_ref())
+        ));
         let mut claimed_this_cycle = 0usize;
         let mut claimed_identifiers = Vec::new();
         let mut eligible = Vec::new();
@@ -1216,7 +1250,7 @@ where
             if state.blocks_pickup(&issue.identifier) {
                 continue;
             }
-            if let Some(reason) = self.skip_reason(issue) {
+            if let Some(reason) = self.skip_reason_with_viewer(issue, viewer.as_ref()) {
                 notes.push(format!("Skipped {}: {}.", issue.identifier, reason));
                 continue;
             }
@@ -1248,6 +1282,9 @@ where
             .map(PendingIssue::from)
             .collect::<Vec<_>>();
         let sessions = state.sorted_sessions();
+        state.pending_issues = pending_issues.clone();
+        state.active_issues = active_issues.clone();
+        state.degraded = None;
         self.store.save_state(&state)?;
         let session_details = self
             .store
@@ -1267,7 +1304,7 @@ where
 
         Ok(ListenCycleData {
             scope,
-            watch_scope: self.watch_scope_label(),
+            watch_scope: self.watch_scope_label_with(viewer.as_ref()),
             claimed_this_cycle,
             pending_issues,
             active_issues,
@@ -1276,6 +1313,82 @@ where
             notes,
             state_file,
             rate_limits: None,
+            degraded: None,
+        })
+    }
+
+    fn build_degraded_cycle(&self, error: &anyhow::Error) -> Result<ListenCycleData> {
+        self.store.ensure_layout()?;
+        let mut state = self.store.load_state()?;
+        let classified = classify_linear_failure(error);
+        let previous_failures = state
+            .degraded
+            .as_ref()
+            .map(|failure| failure.consecutive_failures)
+            .unwrap_or(0);
+        let consecutive_failures = previous_failures.saturating_add(1);
+        let now_epoch_seconds = now_epoch_seconds();
+        let next_retry_at_epoch_seconds = classified.is_retryable().then_some(
+            now_epoch_seconds
+                + self
+                    .app_config
+                    .defaults
+                    .listen
+                    .retry
+                    .backoff_seconds_for_failure_streak(consecutive_failures),
+        );
+        let degraded = LinearFailureSnapshot {
+            kind: classified.kind,
+            message: classified.message,
+            observed_at_epoch_seconds: now_epoch_seconds,
+            status_code: classified.status_code,
+            consecutive_failures,
+            next_retry_at_epoch_seconds,
+        };
+        state.degraded = Some(degraded.clone());
+        self.store.save_state(&state)?;
+
+        let sessions = state.sorted_sessions();
+        let session_details = self
+            .store
+            .load_session_details(&sessions)?
+            .into_iter()
+            .map(|detail| (detail.issue_identifier.clone(), detail))
+            .collect();
+        let scope = match (&self.filters.team, &self.filters.project) {
+            (Some(team), Some(project)) => format!("{team} / {project}"),
+            (Some(team), None) => team.clone(),
+            (None, Some(project)) => project.clone(),
+            (None, None) => "all teams".to_string(),
+        };
+        let retry_note = match degraded.next_retry_at_epoch_seconds {
+            Some(_) => format!(
+                "Retrying in {} under the shared listen backoff policy.",
+                degraded.retry_label(now_epoch_seconds)
+            ),
+            None => "Operator action is likely required before the next successful Linear refresh."
+                .to_string(),
+        };
+        let notes = vec![
+            format!(
+                "Preserved the last known queue and session snapshot after a {} Linear failure.",
+                degraded.kind.label()
+            ),
+            retry_note,
+            format!("Latest Linear failure: {:#}", error),
+        ];
+        Ok(ListenCycleData {
+            scope,
+            watch_scope: self.watch_scope_label(),
+            claimed_this_cycle: 0,
+            pending_issues: state.pending_issues.clone(),
+            active_issues: state.active_issues.clone(),
+            sessions,
+            session_details,
+            notes,
+            state_file: display_path(&self.store.paths().state_path, &self.root),
+            rate_limits: None,
+            degraded: Some(degraded),
         })
     }
 
@@ -1840,14 +1953,18 @@ where
         }
     }
 
-    fn skip_reason(&self, issue: &IssueSummary) -> Option<String> {
+    fn skip_reason_with_viewer(
+        &self,
+        issue: &IssueSummary,
+        viewer: Option<&UserRef>,
+    ) -> Option<String> {
         let mut reasons = Vec::new();
 
         if let Some(reason) = required_label_skip_reason(&self.listen_settings, issue) {
             reasons.push(reason);
         }
 
-        if let Some(reason) = self.assignee_scope_skip_reason(issue) {
+        if let Some(reason) = self.assignee_scope_skip_reason_with_viewer(issue, viewer) {
             reasons.push(reason);
         }
 
@@ -1855,14 +1972,24 @@ where
     }
 
     fn watch_scope_label(&self) -> String {
-        render_watch_scope(
-            self.listen_settings.assignment_scope(),
-            self.viewer.as_ref(),
-        )
+        self.watch_scope_label_with(self.viewer.as_ref())
     }
 
+    fn watch_scope_label_with(&self, viewer: Option<&UserRef>) -> String {
+        render_watch_scope(self.listen_settings.assignment_scope(), viewer)
+    }
+
+    #[cfg(test)]
     fn assignee_scope_skip_reason(&self, issue: &IssueSummary) -> Option<String> {
-        let viewer = self.viewer.as_ref()?;
+        self.assignee_scope_skip_reason_with_viewer(issue, self.viewer.as_ref())
+    }
+
+    fn assignee_scope_skip_reason_with_viewer(
+        &self,
+        issue: &IssueSummary,
+        viewer: Option<&UserRef>,
+    ) -> Option<String> {
+        let viewer = viewer?;
         match self.listen_settings.assignment_scope() {
             ListenAssignmentScope::Any => None,
             ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
@@ -1881,6 +2008,22 @@ where
                 )),
                 None => None,
             },
+        }
+    }
+
+    async fn resolve_cycle_viewer(&self) -> Result<Option<UserRef>> {
+        match self.listen_settings.assignment_scope() {
+            ListenAssignmentScope::Any => Ok(None),
+            ListenAssignmentScope::ViewerOnly | ListenAssignmentScope::ViewerOrUnassigned => {
+                self.service.viewer().await.map(Some)
+            }
+        }
+    }
+
+    fn filters_with_viewer(&self, viewer: Option<&UserRef>) -> IssueListFilters {
+        IssueListFilters {
+            assignee: issue_assignee_filter(self.listen_settings.assignment_scope(), viewer),
+            ..self.filters.clone()
         }
     }
 
@@ -1936,6 +2079,7 @@ where
             pid: artifacts.pid.filter(|pid| *pid > 0),
             session_id: None,
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -2427,11 +2571,7 @@ fn is_missing_review_state_error(error: &anyhow::Error) -> bool {
 }
 
 fn is_transient_linear_read_failure(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .to_string()
-            .contains("failed to reach the Linear GraphQL endpoint")
-    })
+    classify_linear_failure(error).is_retryable()
 }
 
 fn git_stdout(workspace_path: &Path, args: &[&str]) -> Result<String> {
@@ -2535,6 +2675,7 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
 pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<String> {
     let store = resolve_session_store(&args.target)?;
     let metadata = store_summary(&store)?;
+    let state = store.load_state()?;
     let mut lines = vec![
         format!("Project key: {}", metadata.metadata.project_key),
         format!("Project: {}", metadata.metadata.project_label),
@@ -2557,6 +2698,15 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         ));
     } else {
         lines.push("Active listener: none".to_string());
+    }
+
+    if let Some(degraded) = state.degraded.as_ref() {
+        lines.push(format!(
+            "Degraded Linear state: {} | retry {}",
+            degraded.kind.label(),
+            degraded.retry_label(now_epoch_seconds())
+        ));
+        lines.push(format!("Degraded failure: {}", degraded.message));
     }
 
     if let Some(session) = metadata.latest_session {
@@ -2590,6 +2740,9 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
             "  - Resume ID: {}",
             explicit_resume_id_label(session.latest_resume_handle.as_ref())
         ));
+        if let Some(pending_sync) = session.pending_linear_sync_label() {
+            lines.push(format!("  - Pending Linear sync: {pending_sync}"));
+        }
         if let Some(workspace_path) = session.workspace_path {
             lines.push(format!("  - Workspace: {workspace_path}"));
         }
@@ -2604,17 +2757,21 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         }
     }
 
-    let state = store.load_state()?;
     if !state.sessions.is_empty() {
         lines.push(String::new());
         lines.push("Tracked sessions:".to_string());
         for session in state.sorted_sessions() {
+            let pending_sync = session
+                .pending_linear_sync_label()
+                .map(|value| format!(" | pending {value}"))
+                .unwrap_or_default();
             lines.push(format!(
-                "  - {} [{}] {} | tokens {}",
+                "  - {} [{}] {} | tokens {}{}",
                 session.issue_identifier,
                 session.phase.display_label(),
                 session.summary,
-                session.canonical_tokens().display_compact()
+                session.canonical_tokens().display_compact(),
+                pending_sync
             ));
         }
     }
@@ -2658,6 +2815,20 @@ fn append_session_inspect_detail_lines(
         "  - Detail resume ID: {}",
         explicit_resume_id_label(detail.latest_resume_handle.as_ref())
     ));
+    if let Some(pending_sync) = detail.pending_linear_sync.as_ref() {
+        lines.push(format!(
+            "  - Detail pending Linear sync: {}",
+            pending_sync.operation_labels().join(", ")
+        ));
+        if let Some(failure) = pending_sync.last_failure.as_ref() {
+            lines.push(format!(
+                "  - Detail pending failure: {} | retry {} | {}",
+                failure.kind.label(),
+                failure.retry_label(now_epoch_seconds()),
+                failure.message
+            ));
+        }
+    }
 
     if let Some(url) = detail.pull_request.url.as_deref() {
         lines.push(format!("  - Detail PR URL: {url}"));
@@ -3011,6 +3182,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         pid: Some(pid),
         session_id: Some(detailed_issue.id.clone()),
         latest_resume_handle: None,
+        pending_linear_sync: None,
         turns: Some(0),
         tokens: TokenUsage::default(),
         turn_history: Vec::new(),
@@ -3247,22 +3419,13 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                 preflight_viewer = report.viewer().cloned();
                 preflight::emit_listen_preflight_warnings(&report);
             }
+            Err(error) if classify_linear_failure(&error).is_retryable() => {}
             Err(error) => return Err(error),
         }
     } else if args.check {
         unreachable!("`--check` exits on provider preflight failures before Linear validation");
     }
-    let viewer = if matches!(
-        listen_settings.assignment_scope(),
-        ListenAssignmentScope::ViewerOnly | ListenAssignmentScope::ViewerOrUnassigned
-    ) {
-        match preflight_viewer {
-            Some(viewer) => Some(viewer),
-            None => Some(service.viewer().await?),
-        }
-    } else {
-        None
-    };
+    let viewer = preflight_viewer;
     let daemon = AgentDaemon {
         root: root.clone(),
         store,
@@ -3291,7 +3454,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     };
 
     if args.render_once {
-        let cycle = daemon.run_cycle().await?;
+        let cycle = daemon.run_cycle_resilient().await?;
         let now = now_epoch_seconds();
         let data = build_dashboard_data(
             &cycle,
@@ -3316,7 +3479,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     }
 
     if args.once {
-        let cycle = daemon.run_cycle().await?;
+        let cycle = daemon.run_cycle_resilient().await?;
         let now = now_epoch_seconds();
         let data = build_dashboard_data(
             &cycle,
@@ -3364,7 +3527,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             resolved_agent,
         },
         initial_cycle,
-        || daemon.run_cycle(),
+        || daemon.run_cycle_resilient(),
         |cycle| {
             let state = daemon.store.load_state()?;
             let session_details = daemon
@@ -3661,7 +3824,12 @@ where
                 }, if pending_cycle_refresh.is_some() => {
                 cycle = result?;
                 let refreshed_at = Instant::now();
-                next_linear_refresh_at = refreshed_at + linear_refresh_interval;
+                next_linear_refresh_at = cycle
+                    .degraded
+                    .as_ref()
+                    .and_then(|failure| failure.next_retry_at_epoch_seconds)
+                    .and_then(epoch_seconds_to_instant)
+                    .unwrap_or(refreshed_at + linear_refresh_interval);
                 pending_cycle_refresh = None;
                 refresh_dashboard_state(&mut cycle)?;
                 next_terminal_refresh_at = Instant::now() + terminal_refresh_interval;
@@ -3681,6 +3849,14 @@ where
     }
 
     Ok(())
+}
+
+fn epoch_seconds_to_instant(epoch_seconds: u64) -> Option<Instant> {
+    let now_epoch_seconds = now_epoch_seconds();
+    if epoch_seconds <= now_epoch_seconds {
+        return Some(Instant::now());
+    }
+    Some(Instant::now() + Duration::from_secs(epoch_seconds - now_epoch_seconds))
 }
 
 fn resolve_listen_poll_interval_seconds(
@@ -3746,6 +3922,7 @@ fn build_dashboard_data(
             rate_limits: cycle.rate_limits.clone().unwrap_or_else(|| {
                 "n/a (agent rate-limit telemetry is not surfaced by this CLI yet)".to_string()
             }),
+            linear_status: render_linear_status(cycle.degraded.as_ref(), runtime.now_epoch_seconds),
             project: cycle.scope.clone(),
             dashboard: runtime.dashboard_label.to_string(),
             dashboard_refresh: format!("{}s", runtime.dashboard_refresh_seconds),
@@ -3758,10 +3935,27 @@ fn build_dashboard_data(
         session_details: cycle.session_details.clone(),
         notes: cycle.notes.clone(),
         state_file: cycle.state_file.clone(),
+        degraded: cycle.degraded.clone(),
         show_active_issues: runtime.show_active_issues,
         show_preview: runtime.show_preview,
         resolved_agent: runtime.resolved_agent.clone(),
     }
+}
+
+fn render_linear_status(
+    degraded: Option<&LinearFailureSnapshot>,
+    now_epoch_seconds: u64,
+) -> String {
+    degraded
+        .map(|failure| {
+            format!(
+                "degraded | {} | retry {} | {}",
+                failure.kind.label(),
+                failure.retry_label(now_epoch_seconds),
+                failure.message
+            )
+        })
+        .unwrap_or_else(|| "healthy".to_string())
 }
 
 fn aggregate_token_usage(sessions: &[AgentSession]) -> Option<TokenTotals> {
@@ -4383,6 +4577,7 @@ suffix
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
+                pending_linear_sync: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: Some(100),
@@ -4414,6 +4609,7 @@ suffix
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
+                pending_linear_sync: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: None,
@@ -4455,6 +4651,7 @@ suffix
             pid: None,
             session_id: None,
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turns: None,
             tokens: TokenUsage {
                 input: Some(100),
@@ -4502,6 +4699,7 @@ suffix
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
+                    pending_linear_sync: None,
                     turns: None,
                     tokens: TokenUsage::default(),
                     turn_history: Vec::new(),
@@ -4539,6 +4737,7 @@ suffix
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
+                    pending_linear_sync: None,
                     turns: None,
                     tokens: TokenUsage::default(),
                     turn_history: Vec::new(),
@@ -4576,6 +4775,7 @@ suffix
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
+                    pending_linear_sync: None,
                     turns: None,
                     tokens: TokenUsage::default(),
                     turn_history: Vec::new(),
@@ -4588,6 +4788,7 @@ suffix
             state_file: "/tmp/session.json".to_string(),
             rate_limits: None,
             claimed_this_cycle: 0,
+            degraded: None,
         };
         let runtime = DashboardRuntimeContext {
             started_at_epoch_seconds: 1,
@@ -4635,6 +4836,7 @@ suffix
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
+                pending_linear_sync: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: Some(100),
@@ -4649,6 +4851,7 @@ suffix
             state_file: "/tmp/session.json".to_string(),
             rate_limits: None,
             claimed_this_cycle: 0,
+            degraded: None,
         };
         let runtime = DashboardRuntimeContext {
             started_at_epoch_seconds: 1,
@@ -4749,6 +4952,7 @@ suffix
             pid: None,
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turns: None,
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -4801,6 +5005,7 @@ suffix
             pid: None,
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turns: None,
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -4965,6 +5170,7 @@ suffix
             pid: Some(42_424),
             session_id: Some("session-1".to_string()),
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -5509,6 +5715,7 @@ suffix
             canonical: CanonicalSessionData::default(),
             log_path: None,
             latest_resume_handle: None,
+            pending_linear_sync: None,
             origin: SessionOrigin::Listen,
         }]);
         let mut notes = Vec::new();
@@ -5613,6 +5820,7 @@ suffix
             canonical: CanonicalSessionData::default(),
             log_path: None,
             latest_resume_handle: None,
+            pending_linear_sync: None,
             origin: SessionOrigin::Listen,
         }]);
         let mut notes = Vec::new();
