@@ -91,6 +91,57 @@ impl WorkflowInstructionBundle {
         lines.join("\n")
     }
 
+    fn render_for_prompt_without_legacy_overlay_contents(&self) -> String {
+        let mut lines = vec![
+            "## Built-in Workflow Contract".to_string(),
+            String::new(),
+            self.builtin_contract().to_string(),
+            String::new(),
+            "## Repository Scope".to_string(),
+            String::new(),
+            self.repo_target.prompt_scope_block(),
+            String::new(),
+            "## Repo Overlays".to_string(),
+            String::new(),
+        ];
+
+        if self.repo_overlays.is_empty() {
+            lines.push(NO_REPO_OVERLAYS_MESSAGE.to_string());
+        } else {
+            for source in &self.repo_overlays {
+                lines.push(format!(
+                    "### `{}`",
+                    display_path(&source.path, self.repo_target.repo_root())
+                ));
+                lines.push(String::new());
+                if source.label == "WORKFLOW.md" {
+                    lines.push(
+                        "Treat this as legacy compatibility/documentation context. Read it directly from disk only when the ticket or repository state requires clarification."
+                            .to_string(),
+                    );
+                } else {
+                    lines.push(source.contents.clone());
+                }
+                lines.push(String::new());
+            }
+        }
+
+        lines.extend(["## Repo-Scoped Instructions".to_string(), String::new()]);
+        match &self.repo_scoped_instructions {
+            Some(source) => {
+                lines.push(format!(
+                    "Source: `{}`",
+                    display_path(&source.path, self.repo_target.repo_root())
+                ));
+                lines.push(String::new());
+                lines.push(source.contents.clone());
+            }
+            None => lines.push(no_repo_scoped_instructions_text()),
+        }
+
+        lines.join("\n")
+    }
+
     fn render_for_listen_prompt(&self) -> String {
         let mut lines = vec![
             "## Built-in Workflow Contract".to_string(),
@@ -233,6 +284,19 @@ pub(crate) fn render_workflow_contract(root: &Path, repo_target: RepoTarget) -> 
     Ok(WorkflowInstructionBundle::load(root, repo_target)?.render_for_prompt())
 }
 
+/// Renders the workflow contract while omitting inline legacy overlay contents such as
+/// `WORKFLOW.md`.
+///
+/// This keeps mandatory built-in and repo-scoped guidance intact while reducing prompt size for
+/// routes that only need the legacy document as optional clarification context.
+pub(crate) fn render_workflow_contract_without_legacy_overlay_contents(
+    root: &Path,
+    repo_target: RepoTarget,
+) -> Result<String> {
+    Ok(WorkflowInstructionBundle::load(root, repo_target)?
+        .render_for_prompt_without_legacy_overlay_contents())
+}
+
 pub(crate) fn render_workflow_contract_for_listen(
     root: &Path,
     repo_target: RepoTarget,
@@ -305,6 +369,41 @@ mod tests {
         assert!(rendered.contains("`AGENTS.md`: read this file directly from disk"));
         assert!(rendered.contains("`WORKFLOW.md`: read this file directly from disk"));
         assert!(rendered.contains("legacy compatibility/documentation context"));
+        assert!(!rendered.contains("Very long legacy guidance."));
+    }
+
+    #[test]
+    fn compact_prompt_render_keeps_agents_but_skips_legacy_workflow_contents() {
+        let temp = tempdir().expect("tempdir should create");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("instructions")).expect("instructions dir should exist");
+        std::fs::write(root.join("AGENTS.md"), "# AGENTS\nUse tests.\n")
+            .expect("agents should write");
+        std::fs::write(
+            root.join("WORKFLOW.md"),
+            "# Workflow\nVery long legacy guidance.\n",
+        )
+        .expect("workflow should write");
+        std::fs::create_dir_all(root.join(branding::PROJECT_DIR))
+            .expect("metastack dir should exist");
+        std::fs::write(
+            root.join(format!("{}/meta.json", branding::PROJECT_DIR)),
+            r#"{"listen":{"instructions_path":"instructions/listen.md"}}"#,
+        )
+        .expect("meta should write");
+        std::fs::write(
+            root.join("instructions/listen.md"),
+            "# Listener Instructions\nKeep work scoped.\n",
+        )
+        .expect("instructions should write");
+
+        let bundle = WorkflowInstructionBundle::load(root, RepoTarget::from_root(root))
+            .expect("bundle should load");
+        let rendered = bundle.render_for_prompt_without_legacy_overlay_contents();
+
+        assert!(rendered.contains("Use tests."));
+        assert!(rendered.contains("Keep work scoped."));
+        assert!(rendered.contains("Treat this as legacy compatibility/documentation context."));
         assert!(!rendered.contains("Very long legacy guidance."));
     }
 }

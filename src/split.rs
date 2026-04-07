@@ -41,7 +41,7 @@ use crate::codebase_context::{
     CodebaseContextSection, MissingCodebaseContextHint, load_codebase_context_bundle,
 };
 use crate::config::{AGENT_ROUTE_BACKLOG_SPLIT, AppConfig, load_required_planning_meta};
-use crate::context::load_workflow_contract;
+use crate::context::load_compact_workflow_contract;
 use crate::fs::{canonicalize_existing_dir, display_path};
 use crate::linear::{
     IssueCreateSpec, IssueEditSpec, IssueSummary, PreparedIssueContext, TicketDiscussionBudgets,
@@ -396,7 +396,7 @@ fn render_split_prompt(
     prepared_context: &PreparedIssueContext,
     addendum: Option<&str>,
 ) -> Result<String> {
-    let workflow_contract = load_workflow_contract(root)?;
+    let workflow_contract = load_compact_workflow_contract(root)?;
     let repository_context = load_context_bundle(root)?;
     let repository_snapshot = render_repository_snapshot(root)?;
     let source = &prepared_context.issue;

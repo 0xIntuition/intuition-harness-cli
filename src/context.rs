@@ -20,6 +20,7 @@ use crate::workflow_contract::{
     InstructionSource, WorkflowInstructionBundle, no_repo_overlays_message,
     no_repo_scoped_instructions_message, render_repo_overlay_bundle,
     render_repo_scoped_instructions, render_workflow_contract,
+    render_workflow_contract_without_legacy_overlay_contents,
 };
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,12 @@ pub(crate) fn load_effective_instructions(root: &Path) -> Result<String> {
 
 pub(crate) fn load_workflow_contract(root: &Path) -> Result<String> {
     render_workflow_contract(root, RepoTarget::from_root(root))
+}
+
+/// Loads a compact workflow contract that keeps required guidance while omitting inline legacy
+/// overlay contents like `WORKFLOW.md`.
+pub(crate) fn load_compact_workflow_contract(root: &Path) -> Result<String> {
+    render_workflow_contract_without_legacy_overlay_contents(root, RepoTarget::from_root(root))
 }
 
 pub(crate) fn load_project_rules_bundle(root: &Path) -> Result<String> {
