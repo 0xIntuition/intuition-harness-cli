@@ -21,6 +21,7 @@ mod github_pr;
 mod improve;
 mod linear;
 mod listen;
+mod managed_child;
 mod merge;
 mod merge_dashboard;
 mod onboarding;

@@ -368,6 +368,45 @@ impl CanonicalSessionData {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTimeoutTermination {
+    Sigterm,
+    Sigkill,
+}
+
+impl SessionTimeoutTermination {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Sigterm => "sigterm",
+            Self::Sigkill => "sigkill",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTimeoutRecord {
+    pub turn: u32,
+    pub pid: u32,
+    pub elapsed_seconds: u64,
+    pub timeout_seconds: u64,
+    pub graceful_shutdown_seconds: u64,
+    pub termination: SessionTimeoutTermination,
+}
+
+impl SessionTimeoutRecord {
+    pub(super) fn summary_label(&self) -> String {
+        format!(
+            "turn {} timeout | elapsed {}s | limit {}s | pid {} | {}",
+            self.turn,
+            self.elapsed_seconds,
+            self.timeout_seconds,
+            self.pid,
+            self.termination.label()
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalRepairRecord {
     pub status: CanonicalRepairStatus,
@@ -486,6 +525,8 @@ pub struct AgentSession {
     #[serde(default)]
     pub pending_linear_sync: Option<PendingLinearSync>,
     #[serde(default)]
+    pub last_timeout: Option<SessionTimeoutRecord>,
+    #[serde(default)]
     pub turns: Option<u32>,
     #[serde(default)]
     pub tokens: TokenUsage,
@@ -552,6 +593,12 @@ impl AgentSession {
                 None => operations,
             }
         })
+    }
+
+    pub(super) fn last_timeout_label(&self) -> Option<String> {
+        self.last_timeout
+            .as_ref()
+            .map(SessionTimeoutRecord::summary_label)
     }
 
     pub(super) fn canonical_tokens(&self) -> &TokenUsage {
@@ -792,6 +839,7 @@ mod tests {
             session_id: Some("issue-1".to_string()),
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),

@@ -1058,6 +1058,9 @@ fn render_session_detail_text(
             ));
         }
     }
+    if let Some(timeout) = detail.last_timeout.as_ref() {
+        summary_fields.push(SummaryField::new("Last timeout", timeout.summary_label()));
+    }
     push_optional_summary_field(
         &mut summary_fields,
         "Branch",

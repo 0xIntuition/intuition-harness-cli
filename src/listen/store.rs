@@ -184,6 +184,8 @@ pub(crate) struct ListenSessionDetail {
     #[serde(default)]
     pub pending_linear_sync: Option<PendingLinearSync>,
     #[serde(default)]
+    pub last_timeout: Option<super::SessionTimeoutRecord>,
+    #[serde(default)]
     pub references: SessionDetailReferences,
     #[serde(default)]
     pub prompt_context: Vec<SessionContextReference>,
@@ -785,6 +787,7 @@ impl ListenProjectStore {
                 latest_resume_handle: session.latest_resume_handle.clone(),
                 verification: None,
                 pending_linear_sync: session.pending_linear_sync.clone(),
+                last_timeout: session.last_timeout.clone(),
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),
@@ -808,6 +811,7 @@ impl ListenProjectStore {
             .load_verification_report(&session.issue_identifier)?
             .map(|report| report.summary_snapshot());
         detail.pending_linear_sync = session.pending_linear_sync.clone();
+        detail.last_timeout = session.last_timeout.clone();
         detail.references = SessionDetailReferences {
             workspace_path: session.workspace_path.clone(),
             backlog_path: session.backlog_path.clone(),
@@ -1722,6 +1726,7 @@ mod tests {
             turn_history: Vec::new(),
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             canonical: CanonicalSessionData::default(),
@@ -1952,6 +1957,7 @@ mod tests {
                 verification: None,
                 latest_resume_handle: None,
                 pending_linear_sync: None,
+                last_timeout: None,
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),

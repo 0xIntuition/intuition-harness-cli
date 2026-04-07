@@ -1020,6 +1020,28 @@ pub fn validate_listen_poll_interval_seconds(interval: u64) -> Result<()> {
     }
 }
 
+/// Validates the listen agent-turn timeout in seconds.
+pub fn validate_listen_agent_turn_timeout_seconds(timeout: u64) -> Result<()> {
+    if timeout >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen agent turn timeout must be at least 1 second; got {timeout}"
+        ))
+    }
+}
+
+/// Validates the listen graceful-shutdown window in seconds.
+pub fn validate_listen_agent_graceful_shutdown_seconds(timeout: u64) -> Result<()> {
+    if timeout >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen agent graceful shutdown must be at least 1 second; got {timeout}"
+        ))
+    }
+}
+
 pub fn validate_listen_retry_initial_backoff_seconds(backoff: u64) -> Result<()> {
     if (1..=3_600).contains(&backoff) {
         Ok(())

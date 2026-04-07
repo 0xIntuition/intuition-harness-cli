@@ -1039,6 +1039,12 @@ pub struct ConfigArgs {
     /// Update the install-scoped listen poll interval (seconds).
     #[arg(long)]
     pub poll_interval: Option<String>,
+    /// Update the install-scoped listen agent turn timeout (seconds).
+    #[arg(long)]
+    pub listen_agent_turn_timeout: Option<String>,
+    /// Update the install-scoped graceful shutdown window for timed-out listen turns (seconds).
+    #[arg(long)]
+    pub listen_agent_graceful_shutdown: Option<String>,
     /// Update the install-scoped initial retry backoff for Linear listen failures (seconds).
     #[arg(long)]
     pub listen_retry_initial_backoff: Option<String>,

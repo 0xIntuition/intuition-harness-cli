@@ -46,6 +46,17 @@ The execution phase receives:
 
 The execution phase must attempt to complete as much of the remaining ticket work as possible before stopping.
 
+Each execution turn is also bounded by the shared listen subprocess supervisor:
+
+- install-scoped `defaults.listen.agent_turn_timeout_seconds` defaults to `1800`
+- install-scoped `defaults.listen.agent_graceful_shutdown_seconds` defaults to `5`
+- built-in provider turns run in their own Unix process group
+- timeout expiry sends `SIGTERM` first, waits the graceful-shutdown window, then escalates to `SIGKILL` only if the process group is still alive
+
+Timed-out subprocesses are reported separately from stalled turns. A timeout means the active child
+process exceeded its runtime budget; a stall still means repeated completed turns finished without
+meaningful progress.
+
 ### Review
 
 The review phase compares the current workspace against:
@@ -126,6 +137,11 @@ If the verifier output is missing or malformed, verification fails closed instea
 approving the ticket. Verification failures use their own bounded retry budget: the draft PR stays
 in place, remediation is injected into the next execution turn, and the worker blocks when the
 verification repair budget is exhausted.
+
+Route-scoped E2E recipe steps accept an optional `timeout_seconds`. Omitted values default to
+`300`. When a step times out, verification records that step as timed out with its elapsed/runtime
+budget details instead of leaving the worker hung or collapsing the result into stalled-turn
+reporting.
 
 ### Validate
 
@@ -219,6 +235,8 @@ The install-scoped listen store also carries:
 
 - degraded Linear state, including failure kind, failure message, and retry timing
 - deferred worker-side `pending_linear_sync` metadata for replayable remote operations
+- the latest timeout snapshot for a timed-out worker turn, including turn number, elapsed time,
+  timeout limit, PID, graceful-shutdown window, and final termination path
 
 ## Completion Rules
 
@@ -235,5 +253,9 @@ A ticket is complete only when:
 
 `max_turns` limits execution turns, not the lightweight review/final-review/verification passes
 around each turn.
+
+Timed-out subprocesses still consume execution turns. The listener records the timeout, feeds the
+next continuation turn through the existing retry/repair path when budget remains, and blocks with
+timeout-specific reporting when the turn budget is exhausted.
 
 This preserves quality while keeping the main execution loop bounded.
