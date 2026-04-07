@@ -50,17 +50,18 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 11. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
 12. The session table keeps a focused row selection, shows compact PR state (`none`, `draft #N`, `ready #N`), and opens a structured selected-session detail pane with `Enter`.
 13. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
-14. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning.
-15. Once the ticket branch is pushed, the worker creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and reuses the same PR on continuation instead of replacing it.
-16. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state. If no matching open branch PR exists, the handoff keeps PR state at `none` and does not create a new PR during completion.
-17. The worker records `completed` or `blocked` state locally, including stall summaries and recent agent log output for unattended failures.
-18. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
+14. Built-in provider turns and route-scoped E2E recipe steps now run under one shared subprocess supervisor that creates a dedicated Unix process group, applies the install-scoped listen turn timeout (default `1800s`), sends `SIGTERM`, waits the install-scoped graceful shutdown window (default `5s`), and escalates to `SIGKILL` only when the process group does not exit in time.
+15. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning. That stall logic is separate from timed-out subprocesses: a timeout means the active child process exceeded its runtime budget, while a stall means repeated completed turns made no meaningful progress.
+16. Once the ticket branch is pushed, the worker creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and reuses the same PR on continuation instead of replacing it.
+17. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state. If no matching open branch PR exists, the handoff keeps PR state at `none` and does not create a new PR during completion.
+18. The worker records `completed` or `blocked` state locally, including timeout summaries (turn, elapsed time, timeout limit, PID, termination path), stall summaries, and recent agent log output for unattended failures.
+19. During reconciliation, a stored `running` session with a dead worker PID is marked `blocked`
     with stale/worker-died context preserved in its summary and log references instead of being
     auto-resumed.
-19. Completed sessions older than the default 24-hour TTL are pruned automatically during store
+20. Completed sessions older than the default 24-hour TTL are pruned automatically during store
     loads and reconciliation, while blocked sessions are retained until explicit cleanup.
-20. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
-21. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, append one explicit per-turn token summary line to the worker log after each completed turn, persist additive per-turn token history in `session-details/<TICKET>.json`, and leave token fields blank instead of failing when providers omit exact usage data.
+21. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
+22. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, append one explicit per-turn token summary line to the worker log after each completed turn, persist additive per-turn token history in `session-details/<TICKET>.json`, and leave token fields blank instead of failing when providers omit exact usage data.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
@@ -92,6 +93,9 @@ Primary options:
 - install-scoped listen retry backoff is configured through `meta runtime config
   --listen-retry-initial-backoff <SECONDS> --listen-retry-max-backoff <SECONDS>`. Unset values
   fall back to `2s` initial and `60s` max.
+- install-scoped listen subprocess timeouts are configured through `meta runtime config
+  --listen-agent-turn-timeout <SECONDS> --listen-agent-graceful-shutdown <SECONDS>`. Unset values
+  fall back to `1800s` per agent turn and `5s` of graceful shutdown before escalation.
 - `listen sessions list|inspect|clear|resume`: inspect or reuse stored project sessions from the
   install-scoped listener store. Use `--project` with `inspect`, `clear`, or `resume` to target a
   non-default project from the same checkout, or `--project-key` when you already know the stored
@@ -149,6 +153,10 @@ dashboard can show cumulative `in`, `out`, and `total` counts when usage is avai
 unsupported or missing counts still render as `n/a`. The same capture result now also produces a
 per-turn snapshot with `turn`, `prompt_mode`, and partial-or-complete token counts so the worker
 log and `meta listen sessions inspect --turns` share one source of truth for turn-by-turn usage.
+The built-in capture path is timeout-aware and no longer waits for provider stdout to reach EOF
+before the worker can recover. Timeout summaries are mirrored into session detail, dashboard
+detail, and textual inspect output as `Last timeout`, while repeated no-progress completed turns
+continue to surface as stall summaries.
 Listen-mode built-in launches also switch to machine-readable provider output so the worker can
 capture the latest provider-native resume target for the current turn. Codex uses
 `codex exec --json`, Claude uses `claude -p --verbose --output-format=stream-json`, and both
@@ -181,7 +189,7 @@ opts into rendering the persisted turn-history breakdown.
 - Live mode runs in an alternate terminal screen, keeps list/detail navigation terminal-local, and exits on `q` or `Ctrl-C` without binding a local TCP port.
 - Session persistence is install-scoped and local-file based; there is no remote coordination
   beyond the per-project active-listener lock yet.
-- The supervised worker can mark a ticket `blocked` if it exhausts the configured turn cap, or if repeated turns fail to produce meaningful implementation updates while the issue stays active.
+- The supervised worker can mark a ticket `blocked` if it exhausts the configured turn cap, if a timed-out subprocess consumes the remaining turn budget, or if repeated turns fail to produce meaningful implementation updates while the issue stays active.
 - Detail artifacts intentionally store only bounded milestones, references, PR metadata, and short
   log excerpts; raw log files remain the source of truth for full history.
 - Agent rows already expose stage, age, local session handle, PID, PR state, and compact token

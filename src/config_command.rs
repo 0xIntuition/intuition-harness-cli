@@ -31,6 +31,7 @@ use crate::config::{
     supported_reasoning_options, validate_agent_model, validate_agent_name,
     validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
     validate_fast_plan_question_limit, validate_interactive_plan_follow_up_question_limit,
+    validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
     validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
     validate_listen_retry_max_backoff_seconds,
 };
@@ -72,12 +73,19 @@ struct SerializableConfigView<'a> {
 #[derive(Debug, Serialize)]
 struct EffectiveConfigView {
     listen_retry: EffectiveListenRetryView,
+    listen_timeouts: EffectiveListenTimeoutView,
 }
 
 #[derive(Debug, Serialize)]
 struct EffectiveListenRetryView {
     initial_backoff_seconds: u64,
     max_backoff_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct EffectiveListenTimeoutView {
+    agent_turn_timeout_seconds: u64,
+    agent_graceful_shutdown_seconds: u64,
 }
 
 pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
@@ -188,6 +196,18 @@ fn render_json(view: &ConfigViewData) -> Result<String> {
                     .initial_backoff_seconds(),
                 max_backoff_seconds: view.app_config.defaults.listen.retry.max_backoff_seconds(),
             },
+            listen_timeouts: EffectiveListenTimeoutView {
+                agent_turn_timeout_seconds: view
+                    .app_config
+                    .defaults
+                    .listen
+                    .agent_turn_timeout_seconds(),
+                agent_graceful_shutdown_seconds: view
+                    .app_config
+                    .defaults
+                    .listen
+                    .agent_graceful_shutdown_seconds(),
+            },
         },
     })?)
 }
@@ -247,6 +267,17 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .poll_interval_seconds
             .map(|v| format!("{v}s"))
             .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install agent turn timeout: {}s",
+        view.app_config.defaults.listen.agent_turn_timeout_seconds()
+    ));
+    lines.push(format!(
+        "Install graceful shutdown: {}s",
+        view.app_config
+            .defaults
+            .listen
+            .agent_graceful_shutdown_seconds()
     ));
     lines.push(format!(
         "Install listen retry backoff: {}s initial / {}s max",
@@ -507,6 +538,8 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.assignee_scope.is_some()
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
+        || args.listen_agent_turn_timeout.is_some()
+        || args.listen_agent_graceful_shutdown.is_some()
         || args.listen_retry_initial_backoff.is_some()
         || args.listen_retry_max_backoff.is_some()
         || args.plan_follow_up_limit.is_some()
@@ -568,6 +601,23 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             interval,
             "listen poll interval",
             validate_listen_poll_interval_seconds,
+        )?;
+    }
+    if let Some(timeout) = &args.listen_agent_turn_timeout {
+        view.app_config.defaults.listen.agent_turn_timeout_seconds = parse_optional_u64(
+            timeout,
+            "listen agent turn timeout",
+            validate_listen_agent_turn_timeout_seconds,
+        )?;
+    }
+    if let Some(timeout) = &args.listen_agent_graceful_shutdown {
+        view.app_config
+            .defaults
+            .listen
+            .agent_graceful_shutdown_seconds = parse_optional_u64(
+            timeout,
+            "listen agent graceful shutdown",
+            validate_listen_agent_graceful_shutdown_seconds,
         )?;
     }
     if let Some(backoff) = &args.listen_retry_initial_backoff {

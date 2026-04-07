@@ -6767,6 +6767,215 @@ printf '%s' '{"type":"result","subtype":"success","result":"claude listen ok","s
 
 #[cfg(unix)]
 #[test]
+fn listen_worker_times_out_builtin_turns_and_records_timeout_reporting()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "claude"
+
+[defaults.listen]
+agent_turn_timeout_seconds = 1
+agent_graceful_shutdown_seconds = 1
+"#,
+            api_url = server.url.as_str(),
+        ),
+    )?;
+
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+set -eu
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--verbose
+--output-format <format>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "$count" > "$TEST_OUTPUT_DIR/turn-$count.txt"
+printf '[{"type":"system","subtype":"init","session_id":"claude-timeout-session-%s"}]\n' "$count"
+printf '{"type":"message_start","message":{"usage":{"input_tokens":%s}}}\n' "$((100 + count))"
+printf '{"type":"message_delta","usage":{"output_tokens":%s}}\n' "$((10 + count))"
+sleep 5
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-timeout-reporting";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn timeout() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare timeout reporting proof",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Timeout proof\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read_to_string(stub_dir.join("count.txt"))?.trim(), "2");
+
+    let log_path = listen_log_path(&config_path, &repo_root, "MET-32")?;
+    let log = fs::read_to_string(&log_path)?;
+    assert!(log.contains("turn timeout"));
+    assert!(log.contains("turn=1"));
+    assert!(log.contains("turn=2"));
+    assert!(log.contains("timeout=1s"));
+    assert!(log.contains("graceful_shutdown=1s"));
+    assert!(!log.to_ascii_lowercase().contains("stalled"));
+
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    let state = fs::read_to_string(&state_path)?;
+    assert!(state.contains("\"phase\": \"blocked\""));
+    assert!(state.contains("turn 2 timeout"));
+    assert!(state.contains("claude-timeout-session-2"));
+    assert!(!state.to_ascii_lowercase().contains("stalled"));
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, "MET-32")?;
+    let detail: serde_json::Value = serde_json::from_slice(&fs::read(&detail_path)?)?;
+    assert_eq!(detail["phase"], json!("blocked"));
+    assert_eq!(detail["last_timeout"]["turn"], json!(2));
+    assert_eq!(detail["last_timeout"]["timeout_seconds"], json!(1));
+    assert_eq!(
+        detail["last_timeout"]["graceful_shutdown_seconds"],
+        json!(1)
+    );
+    assert_eq!(detail["latest_resume_handle"]["provider"], json!("claude"));
+    assert_eq!(
+        detail["latest_resume_handle"]["id"],
+        json!("claude-timeout-session-2")
+    );
+    assert_eq!(
+        detail["tokens"]["input"].as_u64(),
+        Some(203),
+        "detail={detail}"
+    );
+    assert_eq!(
+        detail["tokens"]["output"].as_u64(),
+        Some(23),
+        "detail={detail}"
+    );
+    assert_eq!(
+        detail["turn_history"].as_array().map(Vec::len),
+        Some(2),
+        "detail={detail}"
+    );
+    assert!(!detail.to_string().to_ascii_lowercase().contains("stalled"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_worker_reuses_stored_codex_resume_handle() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;

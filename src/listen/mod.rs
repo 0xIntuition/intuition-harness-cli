@@ -62,8 +62,8 @@ use crate::validation::resolve_validation_profile;
 pub use state::{
     ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, LinearFailureSnapshot,
     PendingIssue, PendingLinearSync, PendingPullRequestAttachment, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage, TurnPromptMode,
-    TurnTokenSnapshot,
+    PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, SessionTimeoutRecord,
+    SessionTimeoutTermination, TokenUsage, TurnPromptMode, TurnTokenSnapshot,
 };
 use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label};
 use store::{
@@ -374,6 +374,7 @@ impl ListenCycleData {
                             .to_string(),
                     }),
                     pending_linear_sync: None,
+                    last_timeout: None,
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(9_614_112),
@@ -422,6 +423,7 @@ impl ListenCycleData {
                             .to_string(),
                     }),
                     pending_linear_sync: None,
+                    last_timeout: None,
                     turns: Some(1),
                     tokens: TokenUsage {
                         input: Some(8_380_959),
@@ -534,6 +536,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                         .to_string(),
                 }),
                 pending_linear_sync: None,
+                last_timeout: None,
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
                     backlog_path: Some(format!("{}/backlog/MET-14", crate::branding::PROJECT_DIR)),
@@ -640,6 +643,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                         .to_string(),
                 }),
                 pending_linear_sync: None,
+                last_timeout: None,
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-17".to_string()),
                     backlog_path: None,
@@ -2153,6 +2157,7 @@ where
             session_id: None,
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -2816,6 +2821,9 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         if let Some(pending_sync) = session.pending_linear_sync_label() {
             lines.push(format!("  - Pending Linear sync: {pending_sync}"));
         }
+        if let Some(timeout) = session.last_timeout_label() {
+            lines.push(format!("  - Last timeout: {timeout}"));
+        }
         if let Some(workspace_path) = session.workspace_path {
             lines.push(format!("  - Workspace: {workspace_path}"));
         }
@@ -2901,6 +2909,12 @@ fn append_session_inspect_detail_lines(
                 failure.message
             ));
         }
+    }
+    if let Some(timeout) = detail.last_timeout.as_ref() {
+        lines.push(format!(
+            "  - Detail last timeout: {}",
+            timeout.summary_label()
+        ));
     }
 
     if let Some(url) = detail.pull_request.url.as_deref() {
@@ -3331,6 +3345,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         session_id: Some(detailed_issue.id.clone()),
         latest_resume_handle: None,
         pending_linear_sync: None,
+        last_timeout: None,
         turns: Some(0),
         tokens: TokenUsage::default(),
         turn_history: Vec::new(),
@@ -4761,6 +4776,7 @@ suffix
                 session_id: None,
                 latest_resume_handle: None,
                 pending_linear_sync: None,
+                last_timeout: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: Some(100),
@@ -4793,6 +4809,7 @@ suffix
                 session_id: None,
                 latest_resume_handle: None,
                 pending_linear_sync: None,
+                last_timeout: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: None,
@@ -4835,6 +4852,7 @@ suffix
             session_id: None,
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turns: None,
             tokens: TokenUsage {
                 input: Some(100),
@@ -4883,6 +4901,7 @@ suffix
                     session_id: None,
                     latest_resume_handle: None,
                     pending_linear_sync: None,
+                    last_timeout: None,
                     turns: None,
                     tokens: TokenUsage::default(),
                     turn_history: Vec::new(),
@@ -4921,6 +4940,7 @@ suffix
                     session_id: None,
                     latest_resume_handle: None,
                     pending_linear_sync: None,
+                    last_timeout: None,
                     turns: None,
                     tokens: TokenUsage::default(),
                     turn_history: Vec::new(),
@@ -4959,6 +4979,7 @@ suffix
                     session_id: None,
                     latest_resume_handle: None,
                     pending_linear_sync: None,
+                    last_timeout: None,
                     turns: None,
                     tokens: TokenUsage::default(),
                     turn_history: Vec::new(),
@@ -5020,6 +5041,7 @@ suffix
                 session_id: None,
                 latest_resume_handle: None,
                 pending_linear_sync: None,
+                last_timeout: None,
                 turns: None,
                 tokens: TokenUsage {
                     input: Some(100),
@@ -5136,6 +5158,7 @@ suffix
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turns: None,
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -5189,6 +5212,7 @@ suffix
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turns: None,
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -5354,6 +5378,7 @@ suffix
             session_id: Some("session-1".to_string()),
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
@@ -5912,13 +5937,14 @@ suffix
             updated_at_epoch_seconds: 1_773_575_000,
             pid: None,
             session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: None,
-            latest_resume_handle: None,
-            pending_linear_sync: None,
             origin: SessionOrigin::Listen,
         }]);
         let mut notes = Vec::new();
@@ -6021,13 +6047,14 @@ suffix
             updated_at_epoch_seconds: 1_773_575_000,
             pid: None,
             session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: None,
-            latest_resume_handle: None,
-            pending_linear_sync: None,
             origin: SessionOrigin::Listen,
         }]);
         let mut notes = Vec::new();
@@ -6113,13 +6140,14 @@ suffix
             updated_at_epoch_seconds: 1_773_575_000,
             pid: None,
             session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             log_path: None,
-            latest_resume_handle: None,
-            pending_linear_sync: None,
             origin: SessionOrigin::Listen,
         }]);
         daemon.store.save_state(&state)?;

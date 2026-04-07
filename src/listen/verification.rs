@@ -9,6 +9,7 @@ use crate::fs::PlanningPaths;
 
 const BATTLE_TEST_INPUT_PREVIEW_LIMIT: usize = 1_200;
 const EVIDENCE_PREVIEW_LIMIT: usize = 600;
+pub(crate) const DEFAULT_E2E_TIMEOUT_SECONDS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +92,12 @@ pub(crate) struct VerificationE2eStepReport {
     pub name: String,
     #[serde(default)]
     pub command: Vec<String>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub elapsed_seconds: Option<u64>,
+    #[serde(default)]
+    pub timed_out: bool,
     #[serde(default)]
     pub status: VerificationStatus,
     #[serde(default)]
@@ -286,6 +293,15 @@ impl VerificationReport {
             if !step.command.is_empty() {
                 lines.push(format!("  Command: {}", step.command.join(" ")));
             }
+            if let Some(timeout_seconds) = step.timeout_seconds {
+                lines.push(format!("  Timeout: {timeout_seconds}s"));
+            }
+            if let Some(elapsed_seconds) = step.elapsed_seconds {
+                lines.push(format!("  Elapsed: {elapsed_seconds}s"));
+            }
+            if step.timed_out {
+                lines.push("  Timeout result: timed out".to_string());
+            }
             if let Some(code) = step.exit_code {
                 lines.push(format!("  Exit code: {code}"));
             }
@@ -344,6 +360,8 @@ pub(crate) struct VerificationRecipeStep {
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
     pub expect_exit_code: Option<i32>,
     #[serde(default)]
     pub expect_stdout_contains: Vec<String>,
@@ -353,6 +371,12 @@ pub(crate) struct VerificationRecipeStep {
     pub expect_paths_exist: Vec<String>,
     #[serde(default)]
     pub expect_paths_missing: Vec<String>,
+}
+
+impl VerificationRecipeStep {
+    pub(crate) fn timeout_seconds(&self) -> u64 {
+        self.timeout_seconds.unwrap_or(DEFAULT_E2E_TIMEOUT_SECONDS)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,7 +435,21 @@ pub(crate) fn load_route_verification_recipe(
         .with_context(|| format!("failed to read `{}`", path.display()))?;
     let recipe = serde_yaml::from_str::<RouteVerificationRecipe>(&contents)
         .with_context(|| format!("failed to parse `{}`", path.display()))?;
+    validate_route_verification_recipe(&path, &recipe)?;
     Ok(Some(LoadedRouteVerificationRecipe { path, recipe }))
+}
+
+fn validate_route_verification_recipe(path: &Path, recipe: &RouteVerificationRecipe) -> Result<()> {
+    for step in &recipe.e2e {
+        if matches!(step.timeout_seconds, Some(0)) {
+            return Err(anyhow::anyhow!(
+                "verification recipe step `{}` in `{}` must use a positive timeout_seconds value",
+                step.name,
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Discovers deterministic battle-test inputs under the route-scoped verification input directory.
@@ -485,7 +523,8 @@ fn truncate_with_ellipsis(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BATTLE_TEST_INPUT_PREVIEW_LIMIT, EVIDENCE_PREVIEW_LIMIT, discover_battle_test_inputs,
+        BATTLE_TEST_INPUT_PREVIEW_LIMIT, DEFAULT_E2E_TIMEOUT_SECONDS, EVIDENCE_PREVIEW_LIMIT,
+        discover_battle_test_inputs, load_route_verification_recipe,
         truncate_for_battle_test_input, truncate_for_evidence,
     };
     use std::fs;
@@ -528,5 +567,48 @@ mod tests {
             truncate_for_battle_test_input(&"界".repeat(BATTLE_TEST_INPUT_PREVIEW_LIMIT + 5));
         assert!(battle.ends_with("..."));
         assert_eq!(battle.chars().count(), BATTLE_TEST_INPUT_PREVIEW_LIMIT);
+    }
+
+    #[test]
+    fn route_recipe_defaults_e2e_timeout_when_omitted() {
+        let temp = tempdir().expect("tempdir should build");
+        let recipe_dir = temp.path().join(".intuition/verification/recipes");
+        fs::create_dir_all(&recipe_dir).expect("recipe dir should build");
+        fs::write(
+            recipe_dir.join("agents.listen.yaml"),
+            "e2e:\n  - name: smoke\n    command:\n      - echo\n      - ok\n",
+        )
+        .expect("recipe should write");
+
+        let recipe = load_route_verification_recipe(temp.path(), "agents.listen")
+            .expect("recipe should load")
+            .expect("recipe should exist");
+
+        assert_eq!(recipe.recipe.e2e.len(), 1);
+        assert_eq!(
+            recipe.recipe.e2e[0].timeout_seconds(),
+            DEFAULT_E2E_TIMEOUT_SECONDS
+        );
+    }
+
+    #[test]
+    fn route_recipe_rejects_zero_e2e_timeout() {
+        let temp = tempdir().expect("tempdir should build");
+        let recipe_dir = temp.path().join(".intuition/verification/recipes");
+        fs::create_dir_all(&recipe_dir).expect("recipe dir should build");
+        fs::write(
+            recipe_dir.join("agents.listen.yaml"),
+            "e2e:\n  - name: smoke\n    timeout_seconds: 0\n    command:\n      - echo\n      - ok\n",
+        )
+        .expect("recipe should write");
+
+        let error = load_route_verification_recipe(temp.path(), "agents.listen")
+            .expect_err("zero timeout should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must use a positive timeout_seconds value")
+        );
     }
 }

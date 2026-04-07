@@ -1,12 +1,9 @@
 use std::cell::RefCell;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -39,6 +36,10 @@ use crate::linear::{
     AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
     ReqwestLinearClient, WorkflowState, classify_linear_failure,
 };
+use crate::managed_child::{
+    ManagedChild, ManagedChildOutput, ManagedChildResult, ManagedChildSettings,
+    ManagedChildTermination,
+};
 use crate::repo_target::RepoTarget;
 use crate::validation::{
     ResolvedValidationProfile, ValidationCommandRecord, resolve_validation_profile,
@@ -58,13 +59,13 @@ use super::verification::{
 use super::{
     BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PendingLinearSync,
     PendingPullRequestAttachment, PullRequestStatus, PullRequestSummary, ResumeProvider,
-    SessionPhase, TokenUsage, TurnPromptMode, TurnTokenSnapshot, agent_log_path,
-    backlog_progress_for_issue_dir, capture_workspace_snapshot, compact_blocked_summary,
-    compact_completed_summary, compact_running_summary, compact_session_summary,
-    compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
-    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
-    render_continuation_prompt, try_transition_issue_to_review_state,
-    workspace_has_meaningful_progress, write_listen_session,
+    SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage, TurnPromptMode,
+    TurnTokenSnapshot, agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
+    compact_blocked_summary, compact_completed_summary, compact_running_summary,
+    compact_session_summary, compare_workspace_snapshots, current_workspace_branch,
+    issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
+    preflight, render_agent_prompt, render_continuation_prompt,
+    try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
 };
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
@@ -73,8 +74,6 @@ const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
 const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
-const E2E_RECIPE_STEP_TIMEOUT_SECONDS: u64 = 300;
-
 fn listen_preflight_failure_header(timestamp: &str) -> String {
     format!(
         "\n--- {} listen preflight failed @ {} ---\n",
@@ -181,6 +180,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             &args.issue,
         )?,
         pending_linear_sync,
+        last_timeout: load_existing_last_timeout(&source_root, project_selector, &args.issue)?,
         turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
         canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
@@ -551,6 +551,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 return Err(error);
             }
         };
+        session_context.last_timeout = turn_result.timeout.clone();
         session_context.latest_resume_handle = turn_result
             .latest_resume_handle
             .or(session_context.latest_resume_handle);
@@ -635,6 +636,62 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         }
 
         if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
+            continue;
+        }
+
+        if let Some(timeout) = turn_result.timeout.clone() {
+            let review = review_for_turn_timeout(&timeout);
+            write_listen_session(
+                &source_root,
+                project_selector,
+                build_worker_session(
+                    &issue,
+                    SessionPhase::Running,
+                    compact_session_summary([
+                        Some(format!("Timeout | {}", timeout.summary_label())),
+                        Some(super::ticket_progress_summary(issue.description.as_deref())),
+                        Some(format!(
+                            "{} turn(s) remaining",
+                            args.max_turns.saturating_sub(turns_completed)
+                        )),
+                    ]),
+                    &session_context,
+                    turns_completed,
+                    provider_session_id.as_deref(),
+                    &session_context.canonical,
+                ),
+            )?;
+            sync_review_tracking(
+                &service,
+                &issue,
+                &turn_context,
+                &app_config,
+                &mut session_context,
+                &log_path,
+                &review,
+            )
+            .await?;
+            last_review = Some(review);
+            if turns_completed >= args.max_turns {
+                write_listen_session(
+                    &source_root,
+                    project_selector,
+                    build_worker_session(
+                        &issue,
+                        SessionPhase::Blocked,
+                        compact_session_summary([
+                            Some(format!("Blocked | {}", timeout.summary_label())),
+                            Some("turn budget exhausted".to_string()),
+                            Some(format!("see {}", log_path.display())),
+                        ]),
+                        &session_context,
+                        turns_completed,
+                        provider_session_id.as_deref(),
+                        &session_context.canonical,
+                    ),
+                )?;
+                return Ok(());
+            }
             continue;
         }
 
@@ -1364,6 +1421,7 @@ struct WorkerSessionContext<'a> {
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
     pending_linear_sync: Option<PendingLinearSync>,
+    last_timeout: Option<SessionTimeoutRecord>,
     turn_history: Vec<TurnTokenSnapshot>,
     canonical: CanonicalSessionData,
     pull_request: PullRequestSummary,
@@ -1395,6 +1453,7 @@ struct TurnExecutionResult {
     session_id: Option<String>,
     usage: Option<AgentTokenUsage>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    timeout: Option<SessionTimeoutRecord>,
     prompt_mode: TurnPromptMode,
     provider: Option<String>,
     model: Option<String>,
@@ -2406,6 +2465,46 @@ fn review_for_verification_failure(
     follow_up
 }
 
+fn review_for_turn_timeout(timeout: &SessionTimeoutRecord) -> ReviewReport {
+    ReviewReport {
+        summary: format!(
+            "Execution timed out on turn {} after {}s (limit {}s); subprocess pid {} was terminated with {}.",
+            timeout.turn,
+            timeout.elapsed_seconds,
+            timeout.timeout_seconds,
+            timeout.pid,
+            timeout.termination.label()
+        ),
+        complete: false,
+        remaining_items: vec![
+            "Repair the timeout root cause from the previous listen turn before review handoff."
+                .to_string(),
+        ],
+        risks: vec![format!(
+            "Turn {} timed out and required {} for pid {}.",
+            timeout.turn,
+            timeout.termination.label(),
+            timeout.pid
+        )],
+        notes: vec![format!(
+            "Timeout remains distinct from stalled-turn handling. Grace window: {}s.",
+            timeout.graceful_shutdown_seconds
+        )],
+        ..ReviewReport::default()
+    }
+}
+
+fn phase_timeout_error(phase: &str, timeout: &SessionTimeoutRecord) -> anyhow::Error {
+    anyhow!(
+        "listen {phase} timed out on turn {} after {}s (limit {}s); subprocess pid {} was terminated with {}",
+        timeout.turn,
+        timeout.elapsed_seconds,
+        timeout.timeout_seconds,
+        timeout.pid,
+        timeout.termination.label()
+    )
+}
+
 async fn run_pre_pr_validation_gate(
     gate_context: PrePrValidationGateContext<'_>,
     review: &ReviewReport,
@@ -2844,23 +2943,6 @@ fn execute_agent_run(
     let mut command = Command::new(&invocation.command);
     command.current_dir(context.workspace_path);
     command.args(&command_args);
-    if capture_output {
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-    } else {
-        let stdout = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-        let stderr = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-        command.stdout(Stdio::from(stdout));
-        command.stderr(Stdio::from(stderr));
-    }
     apply_noninteractive_agent_environment(&mut command);
     apply_invocation_environment(
         &mut command,
@@ -2919,7 +3001,36 @@ fn execute_agent_run(
         }
     }
 
-    let mut child = command.spawn().with_context(|| {
+    let managed_settings = listen_managed_child_settings(context);
+    let managed_stdout = if capture_output {
+        ManagedChildOutput::Capture
+    } else {
+        ManagedChildOutput::File(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .with_context(|| format!("failed to open `{}`", log_path.display()))?,
+        )
+    };
+    let managed_stderr = if capture_output {
+        ManagedChildOutput::Capture
+    } else {
+        ManagedChildOutput::File(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .with_context(|| format!("failed to open `{}`", log_path.display()))?,
+        )
+    };
+    let mut child = ManagedChild::spawn(
+        &mut command,
+        managed_stdout,
+        managed_stderr,
+        managed_settings,
+    )
+    .with_context(|| {
         format!(
             "failed to launch agent `{}` with command `{attempted_command}`",
             invocation.agent
@@ -2928,9 +3039,8 @@ fn execute_agent_run(
     let turn_started_at = now_epoch_seconds();
 
     if invocation.transport == PromptTransport::Stdin {
-        let mut stdin = child
-            .stdin
-            .take()
+        let stdin = child
+            .stdin_mut()
             .ok_or_else(|| anyhow!("failed to open stdin for the listen agent turn"))?;
         use std::io::Write as _;
         stdin
@@ -2939,79 +3049,64 @@ fn execute_agent_run(
     }
 
     if capture_output {
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("failed to capture stdout for listen turn {turn_number}"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("failed to capture stderr for listen turn {turn_number}"))?;
-        let stderr_log_path = log_path.clone();
-        let stderr_handle = thread::spawn(move || -> Result<String> {
-            let mut stderr_log = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&stderr_log_path)
-                .with_context(|| format!("failed to open `{}`", stderr_log_path.display()))?;
-            let mut collected = String::new();
-            for line in BufReader::new(stderr).lines() {
-                let line = line.with_context(|| {
-                    format!("failed to read stderr for `{}`", stderr_log_path.display())
-                })?;
-                writeln!(stderr_log, "{line}")
-                    .with_context(|| format!("failed to write `{}`", stderr_log_path.display()))?;
-                collected.push_str(&line);
-                collected.push('\n');
-            }
-            Ok(collected)
-        });
-
         let mut stdout_log = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
             .with_context(|| format!("failed to open `{}`", log_path.display()))?;
-        let mut raw_stdout = String::new();
+        let mut stderr_log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to open `{}`", log_path.display()))?;
         let provider = builtin_provider_adapter(&invocation.agent);
         let mut continuation = None;
         let mut usage = None;
         let mut latest_resume_handle = None;
-        for line in BufReader::new(stdout).lines() {
-            let line = line
-                .with_context(|| format!("failed to read stdout for `{}`", log_path.display()))?;
-            writeln!(stdout_log, "{line}")
-                .with_context(|| format!("failed to write `{}`", log_path.display()))?;
-            raw_stdout.push_str(&line);
-            raw_stdout.push('\n');
-            if latest_resume_handle.is_none() {
-                latest_resume_handle = parse_resume_handle_line(&invocation.agent, line.as_bytes());
-            }
-            if let Some(provider) = provider {
-                let parsed = provider.parse_capture_output(&line)?;
-                if let Some(current_session_id) = parsed.continuation
-                    && continuation.as_deref() != Some(current_session_id.as_str())
-                {
-                    on_session_started(&current_session_id)?;
-                    continuation = Some(current_session_id);
+        let managed_result = child.wait_with_captured_output(
+            |line| {
+                writeln!(stdout_log, "{line}")
+                    .with_context(|| format!("failed to write `{}`", log_path.display()))?;
+                if latest_resume_handle.is_none() {
+                    latest_resume_handle =
+                        parse_resume_handle_line(&invocation.agent, line.as_bytes());
                 }
-                if let Some(update) = parsed.usage
-                    && usage.as_ref() != Some(&update)
-                {
-                    on_usage(&update)?;
-                    usage = Some(update);
+                if let Some(provider) = provider {
+                    let parsed = provider.parse_capture_output(line)?;
+                    if let Some(current_session_id) = parsed.continuation
+                        && continuation.as_deref() != Some(current_session_id.as_str())
+                    {
+                        on_session_started(&current_session_id)?;
+                        continuation = Some(current_session_id);
+                    }
+                    if let Some(update) = parsed.usage
+                        && usage.as_ref() != Some(&update)
+                    {
+                        on_usage(&update)?;
+                        usage = Some(update);
+                    }
                 }
-            }
-        }
-
-        let status = child
-            .wait()
-            .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
-        let stderr_output = stderr_handle
-            .join()
-            .map_err(|_| anyhow!("stderr drain thread panicked for listen turn {turn_number}"))??;
-        if !status.success() {
-            let code = status
+                Ok(())
+            },
+            |line| {
+                writeln!(stderr_log, "{line}")
+                    .with_context(|| format!("failed to write `{}`", log_path.display()))
+            },
+            |timeout| {
+                append_agent_turn_timeout_log(
+                    &log_path,
+                    phase_label,
+                    turn_number,
+                    &invocation.agent,
+                    timeout,
+                )
+            },
+        )?;
+        let raw_stdout = managed_result.stdout.as_deref().unwrap_or_default();
+        let stderr_output = managed_result.stderr.as_deref().unwrap_or_default();
+        if !managed_result.status.success() && managed_result.timeout.is_none() {
+            let code = managed_result
+                .status
                 .code()
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "terminated by signal".to_string());
@@ -3022,12 +3117,17 @@ fn execute_agent_run(
             );
         }
         let turn_finished_at = now_epoch_seconds();
+        let timeout = managed_result
+            .timeout
+            .as_ref()
+            .map(|value| session_timeout_record(turn_number, &managed_result, *value));
         if let Some(provider) = provider {
-            let parsed = provider.parse_capture_output(&raw_stdout)?;
+            let parsed = provider.parse_capture_output(raw_stdout)?;
             return Ok(TurnExecutionResult {
                 response_text: parsed.response_text.clone(),
                 session_id: parsed.continuation.or(continuation),
                 usage: parsed.usage.or(usage),
+                timeout,
                 latest_resume_handle: latest_resume_handle.or_else(|| {
                     if invocation.agent == "codex" {
                         resolve_codex_resume_handle(
@@ -3049,6 +3149,7 @@ fn execute_agent_run(
 
         return Ok(TurnExecutionResult {
             response_text: capture_response_text.then(|| raw_stdout.trim().to_string()),
+            timeout,
             prompt_mode,
             provider: Some(invocation.agent.clone()),
             model: invocation.model.clone(),
@@ -3057,11 +3158,18 @@ fn execute_agent_run(
         });
     }
 
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for agent turn {turn_number}"))?;
-    if !status.success() {
-        let code = status
+    let managed_result = child.wait(|timeout| {
+        append_agent_turn_timeout_log(
+            &log_path,
+            phase_label,
+            turn_number,
+            &invocation.agent,
+            timeout,
+        )
+    })?;
+    if !managed_result.status.success() && managed_result.timeout.is_none() {
+        let code = managed_result
+            .status
             .code()
             .map(|value| value.to_string())
             .unwrap_or_else(|| "terminated by signal".to_string());
@@ -3072,9 +3180,71 @@ fn execute_agent_run(
     }
 
     Ok(TurnExecutionResult {
+        timeout: managed_result
+            .timeout
+            .as_ref()
+            .map(|value| session_timeout_record(turn_number, &managed_result, *value)),
         prompt_mode,
         ..TurnExecutionResult::default()
     })
+}
+
+fn listen_managed_child_settings(context: &ListenTurnContext<'_>) -> ManagedChildSettings {
+    ManagedChildSettings {
+        timeout: Duration::from_secs(
+            context
+                .app_config
+                .defaults
+                .listen
+                .agent_turn_timeout_seconds(),
+        ),
+        graceful_shutdown: Duration::from_secs(
+            context
+                .app_config
+                .defaults
+                .listen
+                .agent_graceful_shutdown_seconds(),
+        ),
+    }
+}
+
+fn session_timeout_record(
+    turn_number: u32,
+    result: &ManagedChildResult,
+    timeout: crate::managed_child::ManagedChildTimeout,
+) -> SessionTimeoutRecord {
+    SessionTimeoutRecord {
+        turn: turn_number,
+        pid: timeout.pid,
+        elapsed_seconds: result.elapsed.as_secs(),
+        timeout_seconds: timeout.timeout_seconds(),
+        graceful_shutdown_seconds: timeout.graceful_shutdown.as_secs(),
+        termination: match timeout.termination {
+            ManagedChildTermination::GracefulTerminated => SessionTimeoutTermination::Sigterm,
+            ManagedChildTermination::ForceKilled => SessionTimeoutTermination::Sigkill,
+        },
+    }
+}
+
+fn append_agent_turn_timeout_log(
+    log_path: &Path,
+    phase_label: &str,
+    turn_number: u32,
+    agent: &str,
+    timeout: crate::managed_child::ManagedChildTimeout,
+) -> Result<()> {
+    append_worker_log(
+        log_path,
+        "turn timeout",
+        &[format!(
+            "phase={phase_label} turn={turn_number} agent={agent} pid={} elapsed={}s timeout={}s graceful_shutdown={}s termination={}",
+            timeout.pid,
+            timeout.elapsed_seconds(),
+            timeout.timeout_seconds(),
+            timeout.graceful_shutdown.as_secs(),
+            timeout.termination.label(),
+        )],
+    )
 }
 
 fn append_turn_token_summary(log_path: &Path, snapshot: &TurnTokenSnapshot) -> Result<()> {
@@ -3786,6 +3956,9 @@ async fn run_review_phase(
             |_| Ok(()),
             |_| Ok(()),
         )?;
+        if let Some(timeout) = result.timeout.as_ref() {
+            return Err(phase_timeout_error("review", timeout));
+        }
         let raw = result
             .response_text
             .ok_or_else(|| anyhow!("listen review did not return any structured output"))?;
@@ -3846,6 +4019,9 @@ async fn run_final_review_phase(
             |_| Ok(()),
             |_| Ok(()),
         )?;
+        if let Some(timeout) = result.timeout.as_ref() {
+            return Err(phase_timeout_error("final review", timeout));
+        }
         let raw = result
             .response_text
             .ok_or_else(|| anyhow!("listen final review did not return any structured output"))?;
@@ -3932,6 +4108,28 @@ async fn run_verification_phase(
             |_| Ok(()),
             |_| Ok(()),
         ) {
+            Ok(result) if result.timeout.is_some() => {
+                verifier_notes.push(
+                    phase_timeout_error(
+                        "verification",
+                        result.timeout.as_ref().expect("timeout should exist"),
+                    )
+                    .to_string(),
+                );
+                code_review = failed_code_review_report(
+                    code_review_enabled,
+                    &quality_criteria,
+                    "Verification agent execution timed out before producing a report.",
+                    "Repair the verification route or command configuration and rerun verification.",
+                );
+                battle_tests = failed_battle_test_report(
+                    battle_test_count,
+                    &battle_input_dir,
+                    &battle_inputs,
+                    "Verification agent execution timed out before producing battle-test results.",
+                    "Repair the verification route or command configuration and rerun verification.",
+                );
+            }
             Ok(result) => {
                 if let Some(raw) = result
                     .response_text
@@ -4504,7 +4702,7 @@ fn run_e2e_recipe_step(
     run_e2e_recipe_step_with_timeout(
         workspace_path,
         step,
-        Duration::from_secs(E2E_RECIPE_STEP_TIMEOUT_SECONDS),
+        Duration::from_secs(step.timeout_seconds()),
     )
 }
 
@@ -4517,6 +4715,9 @@ fn run_e2e_recipe_step_with_timeout(
         return Ok(VerificationE2eStepReport {
             name: step.name.clone(),
             command: Vec::new(),
+            timeout_seconds: Some(timeout.as_secs()),
+            elapsed_seconds: None,
+            timed_out: false,
             status: VerificationStatus::Failed,
             exit_code: None,
             assertions: vec!["recipe step must define at least one command token".to_string()],
@@ -4529,8 +4730,9 @@ fn run_e2e_recipe_step_with_timeout(
     let mut assertions = Vec::new();
     if output.timed_out {
         assertions.push(format!(
-            "step timed out after {}",
-            format_duration_label(timeout)
+            "step timed out after {} (elapsed {}s)",
+            format_duration_label(timeout),
+            output.elapsed_seconds
         ));
     } else {
         let expected_exit_code = step.expect_exit_code.unwrap_or(0);
@@ -4570,6 +4772,9 @@ fn run_e2e_recipe_step_with_timeout(
     Ok(VerificationE2eStepReport {
         name: step.name.clone(),
         command: step.command.clone(),
+        timeout_seconds: Some(timeout.as_secs()),
+        elapsed_seconds: Some(output.elapsed_seconds),
+        timed_out: output.timed_out,
         status: if assertions.is_empty() {
             VerificationStatus::Passed
         } else {
@@ -4587,6 +4792,7 @@ struct RecipeStepCommandOutput {
     stdout: String,
     stderr: String,
     timed_out: bool,
+    elapsed_seconds: u64,
 }
 
 fn run_e2e_recipe_command(
@@ -4597,126 +4803,39 @@ fn run_e2e_recipe_command(
     let mut command = Command::new(&step.command[0]);
     command.args(&step.command[1..]);
     command.current_dir(workspace_path);
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    configure_command_process_group(&mut command);
-    let mut child = command.spawn().with_context(|| {
+    let child = ManagedChild::spawn(
+        &mut command,
+        ManagedChildOutput::Capture,
+        ManagedChildOutput::Capture,
+        ManagedChildSettings {
+            timeout,
+            graceful_shutdown: Duration::from_secs(5),
+        },
+    )
+    .with_context(|| {
         format!(
             "failed to run verification recipe step `{}` in `{}`",
             step.name,
             workspace_path.display()
         )
     })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        anyhow!(
-            "failed to capture stdout for verification recipe step `{}`",
-            step.name
-        )
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        anyhow!(
-            "failed to capture stderr for verification recipe step `{}`",
-            step.name
-        )
-    })?;
-    let stdout_handle = drain_recipe_stream(stdout, step.name.clone(), "stdout");
-    let stderr_handle = drain_recipe_stream(stderr, step.name.clone(), "stderr");
-
-    let started = Instant::now();
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait().with_context(|| {
+    let output = child
+        .wait_with_captured_output(|_| Ok(()), |_| Ok(()), |_| Ok(()))
+        .with_context(|| {
             format!(
                 "failed to wait for verification recipe step `{}` in `{}`",
                 step.name,
                 workspace_path.display()
             )
-        })? {
-            break status;
-        }
-        if started.elapsed() >= timeout {
-            timed_out = true;
-            terminate_command_process_group(&mut child).with_context(|| {
-                format!(
-                    "failed to terminate verification recipe step `{}` after timeout",
-                    step.name
-                )
-            })?;
-            break child.wait().with_context(|| {
-                format!(
-                    "failed to reap verification recipe step `{}` after timeout",
-                    step.name
-                )
-            })?;
-        }
-        thread::sleep(Duration::from_millis(100));
-    };
+        })?;
 
     Ok(RecipeStepCommandOutput {
-        exit_code: status.code(),
-        stdout: stdout_handle
-            .join()
-            .map_err(|_| anyhow!("stdout drain thread panicked for `{}`", step.name))??,
-        stderr: stderr_handle
-            .join()
-            .map_err(|_| anyhow!("stderr drain thread panicked for `{}`", step.name))??,
-        timed_out,
+        exit_code: output.status.code(),
+        stdout: output.stdout.unwrap_or_default(),
+        stderr: output.stderr.unwrap_or_default(),
+        timed_out: output.timeout.is_some(),
+        elapsed_seconds: output.elapsed.as_secs(),
     })
-}
-
-fn drain_recipe_stream<R>(
-    mut reader: R,
-    step_name: String,
-    stream_name: &'static str,
-) -> thread::JoinHandle<Result<String>>
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).with_context(|| {
-            format!("failed to read {stream_name} for verification recipe step `{step_name}`")
-        })?;
-        Ok(String::from_utf8_lossy(&bytes).to_string())
-    })
-}
-
-#[cfg(unix)]
-fn configure_command_process_group(command: &mut Command) {
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn configure_command_process_group(_: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_command_process_group(child: &mut std::process::Child) -> Result<()> {
-    let pid = child.id() as i32;
-    if pid > 0 {
-        let result = unsafe { libc::killpg(pid, libc::SIGKILL) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error).context("failed to kill verification recipe process group");
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn terminate_command_process_group(child: &mut std::process::Child) -> Result<()> {
-    child
-        .kill()
-        .context("failed to kill verification recipe step")
 }
 
 fn format_duration_label(timeout: Duration) -> String {
@@ -4771,12 +4890,19 @@ fn render_verification_e2e_lines(report: &VerificationE2eReport) -> Vec<String> 
     }
     for step in &report.steps {
         lines.push(format!(
-            "step={} status={} exit_code={}",
+            "step={} status={} exit_code={} timeout_seconds={} elapsed_seconds={} timed_out={}",
             step.name,
             step.status.label(),
             step.exit_code
                 .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+            step.timeout_seconds
+                .map(|seconds| seconds.to_string())
+                .unwrap_or_else(|| "unset".to_string()),
+            step.elapsed_seconds
+                .map(|seconds| seconds.to_string())
+                .unwrap_or_else(|| "unset".to_string()),
+            step.timed_out
         ));
         for assertion in &step.assertions {
             lines.push(format!("assertion={assertion}"));
@@ -5286,6 +5412,7 @@ fn build_worker_session(
         session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
         pending_linear_sync: context.pending_linear_sync.clone(),
+        last_timeout: context.last_timeout.clone(),
         turns: Some(turns),
         tokens: canonical.tokens.clone(),
         turn_history: context.turn_history.clone(),
@@ -5388,6 +5515,20 @@ fn load_existing_pending_linear_sync(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .and_then(|session| session.pending_linear_sync))
+}
+
+fn load_existing_last_timeout(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<SessionTimeoutRecord>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.last_timeout))
 }
 
 fn load_existing_turn_count(
@@ -5551,6 +5692,7 @@ mod tests {
             pid: Some(1234),
             latest_resume_handle: None,
             pending_linear_sync: None,
+            last_timeout: None,
             turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
@@ -6259,6 +6401,9 @@ old
         .expect("timed e2e step should return a report");
 
         assert_eq!(report.status, VerificationStatus::Failed);
+        assert_eq!(report.timeout_seconds, Some(0));
+        assert!(report.elapsed_seconds.is_some());
+        assert!(report.timed_out);
         assert!(
             report
                 .assertions

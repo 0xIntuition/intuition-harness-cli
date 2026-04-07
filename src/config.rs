@@ -21,9 +21,10 @@ pub use crate::config_resolution::{
     supported_agent_route_families, supported_reasoning_options, validate_agent_model,
     validate_agent_name, validate_agent_reasoning, validate_backlog_default_priority,
     validate_backlog_labels, validate_fast_plan_question_limit,
-    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
-    validate_listen_retry_initial_backoff_seconds, validate_listen_retry_max_backoff_seconds,
-    validate_supported_agent,
+    validate_interactive_plan_follow_up_question_limit,
+    validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
+    validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
+    validate_listen_retry_max_backoff_seconds, validate_supported_agent,
 };
 use crate::config_resolution::{
     config_path_from_env_or_home, default_linear_api_url, normalize_optional_ref,
@@ -51,6 +52,8 @@ pub const DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS: usize = 2;
 pub const DEFAULT_VERIFICATION_BATTLE_TEST_COUNT: usize = 0;
 pub const DEFAULT_LISTEN_RETRY_INITIAL_BACKOFF_SECONDS: u64 = 2;
 pub const DEFAULT_LISTEN_RETRY_MAX_BACKOFF_SECONDS: u64 = 60;
+pub const DEFAULT_LISTEN_AGENT_TURN_TIMEOUT_SECONDS: u64 = 1_800;
+pub const DEFAULT_LISTEN_AGENT_GRACEFUL_SHUTDOWN_SECONDS: u64 = 5;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_IMPROVE: &str = "backlog.improve";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
@@ -130,6 +133,8 @@ pub struct InstallListenSettings {
     pub assignment_scope: Option<ListenAssignmentScope>,
     pub refresh_policy: Option<ListenRefreshPolicy>,
     pub poll_interval_seconds: Option<u64>,
+    pub agent_turn_timeout_seconds: Option<u64>,
+    pub agent_graceful_shutdown_seconds: Option<u64>,
     #[serde(default)]
     pub retry: ListenRetrySettings,
 }
@@ -913,6 +918,20 @@ impl PlanningListenSettings {
     }
 }
 
+impl InstallListenSettings {
+    /// Returns the configured listen turn timeout in seconds.
+    pub fn agent_turn_timeout_seconds(&self) -> u64 {
+        self.agent_turn_timeout_seconds
+            .unwrap_or(DEFAULT_LISTEN_AGENT_TURN_TIMEOUT_SECONDS)
+    }
+
+    /// Returns the configured graceful-shutdown window for listen turns in seconds.
+    pub fn agent_graceful_shutdown_seconds(&self) -> u64 {
+        self.agent_graceful_shutdown_seconds
+            .unwrap_or(DEFAULT_LISTEN_AGENT_GRACEFUL_SHUTDOWN_SECONDS)
+    }
+}
+
 impl PlanningValidationSettings {
     fn is_empty(&self) -> bool {
         self.commands.is_empty()
@@ -964,6 +983,12 @@ impl InstallDefaults {
     pub fn validate(&self) -> Result<()> {
         if let Some(interval) = self.listen.poll_interval_seconds {
             validate_listen_poll_interval_seconds(interval)?;
+        }
+        if let Some(timeout) = self.listen.agent_turn_timeout_seconds {
+            validate_listen_agent_turn_timeout_seconds(timeout)?;
+        }
+        if let Some(timeout) = self.listen.agent_graceful_shutdown_seconds {
+            validate_listen_agent_graceful_shutdown_seconds(timeout)?;
         }
         self.listen.retry.validate()?;
         if let Some(limit) = self.plan.interactive_follow_up_questions {
@@ -1416,6 +1441,8 @@ mod tests {
                     assignment_scope: Some(super::ListenAssignmentScope::ViewerOrUnassigned),
                     refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
                     poll_interval_seconds: Some(42),
+                    agent_turn_timeout_seconds: None,
+                    agent_graceful_shutdown_seconds: None,
                     retry: super::ListenRetrySettings::default(),
                 },
                 plan: InstallPlanSettings {
@@ -1570,6 +1597,8 @@ mod tests {
                     assignment_scope: Some(super::ListenAssignmentScope::ViewerOrUnassigned),
                     refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
                     poll_interval_seconds: Some(42),
+                    agent_turn_timeout_seconds: None,
+                    agent_graceful_shutdown_seconds: None,
                     retry: super::ListenRetrySettings::default(),
                 },
                 plan: InstallPlanSettings {

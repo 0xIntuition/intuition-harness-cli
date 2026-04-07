@@ -228,6 +228,63 @@ fn config_updates_listen_retry_defaults_and_renders_effective_values() -> Result
 }
 
 #[test]
+fn config_updates_listen_timeout_defaults_and_renders_effective_values()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+            "--listen-agent-turn-timeout",
+            "91",
+            "--listen-agent-graceful-shutdown",
+            "7",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let rendered: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        rendered["app"]["defaults"]["listen"]["agent_turn_timeout_seconds"],
+        json!(91)
+    );
+    assert_eq!(
+        rendered["app"]["defaults"]["listen"]["agent_graceful_shutdown_seconds"],
+        json!(7)
+    );
+    assert_eq!(
+        rendered["effective"]["listen_timeouts"]["agent_turn_timeout_seconds"],
+        json!(91)
+    );
+    assert_eq!(
+        rendered["effective"]["listen_timeouts"]["agent_graceful_shutdown_seconds"],
+        json!(7)
+    );
+
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(config_path)?)?;
+    assert_eq!(
+        saved["defaults"]["listen"]["agent_turn_timeout_seconds"].as_integer(),
+        Some(91)
+    );
+    assert_eq!(
+        saved["defaults"]["listen"]["agent_graceful_shutdown_seconds"].as_integer(),
+        Some(7)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_rejects_listen_retry_max_backoff_below_initial() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -249,6 +306,56 @@ fn config_rejects_listen_retry_max_backoff_below_initial() -> Result<(), Box<dyn
         .failure()
         .stderr(predicate::str::contains(
             "listen retry max backoff must be greater than or equal to the initial backoff",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn config_rejects_zero_listen_agent_turn_timeout() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--listen-agent-turn-timeout",
+            "0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "listen agent turn timeout must be at least 1 second; got 0",
+        ));
+
+    Ok(())
+}
+
+#[test]
+fn config_rejects_zero_listen_agent_graceful_shutdown() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--listen-agent-graceful-shutdown",
+            "0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "listen agent graceful shutdown must be at least 1 second; got 0",
         ));
 
     Ok(())
