@@ -45,3 +45,50 @@ That fragmentation leaks into runtime behavior. [`../../../src/listen/mod.rs`](<
 - [x] Daemon degraded-state behavior and worker deferred-sync behavior are both covered by tests or deterministic command proofs.
 - [x] README and affected workflow docs explain the new listen retry settings, default behavior, and inherited flows.
 - [x] Validation evidence is recorded in [`./validation.md`](<./validation.md>).
+
+<!-- metastack-listen-progress:start -->
+## Listener Progress Checklist
+
+### Completed
+
+- [x] Changed `README.md`
+- [x] Changed `WORKFLOW.md`
+- [x] Changed `docs/agent-daemon.md`
+- [x] Changed `docs/listen-phased-execution-spec.md`
+- [x] Changed `src/cli.rs`
+- [x] Changed `src/config.rs`
+- [x] Changed `src/config_command.rs`
+- [x] Changed `src/config_resolution.rs`
+- [x] Changed `src/linear/mod.rs`
+- [x] Changed `src/linear/service.rs`
+- [x] Changed `src/linear/service/tests.rs`
+- [x] Changed `src/listen/dashboard.rs`
+- [x] Changed `src/listen/mod.rs`
+- [x] Changed `src/listen/preflight.rs`
+- [x] Changed `src/listen/state.rs`
+- [x] Changed `src/listen/store.rs`
+- [x] Changed `src/listen/worker.rs`
+- [x] Changed `tests/config.rs`
+- [x] Changed `tests/listen.rs`
+- [x] Changed `tests/support/common.rs`
+- [x] Changed `.intuition/backlog/ENG-10716/checklist.md`
+- [x] Changed `.intuition/backlog/ENG-10716/implementation.md`
+- [x] Changed `.intuition/backlog/ENG-10716/index.md`
+- [x] Changed `.intuition/backlog/ENG-10716/specification.md`
+- [x] Changed `.intuition/backlog/ENG-10716/validation.md`
+
+### Remaining
+
+- [ ] Performance budget validated.
+
+### Validation
+
+- [x] `cargo test --test config`
+- [x] `cargo test --test listen`
+- [x] `cargo test linear::service`
+- [x] `cargo test linear::transport`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] `make quality`
+- [x] Deterministic proof that mocked `429`, `503`, and network-level Linear failures preserve existing session visibility and surface degraded-state or backoff evidence instead of terminating the daemon
+- [x] Deterministic proof that a session with local workspace progress survives a later transient Linear failure, resumes successfully, and clears pending sync state once Linear is reachable again
+<!-- metastack-listen-progress:end -->
