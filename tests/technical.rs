@@ -19,6 +19,21 @@ fn write_onboarded_config(
 }
 
 #[cfg(unix)]
+fn write_minimal_technical_templates(repo_root: &Path) -> Result<(), Box<dyn Error>> {
+    let template_dir = repo_root.join(format!("{}/backlog/_TEMPLATE", branding::PROJECT_DIR));
+    fs::create_dir_all(&template_dir)?;
+    fs::write(
+        template_dir.join("index.md"),
+        "# {{BACKLOG_TITLE}}\n\nParent: {{parent_identifier}}\n",
+    )?;
+    fs::write(
+        template_dir.join("specification.md"),
+        "# Specification: {{BACKLOG_TITLE}}\n\nSlug: {{BACKLOG_SLUG}}\n",
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn technical_command_creates_a_child_issue_and_local_backlog_files() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
@@ -109,26 +124,43 @@ transport = "stdin"
     fs::write(
         &stub_path,
         format!(
-            "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload.txt\"\ncat <<'JSON'\n\
+            "#!/bin/sh\ncount_file=\"$TEST_OUTPUT_DIR/count.txt\"\ncount=0\n\
+if [ -f \"$count_file\" ]; then\n  count=$(cat \"$count_file\")\nfi\n\
+count=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\n\
+cat > \"$TEST_OUTPUT_DIR/payload-$count.txt\"\n\
+if [ \"$count\" -eq 1 ]; then\n\
+cat <<'JSON'\n\
 Context {{not json}}\n\
-{{\"files\":[\n\
+{{\"kind\":\"questions\",\"questions\":[\"Which module should own the follow-up loop?\"]}}\n\
+JSON\n\
+elif [ \"$count\" -eq 2 ]; then\n\
+cat <<'JSON'\n\
+Context {{not json}}\n\
+{{\"kind\":\"questions\",\"questions\":[\"Should refinement preserve the existing review layout?\"]}}\n\
+JSON\n\
+else\n\
+cat <<'JSON'\n\
+Context {{not json}}\n\
+{{\"kind\":\"draft\",\"files\":[\n\
   {{\"path\":\"index.md\",\"contents\":\"# Technical: Create the technical and sync commands\\n\\nAgent-generated technical backlog for parent `MET-35`.\\n\"}},\n\
   {{\"path\":\"README.md\",\"contents\":\"# Backlog Item Template\\n\\nThis directory is the canonical backlog for the technical child ticket.\\n\"}},\n\
   {{\"path\":\"checklist.md\",\"contents\":\"# Checklist: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
   {{\"path\":\"contacts.md\",\"contents\":\"# Contacts: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
   {{\"path\":\"decisions.md\",\"contents\":\"# Decisions: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
-  {{\"path\":\"specification.md\",\"contents\":\"# Specification: Technical: Create the technical and sync commands\\n\\nSlug: technical-create-the-technical-and-sync-commands\\n\\n## Functional Requirements\\n1. Inspect the parent Linear issue before creating the child.\\n2. Generate backlog docs through the configured agent.\\n\"}},\n\
-  {{\"path\":\"implementation.md\",\"contents\":\"# Implementation\\n\\n- Generate backlog docs from `{dir}/backlog/_TEMPLATE` through the configured agent.\\n- Sync the generated docs back to Linear attachments.\\n\"}},\n\
+  {{\"path\":\"specification.md\",\"contents\":\"# Specification: Technical: Create the technical and sync commands\\n\\nSlug: technical-create-the-technical-and-sync-commands\\n\\n## Functional Requirements\\n1. Inspect the parent Linear issue before creating the child.\\n2. Generate backlog docs through the configured agent.\\n3. Implement the iterative loop in `src/technical.rs`.\\n4. Preserve the existing review layout while adding refine.\\n\"}},\n\
+  {{\"path\":\"implementation.md\",\"contents\":\"# Implementation\\n\\n- Generate backlog docs from `{dir}/backlog/_TEMPLATE` through the configured agent.\\n- Use `src/technical.rs` for the follow-up loop implementation.\\n- Preserve the existing review layout during refinement.\\n- Sync the generated docs back to Linear attachments.\\n\"}},\n\
   {{\"path\":\"proposed-prs.md\",\"contents\":\"# Proposed PRs: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\\n1. `technical-create-the-technical-and-sync-commands-01`\\n\"}},\n\
   {{\"path\":\"risks.md\",\"contents\":\"# Risks: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
-  {{\"path\":\"validation.md\",\"contents\":\"# Validation\\n\\n- `{cmd} backlog tech MET-35`\\n- `cargo test technical_command_creates_a_child_issue_and_local_backlog_files`\\n\"}},\n\
+  {{\"path\":\"validation.md\",\"contents\":\"# Validation\\n\\n- `{cmd} backlog tech MET-35 --answer 'Use src/technical.rs for the follow-up loop' --answer 'Yes, preserve the existing review layout'`\\n- `cargo test technical_command_creates_a_child_issue_and_local_backlog_files`\\n\"}},\n\
   {{\"path\":\"context/README.md\",\"contents\":\"# Context Index: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
   {{\"path\":\"context/context-note-template.md\",\"contents\":\"# Context Note: Parent issue snapshot\\n\\nLast updated: 2026-03-15\\n\"}},\n\
   {{\"path\":\"tasks/README.md\",\"contents\":\"# Workstreams: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
   {{\"path\":\"tasks/workstream-template.md\",\"contents\":\"# Workstream: sync-surface\\n\\nLast updated: 2026-03-15\\n\"}},\n\
   {{\"path\":\"artifacts/README.md\",\"contents\":\"# Artifact Index: Technical: Create the technical and sync commands\\n\\nLast updated: 2026-03-15\\n\"}},\n\
   {{\"path\":\"artifacts/artifact-template.md\",\"contents\":\"# Artifact: generated-proof\\n\\nLast updated: 2026-03-15\\n\"}}\n\
-]}}\nJSON\n",
+]}}\n\
+JSON\n\
+fi\n",
             cmd = branding::COMMAND_NAME,
             dir = branding::PROJECT_DIR,
         ),
@@ -472,6 +504,10 @@ Context {{not json}}\n\
             "token",
             "--api-url",
             &api_url,
+            "--answer",
+            "Use src/technical.rs for the follow-up loop",
+            "--answer",
+            "Yes, preserve the existing review layout",
             "MET-35",
         ])
         .assert()
@@ -497,7 +533,9 @@ Context {{not json}}\n\
     let specification = fs::read_to_string(issue_dir.join("specification.md"))?;
     let validation = fs::read_to_string(issue_dir.join("validation.md"))?;
     let metadata = fs::read_to_string(issue_dir.join(".linear.json"))?;
-    let payload = fs::read_to_string(output_dir.join("payload.txt"))?;
+    let first_prompt = fs::read_to_string(output_dir.join("payload-1.txt"))?;
+    let second_prompt = fs::read_to_string(output_dir.join("payload-2.txt"))?;
+    let third_prompt = fs::read_to_string(output_dir.join("payload-3.txt"))?;
     let ticket_images = fs::read_to_string(issue_dir.join("artifacts/ticket-images.md"))?;
     let ticket_discussion = fs::read_to_string(issue_dir.join("context/ticket-discussion.md"))?;
 
@@ -506,8 +544,11 @@ Context {{not json}}\n\
     assert!(readme.contains("canonical backlog for the technical child"));
     assert!(checklist.contains("Last updated: 2026-03-15"));
     assert!(implementation.contains("configured agent"));
+    assert!(implementation.contains("src/technical.rs"));
+    assert!(implementation.contains("review layout"));
     assert!(proposed_prs.contains("technical-create-the-technical-and-sync-commands-01"));
     assert!(specification.contains("Slug: technical-create-the-technical-and-sync-commands"));
+    assert!(specification.contains("iterative loop in `src/technical.rs`"));
     assert!(!specification.contains("{{BACKLOG_SLUG}}"));
     assert!(validation.contains(&format!("{} backlog tech MET-35", branding::COMMAND_NAME)));
     assert!(metadata.contains("\"identifier\": \"MET-36\""));
@@ -522,40 +563,55 @@ Context {{not json}}\n\
     );
     assert!(ticket_discussion.contains("### **Alice** (2026-03-16)"));
     assert!(ticket_discussion.contains("![comment-shot](artifacts/comment-1-comment-shot.jpg)"));
-    assert!(payload.contains("Parent Linear issue"));
-    assert!(payload.contains("Create the technical and sync commands"));
-    assert!(payload.contains("Injected workflow contract:"));
-    assert!(payload.contains("## Built-in Workflow Contract"));
+    assert!(first_prompt.contains("Parent Linear issue"));
+    assert!(first_prompt.contains("Create the technical and sync commands"));
+    assert!(first_prompt.contains("Injected workflow contract:"));
+    assert!(first_prompt.contains("## Built-in Workflow Contract"));
     assert!(
-        payload.contains("`BACKLOG_TITLE`: Technical: Create the technical and sync commands",)
+        first_prompt
+            .contains("`BACKLOG_TITLE`: Technical: Create the technical and sync commands",)
     );
-    assert!(payload.contains("`BACKLOG_SLUG`: technical-create-the-technical-and-sync-commands",));
-    assert!(payload.contains("`TODAY`:"));
-    assert!(payload.contains("context/context-note-template.md"));
-    assert!(payload.contains("tasks/workstream-template.md"));
-    assert!(payload.contains("artifacts/artifact-template.md"));
-    assert!(payload.contains("## SCAN.md"));
-    assert!(payload.contains("## ARCHITECTURE.md"));
-    assert!(payload.contains("## CONCERNS.md"));
-    assert!(payload.contains("## CONVENTIONS.md"));
-    assert!(payload.contains("## INTEGRATIONS.md"));
-    assert!(payload.contains("## STACK.md"));
-    assert!(payload.contains("## STRUCTURE.md"));
-    assert!(payload.contains("## TESTING.md"));
-    assert!(payload.contains(&format!(
+    assert!(
+        first_prompt.contains("`BACKLOG_SLUG`: technical-create-the-technical-and-sync-commands",)
+    );
+    assert!(first_prompt.contains("`TODAY`:"));
+    assert!(first_prompt.contains("context/context-note-template.md"));
+    assert!(first_prompt.contains("tasks/workstream-template.md"));
+    assert!(first_prompt.contains("artifacts/artifact-template.md"));
+    assert!(first_prompt.contains("## SCAN.md"));
+    assert!(first_prompt.contains("## ARCHITECTURE.md"));
+    assert!(first_prompt.contains("## CONCERNS.md"));
+    assert!(first_prompt.contains("## CONVENTIONS.md"));
+    assert!(first_prompt.contains("## INTEGRATIONS.md"));
+    assert!(first_prompt.contains("## STACK.md"));
+    assert!(first_prompt.contains("## STRUCTURE.md"));
+    assert!(first_prompt.contains("## TESTING.md"));
+    assert!(first_prompt.contains(&format!(
         "_Missing `INTEGRATIONS.md`. Run `{} scan` to generate it._",
         branding::COMMAND_NAME
     )));
-    assert!(!payload.contains(&format!("{} context reload", branding::COMMAND_NAME)));
-    assert!(payload.contains("Selected acceptance criteria for this technical sub-ticket"));
-    assert!(payload.contains("- Generate backlog docs from the template"));
-    assert!(payload.contains("Parent issue context:"));
-    assert!(payload.contains("Ticket discussion context:"));
-    assert!(payload.contains("Localized ticket images:"));
-    assert!(payload.contains("artifacts/issue-diagram.png"));
-    assert!(payload.contains("artifacts/parent-parent-reference.svg"));
-    assert!(payload.contains("Need parent art"));
-    assert!(payload.contains("Repository directory snapshot"));
+    assert!(!first_prompt.contains(&format!("{} context reload", branding::COMMAND_NAME)));
+    assert!(first_prompt.contains("Selected acceptance criteria for this technical sub-ticket"));
+    assert!(first_prompt.contains("- Generate backlog docs from the template"));
+    assert!(first_prompt.contains("Parent issue context:"));
+    assert!(first_prompt.contains("Ticket discussion context:"));
+    assert!(first_prompt.contains("Localized ticket images:"));
+    assert!(first_prompt.contains("artifacts/issue-diagram.png"));
+    assert!(first_prompt.contains("artifacts/parent-parent-reference.svg"));
+    assert!(first_prompt.contains("Need parent art"));
+    assert!(first_prompt.contains("Repository directory snapshot"));
+    assert!(
+        first_prompt
+            .contains("{\"kind\":\"questions\",\"questions\":[\"Question 1\",\"Question 2\"]}")
+    );
+    assert!(first_prompt.contains(
+        "{\"kind\":\"draft\",\"files\":[{\"path\":\"index.md\",\"contents\":\"# ...\"}]}"
+    ));
+    assert!(second_prompt.contains("Which module should own the follow-up loop?"));
+    assert!(second_prompt.contains("Use src/technical.rs for the follow-up loop"));
+    assert!(third_prompt.contains("Should refinement preserve the existing review layout?"));
+    assert!(third_prompt.contains("Yes, preserve the existing review layout"));
+    assert_eq!(fs::read_to_string(output_dir.join("count.txt"))?, "3");
 
     cli()
         .current_dir(&repo_root)
@@ -585,6 +641,152 @@ Context {{not json}}\n\
 
     issue_labels_mock.assert_calls(1);
     create_issue_mock.assert_calls(1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn technical_command_rejects_mismatched_non_interactive_answers_before_mutation()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let stub_path = temp.path().join("technical-agent-stub");
+    let output_dir = temp.path().join("agent-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let parent_issue = issue_node(
+        "parent-1",
+        "MET-35",
+        "Create the technical and sync commands",
+        "## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket",
+        "state-2",
+        "In Progress",
+    );
+
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&output_dir)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_minimal_technical_templates(&repo_root)?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[agents]
+default_agent = "technical-stub"
+
+[agents.commands.technical-stub]
+command = "{}"
+transport = "stdin"
+"#,
+            stub_path.display()
+        ),
+    )?;
+    fs::write(
+        &stub_path,
+        "#!/bin/sh\ncat > \"$TEST_OUTPUT_DIR/payload-1.txt\"\nprintf '%s' '{\"kind\":\"questions\",\"questions\":[\"Which module should own the follow-up loop?\",\"Should refinement preserve the existing review layout?\"]}'\n",
+    )?;
+    let mut permissions = fs::metadata(&stub_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub_path, permissions)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [parent_issue.clone()]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue")
+            .body_includes("\"id\":\"parent-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": issue_detail_node(
+                    "parent-1",
+                    "MET-35",
+                    "Create the technical and sync commands",
+                    "## Acceptance Criteria\n- Generate backlog docs from the template\n- Keep sync safe for the child ticket",
+                    Vec::new(),
+                    None,
+                )
+            }
+        }));
+    });
+
+    let create_issue_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": issue_node(
+                        "child-1",
+                        "MET-36",
+                        "Technical: Create the technical and sync commands",
+                        "Technical child description",
+                        "state-1",
+                        "Todo",
+                    )
+                }
+            }
+        }));
+    });
+
+    let assert = cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &output_dir)
+        .args([
+            "technical",
+            "--no-interactive",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--answer",
+            "Only one answer",
+            "MET-35",
+        ])
+        .assert()
+        .failure();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "backlog.tech");
+    assert_eq!(payload["error"]["code"], "command_failed");
+    assert_eq!(
+        payload["error"]["message"],
+        "technical agent requested 2 follow-up question(s) so far; pass at least 2 `--answer` value(s)"
+    );
+    let prompt = fs::read_to_string(output_dir.join("payload-1.txt"))?;
+    assert!(prompt.contains("Parent Linear issue"));
+    assert!(prompt.contains("Return JSON only using exactly one of these tagged response shapes"));
+    assert!(
+        !repo_root
+            .join(format!("{}/backlog/MET-36", branding::PROJECT_DIR))
+            .exists()
+    );
+    create_issue_mock.assert_calls(0);
 
     Ok(())
 }

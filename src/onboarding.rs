@@ -23,7 +23,9 @@ use ratatui::{Frame, Terminal};
 use crate::branding;
 use crate::config::{
     AppConfig, DEFAULT_LINEAR_API_URL, ListenAssignmentScope, ListenRefreshPolicy,
-    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    validate_interactive_plan_follow_up_question_limit,
+    validate_interactive_technical_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    validate_technical_refinement_round_limit,
 };
 use crate::linear::{
     LinearClient, LinearService, ProjectSummary, ReqwestLinearClient, TeamSummary, UserRef,
@@ -101,13 +103,15 @@ enum OnboardingStep {
     RefreshPolicy,
     PollInterval,
     PlanFollowUpLimit,
+    TechnicalFollowUpLimit,
+    TechnicalRefinementLimit,
     PlanLabel,
     TechnicalLabel,
     Review,
 }
 
 impl OnboardingStep {
-    fn all() -> [Self; 13] {
+    fn all() -> [Self; 15] {
         [
             Self::Welcome,
             Self::ApiKey,
@@ -119,6 +123,8 @@ impl OnboardingStep {
             Self::RefreshPolicy,
             Self::PollInterval,
             Self::PlanFollowUpLimit,
+            Self::TechnicalFollowUpLimit,
+            Self::TechnicalRefinementLimit,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::Review,
@@ -154,6 +160,8 @@ impl OnboardingStep {
             Self::RefreshPolicy => "Refresh policy",
             Self::PollInterval => "Poll interval",
             Self::PlanFollowUpLimit => "Plan follow-ups",
+            Self::TechnicalFollowUpLimit => "Tech follow-ups",
+            Self::TechnicalRefinementLimit => "Tech refinements",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::Review => "Save",
@@ -188,6 +196,8 @@ struct OnboardingApp {
     listen_label: InputFieldState,
     poll_interval: InputFieldState,
     plan_follow_up_limit: InputFieldState,
+    technical_follow_up_limit: InputFieldState,
+    technical_refinement_limit: InputFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
     assignment_scope: SelectFieldState,
@@ -216,6 +226,8 @@ struct OnboardingSubmission {
     refresh_policy: ListenRefreshPolicy,
     poll_interval_seconds: Option<u64>,
     interactive_follow_up_questions: Option<usize>,
+    technical_follow_up_questions: Option<usize>,
+    technical_refinement_rounds: Option<usize>,
     plan_label: Option<String>,
     technical_label: Option<String>,
 }
@@ -283,6 +295,22 @@ impl OnboardingApp {
                     .defaults
                     .plan
                     .interactive_follow_up_questions
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
+            technical_follow_up_limit: InputFieldState::new(
+                app_config
+                    .defaults
+                    .technical
+                    .interactive_follow_up_questions
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
+            technical_refinement_limit: InputFieldState::new(
+                app_config
+                    .defaults
+                    .technical
+                    .refinement_rounds
                     .map(|value| value.to_string())
                     .unwrap_or_default(),
             ),
@@ -380,6 +408,12 @@ impl OnboardingApp {
             OnboardingStep::RefreshPolicy => self.refresh_policy.handle_key(key),
             OnboardingStep::PollInterval => self.poll_interval.handle_key(key),
             OnboardingStep::PlanFollowUpLimit => self.plan_follow_up_limit.handle_key(key),
+            OnboardingStep::TechnicalFollowUpLimit => {
+                self.technical_follow_up_limit.handle_key(key)
+            }
+            OnboardingStep::TechnicalRefinementLimit => {
+                self.technical_refinement_limit.handle_key(key)
+            }
             OnboardingStep::PlanLabel => self.plan_label.handle_key(key),
             OnboardingStep::TechnicalLabel => self.technical_label.handle_key(key),
             OnboardingStep::Review => false,
@@ -447,6 +481,12 @@ impl OnboardingApp {
             OnboardingStep::PlanFollowUpLimit => self
                 .plan_follow_up_limit
                 .copy_payload("onboarding plan follow-up limit"),
+            OnboardingStep::TechnicalFollowUpLimit => self
+                .technical_follow_up_limit
+                .copy_payload("onboarding technical follow-up limit"),
+            OnboardingStep::TechnicalRefinementLimit => self
+                .technical_refinement_limit
+                .copy_payload("onboarding technical refinement limit"),
             OnboardingStep::PlanLabel => self.plan_label.copy_payload("onboarding plan label"),
             OnboardingStep::TechnicalLabel => self
                 .technical_label
@@ -526,6 +566,16 @@ impl OnboardingApp {
             "interactive plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
         )?;
+        let technical_follow_up_questions = parse_optional_usize(
+            self.technical_follow_up_limit.value(),
+            "interactive technical follow-up question limit",
+            validate_interactive_technical_follow_up_question_limit,
+        )?;
+        let technical_refinement_rounds = parse_optional_usize(
+            self.technical_refinement_limit.value(),
+            "technical refinement round limit",
+            validate_technical_refinement_round_limit,
+        )?;
 
         if !matches!(self.validation_state, ValidationState::Succeeded { .. }) {
             bail!("Linear authentication must succeed before onboarding can finish");
@@ -549,6 +599,8 @@ impl OnboardingApp {
             },
             poll_interval_seconds,
             interactive_follow_up_questions,
+            technical_follow_up_questions,
+            technical_refinement_rounds,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
         })
@@ -776,6 +828,9 @@ async fn save_submission(config: &mut AppConfig, submitted: OnboardingSubmission
     config.defaults.listen.poll_interval_seconds = submitted.poll_interval_seconds;
     config.defaults.plan.interactive_follow_up_questions =
         submitted.interactive_follow_up_questions;
+    config.defaults.technical.interactive_follow_up_questions =
+        submitted.technical_follow_up_questions;
+    config.defaults.technical.refinement_rounds = submitted.technical_refinement_rounds;
     config.defaults.issue_labels.plan = submitted.plan_label.clone();
     config.defaults.issue_labels.technical = submitted.technical_label.clone();
     config.mark_onboarding_complete();
@@ -967,6 +1022,24 @@ fn step_copy(app: &OnboardingApp) -> Vec<Line<'static>> {
                 "Set a small limit for tighter loops or a larger one for deeper planning passes.",
             ),
         ],
+        OnboardingStep::TechnicalFollowUpLimit => vec![
+            Line::from(format!(
+                "This caps the total follow-up questions across one interactive `{} backlog tech` run.",
+                branding::COMMAND_NAME
+            )),
+            Line::from(
+                "Use `0` to force immediate drafts only, or a higher value to allow guided technical Q&A.",
+            ),
+        ],
+        OnboardingStep::TechnicalRefinementLimit => vec![
+            Line::from(format!(
+                "This caps how many refinement rounds the technical review screen allows for `{} backlog tech`.",
+                branding::COMMAND_NAME
+            )),
+            Line::from(
+                "Set `0` to disable refinement from the review stage, or increase it for iterative draft improvement.",
+            ),
+        ],
         OnboardingStep::PlanLabel => vec![
             Line::from(format!(
                 "Default label for issues created by `{} backlog plan`.",
@@ -1044,7 +1117,7 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
                 Line::from("  Linear authentication (API key)"),
                 Line::from("  Default team and project"),
                 Line::from("  Listen settings (label, scope, refresh, poll)"),
-                Line::from("  Planning defaults (follow-ups, labels)"),
+                Line::from("  Planning defaults (plan + technical limits, labels)"),
                 Line::from(""),
                 Line::from("Press Enter to begin."),
             ]))
@@ -1089,6 +1162,20 @@ fn render_right_panel(frame: &mut Frame<'_>, app: &OnboardingApp, area: Rect) {
             "Plan follow-up question limit",
             &app.plan_follow_up_limit,
             "10",
+        ),
+        OnboardingStep::TechnicalFollowUpLimit => render_input_panel(
+            frame,
+            area,
+            "Technical follow-up question limit",
+            &app.technical_follow_up_limit,
+            "3",
+        ),
+        OnboardingStep::TechnicalRefinementLimit => render_input_panel(
+            frame,
+            area,
+            "Technical refinement round limit",
+            &app.technical_refinement_limit,
+            "3",
         ),
         OnboardingStep::PlanLabel => {
             render_input_panel(frame, area, "Default plan label", &app.plan_label, "plan")
@@ -1178,6 +1265,14 @@ fn review_lines(app: &OnboardingApp) -> Vec<Line<'static>> {
         summary_line(
             "Plan follow-ups",
             summarize_input(&app.plan_follow_up_limit, "10"),
+        ),
+        summary_line(
+            "Tech follow-ups",
+            summarize_input(&app.technical_follow_up_limit, "3"),
+        ),
+        summary_line(
+            "Tech refinements",
+            summarize_input(&app.technical_refinement_limit, "3"),
         ),
         summary_line("Plan label", summarize_input(&app.plan_label, "plan")),
         summary_line(

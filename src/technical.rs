@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -24,10 +24,11 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::agents::run_agent_capture;
+use crate::agents::{AgentContinuation, run_agent_capture_with_continuation};
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, RenderedTemplateFile,
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
@@ -63,30 +64,79 @@ use crate::tui::copy::{
 };
 use crate::tui::fields::{InputFieldState, MultiSelectFieldState};
 use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key, top_level_cancel};
-use crate::tui::scroll::{ScrollState, plain_text, scrollable_content_paragraph, wrapped_rows};
+use crate::tui::markdown::render_markdown;
+use crate::tui::scroll::{
+    ScrollState, plain_text, scrollable_content_paragraph, scrollable_paragraph_with_block,
+    wrapped_rows,
+};
 use crate::{LinearCommandContext, load_linear_command_context};
 
 const ISSUE_PICKER_LIMIT: usize = 250;
+const SKIPPED_TECHNICAL_FOLLOW_UP_LABEL: &str = "Skipped intentionally.";
 
-#[derive(Debug, Deserialize)]
-struct TechnicalBacklogDraft {
-    #[serde(default)]
-    files: Vec<TechnicalBacklogFile>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct TechnicalBacklogFile {
     path: String,
     contents: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TechnicalFollowUpResponse {
+    question: String,
+    answer: String,
+    skipped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowUpAnswerState {
+    Pending,
+    Answered,
+    Skipped,
+}
+
+#[derive(Debug, Clone)]
+struct QuestionAnswer {
+    question: String,
+    answer: InputFieldState,
+    state: FollowUpAnswerState,
 }
 
 #[derive(Debug, Clone)]
 struct TechnicalGeneratedBacklog {
     parent: IssueSummary,
     child_title: String,
-    selected_acceptance_criteria: Vec<String>,
     prepared_context: PreparedIssueContext,
     files: Vec<RenderedTemplateFile>,
+}
+
+#[derive(Debug, Clone)]
+struct TechnicalWorkflowState {
+    parent: IssueSummary,
+    child_title: String,
+    selected_acceptance_criteria: Vec<String>,
+    prepared_context: PreparedIssueContext,
+    template_files: Vec<RenderedTemplateFile>,
+    backlog_slug: String,
+    today: String,
+    follow_ups: Vec<TechnicalFollowUpResponse>,
+    questions_asked: usize,
+    refinement_history: Vec<String>,
+    files: Vec<RenderedTemplateFile>,
+    revision: usize,
+}
+
+impl TechnicalWorkflowState {
+    fn to_generated_backlog(&self) -> Result<TechnicalGeneratedBacklog> {
+        if self.files.is_empty() {
+            bail!("technical backlog draft is empty");
+        }
+        Ok(TechnicalGeneratedBacklog {
+            parent: self.parent.clone(),
+            child_title: self.child_title.clone(),
+            prepared_context: self.prepared_context.clone(),
+            files: self.files.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,11 +151,27 @@ struct IssuePickerApp {
 }
 
 #[derive(Debug, Clone)]
+struct TechnicalQuestionsApp {
+    workflow: TechnicalWorkflowState,
+    questions: Vec<QuestionAnswer>,
+    selected: usize,
+    error: Option<String>,
+    sticky_error: bool,
+}
+
+#[derive(Debug, Clone)]
 struct TechnicalReviewApp {
-    generated: TechnicalGeneratedBacklog,
+    workflow: TechnicalWorkflowState,
     selected_file: usize,
     focus: TechnicalReviewFocus,
     preview_scroll: ScrollState,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TechnicalReviewRefinementApp {
+    review: TechnicalReviewApp,
+    addendum: InputFieldState,
     error: Option<String>,
 }
 
@@ -129,19 +195,42 @@ struct LoadingApp {
 enum TechnicalStage {
     PickIssue(IssuePickerApp),
     SelectCriteria(AcceptanceCriteriaApp),
+    Questions(TechnicalQuestionsApp),
+    Refinement(TechnicalReviewRefinementApp),
     Loading(LoadingApp),
     Review(TechnicalReviewApp),
+}
+
+#[derive(Debug, Clone, Default)]
+struct TechnicalAgentOverrides {
+    agent: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
 }
 
 struct TechnicalSessionApp {
     stage: TechnicalStage,
     copy: CopyUiState,
+    agent_overrides: TechnicalAgentOverrides,
+    continuation: Option<AgentContinuation>,
+    question_limit: usize,
+    refinement_round_limit: usize,
     pending: Option<PendingTechnicalJob>,
 }
 
 struct PendingTechnicalJob {
-    receiver: Receiver<Result<TechnicalGeneratedBacklog>>,
-    previous_stage: Option<TechnicalRecoveryStage>,
+    receiver: Receiver<TechnicalWorkerReport>,
+    previous_stage: Option<TechnicalStage>,
+}
+
+struct TechnicalWorkerReport {
+    continuation: Option<AgentContinuation>,
+    outcome: Result<TechnicalWorkerOutcome>,
+}
+
+enum TechnicalWorkerOutcome {
+    Questions(TechnicalQuestionsApp),
+    Review(TechnicalReviewApp),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -149,6 +238,17 @@ enum TechnicalAction {
     None,
     SelectIssue(IssueSummary),
     Generate(TechnicalGenerationRequest),
+    ContinueWithAnswers {
+        workflow: TechnicalWorkflowState,
+        follow_ups: Vec<TechnicalFollowUpResponse>,
+    },
+    OpenRefinement {
+        review: TechnicalReviewApp,
+    },
+    Refine {
+        review: TechnicalReviewApp,
+        addendum: String,
+    },
     Confirm(TechnicalGeneratedBacklog),
 }
 
@@ -169,13 +269,6 @@ struct TechnicalGenerationRequest {
     parent: IssueSummary,
     selected_acceptance_criteria: Vec<String>,
     discussion_budgets: TicketDiscussionBudgets,
-}
-
-#[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
-enum TechnicalRecoveryStage {
-    PickIssue(IssuePickerApp),
-    SelectCriteria(AcceptanceCriteriaApp),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -279,6 +372,9 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
     let app_config = AppConfig::load()?;
     let planning_meta = load_required_planning_meta(&root, "technical")?;
     let discussion_budgets = resolve_ticket_discussion_budgets(&planning_meta);
+    let question_limit = planning_meta.effective_technical_follow_up_question_limit(&app_config);
+    let refinement_round_limit =
+        planning_meta.effective_technical_refinement_round_limit(&app_config);
     ensure_planning_layout(&root, false)?;
     ensure_backlog_templates(&root, false)?;
     let LinearCommandContext {
@@ -293,6 +389,11 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
         load_remembered_backlog_selection(&root)?
     } else {
         Default::default()
+    };
+    let agent_overrides = TechnicalAgentOverrides {
+        agent: args.agent.clone(),
+        model: args.model.clone(),
+        reasoning: args.reasoning.clone(),
     };
 
     let generated = if !run_non_interactive {
@@ -318,6 +419,9 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
             initial_parent,
             available_issues,
             discussion_budgets,
+            question_limit,
+            refinement_round_limit,
+            agent_overrides.clone(),
         )? {
             InteractiveTechnicalExit::Cancelled => {
                 return Ok(TechnicalReport {
@@ -339,11 +443,14 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
         let parent = service.load_issue(issue).await?;
         let selected_acceptance_criteria =
             extract_acceptance_criteria(parent.description.as_deref());
-        build_generated_backlog(
+        run_non_interactive_technical_generation(
             &root,
-            &parent,
-            &selected_acceptance_criteria,
+            parent,
+            selected_acceptance_criteria,
             discussion_budgets,
+            question_limit,
+            &args.answers,
+            &agent_overrides,
         )?
     };
 
@@ -418,11 +525,109 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
     })
 }
 
+fn run_non_interactive_technical_generation(
+    root: &Path,
+    parent: IssueSummary,
+    selected_acceptance_criteria: Vec<String>,
+    discussion_budgets: TicketDiscussionBudgets,
+    question_limit: usize,
+    answers: &[String],
+    overrides: &TechnicalAgentOverrides,
+) -> Result<TechnicalGeneratedBacklog> {
+    let mut workflow = build_technical_workflow_state(
+        root,
+        &parent,
+        &selected_acceptance_criteria,
+        discussion_budgets,
+    )?;
+    let mut continuation = None;
+
+    loop {
+        let remaining_questions = question_limit.saturating_sub(workflow.questions_asked);
+        let outcome = if workflow.follow_ups.is_empty() {
+            generate_technical_route_outcome(
+                root,
+                workflow,
+                TechnicalPromptKind::Initial,
+                remaining_questions,
+                overrides,
+                &mut continuation,
+            )?
+        } else {
+            generate_technical_route_outcome(
+                root,
+                workflow,
+                TechnicalPromptKind::FollowUp,
+                remaining_questions,
+                overrides,
+                &mut continuation,
+            )?
+        };
+
+        match outcome {
+            TechnicalRouteOutcome::Questions {
+                workflow: mut next_workflow,
+                questions,
+            } => {
+                let required_answers = next_workflow.questions_asked;
+                validate_non_interactive_answer_floor(answers.len(), required_answers)?;
+                let provided = &answers[next_workflow.follow_ups.len()..required_answers];
+                next_workflow.follow_ups.extend(
+                    questions.into_iter().zip(provided.iter().cloned()).map(
+                        |(question, answer)| TechnicalFollowUpResponse {
+                            question,
+                            answer,
+                            skipped: false,
+                        },
+                    ),
+                );
+                workflow = next_workflow;
+            }
+            TechnicalRouteOutcome::Draft(workflow_with_draft) => {
+                validate_non_interactive_answer_count(
+                    answers.len(),
+                    workflow_with_draft.questions_asked,
+                )?;
+                return workflow_with_draft.to_generated_backlog();
+            }
+        }
+    }
+}
+
+fn validate_non_interactive_answer_floor(provided: usize, required: usize) -> Result<()> {
+    if provided >= required {
+        return Ok(());
+    }
+
+    bail!(
+        "technical agent requested {required} follow-up question(s) so far; pass at least {required} `--answer` value(s)"
+    );
+}
+
+fn validate_non_interactive_answer_count(provided: usize, required: usize) -> Result<()> {
+    if provided == required {
+        return Ok(());
+    }
+
+    if required == 0 {
+        bail!(
+            "technical agent requested no follow-up questions; remove the provided `--answer` values"
+        );
+    }
+
+    bail!(
+        "technical agent requested {required} follow-up question(s); pass exactly {required} `--answer` value(s)"
+    );
+}
+
 fn run_interactive_technical_session(
     root: &Path,
     initial_parent: Option<IssueSummary>,
     issues: Vec<IssueSummary>,
     discussion_budgets: TicketDiscussionBudgets,
+    question_limit: usize,
+    refinement_round_limit: usize,
+    agent_overrides: TechnicalAgentOverrides,
 ) -> Result<InteractiveTechnicalExit> {
     let mut app = if let Some(parent) = initial_parent {
         let criteria = extract_acceptance_criteria(parent.description.as_deref());
@@ -438,9 +643,13 @@ fn run_interactive_technical_session(
                     spinner_index: 0,
                 }),
                 copy: CopyUiState::default(),
+                agent_overrides: agent_overrides.clone(),
+                continuation: None,
+                question_limit,
+                refinement_round_limit,
                 pending: None,
             };
-            start_generation(
+            start_initial_generation(
                 &mut app,
                 root,
                 TechnicalGenerationRequest {
@@ -460,6 +669,10 @@ fn run_interactive_technical_session(
                     sticky_error: false,
                 }),
                 copy: CopyUiState::default(),
+                agent_overrides: agent_overrides.clone(),
+                continuation: None,
+                question_limit,
+                refinement_round_limit,
                 pending: None,
             }
         }
@@ -475,6 +688,10 @@ fn run_interactive_technical_session(
                 sticky_error: false,
             }),
             copy: CopyUiState::default(),
+            agent_overrides,
+            continuation: None,
+            question_limit,
+            refinement_round_limit,
             pending: None,
         }
     };
@@ -509,6 +726,10 @@ fn run_interactive_technical_session(
                     }
 
                     if key.code == KeyCode::Esc {
+                        if let TechnicalStage::Refinement(refinement) = &app.stage {
+                            app.stage = TechnicalStage::Review(refinement.review.clone());
+                            continue;
+                        }
                         return Ok(InteractiveTechnicalExit::Cancelled);
                     }
 
@@ -543,12 +764,26 @@ fn run_interactive_technical_session(
                             &mut app.copy,
                             discussion_budgets,
                         ),
+                        TechnicalStage::Questions(questions) => handle_technical_questions_key(
+                            questions,
+                            &mut app.copy,
+                            key,
+                            technical_questions_answer_viewport(terminal_area),
+                        ),
+                        TechnicalStage::Refinement(refinement) => {
+                            handle_technical_review_refinement_key(
+                                refinement,
+                                key,
+                                technical_refinement_input_viewport(terminal_area),
+                            )
+                        }
                         TechnicalStage::Loading(_) => TechnicalAction::None,
                         TechnicalStage::Review(review) => handle_technical_review_key(
                             review,
                             &mut app.copy,
                             key,
                             technical_review_preview_viewport(terminal_area),
+                            app.refinement_round_limit,
                         ),
                     };
 
@@ -558,13 +793,8 @@ fn run_interactive_technical_session(
                             let criteria =
                                 extract_acceptance_criteria(parent.description.as_deref());
                             if criteria.is_empty() {
-                                let previous_stage = match &app.stage {
-                                    TechnicalStage::PickIssue(picker) => {
-                                        Some(TechnicalRecoveryStage::PickIssue(picker.clone()))
-                                    }
-                                    _ => None,
-                                };
-                                start_generation(
+                                let previous_stage = app.stage.clone();
+                                start_initial_generation(
                                     &mut app,
                                     root,
                                     TechnicalGenerationRequest {
@@ -572,7 +802,7 @@ fn run_interactive_technical_session(
                                         selected_acceptance_criteria: Vec::new(),
                                         discussion_budgets,
                                     },
-                                    previous_stage,
+                                    Some(previous_stage),
                                 );
                             } else {
                                 app.stage = TechnicalStage::SelectCriteria(AcceptanceCriteriaApp {
@@ -587,27 +817,54 @@ fn run_interactive_technical_session(
                             }
                         }
                         TechnicalAction::Generate(request) => {
-                            let previous_stage = match &app.stage {
-                                TechnicalStage::PickIssue(picker) => {
-                                    Some(TechnicalRecoveryStage::PickIssue(picker.clone()))
-                                }
-                                TechnicalStage::SelectCriteria(criteria) => {
-                                    Some(TechnicalRecoveryStage::SelectCriteria(criteria.clone()))
-                                }
-                                _ => None,
-                            };
-                            start_generation(&mut app, root, request, previous_stage);
+                            let previous_stage = app.stage.clone();
+                            start_initial_generation(&mut app, root, request, Some(previous_stage));
+                        }
+                        TechnicalAction::ContinueWithAnswers {
+                            workflow,
+                            follow_ups,
+                        } => {
+                            let previous_stage = app.stage.clone();
+                            start_follow_up_generation(
+                                &mut app,
+                                root,
+                                workflow,
+                                follow_ups,
+                                Some(previous_stage),
+                            );
+                        }
+                        TechnicalAction::OpenRefinement { review } => {
+                            app.stage =
+                                TechnicalStage::Refinement(build_review_refinement_app(review));
+                        }
+                        TechnicalAction::Refine { review, addendum } => {
+                            let previous_stage = app.stage.clone();
+                            start_refinement_generation(
+                                &mut app,
+                                root,
+                                review,
+                                addendum,
+                                Some(previous_stage),
+                            );
                         }
                         TechnicalAction::Confirm(generated) => {
                             return Ok(InteractiveTechnicalExit::Confirmed(generated));
                         }
                     }
                 }
-                Event::Paste(text) => {
-                    if let TechnicalStage::PickIssue(picker) = &mut app.stage {
-                        handle_issue_picker_paste(picker, &text);
+                Event::Paste(text) => match &mut app.stage {
+                    TechnicalStage::PickIssue(picker) => handle_issue_picker_paste(picker, &text),
+                    TechnicalStage::Questions(questions) => {
+                        handle_technical_questions_paste(questions, &text);
                     }
-                }
+                    TechnicalStage::Refinement(refinement) => {
+                        refinement.addendum.paste(&text);
+                        refinement.error = None;
+                    }
+                    TechnicalStage::SelectCriteria(_)
+                    | TechnicalStage::Loading(_)
+                    | TechnicalStage::Review(_) => {}
+                },
                 Event::Mouse(mouse) => {
                     let terminal_area = terminal.size()?.into();
                     if app.copy.export_active() {
@@ -631,6 +888,13 @@ fn run_interactive_technical_session(
                                 picker.preview_content_rows(viewport.width.max(1)),
                             );
                         }
+                        TechnicalStage::Questions(questions) => {
+                            if let Some(question) = questions.questions.get_mut(questions.selected)
+                            {
+                                let viewport = technical_questions_answer_viewport(terminal_area);
+                                let _ = handle_technical_questions_mouse(question, mouse, viewport);
+                            }
+                        }
                         TechnicalStage::Review(review)
                             if review.focus == TechnicalReviewFocus::Preview
                                 && matches!(
@@ -645,6 +909,7 @@ fn run_interactive_technical_session(
                                 review.preview_content_rows(viewport.width.max(1)),
                             );
                         }
+                        TechnicalStage::Refinement(_) => {}
                         _ => {}
                     }
                 }
@@ -652,6 +917,280 @@ fn run_interactive_technical_session(
             }
         }
     }
+}
+
+fn build_questions_app(
+    workflow: TechnicalWorkflowState,
+    questions: Vec<String>,
+) -> TechnicalQuestionsApp {
+    TechnicalQuestionsApp {
+        workflow,
+        questions: questions
+            .into_iter()
+            .map(|question| QuestionAnswer {
+                question,
+                answer: InputFieldState::multiline(String::new()),
+                state: FollowUpAnswerState::Pending,
+            })
+            .collect(),
+        selected: 0,
+        error: None,
+        sticky_error: false,
+    }
+}
+
+fn build_review_app(workflow: TechnicalWorkflowState) -> Result<TechnicalReviewApp> {
+    if workflow.files.is_empty() {
+        bail!("technical backlog draft is empty");
+    }
+    Ok(TechnicalReviewApp {
+        workflow,
+        selected_file: 0,
+        focus: TechnicalReviewFocus::Files,
+        preview_scroll: ScrollState::default(),
+        error: None,
+    })
+}
+
+fn build_review_refinement_app(review: TechnicalReviewApp) -> TechnicalReviewRefinementApp {
+    TechnicalReviewRefinementApp {
+        review,
+        addendum: InputFieldState::multiline(String::new()),
+        error: None,
+    }
+}
+
+fn set_stage_error(stage: &mut TechnicalStage, error: String) {
+    match stage {
+        TechnicalStage::PickIssue(picker) => {
+            set_sticky_error(&mut picker.error, &mut picker.sticky_error, error);
+        }
+        TechnicalStage::SelectCriteria(criteria) => {
+            set_sticky_error(&mut criteria.error, &mut criteria.sticky_error, error);
+        }
+        TechnicalStage::Questions(questions) => {
+            set_sticky_error(&mut questions.error, &mut questions.sticky_error, error);
+        }
+        TechnicalStage::Review(review) => {
+            review.error = Some(error);
+        }
+        TechnicalStage::Refinement(refinement) => {
+            refinement.error = Some(error);
+        }
+        TechnicalStage::Loading(_) => {}
+    }
+}
+
+fn start_initial_generation(
+    app: &mut TechnicalSessionApp,
+    root: &Path,
+    request: TechnicalGenerationRequest,
+    previous_stage: Option<TechnicalStage>,
+) {
+    app.stage = TechnicalStage::Loading(LoadingApp {
+        message: "Generating technical backlog".to_string(),
+        detail: format!(
+            "Building `{}/backlog/_TEMPLATE` for {}.",
+            branding::PROJECT_DIR,
+            request.parent.identifier
+        ),
+        spinner_index: 0,
+    });
+    app.pending = Some(PendingTechnicalJob {
+        receiver: spawn_initial_generation_job(
+            root.to_path_buf(),
+            request,
+            app.question_limit,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
+        ),
+        previous_stage,
+    });
+}
+
+fn start_follow_up_generation(
+    app: &mut TechnicalSessionApp,
+    root: &Path,
+    workflow: TechnicalWorkflowState,
+    follow_ups: Vec<TechnicalFollowUpResponse>,
+    previous_stage: Option<TechnicalStage>,
+) {
+    app.stage = TechnicalStage::Loading(LoadingApp {
+        message: format!(
+            "Answering technical follow-up questions ({})",
+            workflow.parent.identifier
+        ),
+        detail: format!(
+            "Continuing the draft after {} follow-up answer(s).",
+            follow_ups.len()
+        ),
+        spinner_index: 0,
+    });
+    app.pending = Some(PendingTechnicalJob {
+        receiver: spawn_follow_up_generation_job(
+            root.to_path_buf(),
+            workflow,
+            follow_ups,
+            app.question_limit,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
+        ),
+        previous_stage,
+    });
+}
+
+fn start_refinement_generation(
+    app: &mut TechnicalSessionApp,
+    root: &Path,
+    review: TechnicalReviewApp,
+    addendum: String,
+    previous_stage: Option<TechnicalStage>,
+) {
+    app.stage = TechnicalStage::Loading(LoadingApp {
+        message: format!(
+            "Refining technical draft ({})",
+            review.workflow.parent.identifier
+        ),
+        detail: "Rebuilding the draft with your refinement guidance.".to_string(),
+        spinner_index: 0,
+    });
+    app.pending = Some(PendingTechnicalJob {
+        receiver: spawn_refinement_job(
+            root.to_path_buf(),
+            review,
+            addendum,
+            app.question_limit,
+            app.agent_overrides.clone(),
+            app.continuation.clone(),
+        ),
+        previous_stage,
+    });
+}
+
+fn spawn_initial_generation_job(
+    root: PathBuf,
+    request: TechnicalGenerationRequest,
+    question_limit: usize,
+    agent_overrides: TechnicalAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<TechnicalWorkerReport> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation;
+        let outcome = build_technical_workflow_state(
+            &root,
+            &request.parent,
+            &request.selected_acceptance_criteria,
+            request.discussion_budgets,
+        )
+        .and_then(|workflow| {
+            generate_technical_route_outcome(
+                &root,
+                workflow,
+                TechnicalPromptKind::Initial,
+                question_limit,
+                &agent_overrides,
+                &mut continuation,
+            )
+        })
+        .and_then(|outcome| match outcome {
+            TechnicalRouteOutcome::Questions {
+                workflow,
+                questions,
+            } => Ok(TechnicalWorkerOutcome::Questions(build_questions_app(
+                workflow, questions,
+            ))),
+            TechnicalRouteOutcome::Draft(workflow) => {
+                Ok(TechnicalWorkerOutcome::Review(build_review_app(workflow)?))
+            }
+        });
+        let _ = sender.send(TechnicalWorkerReport {
+            continuation,
+            outcome,
+        });
+    });
+    receiver
+}
+
+fn spawn_follow_up_generation_job(
+    root: PathBuf,
+    mut workflow: TechnicalWorkflowState,
+    follow_ups: Vec<TechnicalFollowUpResponse>,
+    question_limit: usize,
+    agent_overrides: TechnicalAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<TechnicalWorkerReport> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation;
+        workflow.follow_ups.extend(follow_ups);
+        let remaining_questions = question_limit.saturating_sub(workflow.questions_asked);
+        let outcome = generate_technical_route_outcome(
+            &root,
+            workflow,
+            TechnicalPromptKind::FollowUp,
+            remaining_questions,
+            &agent_overrides,
+            &mut continuation,
+        )
+        .and_then(|outcome| match outcome {
+            TechnicalRouteOutcome::Questions {
+                workflow,
+                questions,
+            } => Ok(TechnicalWorkerOutcome::Questions(build_questions_app(
+                workflow, questions,
+            ))),
+            TechnicalRouteOutcome::Draft(workflow) => {
+                Ok(TechnicalWorkerOutcome::Review(build_review_app(workflow)?))
+            }
+        });
+        let _ = sender.send(TechnicalWorkerReport {
+            continuation,
+            outcome,
+        });
+    });
+    receiver
+}
+
+fn spawn_refinement_job(
+    root: PathBuf,
+    review: TechnicalReviewApp,
+    addendum: String,
+    question_limit: usize,
+    agent_overrides: TechnicalAgentOverrides,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<TechnicalWorkerReport> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation;
+        let mut workflow = review.workflow;
+        workflow.refinement_history.push(addendum.clone());
+        let remaining_questions = question_limit.saturating_sub(workflow.questions_asked);
+        let outcome = generate_technical_route_outcome(
+            &root,
+            workflow,
+            TechnicalPromptKind::Refinement { addendum },
+            remaining_questions,
+            &agent_overrides,
+            &mut continuation,
+        )
+        .and_then(|outcome| match outcome {
+            TechnicalRouteOutcome::Questions {
+                workflow,
+                questions,
+            } => Ok(TechnicalWorkerOutcome::Questions(build_questions_app(
+                workflow, questions,
+            ))),
+            TechnicalRouteOutcome::Draft(workflow) => {
+                Ok(TechnicalWorkerOutcome::Review(build_review_app(workflow)?))
+            }
+        });
+        let _ = sender.send(TechnicalWorkerReport {
+            continuation,
+            outcome,
+        });
+    });
+    receiver
 }
 
 fn handle_issue_picker_key(
@@ -818,8 +1357,17 @@ fn handle_technical_review_key(
     copy: &mut CopyUiState,
     key: crossterm::event::KeyEvent,
     preview_viewport: Rect,
+    refinement_round_limit: usize,
 ) -> TechnicalAction {
     match key.code {
+        KeyCode::BackTab => {
+            app.focus = match app.focus {
+                TechnicalReviewFocus::Files => TechnicalReviewFocus::Preview,
+                TechnicalReviewFocus::Preview => TechnicalReviewFocus::Files,
+            };
+            app.error = None;
+            TechnicalAction::None
+        }
         KeyCode::Tab => {
             app.focus = match app.focus {
                 TechnicalReviewFocus::Files => TechnicalReviewFocus::Preview,
@@ -836,7 +1384,7 @@ fn handle_technical_review_key(
                     app.preview_content_rows(preview_viewport.width.max(1)),
                 );
             } else if app.selected_file == 0 {
-                app.selected_file = app.generated.files.len().saturating_sub(1);
+                app.selected_file = app.workflow.files.len().saturating_sub(1);
             } else {
                 app.selected_file -= 1;
                 app.preview_scroll.reset();
@@ -851,8 +1399,8 @@ fn handle_technical_review_key(
                     preview_viewport,
                     app.preview_content_rows(preview_viewport.width.max(1)),
                 );
-            } else if !app.generated.files.is_empty() {
-                app.selected_file = (app.selected_file + 1) % app.generated.files.len();
+            } else if !app.workflow.files.is_empty() {
+                app.selected_file = (app.selected_file + 1) % app.workflow.files.len();
                 app.preview_scroll.reset();
             }
             app.error = None;
@@ -869,13 +1417,247 @@ fn handle_technical_review_key(
             app.error = None;
             TechnicalAction::None
         }
-        KeyCode::Enter => TechnicalAction::Confirm(app.generated.clone()),
+        KeyCode::Char('f') => {
+            if app.workflow.refinement_history.len() >= refinement_round_limit {
+                app.error = Some(format!(
+                    "technical refinement limit reached ({refinement_round_limit}); confirm the current draft or increase the configured limit"
+                ));
+                TechnicalAction::None
+            } else {
+                app.error = None;
+                TechnicalAction::OpenRefinement {
+                    review: app.clone(),
+                }
+            }
+        }
+        KeyCode::Enter => match app.workflow.to_generated_backlog() {
+            Ok(generated) => TechnicalAction::Confirm(generated),
+            Err(error) => {
+                app.error = Some(error.to_string());
+                TechnicalAction::None
+            }
+        },
         _ if is_copy_key(key) => {
             copy.copy_payload(technical_review_copy_payload(app));
             TechnicalAction::None
         }
         _ => TechnicalAction::None,
     }
+}
+
+fn handle_technical_questions_key(
+    app: &mut TechnicalQuestionsApp,
+    copy: &mut CopyUiState,
+    key: crossterm::event::KeyEvent,
+    input_viewport: Rect,
+) -> TechnicalAction {
+    match key.code {
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(question) = app.questions.get_mut(app.selected) {
+                match question.answer.paste_clipboard_with_prompt_attachments() {
+                    Ok(_) => {
+                        question.state = FollowUpAnswerState::Pending;
+                        clear_error(&mut app.error, &mut app.sticky_error);
+                    }
+                    Err(error) => set_transient_error(
+                        &mut app.error,
+                        &mut app.sticky_error,
+                        error.to_string(),
+                    ),
+                }
+            }
+            TechnicalAction::None
+        }
+        KeyCode::BackTab => {
+            if app.selected == 0 {
+                app.selected = app.questions.len().saturating_sub(1);
+            } else {
+                app.selected -= 1;
+            }
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+            TechnicalAction::None
+        }
+        KeyCode::Tab => {
+            app.selected = (app.selected + 1) % app.questions.len();
+            clear_error_for_navigation(&mut app.error, &app.sticky_error);
+            TechnicalAction::None
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let Some(selected) = app.questions.get_mut(app.selected) else {
+                return TechnicalAction::None;
+            };
+            selected.state = if selected.answer.display_value().trim().is_empty() {
+                FollowUpAnswerState::Skipped
+            } else {
+                FollowUpAnswerState::Answered
+            };
+            if app.questions.iter().all(question_is_completed) {
+                clear_error(&mut app.error, &mut app.sticky_error);
+                TechnicalAction::ContinueWithAnswers {
+                    workflow: app.workflow.clone(),
+                    follow_ups: collect_follow_up_responses(&app.questions),
+                }
+            } else {
+                if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
+                    app.selected = index;
+                }
+                clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                TechnicalAction::None
+            }
+        }
+        KeyCode::Enter => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(question) = app.questions.get_mut(app.selected)
+                    && question.answer.insert_newline()
+                {
+                    question.state = FollowUpAnswerState::Pending;
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                }
+                return TechnicalAction::None;
+            }
+
+            let Some(selected) = app.questions.get_mut(app.selected) else {
+                return TechnicalAction::None;
+            };
+            selected.state = if selected.answer.display_value().trim().is_empty() {
+                FollowUpAnswerState::Skipped
+            } else {
+                FollowUpAnswerState::Answered
+            };
+            if app.questions.iter().all(question_is_completed) {
+                clear_error(&mut app.error, &mut app.sticky_error);
+                TechnicalAction::ContinueWithAnswers {
+                    workflow: app.workflow.clone(),
+                    follow_ups: collect_follow_up_responses(&app.questions),
+                }
+            } else {
+                if let Some(index) = next_incomplete_question(&app.questions, app.selected) {
+                    app.selected = index;
+                }
+                clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                TechnicalAction::None
+            }
+        }
+        _ => {
+            if is_copy_key(key) {
+                copy.copy_payload(technical_questions_copy_payload(app));
+            } else if let Some(question) = app.questions.get_mut(app.selected)
+                && question.answer.handle_key_with_viewport(
+                    key,
+                    input_viewport.width,
+                    input_viewport.height,
+                )
+            {
+                question.state = FollowUpAnswerState::Pending;
+                if input_key_clears_sticky_error(key) {
+                    clear_error(&mut app.error, &mut app.sticky_error);
+                } else {
+                    clear_error_for_navigation(&mut app.error, &app.sticky_error);
+                }
+            }
+            TechnicalAction::None
+        }
+    }
+}
+
+fn handle_technical_questions_paste(app: &mut TechnicalQuestionsApp, text: &str) {
+    if let Some(question) = app.questions.get_mut(app.selected) {
+        match question.answer.paste_with_prompt_attachments(text) {
+            Ok(_) => {
+                question.state = FollowUpAnswerState::Pending;
+                clear_error(&mut app.error, &mut app.sticky_error);
+            }
+            Err(error) => {
+                set_transient_error(&mut app.error, &mut app.sticky_error, error.to_string());
+            }
+        }
+    }
+}
+
+fn handle_technical_questions_mouse(
+    question: &mut QuestionAnswer,
+    mouse: MouseEvent,
+    input_viewport: Rect,
+) -> bool {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        return false;
+    }
+
+    question.answer.handle_mouse_scroll(
+        mouse,
+        input_viewport,
+        input_viewport.width,
+        input_viewport.height,
+    )
+}
+
+fn handle_technical_review_refinement_key(
+    app: &mut TechnicalReviewRefinementApp,
+    key: crossterm::event::KeyEvent,
+    input_viewport: Rect,
+) -> TechnicalAction {
+    match key.code {
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let addendum = app.addendum.display_value().trim().to_string();
+            if addendum.is_empty() {
+                app.error = Some("Enter the refinement guidance before continuing.".to_string());
+                TechnicalAction::None
+            } else {
+                app.error = None;
+                TechnicalAction::Refine {
+                    review: app.review.clone(),
+                    addendum,
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if app.addendum.insert_newline() {
+                app.error = None;
+            }
+            TechnicalAction::None
+        }
+        _ => {
+            if app.addendum.handle_key_with_viewport(
+                key,
+                input_viewport.width,
+                input_viewport.height,
+            ) {
+                app.error = None;
+            }
+            TechnicalAction::None
+        }
+    }
+}
+
+fn question_is_completed(question: &QuestionAnswer) -> bool {
+    matches!(
+        question.state,
+        FollowUpAnswerState::Answered | FollowUpAnswerState::Skipped
+    )
+}
+
+fn next_incomplete_question(questions: &[QuestionAnswer], selected: usize) -> Option<usize> {
+    if questions.is_empty() {
+        return None;
+    }
+    let len = questions.len();
+    (1..=len)
+        .map(|offset| (selected + offset) % len)
+        .find(|index| !question_is_completed(&questions[*index]))
+}
+
+fn collect_follow_up_responses(questions: &[QuestionAnswer]) -> Vec<TechnicalFollowUpResponse> {
+    questions
+        .iter()
+        .map(|question| TechnicalFollowUpResponse {
+            question: question.question.clone(),
+            answer: question.answer.display_value().trim().to_string(),
+            skipped: question.state == FollowUpAnswerState::Skipped,
+        })
+        .collect()
 }
 
 impl IssuePickerApp {
@@ -905,15 +1687,33 @@ impl IssuePickerApp {
     }
 }
 
+impl TechnicalQuestionsApp {
+    fn answered_count(&self) -> usize {
+        self.questions
+            .iter()
+            .filter(|question| question.state == FollowUpAnswerState::Answered)
+            .count()
+    }
+
+    fn skipped_count(&self) -> usize {
+        self.questions
+            .iter()
+            .filter(|question| question.state == FollowUpAnswerState::Skipped)
+            .count()
+    }
+}
+
 impl TechnicalReviewApp {
-    fn preview_content_rows(&self, width: u16) -> usize {
-        let contents = self
-            .generated
+    fn preview_text(&self) -> Text<'static> {
+        self.workflow
             .files
             .get(self.selected_file)
-            .map(|file| file.contents.as_str())
-            .unwrap_or_default();
-        wrapped_rows(contents, width.max(1))
+            .map(|file| render_markdown(&file.contents, Style::default(), &[]))
+            .unwrap_or_else(|| Text::from(""))
+    }
+
+    fn preview_content_rows(&self, width: u16) -> usize {
+        wrapped_rows(&plain_text(&self.preview_text()), width.max(1))
     }
 }
 
@@ -962,9 +1762,31 @@ fn acceptance_criteria_copy_payload(app: &AcceptanceCriteriaApp) -> CopyPayload 
     CopyPayload::new("technical criteria summary", lines.join("\n"))
 }
 
+fn technical_questions_copy_payload(app: &TechnicalQuestionsApp) -> CopyPayload {
+    let mut lines = vec![
+        format!("Parent: {}", app.workflow.parent.identifier),
+        app.workflow.parent.title.clone(),
+        String::new(),
+    ];
+    if let Some(selected) = app.questions.get(app.selected) {
+        lines.push(format!(
+            "Question {}\n\n{}",
+            app.selected + 1,
+            selected.question
+        ));
+        lines.push(String::new());
+        lines.push(format!(
+            "Answer {}\n\n{}",
+            app.selected + 1,
+            selected.answer.copy_payload("technical answer").plain_text
+        ));
+    }
+    CopyPayload::new("technical follow-up", lines.join("\n"))
+}
+
 fn technical_review_file_list_text(app: &TechnicalReviewApp) -> Text<'static> {
     Text::from(
-        app.generated
+        app.workflow
             .files
             .iter()
             .map(|file| Line::from(file.relative_path.clone()))
@@ -979,51 +1801,13 @@ fn technical_review_copy_payload(app: &TechnicalReviewApp) -> CopyPayload {
             technical_review_file_list_text(app),
         ),
         TechnicalReviewFocus::Preview => {
-            let selected = &app.generated.files[app.selected_file];
+            let selected = &app.workflow.files[app.selected_file];
             CopyPayload::markdown(
                 format!("technical preview {}", selected.relative_path),
                 selected.contents.clone(),
             )
         }
     }
-}
-
-fn start_generation(
-    app: &mut TechnicalSessionApp,
-    root: &Path,
-    request: TechnicalGenerationRequest,
-    previous_stage: Option<TechnicalRecoveryStage>,
-) {
-    app.stage = TechnicalStage::Loading(LoadingApp {
-        message: "Generating technical backlog".to_string(),
-        detail: format!(
-            "Building `{}/backlog/_TEMPLATE` for {}.",
-            branding::PROJECT_DIR,
-            request.parent.identifier
-        ),
-        spinner_index: 0,
-    });
-    app.pending = Some(PendingTechnicalJob {
-        receiver: spawn_generation_job(root.to_path_buf(), request),
-        previous_stage,
-    });
-}
-
-fn spawn_generation_job(
-    root: PathBuf,
-    request: TechnicalGenerationRequest,
-) -> Receiver<Result<TechnicalGeneratedBacklog>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result = build_generated_backlog(
-            &root,
-            &request.parent,
-            &request.selected_acceptance_criteria,
-            request.discussion_budgets,
-        );
-        let _ = sender.send(result);
-    });
-    receiver
 }
 
 fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
@@ -1037,35 +1821,22 @@ fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
                 .pending
                 .take()
                 .ok_or_else(|| anyhow!("technical generation job disappeared unexpectedly"))?;
-            match result {
-                Ok(generated) => {
-                    app.stage = TechnicalStage::Review(TechnicalReviewApp {
-                        generated,
-                        selected_file: 0,
-                        focus: TechnicalReviewFocus::Files,
-                        preview_scroll: ScrollState::default(),
-                        error: None,
-                    });
+            app.continuation = result.continuation;
+            match result.outcome {
+                Ok(TechnicalWorkerOutcome::Questions(questions)) => {
+                    app.stage = TechnicalStage::Questions(questions);
                 }
-                Err(error) => match pending.previous_stage {
-                    Some(TechnicalRecoveryStage::PickIssue(mut picker)) => {
-                        set_sticky_error(
-                            &mut picker.error,
-                            &mut picker.sticky_error,
-                            error.to_string(),
-                        );
-                        app.stage = TechnicalStage::PickIssue(picker);
+                Ok(TechnicalWorkerOutcome::Review(review)) => {
+                    app.stage = TechnicalStage::Review(review);
+                }
+                Err(error) => {
+                    if let Some(mut previous_stage) = pending.previous_stage {
+                        set_stage_error(&mut previous_stage, error.to_string());
+                        app.stage = previous_stage;
+                    } else {
+                        return Err(error);
                     }
-                    Some(TechnicalRecoveryStage::SelectCriteria(mut criteria)) => {
-                        set_sticky_error(
-                            &mut criteria.error,
-                            &mut criteria.sticky_error,
-                            error.to_string(),
-                        );
-                        app.stage = TechnicalStage::SelectCriteria(criteria);
-                    }
-                    None => return Err(error),
-                },
+                }
             }
         }
         Err(TryRecvError::Empty) => {}
@@ -1074,24 +1845,14 @@ fn process_pending_generation(app: &mut TechnicalSessionApp) -> Result<()> {
                 .pending
                 .take()
                 .ok_or_else(|| anyhow!("technical generation job disappeared unexpectedly"))?;
-            match pending.previous_stage {
-                Some(TechnicalRecoveryStage::PickIssue(mut picker)) => {
-                    set_sticky_error(
-                        &mut picker.error,
-                        &mut picker.sticky_error,
-                        "technical generation worker exited before returning a result".to_string(),
-                    );
-                    app.stage = TechnicalStage::PickIssue(picker);
-                }
-                Some(TechnicalRecoveryStage::SelectCriteria(mut criteria)) => {
-                    set_sticky_error(
-                        &mut criteria.error,
-                        &mut criteria.sticky_error,
-                        "technical generation worker exited before returning a result".to_string(),
-                    );
-                    app.stage = TechnicalStage::SelectCriteria(criteria);
-                }
-                None => bail!("technical generation worker exited before returning a result"),
+            if let Some(mut previous_stage) = pending.previous_stage {
+                set_stage_error(
+                    &mut previous_stage,
+                    "technical generation worker exited before returning a result".to_string(),
+                );
+                app.stage = previous_stage;
+            } else {
+                bail!("technical generation worker exited before returning a result");
             }
         }
     }
@@ -1105,12 +1866,12 @@ fn advance_loading_spinner(app: &mut TechnicalSessionApp) {
     }
 }
 
-fn build_generated_backlog(
+fn build_technical_workflow_state(
     root: &Path,
     parent: &IssueSummary,
     selected_acceptance_criteria: &[String],
     discussion_budgets: TicketDiscussionBudgets,
-) -> Result<TechnicalGeneratedBacklog> {
+) -> Result<TechnicalWorkflowState> {
     let prepared_context = prepare_issue_context(parent, discussion_budgets);
     let child_title = format!("Technical: {}", parent.title);
     let template_files = render_template_files(
@@ -1124,19 +1885,19 @@ fn build_generated_backlog(
             ..TemplateContext::default()
         },
     )?;
-    let files = generate_backlog_files(
-        root,
-        &prepared_context,
-        &child_title,
-        selected_acceptance_criteria,
-        &template_files,
-    )?;
-    Ok(TechnicalGeneratedBacklog {
+    Ok(TechnicalWorkflowState {
         parent: parent.clone(),
         child_title,
         selected_acceptance_criteria: selected_acceptance_criteria.to_vec(),
         prepared_context,
-        files,
+        template_files,
+        backlog_slug: slugify(&format!("Technical: {}", parent.title)),
+        today: current_local_date()?,
+        follow_ups: Vec::new(),
+        questions_asked: 0,
+        refinement_history: Vec::new(),
+        files: Vec::new(),
+        revision: 0,
     })
 }
 
@@ -1148,64 +1909,184 @@ fn rendered_index_contents(rendered_files: &[RenderedTemplateFile]) -> Result<St
         .ok_or_else(|| anyhow!("the technical backlog template must contain `{INDEX_FILE_NAME}`"))
 }
 
-fn generate_backlog_files(
-    root: &Path,
-    prepared_context: &PreparedIssueContext,
-    child_title: &str,
-    selected_acceptance_criteria: &[String],
-    template_files: &[RenderedTemplateFile],
-) -> Result<Vec<RenderedTemplateFile>> {
-    let prompt = render_technical_prompt(
-        root,
-        prepared_context,
-        child_title,
-        selected_acceptance_criteria,
-        &slugify(child_title),
-        &current_local_date()?,
-        template_files,
-    )?;
-    let output = run_agent_capture(&RunAgentArgs {
-        root: Some(root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_BACKLOG_TECH.to_string()),
-        agent: None,
-        prompt,
-        instructions: None,
-        model: None,
-        reasoning: None,
-        transport: None,
-        attachments: Vec::new(),
-    })
-    .with_context(|| {
-        format!("{} backlog tech requires a configured local agent to generate backlog content from `{}/backlog/_TEMPLATE`", branding::COMMAND_NAME, branding::PROJECT_DIR)
-    })?;
-    let draft: TechnicalBacklogDraft =
-        parse_agent_json(&output.stdout, "technical backlog generation")?;
-
-    validate_generated_files(draft.files, template_files)
+#[derive(Debug, Clone)]
+enum TechnicalPromptKind {
+    Initial,
+    FollowUp,
+    Refinement { addendum: String },
 }
 
-fn render_technical_prompt(
+impl TechnicalPromptKind {
+    fn phase_name(&self) -> &'static str {
+        match self {
+            Self::Initial => "technical backlog generation",
+            Self::FollowUp => "technical backlog follow-up",
+            Self::Refinement { .. } => "technical backlog refinement",
+        }
+    }
+}
+
+enum TechnicalRouteOutcome {
+    Questions {
+        workflow: TechnicalWorkflowState,
+        questions: Vec<String>,
+    },
+    Draft(TechnicalWorkflowState),
+}
+
+fn generate_technical_route_outcome(
     root: &Path,
-    prepared_context: &PreparedIssueContext,
-    child_title: &str,
-    selected_acceptance_criteria: &[String],
-    backlog_slug: &str,
-    today: &str,
-    template_files: &[RenderedTemplateFile],
-) -> Result<String> {
-    let context = load_context_bundle(root)?;
-    let workflow_contract = load_workflow_contract(root)?;
-    let repository_snapshot = render_repository_snapshot(root)?;
-    let acceptance_criteria_block = if selected_acceptance_criteria.is_empty() {
-        "_No acceptance criteria were selected for this technical sub-ticket._".to_string()
+    workflow: TechnicalWorkflowState,
+    prompt_kind: TechnicalPromptKind,
+    remaining_questions: usize,
+    overrides: &TechnicalAgentOverrides,
+    continuation: &mut Option<AgentContinuation>,
+) -> Result<TechnicalRouteOutcome> {
+    let prompt = render_technical_prompt(root, &workflow, &prompt_kind, remaining_questions)?;
+    let output = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_TECH.to_string()),
+            agent: overrides.agent.clone(),
+            prompt,
+            instructions: None,
+            model: overrides.model.clone(),
+            reasoning: overrides.reasoning.clone(),
+            transport: None,
+            attachments: Vec::new(),
+        },
+        continuation,
+    )
+    .with_context(|| {
+        format!(
+            "{} backlog tech requires a configured local agent to generate backlog content from `{}/backlog/_TEMPLATE`",
+            branding::COMMAND_NAME,
+            branding::PROJECT_DIR
+        )
+    })?;
+    match parse_technical_route_response(&output.stdout, prompt_kind.phase_name())? {
+        ParsedTechnicalRouteResponse::Questions { questions } => {
+            let questions = questions
+                .into_iter()
+                .map(|question| question.trim().to_string())
+                .filter(|question| !question.is_empty())
+                .collect::<Vec<_>>();
+            if questions.is_empty() {
+                bail!(
+                    "technical backlog agent returned `kind = questions` without any questions during {}",
+                    prompt_kind.phase_name()
+                );
+            }
+            if questions.len() > remaining_questions {
+                bail!(
+                    "technical backlog agent requested {} follow-up question(s), exceeding the remaining technical follow-up limit of {}",
+                    questions.len(),
+                    remaining_questions
+                );
+            }
+            let mut workflow = workflow;
+            workflow.questions_asked += questions.len();
+            Ok(TechnicalRouteOutcome::Questions {
+                workflow,
+                questions,
+            })
+        }
+        ParsedTechnicalRouteResponse::Draft { files } => {
+            let files = validate_generated_files(files, &workflow.template_files)?;
+            let mut workflow = workflow;
+            workflow.files = files;
+            workflow.revision += 1;
+            Ok(TechnicalRouteOutcome::Draft(workflow))
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ParsedTechnicalRouteResponse {
+    Questions { questions: Vec<String> },
+    Draft { files: Vec<TechnicalBacklogFile> },
+}
+
+fn parse_technical_route_response(raw: &str, phase: &str) -> Result<ParsedTechnicalRouteResponse> {
+    let value: Value = parse_agent_json(raw, phase)?;
+    let kind = value.get("kind").and_then(Value::as_str).ok_or_else(|| {
+        anyhow!("technical backlog agent response missing string `kind` during {phase}")
+    })?;
+
+    match kind {
+        "questions" => {
+            let questions = value
+                .get("questions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("technical backlog agent response missing `questions` array during {phase}"))?
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow!(
+                            "technical backlog agent response contained a non-string entry in `questions[{index}]` during {phase}"
+                        ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(ParsedTechnicalRouteResponse::Questions { questions })
+        }
+        "draft" => {
+            let files = serde_json::from_value::<Vec<TechnicalBacklogFile>>(
+                value.get("files").cloned().ok_or_else(|| {
+                    anyhow!("technical backlog agent response missing `files` array during {phase}")
+                })?,
+            )
+            .with_context(|| {
+                format!("technical backlog agent response contained invalid `files` during {phase}")
+            })?;
+            Ok(ParsedTechnicalRouteResponse::Draft { files })
+        }
+        other => bail!(
+            "technical backlog agent response returned unsupported `kind` `{other}` during {phase}"
+        ),
+    }
+}
+
+fn render_follow_up_block(follow_ups: &[TechnicalFollowUpResponse]) -> String {
+    if follow_ups.is_empty() {
+        "No follow-up answers have been provided yet.".to_string()
     } else {
-        selected_acceptance_criteria
+        follow_ups
             .iter()
-            .map(|criterion| format!("- {criterion}"))
+            .enumerate()
+            .map(|(index, follow_up)| {
+                let answer = if follow_up.skipped {
+                    SKIPPED_TECHNICAL_FOLLOW_UP_LABEL.to_string()
+                } else {
+                    follow_up.answer.clone()
+                };
+                format!("{}. Q: {}\n   A: {}", index + 1, follow_up.question, answer)
+            })
             .collect::<Vec<_>>()
             .join("\n")
-    };
-    let template_block = template_files
+    }
+}
+
+fn render_refinement_history_block(history: &[String]) -> String {
+    if history.is_empty() {
+        "No refinement guidance has been provided yet.".to_string()
+    } else {
+        history
+            .iter()
+            .enumerate()
+            .map(|(index, addendum)| format!("{}. {}", index + 1, addendum))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+fn render_file_block(files: &[RenderedTemplateFile], empty_message: &str) -> String {
+    if files.is_empty() {
+        return empty_message.to_string();
+    }
+
+    files
         .iter()
         .map(|file| {
             format!(
@@ -1214,8 +2095,33 @@ fn render_technical_prompt(
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n");
-    let parent = &prepared_context.issue;
+        .join("\n\n")
+}
+
+fn render_technical_prompt(
+    root: &Path,
+    workflow: &TechnicalWorkflowState,
+    prompt_kind: &TechnicalPromptKind,
+    remaining_questions: usize,
+) -> Result<String> {
+    let context = load_context_bundle(root)?;
+    let workflow_contract = load_workflow_contract(root)?;
+    let repository_snapshot = render_repository_snapshot(root)?;
+    let acceptance_criteria_block = if workflow.selected_acceptance_criteria.is_empty() {
+        "_No acceptance criteria were selected for this technical sub-ticket._".to_string()
+    } else {
+        workflow
+            .selected_acceptance_criteria
+            .iter()
+            .map(|criterion| format!("- {criterion}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let template_block = render_file_block(
+        &workflow.template_files,
+        "_No backlog template files were found._",
+    );
+    let parent = &workflow.prepared_context.issue;
     let parent_description_block = parent
         .description
         .as_deref()
@@ -1225,15 +2131,43 @@ fn render_technical_prompt(
         .as_ref()
         .and_then(|issue| issue.description.as_deref())
         .unwrap_or("_No parent description was provided._");
-    let discussion_block = if prepared_context.prompt_discussion.trim().is_empty() {
+    let discussion_block = if workflow
+        .prepared_context
+        .prompt_discussion
+        .trim()
+        .is_empty()
+    {
         "_No Linear comments were provided._".to_string()
     } else {
-        prepared_context.prompt_discussion.clone()
+        workflow.prepared_context.prompt_discussion.clone()
     };
-    let image_summary = render_ticket_image_summary(&prepared_context.images);
+    let image_summary = render_ticket_image_summary(&workflow.prepared_context.images);
+    let follow_up_block = render_follow_up_block(&workflow.follow_ups);
+    let refinement_history_block = render_refinement_history_block(&workflow.refinement_history);
+    let current_draft_block =
+        render_file_block(&workflow.files, "_No current technical draft exists yet._");
+    let question_guidance = if remaining_questions == 0 {
+        "Do not ask follow-up questions. Return a complete technical draft.".to_string()
+    } else {
+        format!(
+            "If more information is still required, ask at most {remaining_questions} concise follow-up question(s). Otherwise return a complete technical draft."
+        )
+    };
+    let phase_intro = match prompt_kind {
+        TechnicalPromptKind::Initial => {
+            "You are starting a technical backlog draft for the active repository.".to_string()
+        }
+        TechnicalPromptKind::FollowUp => {
+            "Continue the same technical backlog draft for the active repository.".to_string()
+        }
+        TechnicalPromptKind::Refinement { addendum } => format!(
+            "Continue the same technical backlog review for the active repository.\n\nNew refinement guidance:\n{}",
+            addendum
+        ),
+    };
 
     Ok(format!(
-        "You are generating a technical backlog item for the active repository.\n\n\
+        "{phase_intro}\n\n\
 Injected workflow contract:\n{workflow_contract}\n\n\
 Parent Linear issue:\n\
 - Identifier: `{}`\n\
@@ -1250,6 +2184,9 @@ Derived backlog values:\n\
 - `TODAY`: {}\n\n\
 Selected acceptance criteria for this technical sub-ticket:\n\
 {}\n\n\
+Follow-up answers so far:\n{}\n\n\
+Refinement guidance history:\n{}\n\n\
+Current draft files:\n{}\n\n\
 Repository planning context:\n{}\n\n\
 Repository directory snapshot:\n{}\n\n\
 Template files to convert into a concrete backlog item:\n{}\n\n\
@@ -1260,8 +2197,12 @@ Instructions:\n\
 4. Do not leave unresolved placeholders such as `{{BACKLOG_TITLE}}`, `{{BACKLOG_SLUG}}`, `{{TODAY}}`, `{{issue_title}}`, or `{{parent_identifier}}`.\n\
 5. Keep links relative to the file that contains them.\n\
 6. Default scope to the full repository root unless the user explicitly requested a narrower subproject, and create backlog content only for work inside this repository directory.\n\
-7. Return JSON only with this exact shape:\n\
-{{\"files\":[{{\"path\":\"index.md\",\"contents\":\"# ...\"}}]}}",
+7. {question_guidance}\n\
+8. Return JSON only using exactly one of these tagged response shapes:\n\
+{{\"kind\":\"questions\",\"questions\":[\"Question 1\",\"Question 2\"]}}\n\
+{{\"kind\":\"draft\",\"files\":[{{\"path\":\"index.md\",\"contents\":\"# ...\"}}]}}\n\
+9. When `kind` is `questions`, include at least one non-empty question and do not include `files`.\n\
+10. When `kind` is `draft`, include every template file exactly once and do not include `questions`.",
         parent.identifier,
         parent.title,
         parent
@@ -1274,10 +2215,13 @@ Instructions:\n\
         parent_context_block,
         discussion_block,
         image_summary,
-        child_title,
-        backlog_slug,
-        today,
+        workflow.child_title,
+        workflow.backlog_slug,
+        workflow.today,
         acceptance_criteria_block,
+        follow_up_block,
+        refinement_history_block,
+        current_draft_block,
         context,
         repository_snapshot,
         template_block,
@@ -1390,6 +2334,10 @@ fn render_technical_session(frame: &mut Frame<'_>, app: &TechnicalSessionApp) {
         TechnicalStage::SelectCriteria(criteria) => {
             render_acceptance_criteria_frame(frame, criteria, app.copy.status_text())
         }
+        TechnicalStage::Questions(questions) => {
+            render_questions_frame(frame, questions, app.copy.status_text())
+        }
+        TechnicalStage::Refinement(refinement) => render_review_refinement_frame(frame, refinement),
         TechnicalStage::Loading(loading) => render_loading_frame(frame, loading),
         TechnicalStage::Review(review) => {
             render_review_frame(frame, review, app.copy.status_text())
@@ -1587,6 +2535,142 @@ fn render_acceptance_criteria_frame(
     );
 }
 
+fn render_questions_frame(
+    frame: &mut Frame<'_>,
+    app: &TechnicalQuestionsApp,
+    copy_status: Option<&str>,
+) {
+    let layout = base_layout(frame);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(layout[0]);
+    let main = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(42), Constraint::Min(0)])
+        .split(body[0]);
+
+    let question = app.questions.get(app.selected);
+    let question_title = if let Some(question) = question {
+        match question.state {
+            FollowUpAnswerState::Pending => {
+                format!("Question {} [pending]", app.selected + 1)
+            }
+            FollowUpAnswerState::Answered => {
+                format!("Question {} [answered]", app.selected + 1)
+            }
+            FollowUpAnswerState::Skipped => {
+                format!("Question {} [skipped]", app.selected + 1)
+            }
+        }
+    } else {
+        "Question".to_string()
+    };
+
+    let question_text = question
+        .map(|question| Text::from(question.question.clone()))
+        .unwrap_or_else(|| Text::from("No follow-up questions are pending."));
+    let question_panel = Paragraph::new(question_text)
+        .block(Block::default().borders(Borders::ALL).title(question_title))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(question_panel, main[0]);
+
+    let input_block = Block::default().borders(Borders::ALL).title("Answer Draft");
+    let input_inner = technical_questions_answer_viewport(frame.area());
+    let rendered_answer = question
+        .map(|question| {
+            question.answer.render_with_viewport(
+                "Write the answer for this follow-up question. Leave blank and press Enter to skip.",
+                true,
+                input_inner.width,
+                input_inner.height,
+            )
+        })
+        .unwrap_or_else(|| {
+            InputFieldState::multiline(String::new()).render_with_viewport(
+                "",
+                false,
+                input_inner.width,
+                input_inner.height,
+            )
+        });
+    frame.render_widget(rendered_answer.paragraph(input_block), main[1]);
+    rendered_answer.set_cursor(frame, input_inner);
+
+    let pending_count = app
+        .questions
+        .len()
+        .saturating_sub(app.answered_count() + app.skipped_count());
+    let follow_up_lines = if app.workflow.follow_ups.is_empty() {
+        vec![Line::styled(
+            "_No prior follow-up answers recorded._",
+            Style::default().add_modifier(Modifier::DIM),
+        )]
+    } else {
+        app.workflow
+            .follow_ups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, response)| {
+                let answer = if response.skipped {
+                    SKIPPED_TECHNICAL_FOLLOW_UP_LABEL.to_string()
+                } else {
+                    response.answer.clone()
+                };
+                [
+                    Line::styled(
+                        format!("Q{}: {}", index + 1, response.question),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Line::from(answer),
+                    Line::from(""),
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut summary_lines = vec![
+        Line::from(format!("Parent: {}", app.workflow.parent.identifier)),
+        Line::from(app.workflow.parent.title.clone()),
+        Line::from(""),
+        Line::from(format!(
+            "Question {}/{}",
+            app.selected
+                .saturating_add(1)
+                .min(app.questions.len().max(1)),
+            app.questions.len()
+        )),
+        Line::from(format!("Answered: {}", app.answered_count())),
+        Line::from(format!("Skipped: {}", app.skipped_count())),
+        Line::from(format!("Pending: {pending_count}")),
+        Line::from(""),
+        Line::styled(
+            "Recorded answers",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    summary_lines.extend(follow_up_lines);
+
+    let summary = Paragraph::new(Text::from(summary_lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Technical Context"),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(summary, body[1]);
+
+    render_footer(
+        frame,
+        layout[1],
+        app.error.as_deref(),
+        copy_status,
+        &field_copy_help(
+            "Tab/Shift+Tab switch questions. Enter records answer and advances. Shift+Enter newline. Ctrl+S submits all answers when complete. Ctrl+V paste. Esc cancel.",
+        ),
+    );
+}
+
 fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp, copy_status: Option<&str>) {
     let layout = base_layout(frame);
     let body = Layout::default()
@@ -1595,28 +2679,33 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp, copy_sta
         .split(layout[0]);
     let sidebar = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(14), Constraint::Min(0)])
+        .constraints([Constraint::Length(16), Constraint::Min(0)])
         .split(body[0]);
 
-    let criteria_summary = if app.generated.selected_acceptance_criteria.is_empty() {
+    let criteria_summary = if app.workflow.selected_acceptance_criteria.is_empty() {
         "Criteria: using the full issue context".to_string()
     } else {
         format!(
             "Criteria: {} selected",
-            app.generated.selected_acceptance_criteria.len()
+            app.workflow.selected_acceptance_criteria.len()
         )
     };
 
     let summary = Paragraph::new(Text::from(vec![
-        Line::from(format!("Parent: {}", app.generated.parent.identifier)),
-        Line::from(app.generated.parent.title.clone()),
+        Line::from(format!("Parent: {}", app.workflow.parent.identifier)),
+        Line::from(app.workflow.parent.title.clone()),
         Line::from(""),
-        Line::from(format!("Child: {}", app.generated.child_title)),
-        Line::from(format!("Files: {}", app.generated.files.len())),
+        Line::from(format!("Child: {}", app.workflow.child_title)),
+        Line::from(format!("Files: {}", app.workflow.files.len())),
         Line::from(criteria_summary),
+        Line::from(format!("Follow-ups: {}", app.workflow.follow_ups.len())),
+        Line::from(format!(
+            "Refinements: {}",
+            app.workflow.refinement_history.len()
+        )),
         Line::from(""),
         Line::styled(
-            "Review every generated Markdown file before creating the technical child issue.",
+            "Review the latest generated Markdown files before creating the technical child issue.",
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]))
@@ -1631,10 +2720,10 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp, copy_sta
     let mut file_state = ListState::default();
     file_state.select(Some(
         app.selected_file
-            .min(app.generated.files.len().saturating_sub(1)),
+            .min(app.workflow.files.len().saturating_sub(1)),
     ));
     let file_items = app
-        .generated
+        .workflow
         .files
         .iter()
         .map(|file| ListItem::new(file.relative_path.clone()))
@@ -1651,14 +2740,21 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp, copy_sta
         .highlight_symbol("> ");
     frame.render_stateful_widget(file_list, sidebar[1], &mut file_state);
 
-    let selected_file = &app.generated.files[app.selected_file];
-    let preview = scrollable_content_paragraph(
-        selected_file.contents.clone(),
-        if app.focus == TechnicalReviewFocus::Preview {
-            format!("Preview: {} [focus]", selected_file.relative_path)
-        } else {
-            format!("Preview: {}", selected_file.relative_path)
-        },
+    let selected_file = &app.workflow.files[app.selected_file];
+    let preview = scrollable_paragraph_with_block(
+        app.preview_text(),
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.focus == TechnicalReviewFocus::Preview {
+                format!("Preview: {} [focus]", selected_file.relative_path)
+            } else {
+                format!("Preview: {}", selected_file.relative_path)
+            })
+            .border_style(if app.focus == TechnicalReviewFocus::Preview {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }),
         &app.preview_scroll,
     )
     .wrap(Wrap { trim: false });
@@ -1670,8 +2766,71 @@ fn render_review_frame(frame: &mut Frame<'_>, app: &TechnicalReviewApp, copy_sta
         app.error.as_deref(),
         copy_status,
         &pane_copy_help(
-            "Tab switches between the file list and preview. Up/Down moves the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. Enter creates the technical child issue and syncs the reviewed Markdown files. Esc cancels.",
+            "Tab/Shift+Tab switch focus. Up/Down move the active pane, and PgUp/PgDn/Home/End or the mouse wheel scroll the preview when focused. F refines. Enter creates the technical child issue and syncs the latest reviewed Markdown files. Esc cancels.",
         ),
+    );
+}
+
+fn render_review_refinement_frame(frame: &mut Frame<'_>, app: &TechnicalReviewRefinementApp) {
+    let layout = base_layout(frame);
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Min(0)])
+        .split(layout[0]);
+
+    let history_text = if app.review.workflow.refinement_history.is_empty() {
+        Text::from("No previous refinements. Type new guidance below and press Ctrl+S to rebuild.")
+    } else {
+        let mut lines = vec![
+            Line::from(format!("Parent: {}", app.review.workflow.parent.identifier)),
+            Line::from(app.review.workflow.parent.title.clone()),
+            Line::from(""),
+            Line::styled(
+                format!(
+                    "Previous refinements ({})",
+                    app.review.workflow.refinement_history.len()
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ];
+        for (index, addendum) in app.review.workflow.refinement_history.iter().enumerate() {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                format!("#{}", index + 1),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::from(addendum.clone()));
+        }
+        Text::from(lines)
+    };
+    let history = Paragraph::new(history_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Refinement History"),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(history, body[0]);
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Refinement Guidance");
+    let input_inner = technical_refinement_input_viewport(frame.area());
+    let rendered = app.addendum.render_with_viewport(
+        "Describe what should change in the next technical draft...",
+        true,
+        input_inner.width,
+        input_inner.height,
+    );
+    frame.render_widget(rendered.paragraph(input_block), body[1]);
+    rendered.set_cursor(frame, input_inner);
+
+    render_footer(
+        frame,
+        layout[1],
+        app.error.as_deref(),
+        None,
+        "Type the next refinement guidance. Ctrl+S rebuilds the draft. Enter inserts a newline. Esc returns to the review screen.",
     );
 }
 
@@ -1703,6 +2862,15 @@ fn base_layout_for_area(area: Rect) -> Vec<Rect> {
         .constraints([Constraint::Min(0), Constraint::Length(5)])
         .split(area)
         .to_vec()
+}
+
+fn inner_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2).max(1),
+        area.height.saturating_sub(2).max(1),
+    )
 }
 
 fn render_footer(
@@ -2065,14 +3233,31 @@ fn issue_picker_preview_viewport(area: Rect) -> Rect {
     let layout = base_layout_for_area(area);
     let content = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(layout[0]);
-    Rect::new(
-        content[1].x.saturating_add(1),
-        content[1].y.saturating_add(1),
-        content[1].width.saturating_sub(2).max(1),
-        content[1].height.saturating_sub(2).max(1),
-    )
+    inner_rect(content[1])
+}
+
+fn technical_questions_answer_viewport(area: Rect) -> Rect {
+    let layout = base_layout_for_area(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(layout[0]);
+    let main = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(42), Constraint::Min(0)])
+        .split(body[0]);
+    inner_rect(main[1])
+}
+
+fn technical_refinement_input_viewport(area: Rect) -> Rect {
+    let layout = base_layout_for_area(area);
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Min(0)])
+        .split(layout[0]);
+    inner_rect(body[1])
 }
 
 fn technical_review_preview_viewport(area: Rect) -> Rect {
@@ -2081,12 +3266,7 @@ fn technical_review_preview_viewport(area: Rect) -> Rect {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(layout[0]);
-    Rect::new(
-        body[1].x.saturating_add(1),
-        body[1].y.saturating_add(1),
-        body[1].width.saturating_sub(2).max(1),
-        body[1].height.saturating_sub(2).max(1),
-    )
+    inner_rect(body[1])
 }
 
 #[cfg(test)]
@@ -2107,13 +3287,17 @@ fn snapshot(backend: &TestBackend) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptanceCriteriaApp, IssuePickerApp, IssuePickerFocus, LoadingApp, PendingTechnicalJob,
-        TechnicalAction, TechnicalBacklogDraft, TechnicalGeneratedBacklog, TechnicalRecoveryStage,
-        TechnicalReviewApp, TechnicalReviewFocus, TechnicalSessionApp, TechnicalStage,
-        extract_acceptance_criteria, handle_issue_picker_key, handle_issue_picker_paste,
-        parse_agent_json, process_pending_generation, render_acceptance_criteria_frame,
-        render_issue_picker_frame, render_loading_frame, render_review_frame,
-        render_technical_prompt, search_results, snapshot,
+        AcceptanceCriteriaApp, FollowUpAnswerState, IssuePickerApp, IssuePickerFocus, LoadingApp,
+        ParsedTechnicalRouteResponse, PendingTechnicalJob, QuestionAnswer, TechnicalAction,
+        TechnicalPromptKind, TechnicalQuestionsApp, TechnicalReviewApp, TechnicalReviewFocus,
+        TechnicalReviewRefinementApp, TechnicalSessionApp, TechnicalStage, TechnicalWorkerReport,
+        TechnicalWorkflowState, build_review_refinement_app, extract_acceptance_criteria,
+        handle_issue_picker_key, handle_issue_picker_paste, parse_agent_json,
+        parse_technical_route_response, process_pending_generation,
+        render_acceptance_criteria_frame, render_issue_picker_frame, render_loading_frame,
+        render_questions_frame, render_review_frame, render_review_refinement_frame,
+        render_technical_prompt, search_results, slugify, snapshot,
+        validate_non_interactive_answer_count,
     };
     use crate::backlog::RenderedTemplateFile;
     use crate::fs::PlanningPaths;
@@ -2165,6 +3349,38 @@ mod tests {
         }
     }
 
+    fn rendered_file(path: &str, contents: &str) -> RenderedTemplateFile {
+        RenderedTemplateFile {
+            relative_path: path.to_string(),
+            contents: contents.to_string(),
+        }
+    }
+
+    fn workflow_with_files(
+        title: &str,
+        description: &str,
+        selected_acceptance_criteria: Vec<String>,
+        template_files: Vec<RenderedTemplateFile>,
+        files: Vec<RenderedTemplateFile>,
+    ) -> TechnicalWorkflowState {
+        let parent = issue("MET-35", title, description);
+        let child_title = format!("Technical: {title}");
+        TechnicalWorkflowState {
+            parent: parent.clone(),
+            child_title: child_title.clone(),
+            selected_acceptance_criteria,
+            prepared_context: prepare_issue_context(&parent, TicketDiscussionBudgets::default()),
+            template_files,
+            backlog_slug: slugify(&child_title),
+            today: "2026-03-14".to_string(),
+            follow_ups: Vec::new(),
+            questions_asked: 0,
+            refinement_history: Vec::new(),
+            files,
+            revision: 1,
+        }
+    }
+
     fn render_picker_snapshot(app: &IssuePickerApp) -> String {
         let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
@@ -2192,12 +3408,30 @@ mod tests {
         snapshot(terminal.backend())
     }
 
+    fn render_questions_snapshot(app: &TechnicalQuestionsApp) -> String {
+        let backend = TestBackend::new(140, 36);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| render_questions_frame(frame, app, None))
+            .expect("questions should render");
+        snapshot(terminal.backend())
+    }
+
     fn render_loading_snapshot(app: &LoadingApp) -> String {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
             .draw(|frame| render_loading_frame(frame, app))
             .expect("loading should render");
+        snapshot(terminal.backend())
+    }
+
+    fn render_refinement_snapshot(app: &TechnicalReviewRefinementApp) -> String {
+        let backend = TestBackend::new(140, 36);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| render_review_refinement_frame(frame, app))
+            .expect("refinement should render");
         snapshot(terminal.backend())
     }
 
@@ -2276,37 +3510,24 @@ mod tests {
 
     #[test]
     fn review_snapshot_lists_generated_files_and_preview() {
+        let workflow = workflow_with_files(
+            "Create the technical command",
+            "Parent description",
+            vec![
+                "The command generates backlog docs".to_string(),
+                "The docs stay in sync".to_string(),
+            ],
+            vec![
+                rendered_file("index.md", "# Technical draft"),
+                rendered_file("specification.md", "# Specification"),
+            ],
+            vec![
+                rendered_file("index.md", "# Technical draft"),
+                rendered_file("specification.md", "# Specification"),
+            ],
+        );
         let snapshot = render_review_snapshot(&TechnicalReviewApp {
-            generated: TechnicalGeneratedBacklog {
-                parent: issue(
-                    "MET-35",
-                    "Create the technical command",
-                    "Parent description",
-                ),
-                child_title: "Technical: Create the technical command".to_string(),
-                selected_acceptance_criteria: vec![
-                    "The command generates backlog docs".to_string(),
-                    "The docs stay in sync".to_string(),
-                ],
-                prepared_context: prepare_issue_context(
-                    &issue(
-                        "MET-35",
-                        "Create the technical command",
-                        "Parent description",
-                    ),
-                    TicketDiscussionBudgets::default(),
-                ),
-                files: vec![
-                    RenderedTemplateFile {
-                        relative_path: "index.md".to_string(),
-                        contents: "# Technical draft".to_string(),
-                    },
-                    RenderedTemplateFile {
-                        relative_path: "specification.md".to_string(),
-                        contents: "# Specification".to_string(),
-                    },
-                ],
-            },
+            workflow,
             selected_file: 1,
             focus: TechnicalReviewFocus::Files,
             preview_scroll: ScrollState::default(),
@@ -2321,31 +3542,21 @@ mod tests {
 
     #[test]
     fn review_preview_scrolls_to_bottom_of_long_file() {
+        let workflow = workflow_with_files(
+            "Create the technical command",
+            "Parent description",
+            vec!["The docs stay in sync".to_string()],
+            vec![rendered_file("specification.md", "# Specification")],
+            vec![rendered_file(
+                "specification.md",
+                &(1..=60)
+                    .map(|index| format!("technical preview line {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )],
+        );
         let mut app = TechnicalReviewApp {
-            generated: TechnicalGeneratedBacklog {
-                parent: issue(
-                    "MET-35",
-                    "Create the technical command",
-                    "Parent description",
-                ),
-                child_title: "Technical: Create the technical command".to_string(),
-                selected_acceptance_criteria: vec!["The docs stay in sync".to_string()],
-                prepared_context: prepare_issue_context(
-                    &issue(
-                        "MET-35",
-                        "Create the technical command",
-                        "Parent description",
-                    ),
-                    TicketDiscussionBudgets::default(),
-                ),
-                files: vec![RenderedTemplateFile {
-                    relative_path: "specification.md".to_string(),
-                    contents: (1..=60)
-                        .map(|index| format!("technical preview line {index}"))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                }],
-            },
+            workflow,
             selected_file: 0,
             focus: TechnicalReviewFocus::Preview,
             preview_scroll: ScrollState::default(),
@@ -2398,14 +3609,62 @@ mod tests {
 
     #[test]
     fn parse_agent_json_accepts_progressive_brace_scan() {
-        let parsed: TechnicalBacklogDraft = parse_agent_json(
+        let parsed: serde_json::Value = parse_agent_json(
             "Context {not json}\n{\"files\":[{\"path\":\"index.md\",\"contents\":\"# Draft\"}]}",
             "technical backlog generation",
         )
         .expect("progressive brace scan should find the JSON payload");
 
-        assert_eq!(parsed.files.len(), 1);
-        assert_eq!(parsed.files[0].path, "index.md");
+        assert_eq!(parsed["files"][0]["path"], "index.md");
+    }
+
+    #[test]
+    fn parse_technical_route_response_accepts_tagged_questions() {
+        let parsed = parse_technical_route_response(
+            "{\"kind\":\"questions\",\"questions\":[\"Which repo area is in scope?\"]}",
+            "technical backlog generation",
+        )
+        .expect("tagged question response should parse");
+
+        match parsed {
+            ParsedTechnicalRouteResponse::Questions { questions } => {
+                assert_eq!(questions, vec!["Which repo area is in scope?".to_string()]);
+            }
+            ParsedTechnicalRouteResponse::Draft { .. } => {
+                panic!("expected tagged questions response");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_technical_route_response_rejects_missing_kind() {
+        let error = parse_technical_route_response(
+            "{\"files\":[{\"path\":\"index.md\",\"contents\":\"# Draft\"}]}",
+            "technical backlog generation",
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("technical backlog agent response missing string `kind`")
+        );
+    }
+
+    #[test]
+    fn validate_non_interactive_answer_count_rejects_mismatches() {
+        assert_eq!(
+            validate_non_interactive_answer_count(1, 0)
+                .unwrap_err()
+                .to_string(),
+            "technical agent requested no follow-up questions; remove the provided `--answer` values"
+        );
+        assert_eq!(
+            validate_non_interactive_answer_count(1, 2)
+                .unwrap_err()
+                .to_string(),
+            "technical agent requested 2 follow-up question(s); pass exactly 2 `--answer` value(s)"
+        );
     }
 
     #[test]
@@ -2443,7 +3702,10 @@ mod tests {
     fn process_pending_generation_restores_picker_error_as_sticky() {
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(Err(anyhow!("recovered failure")))
+            .send(TechnicalWorkerReport {
+                continuation: None,
+                outcome: Err(anyhow!("recovered failure")),
+            })
             .expect("generation failure should send");
         drop(sender);
 
@@ -2467,9 +3729,13 @@ mod tests {
                 spinner_index: 0,
             }),
             copy: CopyUiState::default(),
+            agent_overrides: super::TechnicalAgentOverrides::default(),
+            continuation: None,
+            question_limit: 4,
+            refinement_round_limit: 2,
             pending: Some(PendingTechnicalJob {
                 receiver,
-                previous_stage: Some(TechnicalRecoveryStage::PickIssue(picker)),
+                previous_stage: Some(TechnicalStage::PickIssue(picker)),
             }),
         };
 
@@ -2532,6 +3798,74 @@ Ignored.
     }
 
     #[test]
+    fn questions_snapshot_shows_existing_answers_and_controls() {
+        let mut workflow = workflow_with_files(
+            "Create the technical command",
+            "Parent description",
+            vec!["Render docs".to_string()],
+            vec![rendered_file("index.md", "# Template")],
+            vec![rendered_file("index.md", "# Draft")],
+        );
+        workflow.follow_ups.push(super::TechnicalFollowUpResponse {
+            question: "Which repo area already owns the sync path?".to_string(),
+            answer: "src/sync.rs".to_string(),
+            skipped: false,
+        });
+        let app = TechnicalQuestionsApp {
+            workflow,
+            questions: vec![
+                QuestionAnswer {
+                    question: "Should this draft preserve the current packet layout?".to_string(),
+                    answer: InputFieldState::multiline("Yes, keep the existing review layout."),
+                    state: FollowUpAnswerState::Answered,
+                },
+                QuestionAnswer {
+                    question: "Do we need a deterministic mismatch error?".to_string(),
+                    answer: InputFieldState::multiline(String::new()),
+                    state: FollowUpAnswerState::Pending,
+                },
+            ],
+            selected: 1,
+            error: None,
+            sticky_error: false,
+        };
+
+        let snapshot = render_questions_snapshot(&app);
+        assert!(snapshot.contains("Question 2 [pending]"));
+        assert!(snapshot.contains("Technical Context"));
+        assert!(snapshot.contains("Recorded answers"));
+        assert!(snapshot.contains("Ctrl+S submits all answers when complete"));
+    }
+
+    #[test]
+    fn refinement_snapshot_shows_history_and_input() {
+        let mut workflow = workflow_with_files(
+            "Create the technical command",
+            "Parent description",
+            vec!["Render docs".to_string()],
+            vec![rendered_file("index.md", "# Template")],
+            vec![rendered_file("index.md", "# Draft")],
+        );
+        workflow.refinement_history = vec![
+            "Keep the existing review layout and add refine.".to_string(),
+            "Ask more questions when the draft is underspecified.".to_string(),
+        ];
+        let app = build_review_refinement_app(TechnicalReviewApp {
+            workflow,
+            selected_file: 0,
+            focus: TechnicalReviewFocus::Files,
+            preview_scroll: ScrollState::default(),
+            error: None,
+        });
+
+        let snapshot = render_refinement_snapshot(&app);
+        assert!(snapshot.contains("Refinement History"));
+        assert!(snapshot.contains("Previous refinements (2)"));
+        assert!(snapshot.contains("Refinement Guidance"));
+        assert!(snapshot.contains("Ctrl+S rebuilds the draft"));
+    }
+
+    #[test]
     fn technical_prompt_includes_selected_criteria_and_repo_snapshot() {
         let temp = tempdir().expect("tempdir should be created");
         let root = temp.path();
@@ -2540,28 +3874,16 @@ Ignored.
         fs::create_dir_all(root.join("src")).expect("src dir should be created");
         fs::write(paths.scan_path(), "# Scan\nCLI layout").expect("scan context should be written");
         fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("repo file should be written");
-        let prepared_context = prepare_issue_context(
-            &issue(
-                "MET-35",
-                "Create the technical command",
-                "## Acceptance Criteria\n- Render docs\n- Keep sync safe",
-            ),
-            TicketDiscussionBudgets::default(),
+        let workflow = workflow_with_files(
+            "Create the technical command",
+            "## Acceptance Criteria\n- Render docs\n- Keep sync safe",
+            vec!["Render docs".to_string(), "Keep sync safe".to_string()],
+            vec![rendered_file("index.md", "# {{BACKLOG_TITLE}}")],
+            Vec::new(),
         );
 
-        let prompt = render_technical_prompt(
-            root,
-            &prepared_context,
-            "Technical: Create the technical command",
-            &["Render docs".to_string(), "Keep sync safe".to_string()],
-            "technical-create-the-technical-command",
-            "2026-03-14",
-            &[RenderedTemplateFile {
-                relative_path: "index.md".to_string(),
-                contents: "# {{BACKLOG_TITLE}}".to_string(),
-            }],
-        )
-        .expect("prompt should render");
+        let prompt = render_technical_prompt(root, &workflow, &TechnicalPromptKind::Initial, 2)
+            .expect("prompt should render");
 
         assert!(prompt.contains("Selected acceptance criteria for this technical sub-ticket"));
         assert!(prompt.contains("- Render docs"));
@@ -2575,6 +3897,13 @@ Ignored.
         assert!(prompt.contains("- src/"));
         assert!(prompt.contains("- src/main.rs"));
         assert!(prompt.contains("## SCAN.md"));
+        assert!(
+            prompt
+                .contains("{\"kind\":\"questions\",\"questions\":[\"Question 1\",\"Question 2\"]}")
+        );
+        assert!(prompt.contains(
+            "{\"kind\":\"draft\",\"files\":[{\"path\":\"index.md\",\"contents\":\"# ...\"}]}"
+        ));
         assert!(!prompt.contains("MetaStack CLI"));
     }
 }
