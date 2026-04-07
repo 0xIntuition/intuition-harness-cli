@@ -1199,7 +1199,10 @@ fn render_listen_backlog_file(
     }
 
     format!(
-        "# Validation Plan\n\n## Command Proofs\n\n- Run the changed CLI flow against a deterministic local or mocked setup\n- Verify the original Linear issue description for `{}` remains unchanged\n- Update the existing `## Codex Workpad` comment with validation notes instead of running `{} sync push`\n\n## Notes\n\n- `{} listen` must not overwrite the primary Linear issue description.\n",
+        "# Validation Plan\n\n## Command Proofs\n\n- Keep packet-local execution notes in this file (`{}/backlog/{}/validation.md`)\n- Record reviewer-facing repo-level validation evidence in `artifacts/validation/{}.md`\n- Run the changed CLI flow against a deterministic local or mocked setup\n- Verify the original Linear issue description for `{}` remains unchanged\n- Update the existing `## Codex Workpad` comment with validation notes instead of running `{} sync push`\n\n## Notes\n\n- `{} listen` must not overwrite the primary Linear issue description.\n- Do not write ticket-specific PR evidence to repo-root `validation.md`.\n",
+        crate::branding::PROJECT_DIR,
+        parent_issue.identifier,
+        parent_issue.identifier,
         parent_issue.identifier,
         crate::branding::COMMAND_NAME,
         crate::branding::COMMAND_NAME,
@@ -4701,6 +4704,36 @@ suffix
         assert_eq!(usage.input, Some(17));
         assert_eq!(usage.output, Some(5));
         assert_eq!(usage.display_compact(), "in 17 | out 5 | total 22");
+    }
+
+    #[test]
+    fn render_listen_backlog_file_distinguishes_packet_local_and_repo_level_evidence() {
+        let issue = test_issue("MET-57");
+        let rendered = super::render_listen_backlog_file(
+            "validation.md",
+            "# Validation\n".to_string(),
+            &issue,
+        );
+
+        assert!(rendered.contains(&format!(
+            "`{}/backlog/MET-57/validation.md`",
+            crate::branding::PROJECT_DIR
+        )));
+        assert!(rendered.contains("`artifacts/validation/MET-57.md`"));
+        assert!(
+            rendered
+                .contains("Do not write ticket-specific PR evidence to repo-root `validation.md`.")
+        );
+    }
+
+    #[test]
+    fn render_listen_backlog_file_preserves_non_validation_templates() {
+        let original = "# Notes\n".to_string();
+
+        assert_eq!(
+            super::render_listen_backlog_file("notes.md", original.clone(), &test_issue("MET-57")),
+            original
+        );
     }
 
     #[test]

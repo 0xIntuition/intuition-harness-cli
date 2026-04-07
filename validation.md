@@ -1,76 +1,28 @@
-# Validation - ENG-10510
+# Validation Evidence Guide
 
-## Required Checks
+This file is intentionally stable. Do not record ticket-specific pull-request evidence here.
 
-- `cargo test --test commands`
-- `cargo test --test config`
-- `cargo test --test technical`
-- `cargo test --test backlog_split`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo run -- backlog --help`
-- `cargo run -- backlog split --help`
+## Evidence Paths
 
-## Deterministic Command Proofs
+| Path | Purpose | Mutability |
+| --- | --- | --- |
+| `.metastack/backlog/<ISSUE>/validation.md` | packet-local proof during agent execution | per-issue |
+| `.metastack/backlog/<ISSUE>/artifacts/README.md` | packet-local artifact index | per-issue |
+| `artifacts/validation/<TICKET>.md` | repo-level reviewer evidence for a ticket or PR | per-ticket |
+| `artifacts/README.md` | stable repository artifact directory guide | stable |
 
-- Interactive `meta backlog split <ISSUE>`
-  - Covered by `cargo test --test backlog_split`
-  - `backlog_split_render_once_shows_review_flow_snapshot` proves the guided review flow renders the split session for `MET-35`
-- Non-interactive `meta backlog split --no-interactive <ISSUE>`
-  - Covered by `cargo test --test backlog_split`
-  - `backlog_split_no_interactive_emits_structured_proposal_json` proves the command emits the `backlog.split` JSON envelope with child issues, parent rewrite, and dependency suggestions
-- Apply path proof
-  - Covered by `cargo test --test backlog_split`
-  - `backlog_split_render_once_events_can_apply_split_end_to_end` proves reviewed splits create child issues, write one backlog packet per child, rewrite the parent, and create dependency links
+## Rules
 
-## Results
+- Keep packet-local execution notes in `.metastack/backlog/<ISSUE>/validation.md`.
+- Keep packet-local artifact indexes in `.metastack/backlog/<ISSUE>/artifacts/README.md`.
+- Record repo-level reviewer-facing evidence in `artifacts/validation/<TICKET>.md`.
+- Do not write ticket-specific evidence into repo-root `validation.md`.
+- Do not update repo-root `artifacts/README.md` for routine per-PR evidence.
 
-- `cargo test --test commands`
-  - passed
-  - confirmed `meta backlog --help` lists `split` as a first-class subcommand
-  - confirmed `meta backlog tech --help` no longer advertises `split`
-  - confirmed `meta backlog split --help` exposes the inverse-planning surface
+## Migration
 
-- `cargo test --test config`
-  - passed
-  - confirmed `backlog.tech` is accepted as a route key
-  - confirmed legacy `backlog.split` command-route config still falls back for `backlog.tech`
+The previous repo-root validation payload was migrated to:
 
-- `cargo test --test technical`
-  - passed
-  - confirmed existing `meta backlog tech` child-derivation behavior still creates the technical child issue and local backlog files
+- [`artifacts/validation/ENG-10510.md`](artifacts/validation/ENG-10510.md)
 
-- `cargo test --test backlog_split`
-  - passed
-  - confirmed non-interactive proposal JSON under the `backlog.split` envelope
-  - confirmed render-once split review snapshot for an existing parent issue
-  - confirmed end-to-end split apply creates child issues, writes `.metastack/backlog/<CHILD>/` packets, rewrites the parent, and creates dependency links
-
-- `cargo clippy --all-targets --all-features -- -D warnings`
-  - passed
-
-- `cargo run -- backlog --help`
-  - passed
-  - showed `split` alongside `spec`, `plan`, `improve`, `tech`, and `sync`
-
-- `cargo run -- backlog split --help`
-  - passed
-  - showed `intu backlog split [OPTIONS] <IDENTIFIER>` plus `--state`, `--priority`, `--label`, `--assignee`, and `--no-interactive`
-
-## Full Quality Gate
-
-- `make quality`
-  - passed
-  - `cargo fmt --check` passed
-  - `cargo clippy --all-targets --all-features -- -D warnings` passed
-  - the serial full suite now completes cleanly, including `tests/listen.rs`
-  - this rerun also confirms the CI-only `cargo fmt --check` drift is resolved for `src/config_resolution.rs`
-
-## Acceptance Criteria Mapping
-
-| Criterion | Evidence |
-| --- | --- |
-| `meta backlog --help` lists `split` and `meta backlog tech` no longer advertises `split` | `cargo test --test commands`; `cargo run -- backlog --help`; `cargo run -- backlog split --help` |
-| `meta backlog split --no-interactive <ISSUE>` emits structured JSON proposals under `backlog.split` | `cargo test --test backlog_split` (`backlog_split_no_interactive_emits_structured_proposal_json`) |
-| Interactive split runs stay inside one ratatui flow | `cargo test --test backlog_split` (`backlog_split_render_once_shows_review_flow_snapshot`) |
-| Approved split runs create child issues, backlog packets, parent rewrite, and dependency links | `cargo test --test backlog_split` (`backlog_split_render_once_events_can_apply_split_end_to_end`) |
-| Existing `meta backlog tech` behavior and routing remain green | `cargo test --test technical`; `cargo test --test config` |
+For the naming and structure convention, see [`artifacts/validation/README.md`](artifacts/validation/README.md).

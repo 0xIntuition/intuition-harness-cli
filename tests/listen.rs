@@ -4225,6 +4225,11 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
     )))?;
     assert!(validation_plan.contains("must not overwrite the primary Linear issue description"));
     assert!(validation_plan.contains("Update the existing `## Codex Workpad` comment"));
+    assert!(validation_plan.contains("artifacts/validation/MET-21.md"));
+    assert!(
+        validation_plan
+            .contains("Do not write ticket-specific PR evidence to repo-root `validation.md`")
+    );
     assert!(!validation_plan.contains(&format!("{} sync push MET-21", branding::COMMAND_NAME)));
     assert!(
         workspace_root

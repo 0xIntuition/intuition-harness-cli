@@ -1588,6 +1588,13 @@ The interactive planning integration proof in `tests/plan.rs` shells out to `exp
 
 The focused `release_artifacts` proof keeps the GitHub Release packaging contract explicit in the root gate by verifying the release-script archive names, `SHA256SUMS`, and extracted `meta --version` output.
 
+## Validation Evidence Convention
+
+Repository-level reviewer evidence is ticket-scoped and belongs under `artifacts/validation/<TICKET>.md`.
+Packet-local execution proof stays in `.metastack/backlog/<ISSUE>/validation.md` alongside the
+backlog packet, and packet-local artifact indexes stay in `.metastack/backlog/<ISSUE>/artifacts/README.md`.
+Repo-root `validation.md` is a stable guide, not a mutable per-ticket ledger.
+
 ## Testing
 
 Run the full Rust test suite from the repository root with:

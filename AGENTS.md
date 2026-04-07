@@ -20,6 +20,7 @@ This directory contains the MetaStack CLI agent service that polls Linear, creat
 - Workspace safety is critical:
   - Never run Codex turn cwd in source repo.
   - Workspaces must stay under configured workspace root.
+- Repo-level reviewer-facing validation evidence belongs under `artifacts/validation/<TICKET>.md`. Keep packet-local proof in `.metastack/backlog/<ISSUE>/validation.md`, and do not use repo-root `validation.md` for ticket-specific evidence.
 - Orchestrator behavior is stateful and concurrency-sensitive; preserve retry, reconciliation, and cleanup semantics.
 - Follow `docs/logging.md` for logging conventions and required issue/session context fields.
 - Use `src/tui/markdown.rs` (`render_markdown`) as the default renderer for any TUI preview or detail pane that displays markdown-authored content. Do not introduce per-surface markdown rendering helpers.

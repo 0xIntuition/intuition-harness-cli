@@ -28,4 +28,5 @@ Describe the implementation plan, affected command paths, and any service or fil
 
 - [ ] Scope and non-goals are captured.
 - [ ] Implementation plan links to concrete repo paths.
-- [ ] Validation evidence is recorded in `validation.md`.
+- [ ] Packet-local validation evidence is recorded in `validation.md`.
+- [ ] Any reviewer-facing repo-level PR evidence is recorded in `artifacts/validation/<TICKET>.md`.
