@@ -22,6 +22,7 @@ pub use crate::config_resolution::{
     validate_agent_name, validate_agent_reasoning, validate_backlog_default_priority,
     validate_backlog_labels, validate_fast_plan_question_limit,
     validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    validate_listen_retry_initial_backoff_seconds, validate_listen_retry_max_backoff_seconds,
     validate_supported_agent,
 };
 use crate::config_resolution::{
@@ -47,6 +48,8 @@ pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
 pub const DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 pub const DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS: usize = 5;
 pub const DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS: usize = 2;
+pub const DEFAULT_LISTEN_RETRY_INITIAL_BACKOFF_SECONDS: u64 = 2;
+pub const DEFAULT_LISTEN_RETRY_MAX_BACKOFF_SECONDS: u64 = 60;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_IMPROVE: &str = "backlog.improve";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
@@ -122,6 +125,14 @@ pub struct InstallListenSettings {
     pub assignment_scope: Option<ListenAssignmentScope>,
     pub refresh_policy: Option<ListenRefreshPolicy>,
     pub poll_interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub retry: ListenRetrySettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListenRetrySettings {
+    pub initial_backoff_seconds: Option<u64>,
+    pub max_backoff_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -939,11 +950,53 @@ impl InstallDefaults {
         if let Some(interval) = self.listen.poll_interval_seconds {
             validate_listen_poll_interval_seconds(interval)?;
         }
+        self.listen.retry.validate()?;
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
         }
         if let Some(limit) = self.plan.fast_questions {
             validate_fast_plan_question_limit(limit)?;
+        }
+        Ok(())
+    }
+}
+
+impl ListenRetrySettings {
+    /// Returns the configured initial Linear retry backoff in seconds.
+    pub fn initial_backoff_seconds(&self) -> u64 {
+        self.initial_backoff_seconds
+            .unwrap_or(DEFAULT_LISTEN_RETRY_INITIAL_BACKOFF_SECONDS)
+    }
+
+    /// Returns the configured maximum Linear retry backoff in seconds.
+    pub fn max_backoff_seconds(&self) -> u64 {
+        self.max_backoff_seconds
+            .unwrap_or(DEFAULT_LISTEN_RETRY_MAX_BACKOFF_SECONDS)
+    }
+
+    /// Computes the bounded retry delay for the given consecutive failure count.
+    pub fn backoff_seconds_for_failure_streak(&self, consecutive_failures: u32) -> u64 {
+        let initial = self.initial_backoff_seconds();
+        let max = self.max_backoff_seconds();
+        let exponent = consecutive_failures.saturating_sub(1).min(31);
+        initial
+            .saturating_mul(2u64.saturating_pow(exponent))
+            .min(max)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(initial) = self.initial_backoff_seconds {
+            validate_listen_retry_initial_backoff_seconds(initial)?;
+        }
+        if let Some(max) = self.max_backoff_seconds {
+            validate_listen_retry_max_backoff_seconds(max)?;
+        }
+        if self.max_backoff_seconds() < self.initial_backoff_seconds() {
+            return Err(anyhow!(
+                "listen retry max backoff must be greater than or equal to the initial backoff; got {} < {}",
+                self.max_backoff_seconds(),
+                self.initial_backoff_seconds()
+            ));
         }
         Ok(())
     }
@@ -1319,6 +1372,7 @@ mod tests {
                     assignment_scope: Some(super::ListenAssignmentScope::ViewerOrUnassigned),
                     refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
                     poll_interval_seconds: Some(42),
+                    retry: super::ListenRetrySettings::default(),
                 },
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),
@@ -1472,6 +1526,7 @@ mod tests {
                     assignment_scope: Some(super::ListenAssignmentScope::ViewerOrUnassigned),
                     refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
                     poll_interval_seconds: Some(42),
+                    retry: super::ListenRetrySettings::default(),
                 },
                 plan: InstallPlanSettings {
                     interactive_follow_up_questions: Some(4),

@@ -15,7 +15,7 @@ use crate::cli::RunAgentArgs;
 use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta, no_agent_selected_route_key,
 };
-use crate::linear::{LinearClient, LinearService, UserRef};
+use crate::linear::{LinearClient, LinearService, UserRef, classify_linear_failure};
 
 pub(super) struct ListenPreflightRequest<'a> {
     pub(super) working_dir: &'a Path,
@@ -217,11 +217,7 @@ where
 }
 
 fn is_transient_linear_read_failure(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .to_string()
-            .contains("failed to reach the Linear GraphQL endpoint")
-    })
+    classify_linear_failure(error).is_retryable()
 }
 
 fn verify_codex_listen_prerequisites(report: &mut ListenPreflightReport) -> Result<()> {

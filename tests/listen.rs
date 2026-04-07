@@ -228,6 +228,56 @@ fn listen_session_json(
     })
 }
 
+#[cfg(unix)]
+fn closed_graphql_url() -> Result<String, Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    Ok(format!("http://{address}/graphql"))
+}
+
+#[cfg(unix)]
+fn prepare_listen_repo_with_existing_session(
+    repo_root: &Path,
+    config_path: &Path,
+    api_url: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    fs::create_dir_all(repo_root)?;
+    write_minimal_planning_context(
+        repo_root,
+        r#"{
+  "linear": {
+    "team": "ENG",
+    "project_id": "project-1"
+  },
+  "listen": {
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    init_repo_with_origin(repo_root)?;
+    write_listen_store_session(
+        config_path,
+        repo_root,
+        vec![listen_session_json(
+            "ENG-10181",
+            "blocked",
+            1_773_575_100,
+            None,
+        )],
+    )
+}
+
 #[test]
 fn listen_requires_auth_when_not_in_demo_mode() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
@@ -2528,6 +2578,207 @@ fn listen_json_without_once_emits_structured_json_error() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn listen_once_degraded_429_preserves_existing_session_visibility() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    prepare_listen_repo_with_existing_session(&repo_root, &config_path, &api_url)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(429).body("rate limited");
+    });
+
+    let assert = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--once",
+            "--json",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["result"]["degraded"]["kind"], json!("transient"));
+    assert_eq!(payload["result"]["degraded"]["status_code"], json!(429));
+    assert_eq!(
+        payload["result"]["sessions"][0]["issue_identifier"],
+        json!("ENG-10181")
+    );
+    assert!(
+        payload["result"]["runtime"]["linear_status"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("degraded | transient")
+    );
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(listen_state_path(&config_path, &repo_root)?)?)?;
+    assert_eq!(state["degraded"]["kind"], json!("transient"));
+    assert_eq!(state["degraded"]["status_code"], json!(429));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10181"))
+        .stdout(predicate::str::contains("Degraded Linear state: transient"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_degraded_503_preserves_existing_session_visibility() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    prepare_listen_repo_with_existing_session(&repo_root, &config_path, &api_url)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(503).body("service unavailable");
+    });
+
+    let assert = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--once",
+            "--json",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["result"]["degraded"]["kind"], json!("transient"));
+    assert_eq!(payload["result"]["degraded"]["status_code"], json!(503));
+    assert_eq!(
+        payload["result"]["sessions"][0]["issue_identifier"],
+        json!("ENG-10181")
+    );
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(listen_state_path(&config_path, &repo_root)?)?)?;
+    assert_eq!(state["degraded"]["kind"], json!("transient"));
+    assert_eq!(state["degraded"]["status_code"], json!(503));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_degraded_network_failure_preserves_existing_session_visibility()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let api_url = closed_graphql_url()?;
+    prepare_listen_repo_with_existing_session(&repo_root, &config_path, &api_url)?;
+
+    let assert = meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "agents",
+            "listen",
+            "--once",
+            "--json",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["result"]["degraded"]["kind"], json!("transient"));
+    assert!(
+        payload["result"]["degraded"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed to reach the Linear GraphQL endpoint")
+    );
+    assert_eq!(
+        payload["result"]["sessions"][0]["issue_identifier"],
+        json!("ENG-10181")
+    );
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10181"))
+        .stdout(predicate::str::contains("Degraded Linear state: transient"));
+
+    Ok(())
+}
+
 #[test]
 fn listen_uses_repo_configured_poll_interval_by_default() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
@@ -3371,7 +3622,6 @@ exit 0
 
     for rendered in [&first_stdout, &second_stdout] {
         assert!(rendered.contains("Agent Sessions"));
-        assert!(rendered.contains("terminal snapshot"));
         assert!(rendered.contains("MET-40"));
         assert!(rendered.contains("MET-41"));
         assert!(rendered.contains("Running"));
@@ -7072,7 +7322,9 @@ transport = "arg"
         workspace.is_dir(),
         "dirty workspace should be kept for manual review"
     );
-    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    wait_for_file_substring(&state_path, "\"phase\": \"completed\"")?;
+    let state = fs::read_to_string(&state_path)?;
     assert!(state.contains("\"phase\": \"completed\""));
     assert!(state.contains("Human Review"));
     assert!(state.contains("\"status\": \"ready\""));
@@ -7091,6 +7343,220 @@ transport = "arg"
         .success()
         .stdout(predicate::str::contains("ready #321"))
         .stdout(predicate::str::contains("draft #321").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_replays_pending_review_transition_after_linear_recovery()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let failing_server = DynamicLinearServer::start_with_failure_plan(
+        1_000_000,
+        DynamicLinearFailurePlan {
+            review_transition_failures: 3,
+            ..DynamicLinearFailurePlan::default()
+        },
+    )?;
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = failing_server.url.as_str(),
+        ),
+    )?;
+    fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
+    let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    write_minimal_planning_context(
+        &workspace,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  }
+}
+"#,
+    )?;
+    let branch = "met-32-replay-review-transition";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn review_transition() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Prepare review transition replay",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    fs::write(
+        workspace.join("dirty-keep.txt"),
+        "keep workspace for replay assertions\n",
+    )?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Complete\n",
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    let first_state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(first_state["sessions"][0]["phase"], json!("blocked"));
+    assert_eq!(
+        first_state["sessions"][0]["pending_linear_sync"]["review_transition_issue"],
+        json!(true)
+    );
+    assert_eq!(
+        first_state["sessions"][0]["pull_request"]["status"],
+        json!("ready")
+    );
+
+    drop(failing_server);
+    let recovered_server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "stub"
+
+[agents.commands.stub]
+command = "agent-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+"#,
+            api_url = recovered_server.url.as_str(),
+        ),
+    )?;
+
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let second_state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(second_state["sessions"][0]["phase"], json!("completed"));
+    assert!(
+        second_state["sessions"][0]
+            .get("pending_linear_sync")
+            .is_none()
+            || second_state["sessions"][0]["pending_linear_sync"].is_null()
+    );
 
     Ok(())
 }

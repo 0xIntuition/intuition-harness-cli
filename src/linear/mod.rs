@@ -17,7 +17,7 @@ pub(crate) use command::{
 pub(crate) use refine::run_issue_refine_command;
 pub(crate) use render::render_issues_list_output;
 pub use render::{render_issue_summary, render_projects_table};
-pub use service::LinearService;
+pub use service::{LinearFailureKind, LinearService, classify_linear_failure};
 pub(crate) use ticket_context::{
     PreparedIssueContext, TicketDiscussionBudgets, TicketImageDownloadFailure,
     load_localized_ticket_context_ignored_paths, materialize_issue_context, prepare_issue_context,

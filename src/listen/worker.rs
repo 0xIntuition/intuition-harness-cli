@@ -35,7 +35,7 @@ use crate::github_pr::{
 };
 use crate::linear::{
     AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
-    ReqwestLinearClient, WorkflowState,
+    ReqwestLinearClient, WorkflowState, classify_linear_failure,
 };
 use crate::repo_target::RepoTarget;
 use crate::validation::{
@@ -46,14 +46,15 @@ use crate::workflow_contract::render_workflow_contract_for_listen;
 use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
 use super::{
-    BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionPhase, TokenUsage, TurnPromptMode,
-    TurnTokenSnapshot, agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
-    compact_blocked_summary, compact_completed_summary, compact_running_summary,
-    compact_session_summary, compare_workspace_snapshots, current_workspace_branch,
-    issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
-    preflight, render_agent_prompt, render_continuation_prompt,
-    try_transition_issue_to_review_state, workspace_has_meaningful_progress, write_listen_session,
+    BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PendingLinearSync,
+    PendingPullRequestAttachment, PullRequestStatus, PullRequestSummary, ResumeProvider,
+    SessionPhase, TokenUsage, TurnPromptMode, TurnTokenSnapshot, agent_log_path,
+    backlog_progress_for_issue_dir, capture_workspace_snapshot, compact_blocked_summary,
+    compact_completed_summary, compact_running_summary, compact_session_summary,
+    compare_workspace_snapshots, current_workspace_branch, issue_state_label, issue_team_key,
+    listen_issue_is_active, now_epoch_seconds, now_timestamp, preflight, render_agent_prompt,
+    render_continuation_prompt, try_transition_issue_to_review_state,
+    workspace_has_meaningful_progress, write_listen_session,
 };
 
 const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
@@ -107,7 +108,34 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let worker_pid = std::process::id();
     let mut turns_completed =
         load_existing_turn_count(&source_root, project_selector, &args.issue)?;
-    let mut issue = load_worker_issue(&service, &args.issue).await?;
+    let mut pending_linear_sync =
+        load_existing_pending_linear_sync(&source_root, project_selector, &args.issue)?;
+    let existing_issue_snapshot =
+        load_existing_issue_snapshot(&source_root, project_selector, &args.issue)?;
+    let initial_meaningful_progress = workspace_has_meaningful_progress(&workspace_path, true)?;
+    let mut issue = match load_worker_issue(&service, &args.issue).await {
+        Ok(issue) => issue,
+        Err(error) => {
+            let Some(existing_issue) = existing_issue_snapshot else {
+                return Err(error);
+            };
+            if !initial_meaningful_progress && turns_completed == 0 && pending_linear_sync.is_none()
+            {
+                return Err(error);
+            }
+            defer_pending_linear_sync_operation(
+                &app_config,
+                &mut pending_linear_sync,
+                &error,
+                "issue refresh",
+                &log_path,
+                |pending| {
+                    pending.require_issue_refresh = true;
+                },
+            )?;
+            existing_issue
+        }
+    };
     let backlog_issue = match args.backlog_issue.as_deref() {
         Some(identifier) => Some(load_worker_backlog_issue(
             &workspace_path,
@@ -141,6 +169,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             project_selector,
             &args.issue,
         )?,
+        pending_linear_sync,
         turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
         canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
@@ -150,7 +179,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         load_existing_session_tokens(&source_root, project_selector, &args.issue)?;
     let mut provider_session_id =
         load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
-    let _initial_meaningful_progress = workspace_has_meaningful_progress(&workspace_path, true)?;
     let mut stalled_turns = 0u32;
     let mut last_review: Option<ReviewReport> = None;
     let mut remaining_validation_repair_turns = PlanningMeta::load(&workspace_path)
@@ -198,6 +226,36 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         return Err(error);
     }
     loop {
+        match replay_pending_linear_sync(
+            &service,
+            &mut issue,
+            &turn_context,
+            &mut session_context,
+            turns_completed,
+            provider_session_id.as_deref(),
+            &log_path,
+        )
+        .await?
+        {
+            PendingLinearSyncReplayOutcome::Completed => return Ok(()),
+            PendingLinearSyncReplayOutcome::Pending
+                if session_context
+                    .pending_linear_sync
+                    .as_ref()
+                    .is_some_and(PendingLinearSync::blocks_agent_turns) =>
+            {
+                write_pending_linear_sync_blocked_session(
+                    &issue,
+                    &session_context,
+                    turns_completed,
+                    provider_session_id.as_deref(),
+                    &log_path,
+                )?;
+                return Ok(());
+            }
+            PendingLinearSyncReplayOutcome::Pending | PendingLinearSyncReplayOutcome::Cleared => {}
+        }
+
         if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
             write_listen_session(
                 &source_root,
@@ -526,7 +584,31 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         let snapshot_after = capture_workspace_snapshot(&workspace_path, &args.issue)?;
         let turn_progress =
             compare_workspace_snapshots(&workspace_path, &snapshot_before, &snapshot_after)?;
-        issue = load_worker_issue(&service, &args.issue).await?;
+        match load_worker_issue(&service, &args.issue).await {
+            Ok(refreshed_issue) => {
+                issue = refreshed_issue;
+            }
+            Err(error) => {
+                defer_pending_linear_sync_operation(
+                    &app_config,
+                    &mut session_context.pending_linear_sync,
+                    &error,
+                    "issue refresh",
+                    &log_path,
+                    |pending| {
+                        pending.require_issue_refresh = true;
+                    },
+                )?;
+                write_pending_linear_sync_blocked_session(
+                    &issue,
+                    &session_context,
+                    turns_completed,
+                    provider_session_id.as_deref(),
+                    &log_path,
+                )?;
+                return Ok(());
+            }
+        }
 
         if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
             continue;
@@ -541,7 +623,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         let meaningful_turn_progress =
             turn_progress.implementation_changed() || turn_progress.planning_changed();
         let review = run_review_phase(
-            &service,
             &issue,
             turn_number,
             meaningful_turn_progress,
@@ -554,6 +635,16 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 provider_session_id: provider_session_id.as_deref(),
                 log_path: &log_path,
             },
+        )
+        .await?;
+        sync_review_tracking(
+            &service,
+            &issue,
+            &turn_context,
+            &app_config,
+            &mut session_context,
+            &log_path,
+            &review,
         )
         .await?;
         last_review = Some(review.clone());
@@ -580,7 +671,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             .await?;
             if final_review.approved {
                 let review = match run_pre_pr_validation_gate(
-                    &service,
                     PrePrValidationGateContext {
                         issue: &issue,
                         turn_context: &turn_context,
@@ -601,10 +691,30 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 {
                     ValidationGateOutcome::Passed(review) => review,
                     ValidationGateOutcome::Retry(review) => {
+                        sync_review_tracking(
+                            &service,
+                            &issue,
+                            &turn_context,
+                            &app_config,
+                            &mut session_context,
+                            &log_path,
+                            &review,
+                        )
+                        .await?;
                         last_review = Some(review);
                         continue;
                     }
-                    ValidationGateOutcome::Exhausted => {
+                    ValidationGateOutcome::Exhausted(review) => {
+                        sync_review_tracking(
+                            &service,
+                            &issue,
+                            &turn_context,
+                            &app_config,
+                            &mut session_context,
+                            &log_path,
+                            &review,
+                        )
+                        .await?;
                         return Ok(());
                     }
                 };
@@ -628,7 +738,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     anyhow!("failed to inspect the workspace branch before promoting the review PR")
                 })?;
                 let pull_request = match prepare_listener_pull_request_for_review(
-                    &service,
                     &issue,
                     &workspace_path,
                     branch,
@@ -660,8 +769,36 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     }
                 };
                 session_context.pull_request = pull_request
+                    .clone()
                     .map(PullRequestSummary::from)
                     .unwrap_or_default();
+                if let Some(pull_request) = pull_request.as_ref()
+                    && let Err(error) =
+                        ensure_listener_pull_request_attachment(&service, &issue, pull_request)
+                            .await
+                {
+                    defer_pending_linear_sync_operation(
+                        &app_config,
+                        &mut session_context.pending_linear_sync,
+                        &error,
+                        "pull request attachment",
+                        &log_path,
+                        |pending| {
+                            pending.pull_request_attachment = Some(PendingPullRequestAttachment {
+                                number: pull_request.number,
+                                url: pull_request.url.clone(),
+                            });
+                        },
+                    )?;
+                    write_pending_linear_sync_blocked_session(
+                        &issue,
+                        &session_context,
+                        turns_completed,
+                        provider_session_id.as_deref(),
+                        &log_path,
+                    )?;
+                    return Ok(());
+                }
                 if let Some(number) = session_context.pull_request.number {
                     let failing_checks =
                         GhCli.failing_pull_request_checks(&workspace_path, number)?;
@@ -675,8 +812,16 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &failing_checks,
                             remaining_after_failure,
                         );
-                        sync_review_tracking(&service, &issue, &turn_context, &follow_up_review)
-                            .await?;
+                        sync_review_tracking(
+                            &service,
+                            &issue,
+                            &turn_context,
+                            &app_config,
+                            &mut session_context,
+                            &log_path,
+                            &follow_up_review,
+                        )
+                        .await?;
                         last_review = Some(follow_up_review);
                         append_worker_log(
                             &log_path,
@@ -708,13 +853,57 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     }
                 }
                 let transitioned_issue =
-                    try_transition_issue_to_review_state(&service, &issue).await?;
+                    match try_transition_issue_to_review_state(&service, &issue).await {
+                        Ok(transitioned_issue) => transitioned_issue,
+                        Err(error) => {
+                            defer_pending_linear_sync_operation(
+                                &app_config,
+                                &mut session_context.pending_linear_sync,
+                                &error,
+                                "issue review transition",
+                                &log_path,
+                                |pending| {
+                                    pending.review_transition_issue = true;
+                                },
+                            )?;
+                            write_pending_linear_sync_blocked_session(
+                                &issue,
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &log_path,
+                            )?;
+                            return Ok(());
+                        }
+                    };
                 if let Some(backlog_issue) = backlog_issue.as_ref()
                     && !backlog_issue
                         .identifier
                         .eq_ignore_ascii_case(&issue.identifier)
                 {
-                    let _ = try_transition_issue_to_review_state(&service, backlog_issue).await?;
+                    if let Err(error) =
+                        try_transition_issue_to_review_state(&service, backlog_issue).await
+                    {
+                        defer_pending_linear_sync_operation(
+                            &app_config,
+                            &mut session_context.pending_linear_sync,
+                            &error,
+                            "backlog review transition",
+                            &log_path,
+                            |pending| {
+                                pending.review_transition_backlog_issue =
+                                    Some(backlog_issue.identifier.clone());
+                            },
+                        )?;
+                        write_pending_linear_sync_blocked_session(
+                            &issue,
+                            &session_context,
+                            turns_completed,
+                            provider_session_id.as_deref(),
+                            &log_path,
+                        )?;
+                        return Ok(());
+                    }
                 }
                 let refreshed_issue = load_worker_issue(&service, &args.issue)
                     .await
@@ -785,7 +974,16 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 risks: final_review.risks.clone(),
                 notes: final_review.notes.clone(),
             };
-            sync_review_tracking(&service, &issue, &turn_context, &follow_up_review).await?;
+            sync_review_tracking(
+                &service,
+                &issue,
+                &turn_context,
+                &app_config,
+                &mut session_context,
+                &log_path,
+                &follow_up_review,
+            )
+            .await?;
             last_review = Some(follow_up_review);
         }
 
@@ -795,7 +993,6 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     anyhow!("listen review tracking was unavailable before draft PR publication")
                 })?;
                 let review = match run_pre_pr_validation_gate(
-                    &service,
                     PrePrValidationGateContext {
                         issue: &issue,
                         turn_context: &turn_context,
@@ -816,15 +1013,34 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 {
                     ValidationGateOutcome::Passed(review) => review,
                     ValidationGateOutcome::Retry(review) => {
+                        sync_review_tracking(
+                            &service,
+                            &issue,
+                            &turn_context,
+                            &app_config,
+                            &mut session_context,
+                            &log_path,
+                            &review,
+                        )
+                        .await?;
                         last_review = Some(review);
                         continue;
                     }
-                    ValidationGateOutcome::Exhausted => {
+                    ValidationGateOutcome::Exhausted(review) => {
+                        sync_review_tracking(
+                            &service,
+                            &issue,
+                            &turn_context,
+                            &app_config,
+                            &mut session_context,
+                            &log_path,
+                            &review,
+                        )
+                        .await?;
                         return Ok(());
                     }
                 };
                 match publish_listener_pull_request(
-                    &service,
                     &issue,
                     &workspace_path,
                     branch,
@@ -834,7 +1050,27 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 .await
                 {
                     Ok(Some(pull_request)) => {
-                        session_context.pull_request = PullRequestSummary::from(pull_request);
+                        session_context.pull_request =
+                            PullRequestSummary::from(pull_request.clone());
+                        if let Err(error) =
+                            ensure_listener_pull_request_attachment(&service, &issue, &pull_request)
+                                .await
+                        {
+                            defer_pending_linear_sync_operation(
+                                &app_config,
+                                &mut session_context.pending_linear_sync,
+                                &error,
+                                "pull request attachment",
+                                &log_path,
+                                |pending| {
+                                    pending.pull_request_attachment =
+                                        Some(PendingPullRequestAttachment {
+                                            number: pull_request.number,
+                                            url: pull_request.url.clone(),
+                                        });
+                                },
+                            )?;
+                        }
                         if let Some(number) = session_context.pull_request.number {
                             let failing_checks =
                                 GhCli.failing_pull_request_checks(&workspace_path, number)?;
@@ -852,6 +1088,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                     &service,
                                     &issue,
                                     &turn_context,
+                                    &app_config,
+                                    &mut session_context,
+                                    &log_path,
                                     &follow_up_review,
                                 )
                                 .await?;
@@ -1025,6 +1264,7 @@ struct WorkerSessionContext<'a> {
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    pending_linear_sync: Option<PendingLinearSync>,
     turn_history: Vec<TurnTokenSnapshot>,
     canonical: CanonicalSessionData,
     pull_request: PullRequestSummary,
@@ -1099,7 +1339,7 @@ struct FinalReviewReport {
 enum ValidationGateOutcome {
     Passed(ReviewReport),
     Retry(ReviewReport),
-    Exhausted,
+    Exhausted(ReviewReport),
 }
 
 struct PrePrValidationGateContext<'a> {
@@ -1152,11 +1392,7 @@ where
 }
 
 fn is_transient_linear_read_failure(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .to_string()
-            .contains("failed to reach the Linear GraphQL endpoint")
-    })
+    classify_linear_failure(error).is_retryable()
 }
 
 fn load_worker_backlog_issue(
@@ -1198,6 +1434,267 @@ fn load_worker_backlog_issue(
         parent: None,
         children: Vec::new(),
     })
+}
+
+fn stored_issue_snapshot_from_session(session: super::AgentSession) -> IssueSummary {
+    let updated_at = DateTime::<Utc>::from_timestamp(session.updated_at_epoch_seconds as i64, 0)
+        .map(|timestamp| timestamp.to_rfc3339())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+    let state = if session.phase.is_completed() {
+        WorkflowState {
+            id: "state-review".to_string(),
+            name: "Human Review".to_string(),
+            kind: Some("started".to_string()),
+        }
+    } else {
+        WorkflowState {
+            id: "state-in-progress".to_string(),
+            name: "In Progress".to_string(),
+            kind: Some("started".to_string()),
+        }
+    };
+    let issue_identifier = session.issue_identifier;
+    let team_key = session.team_key;
+    IssueSummary {
+        id: session.issue_id.unwrap_or_else(|| issue_identifier.clone()),
+        identifier: issue_identifier.clone(),
+        title: if session.issue_title.trim().is_empty() {
+            format!("Stored session for {issue_identifier}")
+        } else {
+            session.issue_title
+        },
+        description: None,
+        url: session.issue_url,
+        priority: None,
+        estimate: None,
+        updated_at,
+        team: crate::linear::TeamRef {
+            id: format!("team-{}", team_key.to_ascii_lowercase()),
+            key: team_key.clone(),
+            name: team_key,
+        },
+        project: session.project_name.map(|name| crate::linear::ProjectRef {
+            id: format!("project-{}", issue_identifier.to_ascii_lowercase()),
+            name,
+        }),
+        assignee: None,
+        labels: Vec::new(),
+        comments: Vec::new(),
+        state: Some(state),
+        attachments: Vec::new(),
+        parent: None,
+        children: Vec::new(),
+    }
+}
+
+fn load_existing_issue_snapshot(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<IssueSummary>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(stored_issue_snapshot_from_session))
+}
+
+enum PendingLinearSyncReplayOutcome {
+    Pending,
+    Cleared,
+    Completed,
+}
+
+async fn replay_pending_linear_sync(
+    service: &LinearService<ReqwestLinearClient>,
+    issue: &mut IssueSummary,
+    context: &ListenTurnContext<'_>,
+    session_context: &mut WorkerSessionContext<'_>,
+    turns_completed: u32,
+    provider_session_id: Option<&str>,
+    log_path: &Path,
+) -> Result<PendingLinearSyncReplayOutcome> {
+    let Some(mut pending) = session_context.pending_linear_sync.clone() else {
+        return Ok(PendingLinearSyncReplayOutcome::Cleared);
+    };
+
+    if pending.require_issue_refresh
+        || pending.workpad_body.is_some()
+        || pending.pull_request_attachment.is_some()
+        || pending.review_transition_issue
+    {
+        match load_worker_issue(service, &issue.identifier).await {
+            Ok(refreshed_issue) => {
+                *issue = refreshed_issue;
+                pending.require_issue_refresh = false;
+            }
+            Err(error) => {
+                session_context.pending_linear_sync = Some(pending);
+                record_pending_linear_sync_failure(
+                    context.app_config,
+                    &mut session_context.pending_linear_sync,
+                    &error,
+                );
+                write_listen_session(
+                    context.source_root,
+                    context.project_selector,
+                    build_worker_session(
+                        issue,
+                        SessionPhase::Publishing,
+                        session_context
+                            .pending_linear_sync
+                            .as_ref()
+                            .map(pending_linear_sync_summary)
+                            .unwrap_or_else(|| "Pending Linear sync".to_string()),
+                        session_context,
+                        turns_completed,
+                        provider_session_id,
+                        &session_context.canonical,
+                    ),
+                )?;
+                append_worker_log(
+                    log_path,
+                    "pending linear sync",
+                    &[format!("Pending replay failed to refresh issue: {error:#}")],
+                )?;
+                return Ok(PendingLinearSyncReplayOutcome::Pending);
+            }
+        }
+    }
+
+    if let Some(body) = pending.workpad_body.clone() {
+        match service
+            .update_workpad_comment_by_id(context.workpad_comment_id, body.clone())
+            .await
+        {
+            Ok(_) => pending.workpad_body = None,
+            Err(error) => {
+                session_context.pending_linear_sync = Some(pending);
+                record_pending_linear_sync_failure(
+                    context.app_config,
+                    &mut session_context.pending_linear_sync,
+                    &error,
+                );
+                return Ok(PendingLinearSyncReplayOutcome::Pending);
+            }
+        }
+    }
+
+    if let Some(attachment) = pending.pull_request_attachment.clone() {
+        if !issue
+            .attachments
+            .iter()
+            .any(|existing| existing.url == attachment.url)
+        {
+            match service
+                .create_attachment(AttachmentCreateRequest {
+                    issue_id: issue.id.clone(),
+                    title: format!("GitHub PR #{}", attachment.number),
+                    url: attachment.url.clone(),
+                    metadata: json!({
+                        "provider": "github",
+                        "type": "pull_request"
+                    }),
+                })
+                .await
+            {
+                Ok(_) => pending.pull_request_attachment = None,
+                Err(error) => {
+                    session_context.pending_linear_sync = Some(pending);
+                    record_pending_linear_sync_failure(
+                        context.app_config,
+                        &mut session_context.pending_linear_sync,
+                        &error,
+                    );
+                    return Ok(PendingLinearSyncReplayOutcome::Pending);
+                }
+            }
+        } else {
+            pending.pull_request_attachment = None;
+        }
+    }
+
+    if pending.review_transition_issue {
+        match try_transition_issue_to_review_state(service, issue).await {
+            Ok(transitioned_issue) => {
+                if let Some(updated_issue) = transitioned_issue {
+                    *issue = updated_issue;
+                }
+                pending.review_transition_issue = false;
+            }
+            Err(error) => {
+                session_context.pending_linear_sync = Some(pending);
+                record_pending_linear_sync_failure(
+                    context.app_config,
+                    &mut session_context.pending_linear_sync,
+                    &error,
+                );
+                return Ok(PendingLinearSyncReplayOutcome::Pending);
+            }
+        }
+    }
+
+    if pending.review_transition_backlog_issue.is_some()
+        && let Some(backlog_issue) = context.backlog_issue
+    {
+        match try_transition_issue_to_review_state(service, backlog_issue).await {
+            Ok(_) => pending.review_transition_backlog_issue = None,
+            Err(error) => {
+                session_context.pending_linear_sync = Some(pending);
+                record_pending_linear_sync_failure(
+                    context.app_config,
+                    &mut session_context.pending_linear_sync,
+                    &error,
+                );
+                return Ok(PendingLinearSyncReplayOutcome::Pending);
+            }
+        }
+    }
+
+    session_context.pending_linear_sync = Some(pending);
+    clear_pending_linear_sync_failure(&mut session_context.pending_linear_sync);
+    if session_context
+        .pending_linear_sync
+        .as_ref()
+        .is_some_and(PendingLinearSync::is_empty)
+    {
+        session_context.pending_linear_sync = None;
+    }
+
+    if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
+        write_listen_session(
+            context.source_root,
+            context.project_selector,
+            build_worker_session(
+                issue,
+                SessionPhase::Completed,
+                compact_completed_summary(
+                    issue.description.as_deref(),
+                    turns_completed,
+                    &issue_state_label(issue),
+                ),
+                session_context,
+                turns_completed,
+                provider_session_id,
+                &session_context.canonical,
+            ),
+        )?;
+        try_listener_auto_clean(
+            context.source_root,
+            context.project_selector,
+            context.workspace_path,
+            &issue.identifier,
+        );
+        return Ok(PendingLinearSyncReplayOutcome::Completed);
+    }
+
+    if session_context.pending_linear_sync.is_some() {
+        Ok(PendingLinearSyncReplayOutcome::Pending)
+    } else {
+        Ok(PendingLinearSyncReplayOutcome::Cleared)
+    }
 }
 
 fn listener_pull_request_title(issue: &IssueSummary) -> String {
@@ -1268,6 +1765,128 @@ fn listener_pull_request_body(issue: &IssueSummary, review: Option<&ReviewReport
     }
 
     lines.join("\n")
+}
+
+fn update_pending_linear_sync<F>(pending_linear_sync: &mut Option<PendingLinearSync>, updater: F)
+where
+    F: FnOnce(&mut PendingLinearSync),
+{
+    let mut pending = pending_linear_sync.take().unwrap_or_default();
+    updater(&mut pending);
+    *pending_linear_sync = (!pending.is_empty()).then_some(pending);
+}
+
+fn record_pending_linear_sync_failure(
+    app_config: &AppConfig,
+    pending_linear_sync: &mut Option<PendingLinearSync>,
+    error: &anyhow::Error,
+) {
+    let classified = classify_linear_failure(error);
+    update_pending_linear_sync(pending_linear_sync, |pending| {
+        let consecutive_failures = pending
+            .last_failure
+            .as_ref()
+            .map(|failure| failure.consecutive_failures)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let observed_at_epoch_seconds = now_epoch_seconds();
+        pending.last_failure = Some(super::LinearFailureSnapshot {
+            kind: classified.kind,
+            message: classified.message.clone(),
+            observed_at_epoch_seconds,
+            status_code: classified.status_code,
+            consecutive_failures,
+            next_retry_at_epoch_seconds: classified.is_retryable().then_some(
+                observed_at_epoch_seconds
+                    + app_config
+                        .defaults
+                        .listen
+                        .retry
+                        .backoff_seconds_for_failure_streak(consecutive_failures),
+            ),
+        });
+    });
+}
+
+fn clear_pending_linear_sync_failure(pending_linear_sync: &mut Option<PendingLinearSync>) {
+    if let Some(pending) = pending_linear_sync.as_mut() {
+        pending.last_failure = None;
+    }
+    if pending_linear_sync
+        .as_ref()
+        .is_some_and(PendingLinearSync::is_empty)
+    {
+        *pending_linear_sync = None;
+    }
+}
+
+fn pending_linear_sync_summary(pending_linear_sync: &PendingLinearSync) -> String {
+    let operations = pending_linear_sync.operation_labels().join(", ");
+    let failure = pending_linear_sync
+        .last_failure
+        .as_ref()
+        .map(|failure| {
+            format!(
+                "{} failure | retry {}",
+                failure.kind.label(),
+                failure.retry_label(now_epoch_seconds())
+            )
+        })
+        .unwrap_or_else(|| "waiting to replay".to_string());
+    compact_session_summary([
+        Some(format!("Pending Linear sync: {operations}")),
+        Some(failure),
+    ])
+}
+
+fn defer_pending_linear_sync_operation<F>(
+    app_config: &AppConfig,
+    pending_linear_sync: &mut Option<PendingLinearSync>,
+    error: &anyhow::Error,
+    operation_label: &str,
+    log_path: &Path,
+    updater: F,
+) -> Result<()>
+where
+    F: FnOnce(&mut PendingLinearSync),
+{
+    update_pending_linear_sync(pending_linear_sync, updater);
+    record_pending_linear_sync_failure(app_config, pending_linear_sync, error);
+    append_worker_log(
+        log_path,
+        "pending linear sync",
+        &[format!("Deferred {operation_label}: {error:#}")],
+    )
+}
+
+fn write_pending_linear_sync_blocked_session(
+    issue: &IssueSummary,
+    session_context: &WorkerSessionContext<'_>,
+    turns_completed: u32,
+    provider_session_id: Option<&str>,
+    log_path: &Path,
+) -> Result<()> {
+    let summary = compact_session_summary([
+        Some("Blocked | pending Linear sync".to_string()),
+        session_context
+            .pending_linear_sync
+            .as_ref()
+            .map(pending_linear_sync_summary),
+        Some(format!("see {}", log_path.display())),
+    ]);
+    write_listen_session(
+        session_context.source_root,
+        session_context.project_selector,
+        build_worker_session(
+            issue,
+            SessionPhase::Blocked,
+            summary,
+            session_context,
+            turns_completed,
+            provider_session_id,
+            &session_context.canonical,
+        ),
+    )
 }
 
 fn write_listener_pull_request_body(
@@ -1344,17 +1963,13 @@ where
     Ok(())
 }
 
-async fn publish_listener_pull_request<C>(
-    service: &LinearService<C>,
+async fn publish_listener_pull_request(
     issue: &IssueSummary,
     workspace_path: &Path,
     branch: &str,
     mode: PullRequestPublishMode,
     review: Option<&ReviewReport>,
-) -> Result<Option<PullRequestLifecycleResult>>
-where
-    C: LinearClient,
-{
+) -> Result<Option<PullRequestLifecycleResult>> {
     if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
         return Ok(None);
     }
@@ -1373,21 +1988,16 @@ where
         },
     )?;
     ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
-    ensure_listener_pull_request_attachment(service, issue, &pull_request).await?;
     Ok(Some(pull_request))
 }
 
-async fn prepare_listener_pull_request_for_review<C>(
-    service: &LinearService<C>,
+async fn prepare_listener_pull_request_for_review(
     issue: &IssueSummary,
     workspace_path: &Path,
     branch: &str,
     existing_pull_request: &PullRequestSummary,
     review: &ReviewReport,
-) -> Result<Option<PullRequestLifecycleResult>>
-where
-    C: LinearClient,
-{
+) -> Result<Option<PullRequestLifecycleResult>> {
     if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
         return Ok(None);
     }
@@ -1429,7 +2039,6 @@ where
         );
     }
     ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
-    ensure_listener_pull_request_attachment(service, issue, &pull_request).await?;
     Ok(Some(pull_request))
 }
 
@@ -1568,7 +2177,6 @@ fn review_for_validation_failure(
 }
 
 async fn run_pre_pr_validation_gate(
-    service: &LinearService<ReqwestLinearClient>,
     gate_context: PrePrValidationGateContext<'_>,
     review: &ReviewReport,
     remaining_validation_repair_turns: &mut usize,
@@ -1630,13 +2238,6 @@ async fn run_pre_pr_validation_gate(
         remaining_after_failure,
         gate_context.pr_mutation_description,
     );
-    sync_review_tracking(
-        service,
-        gate_context.issue,
-        gate_context.turn_context,
-        &follow_up_review,
-    )
-    .await?;
     if budget_exhausted {
         write_listen_session(
             gate_context.phase_context.source_root,
@@ -1655,7 +2256,7 @@ async fn run_pre_pr_validation_gate(
                 &gate_context.phase_context.session_context.canonical,
             ),
         )?;
-        return Ok(ValidationGateOutcome::Exhausted);
+        return Ok(ValidationGateOutcome::Exhausted(follow_up_review));
     }
 
     *remaining_validation_repair_turns -= 1;
@@ -2779,7 +3380,6 @@ fn preview_text(value: &str) -> String {
 }
 
 async fn run_review_phase(
-    service: &LinearService<ReqwestLinearClient>,
     issue: &IssueSummary,
     turn_number: u32,
     meaningful_turn_progress: bool,
@@ -2834,7 +3434,6 @@ async fn run_review_phase(
             ),
         )?
     };
-    sync_review_tracking(service, issue, context, &report).await?;
     Ok(report)
 }
 
@@ -2889,40 +3488,75 @@ async fn sync_review_tracking(
     service: &LinearService<ReqwestLinearClient>,
     issue: &IssueSummary,
     context: &ListenTurnContext<'_>,
+    app_config: &AppConfig,
+    session_context: &mut WorkerSessionContext<'_>,
+    log_path: &Path,
     review: &ReviewReport,
 ) -> Result<()> {
     let body = render_review_workpad(issue, context, review);
+    let mut updated = false;
+    let mut sync_error = None;
     for attempt in 0..3 {
         match service
             .update_workpad_comment_by_id(context.workpad_comment_id, body.clone())
             .await
         {
-            Ok(_) => break,
+            Ok(_) => {
+                updated = true;
+                break;
+            }
             Err(error) if attempt < 2 && is_transient_linear_read_failure(&error) => {
                 sleep(Duration::from_millis(100)).await;
-                continue;
+                sync_error = Some(error);
             }
-            Err(_) => {
-                let mut updated = false;
-                for upsert_attempt in 0..3 {
-                    match service.upsert_workpad_comment(issue, body.clone()).await {
-                        Ok(_) => {
-                            updated = true;
-                            break;
-                        }
-                        Err(error)
-                            if upsert_attempt < 2 && is_transient_linear_read_failure(&error) =>
-                        {
-                            sleep(Duration::from_millis(100)).await;
-                        }
-                        Err(error) => return Err(error),
-                    }
+            Err(error) => {
+                sync_error = Some(error);
+                break;
+            }
+        }
+    }
+    if !updated {
+        for upsert_attempt in 0..3 {
+            match service.upsert_workpad_comment(issue, body.clone()).await {
+                Ok(_) => {
+                    updated = true;
+                    break;
                 }
-                if updated {
+                Err(error) if upsert_attempt < 2 && is_transient_linear_read_failure(&error) => {
+                    sleep(Duration::from_millis(100)).await;
+                    sync_error = Some(error);
+                }
+                Err(error) => {
+                    sync_error = Some(error);
                     break;
                 }
             }
         }
+    }
+    if updated {
+        update_pending_linear_sync(&mut session_context.pending_linear_sync, |pending| {
+            pending.workpad_body = None;
+        });
+    } else if let Some(error) = sync_error {
+        defer_pending_linear_sync_operation(
+            app_config,
+            &mut session_context.pending_linear_sync,
+            &error,
+            "workpad sync",
+            log_path,
+            |pending| {
+                pending.workpad_body = Some(body.clone());
+            },
+        )?;
+    } else {
+        update_pending_linear_sync(&mut session_context.pending_linear_sync, |pending| {
+            pending.workpad_body = Some(body.clone());
+        });
+        append_worker_log(
+            log_path,
+            "pending linear sync",
+            &["Deferred workpad sync without a captured Linear error".to_string()],
+        )?;
     }
     if let Some(backlog_issue) = context.backlog_issue {
         sync_backlog_progress_section(context.workspace_path, &backlog_issue.identifier, review)?;
@@ -3233,6 +3867,7 @@ fn build_worker_session(
         pid,
         session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
+        pending_linear_sync: context.pending_linear_sync.clone(),
         turns: Some(turns),
         tokens: canonical.tokens.clone(),
         turn_history: context.turn_history.clone(),
@@ -3321,6 +3956,20 @@ fn load_existing_latest_resume_handle(
         .into_iter()
         .find(|session| session.issue_matches(issue_identifier))
         .and_then(|session| session.latest_resume_handle))
+}
+
+fn load_existing_pending_linear_sync(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<PendingLinearSync>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.pending_linear_sync))
 }
 
 fn load_existing_turn_count(
@@ -3467,6 +4116,7 @@ mod tests {
             backlog_issue: None,
             pid: Some(1234),
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),

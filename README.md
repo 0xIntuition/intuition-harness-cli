@@ -287,6 +287,7 @@ meta runtime config --default-agent codex --default-model gpt-5.4 --default-reas
 meta runtime config --default-assignee viewer --default-state Backlog --default-priority 2 --default-label platform --default-label cli
 meta runtime config --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
 meta runtime config --vim-mode enabled
+meta runtime config --listen-retry-initial-backoff 3 --listen-retry-max-backoff 45
 meta runtime config --merge-validation-repair-attempts 8
 meta runtime config --merge-validation-transient-retry-attempts 2
 meta runtime config --merge-publication-retry-attempts 6
@@ -310,7 +311,7 @@ The persisted config can store:
 - install-scoped backlog ticket defaults under `[backlog]`, including `default_assignee`, `default_state` (the default Linear workflow status for new standalone issues), `default_priority`, additive `default_labels`, and zero-prompt `velocity_defaults`
 - install-scoped onboarding completion state
 - install-scoped Linear API key/default team/default project values
-- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, plan follow-up limit, and plan/technical issue labels
+- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, listen retry backoff, plan follow-up limit, and plan/technical issue labels
 - install-scoped UI defaults under `[defaults.ui]`, including `vim_mode = true|false` for safe `h/j/k/l` navigation aliases
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
@@ -353,6 +354,12 @@ Built-in reasoning options shipped in-repo:
 Use `meta runtime config --advanced-routing` for the dedicated routing dashboard, or use
 `--route`, `--route-agent`, `--route-model`, `--route-reasoning`, and `--clear-route` for
 non-interactive edits.
+
+Listen retry backoff lives under `[defaults.listen.retry]` with
+`initial_backoff_seconds` and `max_backoff_seconds`. When unset, the effective shared listen
+policy defaults to `2s` initial and `60s` max. Both values must stay within `1..=3600`, and the
+max backoff must be greater than or equal to the initial backoff. `meta runtime config --json`
+also renders the effective resolved values under `effective.listen_retry`.
 
 Supported route families:
 
@@ -1249,6 +1256,18 @@ Run the unattended agent daemon. The listener watches Todo issues, applies repo-
 
 Listen and merge now share the same validation-profile resolver. Validation selection follows `CLI override > repo-scoped .metastack/meta.json validation.commands > built-in repo heuristics`, and the resolved profile can include an optional repo-scoped label for diagnostics. `meta agents listen --check --root .` prints the active validation profile source, label, and commands so operators can confirm the deterministic gate before starting the daemon.
 
+The listener now also shares one install-scoped Linear retry contract and failure classifier across
+preflight, daemon, and worker paths. Transient failures during viewer lookup, issue listing, or
+session reconciliation no longer terminate the daemon. Instead, the listener keeps the last known
+queue and session snapshot visible, records degraded Linear state in the install-scoped listen
+store, and schedules the next retry using the shared backoff policy from `meta runtime config`.
+Textual `--once` output, `--once --json`, the dashboard, and `meta listen sessions inspect`
+surface the degraded failure kind, message, and retry timing.
+
+The shared classifier distinguishes transient, authentication, permission, configuration, and
+other Linear failures. Authentication, permission, and configuration failures still surface as
+degraded operator-actionable state rather than being silently treated as retryable outages.
+
 Repo-scoped listen validation defaults live in `.metastack/meta.json`:
 
 ```json
@@ -1270,6 +1289,12 @@ Legacy alias: `meta listen`
 `meta agents listen` keeps the same repository identity as the source checkout, but the worker prompt is anchored to the provided workspace checkout as the only local write scope. Implementation, validation, and local backlog updates must stay inside that workspace for the active repository unless the issue explicitly asks for a narrower subproject.
 
 The live terminal dashboard refreshes locally every second so session-state changes stay visible, while the configured listen poll interval continues to control how often Linear is queried. Steady-state listen runs stay entirely in the terminal TUI as an interactive session browser, `--render-once` emits a terminal snapshot, and `--once --json` emits one machine-readable poll-cycle payload without going through the ratatui snapshot path.
+
+When a worker has already created local workspace progress, later Linear failures in issue refresh,
+workpad sync, PR attachment, or review-state transitions are persisted as `pending_linear_sync`
+state instead of discarding the session. The next `meta agents listen`, `meta agents execute`, or
+`meta listen sessions resume` attempt replays that pending sync immediately after Linear recovers
+and clears the deferred state on success.
 
 When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and default textual inspection output render session-level `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The worker also appends one per-turn token summary line to the per-issue log and persists additive turn-history snapshots in the mirrored detail artifact so `meta listen sessions inspect --turns` can render the exact turn order, prompt mode (`full_prompt` or `continuation`), and per-turn token counts without reparsing raw provider JSON. The listener also persists canonical provider, model, reasoning, and token metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`. Persisted worker logs are a small compatibility surface for that repair pass: the current branded `--- intu listen turn ...` / `--- intu listen preflight failed @ ...` headers and the legacy `--- meta ...` equivalents remain readable, and preflight-failure blocks act only as repair boundaries rather than as recoverable canonical metadata on their own.
 The interactive dashboard has two primary panes: **Agent Sessions** (active and completed listener

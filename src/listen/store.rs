@@ -20,8 +20,8 @@ use crate::session_runtime::{
 
 use super::state::{
     AgentSession, COMPLETED_SESSION_TTL_SECONDS, CanonicalRepairRecord, CanonicalRepairStatus,
-    CanonicalSessionData, LatestResumeHandle, ListenState, PullRequestStatus, PullRequestSummary,
-    SessionPhase, TokenUsage, TurnTokenSnapshot,
+    CanonicalSessionData, LatestResumeHandle, ListenState, PendingLinearSync, PullRequestStatus,
+    PullRequestSummary, SessionPhase, TokenUsage, TurnTokenSnapshot,
 };
 
 const LISTEN_STORE_VERSION: u8 = 1;
@@ -173,6 +173,8 @@ pub(crate) struct ListenSessionDetail {
     pub pull_request: PullRequestSummary,
     #[serde(default)]
     pub latest_resume_handle: Option<LatestResumeHandle>,
+    #[serde(default)]
+    pub pending_linear_sync: Option<PendingLinearSync>,
     #[serde(default)]
     pub references: SessionDetailReferences,
     #[serde(default)]
@@ -705,6 +707,7 @@ impl ListenProjectStore {
                 canonical: session.canonical.clone(),
                 pull_request: session.pull_request.clone(),
                 latest_resume_handle: session.latest_resume_handle.clone(),
+                pending_linear_sync: session.pending_linear_sync.clone(),
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),
@@ -724,6 +727,7 @@ impl ListenProjectStore {
         detail.canonical = session.canonical.clone();
         detail.pull_request = session.pull_request.clone();
         detail.latest_resume_handle = session.latest_resume_handle.clone();
+        detail.pending_linear_sync = session.pending_linear_sync.clone();
         detail.references = SessionDetailReferences {
             workspace_path: session.workspace_path.clone(),
             backlog_path: session.backlog_path.clone(),
@@ -1607,6 +1611,7 @@ mod tests {
             session_id: Some(format!("session-{issue_identifier}")),
             turn_history: Vec::new(),
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             canonical: CanonicalSessionData::default(),
@@ -1835,6 +1840,7 @@ mod tests {
                 canonical: CanonicalSessionData::default(),
                 pull_request: PullRequestSummary::default(),
                 latest_resume_handle: None,
+                pending_linear_sync: None,
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),

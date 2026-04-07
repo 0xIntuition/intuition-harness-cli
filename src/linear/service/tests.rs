@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 
 use super::{
-    LinearService,
+    LinearFailureKind, LinearService, classify_linear_failure,
     test_support::{FakeLinearClient, comment, issue, issue_for_team, label, project, team},
 };
 use crate::linear::{
@@ -13,6 +13,42 @@ use crate::linear::{
     IssueUpdateRequest, LabelRef, LinearClient, ProjectSummary, TeamSummary, UserRef,
 };
 use crate::linear::{IssueCreateSpec, IssueEditSpec};
+
+#[test]
+fn classify_linear_failure_distinguishes_retryable_and_operator_errors() {
+    let cases = [
+        (
+            anyhow!("Linear request failed with status 429 Too Many Requests"),
+            LinearFailureKind::Transient,
+        ),
+        (
+            anyhow!("failed to reach the Linear GraphQL endpoint: connection refused"),
+            LinearFailureKind::Transient,
+        ),
+        (
+            anyhow!("Linear request failed with status 401 Unauthorized"),
+            LinearFailureKind::Authentication,
+        ),
+        (
+            anyhow!("Linear request failed with status 403 Forbidden"),
+            LinearFailureKind::Permission,
+        ),
+        (
+            anyhow!("Linear request failed with status 404 Not Found"),
+            LinearFailureKind::Configuration,
+        ),
+        (
+            anyhow!("Linear returned an unexpected error payload"),
+            LinearFailureKind::Other,
+        ),
+    ];
+
+    for (error, expected_kind) in cases {
+        let classified = classify_linear_failure(&error);
+        assert_eq!(classified.kind, expected_kind);
+        assert_eq!(classified.is_retryable(), expected_kind.is_retryable());
+    }
+}
 
 #[tokio::test]
 async fn list_issues_uses_filtered_query_and_applies_filters() {

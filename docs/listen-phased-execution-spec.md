@@ -136,6 +136,22 @@ checks or commit statuses. If CI is red:
 - local validation runs again before the next PR mutation
 - the same repair-turn budget gates additional retries
 
+## Linear Failure Recovery
+
+Listen-family Linear recovery now uses one shared classifier and one install-scoped retry
+contract:
+
+- Transient failures during viewer refresh, issue listing, or reconciliation do not terminate the
+  daemon. The listener preserves the last known queue and session snapshot, records degraded-state
+  metadata, and schedules the next retry from `[defaults.listen.retry]`.
+- Authentication, permission, and configuration failures remain visible as degraded
+  operator-actionable state instead of being treated as retryable transient outages.
+- If a worker already created local workspace progress, later Linear failures in issue refresh,
+  workpad sync, PR attachment, or review-state transitions are persisted as `pending_linear_sync`
+  and replayed on later `meta agents listen`, `meta agents execute`, or
+  `meta listen sessions resume` runs.
+- Successful replay clears the pending sync state from the persisted session artifacts.
+
 ## Tracking Artifacts
 
 ### Linear Workpad
@@ -155,6 +171,13 @@ If a local backlog entry exists, the listener updates a managed section in `inde
 - `## Listener Progress Checklist`
 
 This section is reporting output only. It must not decide ticket completion by itself.
+
+### Persisted Listener State
+
+The install-scoped listen store also carries:
+
+- degraded Linear state, including failure kind, failure message, and retry timing
+- deferred worker-side `pending_linear_sync` metadata for replayable remote operations
 
 ## Completion Rules
 

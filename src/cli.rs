@@ -1024,6 +1024,12 @@ pub struct ConfigArgs {
     /// Update the install-scoped listen poll interval (seconds).
     #[arg(long)]
     pub poll_interval: Option<String>,
+    /// Update the install-scoped initial retry backoff for Linear listen failures (seconds).
+    #[arg(long)]
+    pub listen_retry_initial_backoff: Option<String>,
+    /// Update the install-scoped maximum retry backoff for Linear listen failures (seconds).
+    #[arg(long)]
+    pub listen_retry_max_backoff: Option<String>,
     /// Update the install-scoped plan follow-up question limit.
     #[arg(long)]
     pub plan_follow_up_limit: Option<String>,

@@ -1,6 +1,6 @@
 # Agent Daemon
 
-`meta listen` is the Symphony-inspired orchestration entrypoint for the Rust CLI. The current slice watches a Linear project, filters eligible tickets, claims newly eligible work, prepares an isolated clone-backed ticket workspace, downloads issue attachment context into that workspace, seeds the Linear workpad comment, launches a supervised worker that keeps running the configured local agent until the issue leaves the active workflow states, and surfaces progress in a dashboard without leaving the terminal.
+`meta listen` is the Symphony-inspired orchestration entrypoint for the Rust CLI. The current slice watches a Linear project, filters eligible tickets, claims newly eligible work, prepares an isolated clone-backed ticket workspace, downloads issue attachment context into that workspace, seeds the Linear workpad comment, launches a supervised worker that keeps running the configured local agent until the issue leaves the active workflow states, and surfaces progress in a dashboard without leaving the terminal. The listener now degrades instead of exiting on transient Linear failures and persists worker-side deferred Linear sync so local progress remains resumable after recovery.
 
 ## Design Goals
 
@@ -69,6 +69,14 @@ is derived from the canonical source project root plus the effective project sel
 run, so the source repo checkout and any related worktrees still share one stored session per
 project target while different project targets in the same checkout keep separate locks and logs.
 
+Transient Linear failures during viewer refresh, issue listing, or reconciliation now preserve the
+last known queue and session snapshot. The listener records degraded-state metadata in the shared
+state file, keeps the dashboard and textual inspection surfaces populated, and schedules the next
+retry using the shared install-scoped listen backoff. Worker-side Linear mutations that happen
+after local progress exists, such as workpad sync, PR attachment, or review-state transitions, are
+persisted as pending sync state and replayed on later `meta agents listen`, `meta agents execute`,
+or `meta listen sessions resume` attempts.
+
 ## Command Surface
 
 Primary options:
@@ -81,6 +89,9 @@ Primary options:
 - `--once`: run a single live cycle and print a textual summary.
 - `--render-once`: run a single cycle and print a deterministic ratatui snapshot.
 - `--demo`: skip Linear and render sample queue/session data.
+- install-scoped listen retry backoff is configured through `meta runtime config
+  --listen-retry-initial-backoff <SECONDS> --listen-retry-max-backoff <SECONDS>`. Unset values
+  fall back to `2s` initial and `60s` max.
 - `listen sessions list|inspect|clear|resume`: inspect or reuse stored project sessions from the
   install-scoped listener store. Use `--project` with `inspect`, `clear`, or `resume` to target a
   non-default project from the same checkout, or `--project-key` when you already know the stored
@@ -116,6 +127,11 @@ Repo-scoped listen settings in `.metastack/meta.json`:
 - `listen.refresh_policy`: `reuse_and_refresh` (default) or `recreate_from_origin_main`.
 - `listen.instructions_path`: optional markdown file merged into the shared injected workflow contract for launched-agent instructions.
 - `listen.poll_interval_seconds`: default Linear refresh cadence for `meta listen` when `--poll-interval` is not passed.
+
+The shared failure classifier distinguishes transient, authentication, permission, configuration,
+and other Linear failures. Transient failures drive degraded-state retries, while the non-transient
+kinds remain visible as operator-actionable degraded state in runtime summaries and
+`meta listen sessions inspect`.
 
 Listen worker agent selection uses the shared built-in provider resolver:
 

@@ -404,6 +404,11 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             runtime_line("Runtime", &data.runtime.runtime, Color::Yellow),
             runtime_line("Tokens", &data.runtime.tokens, Color::Magenta),
             runtime_line("Rate Limits", &data.runtime.rate_limits, Color::LightBlue),
+            runtime_line(
+                "Linear status",
+                &data.runtime.linear_status,
+                linear_status_color(data.degraded.is_some()),
+            ),
             runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
             runtime_line(
                 "Terminal refresh",
@@ -512,6 +517,11 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         runtime_line("Runtime", &data.runtime.runtime, Color::Yellow),
         runtime_line("Tokens", &data.runtime.tokens, Color::Magenta),
         runtime_line("Rate Limits", &data.runtime.rate_limits, Color::LightBlue),
+        runtime_line(
+            "Linear status",
+            &data.runtime.linear_status,
+            linear_status_color(data.degraded.is_some()),
+        ),
         runtime_line("Project", &data.runtime.project, Color::White),
         runtime_line("Watching", &data.watch_scope, Color::LightGreen),
         runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
@@ -1023,6 +1033,18 @@ fn render_session_detail_text(
     } else if let Some(number) = detail.pull_request.number {
         summary_fields.push(SummaryField::new("PR Ref", format!("#{number}")));
     }
+    if let Some(pending_sync) = detail.pending_linear_sync.as_ref() {
+        summary_fields.push(SummaryField::new(
+            "Pending Linear sync",
+            pending_sync.operation_labels().join(", "),
+        ));
+        if let Some(failure) = pending_sync.last_failure.as_ref() {
+            summary_fields.push(SummaryField::new(
+                "Pending failure",
+                format!("{} | {}", failure.kind.label(), failure.message),
+            ));
+        }
+    }
     push_optional_summary_field(
         &mut summary_fields,
         "Branch",
@@ -1310,6 +1332,14 @@ fn runtime_line(label: &str, value: &str, color: Color) -> Line<'static> {
     ])
 }
 
+fn linear_status_color(is_degraded: bool) -> Color {
+    if is_degraded {
+        Color::LightRed
+    } else {
+        Color::LightGreen
+    }
+}
+
 fn label_style() -> Style {
     Style::default()
         .fg(Color::Gray)
@@ -1419,12 +1449,13 @@ fn snapshot(backend: &TestBackend) -> String {
 mod tests {
     use std::path::Path;
 
+    use ratatui::style::Color;
     use ratatui::text::Line;
 
     use super::{
         FocusPane, SessionBrowserAction, SessionBrowserState, detail_scroll_metrics,
-        render_active_issue_detail_text, render_dashboard, render_dashboard_with_state,
-        render_dashboard_with_view, render_session_detail_text,
+        linear_status_color, render_active_issue_detail_text, render_dashboard,
+        render_dashboard_with_state, render_dashboard_with_view, render_session_detail_text,
     };
     use crate::listen::{
         DashboardRuntimeContext, ListenCycleData, SessionListView, SessionPhase,
@@ -1440,6 +1471,12 @@ mod tests {
                 crate::branding::PROJECT_DIR
             ),
         )
+    }
+
+    #[test]
+    fn linear_status_color_reflects_degraded_state() {
+        assert_eq!(linear_status_color(false), Color::LightGreen);
+        assert_eq!(linear_status_color(true), Color::LightRed);
     }
 
     #[test]
