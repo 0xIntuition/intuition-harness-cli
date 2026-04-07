@@ -118,14 +118,14 @@ The verification report includes:
 - overall status and summary
 - resolved verification-route diagnostics
 - per-criterion code-review results with findings and remediation
-- route-scoped E2E step results with bounded stdout/stderr evidence
+- route-scoped E2E step results with bounded runtime plus bounded stdout/stderr evidence
 - aggregate battle-test sampling results
 - remediation items for the next repair turn
 
 If the verifier output is missing or malformed, verification fails closed instead of silently
-approving the ticket. Verification failures reuse the shared repair loop: the draft PR stays in
-place, remediation is injected into the next execution turn, and the worker blocks when the repair
-budget is exhausted.
+approving the ticket. Verification failures use their own bounded retry budget: the draft PR stays
+in place, remediation is injected into the next execution turn, and the worker blocks when the
+verification repair budget is exhausted.
 
 ### Validate
 

@@ -462,32 +462,32 @@ pub(crate) fn discover_battle_test_inputs(
 }
 
 pub(crate) fn truncate_for_evidence(text: &str) -> String {
-    let compact = text.trim();
-    if compact.len() <= EVIDENCE_PREVIEW_LIMIT {
-        compact.to_string()
-    } else {
-        format!(
-            "{}...",
-            &compact[..EVIDENCE_PREVIEW_LIMIT.saturating_sub(3)]
-        )
-    }
+    truncate_with_ellipsis(text.trim(), EVIDENCE_PREVIEW_LIMIT)
 }
 
 pub(crate) fn truncate_for_battle_test_input(text: &str) -> String {
-    let compact = text.trim();
-    if compact.len() <= BATTLE_TEST_INPUT_PREVIEW_LIMIT {
-        compact.to_string()
+    truncate_with_ellipsis(text.trim(), BATTLE_TEST_INPUT_PREVIEW_LIMIT)
+}
+
+fn truncate_with_ellipsis(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_string()
     } else {
-        format!(
-            "{}...",
-            &compact[..BATTLE_TEST_INPUT_PREVIEW_LIMIT.saturating_sub(3)]
-        )
+        let mut truncated = text
+            .chars()
+            .take(limit.saturating_sub(3))
+            .collect::<String>();
+        truncated.push_str("...");
+        truncated
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::discover_battle_test_inputs;
+    use super::{
+        BATTLE_TEST_INPUT_PREVIEW_LIMIT, EVIDENCE_PREVIEW_LIMIT, discover_battle_test_inputs,
+        truncate_for_battle_test_input, truncate_for_evidence,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -516,5 +516,17 @@ mod tests {
             ".intuition/verification/inputs/agents.listen/sample.md"
         );
         assert_eq!(inputs[0].preview, "battle test sample");
+    }
+
+    #[test]
+    fn truncate_helpers_preserve_utf8_boundaries() {
+        let evidence = truncate_for_evidence(&"é".repeat(EVIDENCE_PREVIEW_LIMIT + 10));
+        assert!(evidence.ends_with("..."));
+        assert_eq!(evidence.chars().count(), EVIDENCE_PREVIEW_LIMIT);
+
+        let battle =
+            truncate_for_battle_test_input(&"界".repeat(BATTLE_TEST_INPUT_PREVIEW_LIMIT + 5));
+        assert!(battle.ends_with("..."));
+        assert_eq!(battle.chars().count(), BATTLE_TEST_INPUT_PREVIEW_LIMIT);
     }
 }

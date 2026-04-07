@@ -213,6 +213,21 @@ fn listen_verification_markdown_path(
 }
 
 #[cfg(unix)]
+fn write_listen_verification_report(
+    config_path: &Path,
+    repo_root: &Path,
+    issue_identifier: &str,
+    report: serde_json::Value,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let path = listen_verification_json_path(config_path, repo_root, issue_identifier)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
+    Ok(path)
+}
+
+#[cfg(unix)]
 fn read_listen_fixture(name: &str) -> Result<String, Box<dyn Error>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -6302,6 +6317,14 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
     fs::set_permissions(&stub_path, permissions)?;
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+    fs::create_dir_all(&recipe_dir)?;
+    fs::write(
+        recipe_dir.join("agents.listen.yaml"),
+        r#"quality_criteria:
+  - Verification proof.
+"#,
+    )?;
     let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
@@ -9717,11 +9740,63 @@ printf '%s' 'not-json'
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
-    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
-    fs::create_dir_all(&backlog_dir)?;
+    let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+    fs::create_dir_all(&recipe_dir)?;
     fs::write(
-        backlog_dir.join("index.md"),
-        "# MET-32\n\n## Tasks\n\n- [x] Verification ready\n",
+        recipe_dir.join("agents.listen.yaml"),
+        r#"quality_criteria:
+  - Verification proof.
+"#,
+    )?;
+    write_listen_verification_report(
+        &config_path,
+        &repo_root,
+        "MET-32",
+        json!({
+            "version": 1,
+            "issue_identifier": "MET-32",
+            "turn_number": 0,
+            "generated_at_epoch_seconds": 1_773_575_000u64,
+            "status": "failed",
+            "summary": "Previous verification failed.",
+            "route": {
+                "route_key": "agents.listen.verification",
+                "provider": "verify-stub",
+                "provider_source": "command_route:agents.listen.verification"
+            },
+            "quality_criteria": [
+                "Verification proof."
+            ],
+            "code_review": {
+                "status": "failed",
+                "summary": "Previous verification failed.",
+                "criteria": [
+                    {
+                        "name": "Verification proof.",
+                        "status": "failed",
+                        "summary": "Verification needs repair.",
+                        "findings": [],
+                        "remediation": "Fix verification issue"
+                    }
+                ],
+                "notes": []
+            },
+            "e2e": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "steps": []
+            },
+            "battle_tests": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "sampled_count": 0,
+                "cases": []
+            },
+            "remediation": [
+                "Fix verification issue"
+            ],
+            "notes": []
+        }),
     )?;
 
     let state_path = write_listen_store_session(
@@ -9771,8 +9846,6 @@ printf '%s' 'not-json'
             "MET-32",
             "--workpad-comment-id",
             "comment-32",
-            "--backlog-issue",
-            "MET-32",
             "--api-key",
             "token",
             "--api-url",
@@ -9931,6 +10004,46 @@ e2e:
     ));
     fs::create_dir_all(&input_dir)?;
     fs::write(input_dir.join("sample.md"), "sample battle input\n")?;
+    write_listen_verification_report(
+        &config_path,
+        &repo_root,
+        "MET-32",
+        json!({
+            "version": 1,
+            "issue_identifier": "MET-32",
+            "turn_number": 0,
+            "generated_at_epoch_seconds": 1_773_575_000u64,
+            "status": "failed",
+            "summary": "Previous verification failed.",
+            "route": {
+                "route_key": "agents.listen.verification",
+                "provider": "verify-stub",
+                "provider_source": "repo_default"
+            },
+            "quality_criteria": [],
+            "code_review": {
+                "status": "failed",
+                "summary": "Previous verification failed.",
+                "criteria": [],
+                "notes": []
+            },
+            "e2e": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "steps": []
+            },
+            "battle_tests": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "sampled_count": 0,
+                "cases": []
+            },
+            "remediation": [
+                "Repair the verification findings and rerun verification."
+            ],
+            "notes": []
+        }),
+    )?;
 
     let state_path = write_listen_store_session(
         &config_path,
@@ -10025,6 +10138,205 @@ e2e:
 
     let state = fs::read_to_string(&state_path)?;
     assert!(state.contains("\"phase\": \"completed\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_keeps_validation_repair_budget_after_verification_retry()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "validation": {
+    "commands": ["validation-stub"],
+    "repair_attempts": 1
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "exec-stub"
+
+[agents.routing.commands."agents.listen.verification"]
+provider = "verify-stub"
+
+[agents.commands.exec-stub]
+command = "exec-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.verify-stub]
+command = "verify-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[verification]
+battle_test_count = 0
+"#,
+        ),
+    )?;
+    fs::write(
+        bin_dir.join("exec-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/exec-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+mkdir -p src
+printf '// execution turn %s\n' "$count" > "src/exec-turn-$count.rs"
+"#,
+    )?;
+    fs::write(
+        bin_dir.join("verify-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/verify-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"summary":"Initial verification failed","criteria":[{"name":"Verification proof.","status":"failed","summary":"Verification needs repair.","remediation":"Fix verification issue"}],"battle_tests":[],"notes":[]}'
+else
+  printf '%s' '{"summary":"Verification passed","criteria":[{"name":"Verification proof.","status":"passed","summary":"Verification proof is satisfied."}],"battle_tests":[],"notes":[]}'
+fi
+"#,
+    )?;
+    fs::write(
+        bin_dir.join("validation-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/validation-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' 'validation failed once' >&2
+  exit 1
+fi
+printf '%s\n' 'validation passed'
+"#,
+    )?;
+    for command_name in ["exec-stub", "verify-stub", "validation-stub"] {
+        let mut permissions = fs::metadata(bin_dir.join(command_name))?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(bin_dir.join(command_name), permissions)?;
+    }
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+    fs::create_dir_all(&recipe_dir)?;
+    fs::write(
+        recipe_dir.join("agents.listen.yaml"),
+        r#"quality_criteria:
+  - Verification proof.
+"#,
+    )?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Verification ready\n",
+    )?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Split verification and validation repair budgets",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "blocked",
+            "summary": "Waiting for verification retry",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "branch": "main",
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/example/repo/pull/321",
+                "status": "draft"
+            },
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--max-turns",
+            "3",
+        ])
+        .assert()
+        .success();
+
+    wait_for_path(&stub_dir.join("validation-count.txt"))?;
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("validation-count.txt"))?.trim(),
+        "2"
+    );
+
+    let state = fs::read_to_string(&state_path)?;
+    assert!(state.contains("\"phase\": \"completed\""), "state={state}");
 
     Ok(())
 }

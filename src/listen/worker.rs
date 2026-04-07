@@ -1,11 +1,12 @@
 use std::cell::RefCell;
 use std::fs;
-use std::io::Write;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -71,6 +72,7 @@ const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
 const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
+const E2E_RECIPE_STEP_TIMEOUT_SECONDS: u64 = 300;
 
 fn listen_preflight_failure_header(timestamp: &str) -> String {
     format!(
@@ -167,7 +169,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     let _initial_meaningful_progress = workspace_has_meaningful_progress(&workspace_path, true)?;
     let mut stalled_turns = 0u32;
     let mut last_review: Option<ReviewReport> = None;
-    let mut remaining_validation_repair_turns = PlanningMeta::load(&workspace_path)
+    let validation_repair_attempts = PlanningMeta::load(&workspace_path)
         .with_context(|| {
             format!(
                 "failed to load repo validation settings from `{}`",
@@ -176,6 +178,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         })?
         .validation
         .repair_attempts();
+    let mut remaining_verification_repair_turns = validation_repair_attempts;
+    let mut remaining_validation_repair_turns = validation_repair_attempts;
     if let Err(error) = preflight::run_listen_preflight(
         &service,
         &linear_config,
@@ -573,6 +577,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 session_context: &session_context,
                 provider_session_id: provider_session_id.as_deref(),
                 log_path: &log_path,
+                previous_review: last_review.as_ref(),
             },
         )
         .await?;
@@ -595,6 +600,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     session_context: &session_context,
                     provider_session_id: provider_session_id.as_deref(),
                     log_path: &log_path,
+                    previous_review: None,
                 },
             )
             .await?;
@@ -609,6 +615,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         session_context: &session_context,
                         provider_session_id: provider_session_id.as_deref(),
                         log_path: &log_path,
+                        previous_review: None,
                     },
                 )
                 .await?;
@@ -616,9 +623,9 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 sync_review_tracking(&service, &issue, &turn_context, &review, &session_context)
                     .await?;
                 if verification.status == VerificationStatus::Failed {
-                    let budget_exhausted = remaining_validation_repair_turns == 0;
+                    let budget_exhausted = remaining_verification_repair_turns == 0;
                     let remaining_after_failure =
-                        remaining_validation_repair_turns.saturating_sub(1);
+                        remaining_verification_repair_turns.saturating_sub(1);
                     let follow_up_review = review_for_verification_failure(
                         &review,
                         &verification,
@@ -653,7 +660,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         )?;
                         return Ok(());
                     }
-                    remaining_validation_repair_turns -= 1;
+                    remaining_verification_repair_turns -= 1;
                     continue;
                 }
                 let review = match run_pre_pr_validation_gate(
@@ -667,6 +674,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             session_context: &session_context,
                             provider_session_id: provider_session_id.as_deref(),
                             log_path: &log_path,
+                            previous_review: None,
                         },
                         turns_completed,
                         pr_mutation_description: "review-ready PR promotion",
@@ -896,6 +904,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             session_context: &session_context,
                             provider_session_id: provider_session_id.as_deref(),
                             log_path: &log_path,
+                            previous_review: None,
                         },
                         turns_completed,
                         pr_mutation_description: "draft PR publication",
@@ -1141,6 +1150,7 @@ struct WorkerPhaseContext<'a> {
     session_context: &'a WorkerSessionContext<'a>,
     provider_session_id: Option<&'a str>,
     log_path: &'a Path,
+    previous_review: Option<&'a ReviewReport>,
 }
 
 #[derive(Debug, Default)]
@@ -1656,8 +1666,8 @@ fn output_excerpt(text: &str) -> Option<String> {
         .join(" | ");
     if excerpt.is_empty() {
         None
-    } else if excerpt.len() > 240 {
-        Some(format!("{}...", &excerpt[..237]))
+    } else if excerpt.chars().count() > 240 {
+        Some(truncate_with_ellipsis(&excerpt, 240))
     } else {
         Some(excerpt)
     }
@@ -3132,10 +3142,10 @@ fn strip_code_fence(raw: &str) -> Option<String> {
 
 fn preview_text(value: &str) -> String {
     const MAX_PREVIEW_LEN: usize = 240;
-    if value.len() <= MAX_PREVIEW_LEN {
+    if value.chars().count() <= MAX_PREVIEW_LEN {
         value.to_string()
     } else {
-        format!("{}...", &value[..MAX_PREVIEW_LEN])
+        truncate_with_ellipsis(value, MAX_PREVIEW_LEN)
     }
 }
 
@@ -3190,10 +3200,12 @@ async fn run_review_phase(
             context,
             meaningful_turn_progress,
             turn_progress,
-            matches!(
+            !matches!(
                 phase_context.session_context.pull_request.status,
-                PullRequestStatus::Draft
+                PullRequestStatus::Unpublished
             ),
+            phase_context.previous_review,
+            phase_context.session_context.verification_summary.as_ref(),
         )?
     };
     sync_review_tracking(
@@ -3901,6 +3913,18 @@ fn run_e2e_recipe_step(
     workspace_path: &Path,
     step: &VerificationRecipeStep,
 ) -> Result<VerificationE2eStepReport> {
+    run_e2e_recipe_step_with_timeout(
+        workspace_path,
+        step,
+        Duration::from_secs(E2E_RECIPE_STEP_TIMEOUT_SECONDS),
+    )
+}
+
+fn run_e2e_recipe_step_with_timeout(
+    workspace_path: &Path,
+    step: &VerificationRecipeStep,
+    timeout: Duration,
+) -> Result<VerificationE2eStepReport> {
     if step.command.is_empty() {
         return Ok(VerificationE2eStepReport {
             name: step.name.clone(),
@@ -3913,38 +3937,32 @@ fn run_e2e_recipe_step(
         });
     }
 
-    let output = Command::new(&step.command[0])
-        .args(&step.command[1..])
-        .current_dir(workspace_path)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to run verification recipe step `{}` in `{}`",
-                step.name,
-                workspace_path.display()
-            )
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let output = run_e2e_recipe_command(workspace_path, step, timeout)?;
     let mut assertions = Vec::new();
-    let expected_exit_code = step.expect_exit_code.unwrap_or(0);
-    if output.status.code() != Some(expected_exit_code) {
+    if output.timed_out {
         assertions.push(format!(
-            "expected exit code {expected_exit_code}, observed {}",
-            output
-                .status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string())
+            "step timed out after {}",
+            format_duration_label(timeout)
         ));
+    } else {
+        let expected_exit_code = step.expect_exit_code.unwrap_or(0);
+        if output.exit_code != Some(expected_exit_code) {
+            assertions.push(format!(
+                "expected exit code {expected_exit_code}, observed {}",
+                output
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            ));
+        }
     }
     for expected in &step.expect_stdout_contains {
-        if !stdout.contains(expected) {
+        if !output.stdout.contains(expected) {
             assertions.push(format!("stdout must contain `{expected}`"));
         }
     }
     for expected in &step.expect_stderr_contains {
-        if !stderr.contains(expected) {
+        if !output.stderr.contains(expected) {
             assertions.push(format!("stderr must contain `{expected}`"));
         }
     }
@@ -3969,11 +3987,165 @@ fn run_e2e_recipe_step(
         } else {
             VerificationStatus::Failed
         },
-        exit_code: output.status.code(),
+        exit_code: output.exit_code,
         assertions,
-        stdout_excerpt: output_excerpt(&stdout),
-        stderr_excerpt: output_excerpt(&stderr),
+        stdout_excerpt: output_excerpt(&output.stdout),
+        stderr_excerpt: output_excerpt(&output.stderr),
     })
+}
+
+struct RecipeStepCommandOutput {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+}
+
+fn run_e2e_recipe_command(
+    workspace_path: &Path,
+    step: &VerificationRecipeStep,
+    timeout: Duration,
+) -> Result<RecipeStepCommandOutput> {
+    let mut command = Command::new(&step.command[0]);
+    command.args(&step.command[1..]);
+    command.current_dir(workspace_path);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    configure_command_process_group(&mut command);
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to run verification recipe step `{}` in `{}`",
+            step.name,
+            workspace_path.display()
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        anyhow!(
+            "failed to capture stdout for verification recipe step `{}`",
+            step.name
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        anyhow!(
+            "failed to capture stderr for verification recipe step `{}`",
+            step.name
+        )
+    })?;
+    let stdout_handle = drain_recipe_stream(stdout, step.name.clone(), "stdout");
+    let stderr_handle = drain_recipe_stream(stderr, step.name.clone(), "stderr");
+
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().with_context(|| {
+            format!(
+                "failed to wait for verification recipe step `{}` in `{}`",
+                step.name,
+                workspace_path.display()
+            )
+        })? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            terminate_command_process_group(&mut child).with_context(|| {
+                format!(
+                    "failed to terminate verification recipe step `{}` after timeout",
+                    step.name
+                )
+            })?;
+            break child.wait().with_context(|| {
+                format!(
+                    "failed to reap verification recipe step `{}` after timeout",
+                    step.name
+                )
+            })?;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    Ok(RecipeStepCommandOutput {
+        exit_code: status.code(),
+        stdout: stdout_handle
+            .join()
+            .map_err(|_| anyhow!("stdout drain thread panicked for `{}`", step.name))??,
+        stderr: stderr_handle
+            .join()
+            .map_err(|_| anyhow!("stderr drain thread panicked for `{}`", step.name))??,
+        timed_out,
+    })
+}
+
+fn drain_recipe_stream<R>(
+    mut reader: R,
+    step_name: String,
+    stream_name: &'static str,
+) -> thread::JoinHandle<Result<String>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).with_context(|| {
+            format!("failed to read {stream_name} for verification recipe step `{step_name}`")
+        })?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    })
+}
+
+#[cfg(unix)]
+fn configure_command_process_group(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_command_process_group(_: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_command_process_group(child: &mut std::process::Child) -> Result<()> {
+    let pid = child.id() as i32;
+    if pid > 0 {
+        let result = unsafe { libc::killpg(pid, libc::SIGKILL) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context("failed to kill verification recipe process group");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_command_process_group(child: &mut std::process::Child) -> Result<()> {
+    child
+        .kill()
+        .context("failed to kill verification recipe step")
+}
+
+fn format_duration_label(timeout: Duration) -> String {
+    if timeout.subsec_millis() == 0 && timeout.as_secs() > 0 {
+        format!("{}s", timeout.as_secs())
+    } else {
+        format!("{}ms", timeout.as_millis())
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let mut truncated = value.chars().take(max_chars - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn resolve_workspace_assertion_path(workspace_path: &Path, candidate: &str) -> Result<PathBuf> {
@@ -4252,7 +4424,9 @@ fn heuristic_review_report(
     context: &ListenTurnContext<'_>,
     _meaningful_turn_progress: bool,
     turn_progress: &super::TurnProgress,
-    has_existing_draft_pr: bool,
+    has_existing_pull_request: bool,
+    previous_review: Option<&ReviewReport>,
+    verification_summary: Option<&VerificationSummary>,
 ) -> Result<ReviewReport> {
     let acceptance = extract_acceptance_criteria(issue.description.as_deref());
     let validation = extract_validation_requirements(issue.description.as_deref());
@@ -4266,18 +4440,24 @@ fn heuristic_review_report(
     let backlog_complete = backlog_progress
         .as_ref()
         .is_some_and(|progress| progress.total > 0 && progress.completed == progress.total);
-    let complete_from_existing_draft_pr =
-        has_existing_draft_pr && acceptance.is_empty() && validation.is_empty();
+    let complete_from_retry = has_existing_pull_request
+        && acceptance.is_empty()
+        && validation.is_empty()
+        && (verification_summary
+            .is_some_and(|summary| summary.status == VerificationStatus::Failed)
+            || previous_review.is_some_and(|review| !review.validation_remaining.is_empty()));
     let complete = if backlog_progress
         .as_ref()
         .is_some_and(|progress| progress.total > 0)
     {
-        backlog_complete || complete_from_existing_draft_pr
+        backlog_complete || complete_from_retry
     } else {
-        // Repair-loop retries can resume from an already-published draft PR even
-        // when there is no backlog checklist. In that case the dedicated
-        // verification phase becomes the authoritative readiness gate.
-        complete_from_existing_draft_pr
+        // Without a backlog checklist the heuristic still does not have enough
+        // signal to declare completion on its own. The only exception is an
+        // explicit gate-repair retry, where a stored failed verification
+        // summary or the previous review's validation-repair context provides
+        // the missing readiness signal.
+        complete_from_retry
     };
     let changed_items = turn_progress
         .implementation_entries
@@ -4636,13 +4816,17 @@ mod tests {
         build_worker_session, continuation_id_for_invocation, parse_claude_resume_handle,
         parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
     };
+    use crate::config::{AppConfig, PlanningMeta};
     use crate::linear::{IssueSummary, TeamRef};
-    use crate::listen::verification::{VerificationStatus, VerificationSummary};
+    use crate::listen::verification::{
+        VerificationRecipeStep, VerificationStatus, VerificationSummary,
+    };
     use crate::listen::{
         CanonicalSessionData, PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage,
     };
     use std::fs;
     use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn issue() -> IssueSummary {
@@ -5238,5 +5422,212 @@ old
             "should parse session_id from plain JSON object"
         );
         assert_eq!(handle.unwrap().id, "abc-123");
+    }
+
+    #[test]
+    fn heuristic_review_requires_failed_verification_to_complete_without_backlog_signal() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+        let progress = super::super::TurnProgress {
+            planning_entries: Vec::new(),
+            implementation_entries: vec!["src/lib.rs".to_string()],
+        };
+
+        let report = super::heuristic_review_report(
+            &test_issue("MET-57"),
+            &context,
+            true,
+            &progress,
+            true,
+            None,
+            None,
+        )
+        .expect("heuristic review should succeed");
+
+        assert!(!report.complete);
+        assert!(
+            report.remaining_items.is_empty(),
+            "no acceptance criteria means the heuristic should wait for a stronger signal"
+        );
+    }
+
+    #[test]
+    fn heuristic_review_allows_failed_verification_retry_without_backlog_signal() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+        let progress = super::super::TurnProgress {
+            planning_entries: Vec::new(),
+            implementation_entries: vec!["src/lib.rs".to_string()],
+        };
+
+        let report = super::heuristic_review_report(
+            &test_issue("MET-57"),
+            &context,
+            true,
+            &progress,
+            true,
+            None,
+            Some(&VerificationSummary {
+                status: VerificationStatus::Failed,
+                summary: "Previous verification failed.".to_string(),
+                ..VerificationSummary::default()
+            }),
+        )
+        .expect("heuristic review should succeed");
+
+        assert!(report.complete);
+        assert_eq!(
+            report.summary,
+            "Heuristic review believes the ticket work is complete."
+        );
+    }
+
+    #[test]
+    fn heuristic_review_allows_validation_retry_without_backlog_signal() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+        let progress = super::super::TurnProgress {
+            planning_entries: Vec::new(),
+            implementation_entries: vec!["src/lib.rs".to_string()],
+        };
+        let report = super::heuristic_review_report(
+            &test_issue("MET-57"),
+            &context,
+            true,
+            &progress,
+            true,
+            Some(&super::ReviewReport {
+                validation_remaining: vec![
+                    "Local validation must pass before ready promotion.".to_string(),
+                ],
+                ..super::ReviewReport::default()
+            }),
+            Some(&VerificationSummary {
+                status: VerificationStatus::Passed,
+                summary: "Verification already passed.".to_string(),
+                ..VerificationSummary::default()
+            }),
+        )
+        .expect("heuristic review should succeed");
+
+        assert!(report.complete);
+    }
+
+    #[test]
+    fn e2e_recipe_step_times_out_cleanly() {
+        let temp = tempdir().expect("tempdir should build");
+        let report = super::run_e2e_recipe_step_with_timeout(
+            temp.path(),
+            &VerificationRecipeStep {
+                name: "sleepy".to_string(),
+                command: vec!["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
+                ..VerificationRecipeStep::default()
+            },
+            Duration::from_millis(50),
+        )
+        .expect("timed e2e step should return a report");
+
+        assert_eq!(report.status, VerificationStatus::Failed);
+        assert!(
+            report
+                .assertions
+                .iter()
+                .any(|assertion| assertion.contains("timed out")),
+            "assertions={:?}",
+            report.assertions
+        );
     }
 }
