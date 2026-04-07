@@ -222,11 +222,18 @@ struct LoadingApp {
 
 struct PendingSplitJob {
     receiver: Receiver<SplitWorkerReport>,
+    mode: PendingSplitMode,
 }
 
 struct SplitWorkerReport {
     continuation: Option<AgentContinuation>,
     outcome: Result<SplitProposal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingSplitMode {
+    InitialGeneration,
+    Refinement,
 }
 
 #[derive(Debug)]
@@ -275,28 +282,18 @@ pub async fn run_split(args: &SplitArgs) -> Result<SplitReport> {
     ensure_backlog_templates(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(&args.client, None)?;
     let source = service.load_issue(&args.issue).await?;
-    let mut continuation = None;
-    let proposal = generate_split_proposal(
-        &root,
-        &source,
-        discussion_budgets,
-        None,
-        args,
-        &mut continuation,
-    )?;
-    let remembered_selection = load_remembered_backlog_selection(&root)?;
-    let apply_context = SplitApplyContext {
-        root: &root,
-        app_config: &app_config,
-        planning_meta: &planning_meta,
-        remembered_selection: &remembered_selection,
-        service: &service,
-        source: &source,
-        args,
-    };
 
     let can_launch_tui = io::stdin().is_terminal() && io::stdout().is_terminal();
     if args.no_interactive || (!args.render_once && !can_launch_tui) {
+        let mut continuation = None;
+        let proposal = generate_split_proposal(
+            &root,
+            &source,
+            discussion_budgets,
+            None,
+            args,
+            &mut continuation,
+        )?;
         return Ok(SplitReport::Proposed(Box::new(ProposedSplitReport {
             source,
             proposal,
@@ -304,20 +301,23 @@ pub async fn run_split(args: &SplitArgs) -> Result<SplitReport> {
     }
 
     if args.render_once {
-        return match run_render_once_session(
-            &root,
-            source.clone(),
-            proposal,
-            continuation,
-            discussion_budgets,
-            args,
-        )? {
+        return match run_render_once_session(&root, source.clone(), discussion_budgets, args)? {
             RenderOnceSplitResult::Snapshot(snapshot) => Ok(SplitReport::Rendered(snapshot)),
             RenderOnceSplitResult::Confirmed {
                 proposal,
                 selected_indices,
                 selected_dependency_indices,
             } => {
+                let remembered_selection = load_remembered_backlog_selection(&root)?;
+                let apply_context = SplitApplyContext {
+                    root: &root,
+                    app_config: &app_config,
+                    planning_meta: &planning_meta,
+                    remembered_selection: &remembered_selection,
+                    service: &service,
+                    source: &source,
+                    args,
+                };
                 apply_split(
                     &apply_context,
                     &proposal,
@@ -329,20 +329,23 @@ pub async fn run_split(args: &SplitArgs) -> Result<SplitReport> {
         };
     }
 
-    match run_interactive_split_session(
-        &root,
-        source.clone(),
-        proposal,
-        continuation,
-        discussion_budgets,
-        args,
-    )? {
+    match run_interactive_split_session(&root, source.clone(), discussion_budgets, args)? {
         InteractiveSplitExit::Cancelled => Ok(SplitReport::Cancelled),
         InteractiveSplitExit::Confirmed {
             proposal,
             selected_indices,
             selected_dependency_indices,
         } => {
+            let remembered_selection = load_remembered_backlog_selection(&root)?;
+            let apply_context = SplitApplyContext {
+                root: &root,
+                app_config: &app_config,
+                planning_meta: &planning_meta,
+                remembered_selection: &remembered_selection,
+                service: &service,
+                source: &source,
+                args,
+            };
             apply_split(
                 &apply_context,
                 &proposal,
@@ -554,12 +557,11 @@ fn validate_split_proposal(mut proposal: SplitProposal) -> Result<SplitProposal>
 fn run_interactive_split_session(
     root: &Path,
     source: IssueSummary,
-    proposal: SplitProposal,
-    continuation: Option<AgentContinuation>,
     discussion_budgets: TicketDiscussionBudgets,
     args: &SplitArgs,
 ) -> Result<InteractiveSplitExit> {
-    let mut app = SplitApp::new(source, proposal, continuation);
+    let mut app = SplitApp::loading(source);
+    start_split_initial_generation(&mut app, root, discussion_budgets, args.clone());
 
     let mut stdout = io::stdout();
     enable_raw_mode().context("failed to enable raw mode for split review")?;
@@ -660,15 +662,14 @@ fn run_interactive_split_session(
 fn run_render_once_session(
     root: &Path,
     source: IssueSummary,
-    proposal: SplitProposal,
-    continuation: Option<AgentContinuation>,
     discussion_budgets: TicketDiscussionBudgets,
     args: &SplitArgs,
 ) -> Result<RenderOnceSplitResult> {
     let backend = TestBackend::new(args.width, args.height);
     let mut terminal =
         Terminal::new(backend).context("failed to initialize split render-once backend")?;
-    let mut app = SplitApp::new(source, proposal, continuation);
+    let mut app = SplitApp::loading(source);
+    start_split_initial_generation(&mut app, root, discussion_budgets, args.clone());
 
     for event in &args.events {
         process_pending_split_job_blocking(&mut app)?;
@@ -893,6 +894,33 @@ fn start_split_refinement(
             addendum,
             app.continuation.clone(),
         ),
+        mode: PendingSplitMode::Refinement,
+    });
+}
+
+fn start_split_initial_generation(
+    app: &mut SplitApp,
+    root: &Path,
+    discussion_budgets: TicketDiscussionBudgets,
+    args: SplitArgs,
+) {
+    app.loading = Some(LoadingApp {
+        message: "Generating split proposal".to_string(),
+        detail:
+            "Reviewing the issue context and drafting child issues before the review flow opens."
+                .to_string(),
+        spinner_index: 0,
+    });
+    app.pending = Some(PendingSplitJob {
+        receiver: spawn_split_refinement_job(
+            root.to_path_buf(),
+            app.source.clone(),
+            discussion_budgets,
+            args,
+            String::new(),
+            None,
+        ),
+        mode: PendingSplitMode::InitialGeneration,
     });
 }
 
@@ -931,10 +959,15 @@ fn process_pending_split_job(app: &mut SplitApp) -> Result<()> {
     match pending.receiver.try_recv() {
         Ok(report) => finish_pending_split_job(app, report),
         Err(TryRecvError::Empty) => Ok(()),
-        Err(TryRecvError::Disconnected) => restore_split_after_error(
-            app,
-            "split refinement worker exited before returning a result".to_string(),
-        ),
+        Err(TryRecvError::Disconnected) => match pending.mode {
+            PendingSplitMode::InitialGeneration => {
+                bail!("split generation worker exited before returning a result")
+            }
+            PendingSplitMode::Refinement => restore_split_after_error(
+                app,
+                "split refinement worker exited before returning a result".to_string(),
+            ),
+        },
     }
 }
 
@@ -953,7 +986,7 @@ fn process_pending_split_job_blocking(app: &mut SplitApp) -> Result<()> {
 }
 
 fn finish_pending_split_job(app: &mut SplitApp, report: SplitWorkerReport) -> Result<()> {
-    let _pending = app
+    let pending = app
         .pending
         .take()
         .ok_or_else(|| anyhow!("split refinement job disappeared unexpectedly"))?;
@@ -975,7 +1008,10 @@ fn finish_pending_split_job(app: &mut SplitApp, report: SplitWorkerReport) -> Re
             clear_split_error(app);
             Ok(())
         }
-        Err(error) => restore_split_after_error(app, error.to_string()),
+        Err(error) => match pending.mode {
+            PendingSplitMode::InitialGeneration => Err(error),
+            PendingSplitMode::Refinement => restore_split_after_error(app, error.to_string()),
+        },
     }
 }
 
@@ -994,6 +1030,25 @@ fn advance_loading_spinner(app: &mut SplitApp) {
 }
 
 impl SplitApp {
+    fn loading(source: IssueSummary) -> Self {
+        Self {
+            source,
+            selected_children: MultiSelectFieldState::new(Vec::new(), []),
+            selected_dependencies: MultiSelectFieldState::new(Vec::new(), []),
+            proposal: Self::empty_proposal(),
+            stage: SplitStage::Source,
+            preview_scroll: ScrollState::default(),
+            addendum: InputFieldState::default(),
+            error: None,
+            sticky_error: false,
+            copy: CopyUiState::default(),
+            continuation: None,
+            loading: None,
+            pending: None,
+        }
+    }
+
+    #[cfg(test)]
     fn new(
         source: IssueSummary,
         proposal: SplitProposal,
@@ -1019,6 +1074,19 @@ impl SplitApp {
             continuation,
             loading: None,
             pending: None,
+        }
+    }
+
+    fn empty_proposal() -> SplitProposal {
+        SplitProposal {
+            summary: String::new(),
+            child_issues: Vec::new(),
+            parent_rewrite: SplitParentDraft {
+                title: String::new(),
+                description: String::new(),
+                acceptance_criteria: Vec::new(),
+            },
+            dependency_suggestions: Vec::new(),
         }
     }
 
@@ -2107,11 +2175,10 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadingApp, RenderOnceSplitResult, SplitApp, SplitChildDraft, SplitDependencySuggestion,
-        SplitParentDraft, SplitProposal, render_issue_markdown, render_loading_frame,
-        run_render_once_session, snapshot, validate_split_proposal,
+        LoadingApp, SplitApp, SplitChildDraft, SplitDependencySuggestion, SplitParentDraft,
+        SplitProposal, render_issue_markdown, render_loading_frame, render_split_session, snapshot,
+        validate_split_proposal,
     };
-    use crate::cli::SplitArgs;
     use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2205,38 +2272,13 @@ mod tests {
 
     #[test]
     fn split_render_once_snapshot_surfaces_source_and_children() {
-        let result = run_render_once_session(
-            std::path::Path::new("."),
-            issue(),
-            proposal(),
-            None,
-            crate::linear::TicketDiscussionBudgets::default(),
-            &SplitArgs {
-                client: crate::cli::LinearClientArgs {
-                    root: ".".into(),
-                    api_key: None,
-                    api_url: None,
-                    profile: None,
-                },
-                issue: "MET-35".to_string(),
-                state: None,
-                priority: None,
-                labels: Vec::new(),
-                assignee: None,
-                no_interactive: false,
-                agent: None,
-                model: None,
-                reasoning: None,
-                render_once: true,
-                events: Vec::new(),
-                width: 120,
-                height: 32,
-            },
-        )
-        .expect("render-once snapshot should succeed");
-        let RenderOnceSplitResult::Snapshot(snapshot) = result else {
-            panic!("render-once without events should return a snapshot");
-        };
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend).expect("snapshot backend should initialize");
+        let app = SplitApp::new(issue(), proposal(), None);
+        terminal
+            .draw(|frame| render_split_session(frame, &app))
+            .expect("split session should render");
+        let snapshot = snapshot(terminal.backend());
         assert!(snapshot.contains("Split Summary"));
         assert!(snapshot.contains("Source Issue"));
         assert!(snapshot.contains("Proposed children: 2"));
