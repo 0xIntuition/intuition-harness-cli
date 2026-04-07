@@ -711,6 +711,7 @@ pub struct RuntimeArgs {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum RuntimeCommands {
     /// Configure install-scoped MetaStack CLI defaults.
     Config(ConfigArgs),
@@ -988,6 +989,18 @@ pub struct ConfigArgs {
         )
     )]
     pub merge_publication_retry_attempts: Option<String>,
+    /// Enable or disable agent-backed verification before ready-promotion. Supported values: `true`, `false`, or `none`.
+    #[arg(long)]
+    pub verification_code_review: Option<String>,
+    /// Enable or disable route-scoped E2E verification recipes. Supported values: `true`, `false`, or `none`.
+    #[arg(long)]
+    pub verification_e2e: Option<String>,
+    /// Update how many battle-test samples verification evaluates per run.
+    #[arg(long)]
+    pub verification_battle_test_count: Option<String>,
+    /// Extend the install-scoped verification quality criteria. Pass `none` to clear the list.
+    #[arg(long = "verification-quality-criterion")]
+    pub verification_quality_criteria: Vec<String>,
     /// Update the default assignee used by backlog ticket creation.
     #[arg(long)]
     pub default_assignee: Option<String>,

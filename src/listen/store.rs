@@ -23,9 +23,10 @@ use super::state::{
     CanonicalSessionData, LatestResumeHandle, ListenState, PullRequestStatus, PullRequestSummary,
     SessionPhase, TokenUsage, TurnTokenSnapshot,
 };
+use super::verification::{VerificationReport, VerificationSummary};
 
 const LISTEN_STORE_VERSION: u8 = 1;
-const LISTEN_SESSION_DETAIL_VERSION: u8 = 3;
+const LISTEN_SESSION_DETAIL_VERSION: u8 = 4;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
@@ -78,6 +79,7 @@ pub(super) struct ListenProjectPaths {
     pub(super) lock_path: PathBuf,
     pub(super) logs_dir: PathBuf,
     pub(super) details_dir: PathBuf,
+    pub(super) verification_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +127,10 @@ pub(crate) struct SessionDetailReferences {
     pub log_path: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
+    pub verification_json_path: Option<String>,
+    #[serde(default)]
+    pub verification_markdown_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +179,8 @@ pub(crate) struct ListenSessionDetail {
     pub pull_request: PullRequestSummary,
     #[serde(default)]
     pub latest_resume_handle: Option<LatestResumeHandle>,
+    #[serde(default)]
+    pub verification: Option<VerificationSummary>,
     #[serde(default)]
     pub references: SessionDetailReferences,
     #[serde(default)]
@@ -254,6 +262,7 @@ impl ListenProjectStore {
             lock_path: layout.active_session_path().to_path_buf(),
             logs_dir: layout.path("logs"),
             details_dir: layout.path("session-details"),
+            verification_dir: layout.path("verification"),
         };
 
         Ok(Self { identity, paths })
@@ -293,6 +302,7 @@ impl ListenProjectStore {
             lock_path: layout.active_session_path().to_path_buf(),
             logs_dir: layout.path("logs"),
             details_dir: layout.path("session-details"),
+            verification_dir: layout.path("verification"),
         };
         Ok(Self { identity, paths })
     }
@@ -310,6 +320,7 @@ impl ListenProjectStore {
         ensure_dir(&self.paths.project_dir)?;
         ensure_dir(&self.paths.logs_dir)?;
         ensure_dir(&self.paths.details_dir)?;
+        ensure_dir(&self.paths.verification_dir)?;
         self.save_metadata()
     }
 
@@ -481,11 +492,50 @@ impl ListenProjectStore {
             .join(format!("{issue_identifier}.json"))
     }
 
+    pub(super) fn verification_json_path(&self, issue_identifier: &str) -> PathBuf {
+        self.paths
+            .verification_dir
+            .join(format!("{issue_identifier}.json"))
+    }
+
+    pub(super) fn verification_markdown_path(&self, issue_identifier: &str) -> PathBuf {
+        self.paths
+            .verification_dir
+            .join(format!("{issue_identifier}.md"))
+    }
+
     pub(super) fn load_session_detail(
         &self,
         issue_identifier: &str,
     ) -> Result<Option<ListenSessionDetail>> {
         read_optional_json_lossy(&self.detail_path(issue_identifier))
+    }
+
+    pub(super) fn load_verification_report(
+        &self,
+        issue_identifier: &str,
+    ) -> Result<Option<VerificationReport>> {
+        read_optional_json_lossy(&self.verification_json_path(issue_identifier))
+    }
+
+    pub(super) fn write_verification_report(
+        &self,
+        issue_identifier: &str,
+        report: &VerificationReport,
+    ) -> Result<()> {
+        self.ensure_layout()?;
+        write_json(&self.verification_json_path(issue_identifier), report)?;
+        fs::write(
+            self.verification_markdown_path(issue_identifier),
+            report.render_markdown(),
+        )
+        .with_context(|| {
+            format!(
+                "failed to write `{}`",
+                self.verification_markdown_path(issue_identifier).display()
+            )
+        })?;
+        Ok(())
     }
 
     pub(super) fn load_session_details(
@@ -576,6 +626,31 @@ impl ListenProjectStore {
             }
         }
 
+        let verification_json_path = self.verification_json_path(issue_identifier);
+        match fs::remove_file(&verification_json_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to remove `{}`", verification_json_path.display())
+                });
+            }
+        }
+
+        let verification_markdown_path = self.verification_markdown_path(issue_identifier);
+        match fs::remove_file(&verification_markdown_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to remove `{}`",
+                        verification_markdown_path.display()
+                    )
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -639,6 +714,7 @@ impl ListenProjectStore {
                     lock_path: lock_path.clone(),
                     logs_dir: logs_dir.clone(),
                     details_dir,
+                    verification_dir: project_dir.join("verification"),
                 },
             };
             let latest_session = match store.load_state() {
@@ -705,6 +781,7 @@ impl ListenProjectStore {
                 canonical: session.canonical.clone(),
                 pull_request: session.pull_request.clone(),
                 latest_resume_handle: session.latest_resume_handle.clone(),
+                verification: None,
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
                 milestones: Vec::new(),
@@ -724,6 +801,9 @@ impl ListenProjectStore {
         detail.canonical = session.canonical.clone();
         detail.pull_request = session.pull_request.clone();
         detail.latest_resume_handle = session.latest_resume_handle.clone();
+        detail.verification = self
+            .load_verification_report(&session.issue_identifier)?
+            .map(|report| report.summary_snapshot());
         detail.references = SessionDetailReferences {
             workspace_path: session.workspace_path.clone(),
             backlog_path: session.backlog_path.clone(),
@@ -731,6 +811,22 @@ impl ListenProjectStore {
             workpad_comment_id: session.workpad_comment_id.clone(),
             log_path: session.log_path.clone(),
             branch: session.branch.clone(),
+            verification_json_path: self
+                .verification_json_path(&session.issue_identifier)
+                .is_file()
+                .then(|| {
+                    self.verification_json_path(&session.issue_identifier)
+                        .display()
+                        .to_string()
+                }),
+            verification_markdown_path: self
+                .verification_markdown_path(&session.issue_identifier)
+                .is_file()
+                .then(|| {
+                    self.verification_markdown_path(&session.issue_identifier)
+                        .display()
+                        .to_string()
+                }),
         };
         detail.prompt_context = build_prompt_context_references(session);
         detail.log_excerpts = read_log_excerpts(session.log_path.as_deref())?;
@@ -784,6 +880,20 @@ impl ListenProjectStore {
             }
             fs::remove_file(&path)
                 .with_context(|| format!("failed to remove `{}`", path.display()))?;
+            for verification_path in [
+                self.verification_json_path(stem),
+                self.verification_markdown_path(stem),
+            ] {
+                match fs::remove_file(&verification_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("failed to remove `{}`", verification_path.display())
+                        });
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -1834,6 +1944,7 @@ mod tests {
                 turn_history: Vec::new(),
                 canonical: CanonicalSessionData::default(),
                 pull_request: PullRequestSummary::default(),
+                verification: None,
                 latest_resume_handle: None,
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
