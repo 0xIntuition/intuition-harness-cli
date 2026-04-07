@@ -3039,13 +3039,14 @@ fn execute_agent_run(
     let turn_started_at = now_epoch_seconds();
 
     if invocation.transport == PromptTransport::Stdin {
-        let stdin = child
-            .stdin_mut()
+        let mut stdin = child
+            .take_stdin()
             .ok_or_else(|| anyhow!("failed to open stdin for the listen agent turn"))?;
         use std::io::Write as _;
         stdin
             .write_all(invocation.payload.as_bytes())
             .context("failed to write prompt payload to the launched agent")?;
+        drop(stdin);
     }
 
     if capture_output {
@@ -3092,16 +3093,17 @@ fn execute_agent_run(
                 writeln!(stderr_log, "{line}")
                     .with_context(|| format!("failed to write `{}`", log_path.display()))
             },
-            |timeout| {
-                append_agent_turn_timeout_log(
-                    &log_path,
-                    phase_label,
-                    turn_number,
-                    &invocation.agent,
-                    timeout,
-                )
-            },
+            |_| Ok(()),
         )?;
+        if let Some(timeout) = managed_result.timeout {
+            append_agent_turn_timeout_log(
+                &log_path,
+                phase_label,
+                turn_number,
+                &invocation.agent,
+                timeout,
+            )?;
+        }
         let raw_stdout = managed_result.stdout.as_deref().unwrap_or_default();
         let stderr_output = managed_result.stderr.as_deref().unwrap_or_default();
         if !managed_result.status.success() && managed_result.timeout.is_none() {
@@ -3158,15 +3160,16 @@ fn execute_agent_run(
         });
     }
 
-    let managed_result = child.wait(|timeout| {
+    let managed_result = child.wait(|_| Ok(()))?;
+    if let Some(timeout) = managed_result.timeout {
         append_agent_turn_timeout_log(
             &log_path,
             phase_label,
             turn_number,
             &invocation.agent,
             timeout,
-        )
-    })?;
+        )?;
+    }
     if !managed_result.status.success() && managed_result.timeout.is_none() {
         let code = managed_result
             .status

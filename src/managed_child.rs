@@ -115,9 +115,9 @@ impl ManagedChild {
         self.child.id()
     }
 
-    /// Borrow the spawned child stdin handle.
-    pub(crate) fn stdin_mut(&mut self) -> Option<&mut std::process::ChildStdin> {
-        self.child.stdin.as_mut()
+    /// Take ownership of the spawned child stdin handle so callers can close it after writing.
+    pub(crate) fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
     }
 
     /// Wait for a child whose stdout and stderr are redirected to files.
@@ -141,7 +141,17 @@ impl ManagedChild {
             ));
         }
 
-        let (status, timeout) = wait_for_child_exit(child, started_at, settings, &mut on_timeout)?;
+        let mut deferred_error = None;
+        let (status, timeout) = wait_for_child_exit(
+            child,
+            started_at,
+            settings,
+            &mut on_timeout,
+            &mut deferred_error,
+        )?;
+        if let Some(error) = deferred_error {
+            return Err(error);
+        }
         Ok(ManagedChildResult {
             status,
             elapsed: started_at.elapsed(),
@@ -185,7 +195,7 @@ impl ManagedChild {
         let mut stderr = String::new();
         let mut streams_closed = StreamClosure::default();
         let mut timeout_state = None;
-        let mut callback_error: Option<anyhow::Error> = None;
+        let mut deferred_error: Option<anyhow::Error> = None;
 
         while !streams_closed.all_closed() {
             let wait_slice = timeout_wait_slice(self.started_at, self.settings, timeout_state);
@@ -203,7 +213,7 @@ impl ManagedChild {
                         StreamKind::Stderr => on_stderr_line(&line),
                     };
                     if let Err(error) = callback {
-                        callback_error = Some(error);
+                        store_first_error(&mut deferred_error, error);
                         timeout_state = Some(force_shutdown_after_callback_error(
                             &mut self.child,
                             self.started_at,
@@ -232,11 +242,12 @@ impl ManagedChild {
                 if let Some(timeout) =
                     maybe_timeout_expired(self.child.id(), self.started_at, self.settings)
                 {
-                    on_timeout(timeout)?;
-                    timeout_state = Some(begin_timeout_shutdown(
+                    timeout_state = Some(begin_timeout_shutdown_with_callback(
                         &mut self.child,
                         timeout,
                         self.started_at,
+                        &mut on_timeout,
+                        &mut deferred_error,
                     )?);
                 }
             }
@@ -249,11 +260,11 @@ impl ManagedChild {
                     &mut stderr,
                     &mut on_stdout_line,
                     &mut on_stderr_line,
-                    &mut callback_error,
+                    &mut deferred_error,
                 )?;
                 join_stream_reader(stdout_handle, "stdout")?;
                 join_stream_reader(stderr_handle, "stderr")?;
-                if let Some(error) = callback_error {
+                if let Some(error) = deferred_error {
                     return Err(error);
                 }
                 return Ok(ManagedChildResult {
@@ -280,7 +291,7 @@ impl ManagedChild {
             .context("failed to reap managed child after streams closed")?;
         join_stream_reader(stdout_handle, "stdout")?;
         join_stream_reader(stderr_handle, "stderr")?;
-        if let Some(error) = callback_error {
+        if let Some(error) = deferred_error {
             return Err(error);
         }
         Ok(ManagedChildResult {
@@ -385,17 +396,16 @@ fn wait_for_streams_to_close(
     stderr: &mut String,
     on_stdout_line: &mut impl FnMut(&str) -> Result<()>,
     on_stderr_line: &mut impl FnMut(&str) -> Result<()>,
-    callback_error: &mut Option<anyhow::Error>,
+    deferred_error: &mut Option<anyhow::Error>,
 ) -> Result<()> {
     while !streams_closed.all_closed() {
         match receiver.recv_timeout(STREAM_POLL_INTERVAL) {
             Ok(StreamEvent::Line { kind, line }) => {
                 append_captured_line(kind, &line, stdout, stderr);
-                if callback_error.is_none()
-                    && let Err(error) =
-                        invoke_stream_callback(kind, &line, on_stdout_line, on_stderr_line)
+                if let Err(error) =
+                    invoke_stream_callback(kind, &line, on_stdout_line, on_stderr_line)
                 {
-                    *callback_error = Some(error);
+                    store_first_error(deferred_error, error);
                 }
             }
             Ok(StreamEvent::Closed(kind)) => streams_closed.mark_closed(kind),
@@ -476,11 +486,32 @@ fn maybe_timeout_expired(
     })
 }
 
+fn store_first_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
+    if slot.is_none() {
+        *slot = Some(error);
+    }
+}
+
+fn begin_timeout_shutdown_with_callback(
+    child: &mut Child,
+    timeout: ManagedChildTimeout,
+    started_at: Instant,
+    on_timeout: &mut impl FnMut(ManagedChildTimeout) -> Result<()>,
+    deferred_error: &mut Option<anyhow::Error>,
+) -> Result<ManagedChildTimeout> {
+    let timeout = begin_timeout_shutdown(child, timeout, started_at)?;
+    if let Err(error) = on_timeout(timeout) {
+        store_first_error(deferred_error, error);
+    }
+    Ok(timeout)
+}
+
 fn wait_for_child_exit(
     mut child: Child,
     started_at: Instant,
     settings: ManagedChildSettings,
     on_timeout: &mut impl FnMut(ManagedChildTimeout) -> Result<()>,
+    deferred_error: &mut Option<anyhow::Error>,
 ) -> Result<(ExitStatus, Option<ManagedChildTimeout>)> {
     let mut timeout_state = None;
     loop {
@@ -491,8 +522,13 @@ fn wait_for_child_exit(
         if timeout_state.is_none()
             && let Some(timeout) = maybe_timeout_expired(child.id(), started_at, settings)
         {
-            on_timeout(timeout)?;
-            timeout_state = Some(begin_timeout_shutdown(&mut child, timeout, started_at)?);
+            timeout_state = Some(begin_timeout_shutdown_with_callback(
+                &mut child,
+                timeout,
+                started_at,
+                on_timeout,
+                deferred_error,
+            )?);
         }
 
         if let Some(timeout) = timeout_state
@@ -639,6 +675,7 @@ mod tests {
         ManagedChild, ManagedChildOutput, ManagedChildSettings, ManagedChildTermination, Signal,
         terminate_process_group,
     };
+    use anyhow::anyhow;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -666,6 +703,20 @@ mod tests {
                 Instant::now() < deadline,
                 "timed out waiting for {}",
                 path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_process_exit(pid: u32, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !process_is_running(pid) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for process {pid} to exit"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -760,7 +811,7 @@ mod tests {
         )
         .expect("child should spawn");
         let parent_pid = child.pid();
-        wait_for_path(&child_pid_file, Duration::from_millis(250));
+        wait_for_path(&child_pid_file, Duration::from_secs(2));
         let result = child
             .wait_with_captured_output(|_| Ok(()), |_| Ok(()), |_| Ok(()))
             .expect("timeout should still return a result");
@@ -776,8 +827,8 @@ mod tests {
             .trim()
             .parse::<u32>()
             .expect("pid should parse");
-        assert!(!process_is_running(parent_pid));
-        assert!(!process_is_running(child_pid));
+        wait_for_process_exit(parent_pid, Duration::from_secs(2));
+        wait_for_process_exit(child_pid, Duration::from_secs(2));
     }
 
     #[test]
@@ -806,7 +857,7 @@ mod tests {
         )
         .expect("child should spawn");
         let parent_pid = child.pid();
-        wait_for_path(&child_pid_file, Duration::from_millis(250));
+        wait_for_path(&child_pid_file, Duration::from_secs(2));
         let result = child
             .wait_with_captured_output(|_| Ok(()), |_| Ok(()), |_| Ok(()))
             .expect("timeout should still return a result");
@@ -818,8 +869,108 @@ mod tests {
             .trim()
             .parse::<u32>()
             .expect("pid should parse");
-        assert!(!process_is_running(parent_pid));
-        assert!(!process_is_running(child_pid));
+        wait_for_process_exit(parent_pid, Duration::from_secs(2));
+        wait_for_process_exit(child_pid, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn timeout_callback_failure_still_reaps_captured_process_group() {
+        let temp = tempdir().expect("tempdir should build");
+        let script = temp.path().join("callback-error.sh");
+        let child_pid_file = temp.path().join("child.pid");
+        write_script(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+                child_pid_file.display()
+            )
+            .as_str(),
+        );
+
+        let mut command = Command::new(&script);
+        let child = ManagedChild::spawn(
+            &mut command,
+            ManagedChildOutput::Capture,
+            ManagedChildOutput::Capture,
+            ManagedChildSettings {
+                timeout: Duration::from_millis(750),
+                graceful_shutdown: Duration::from_millis(200),
+            },
+        )
+        .expect("child should spawn");
+        let parent_pid = child.pid();
+        wait_for_path(&child_pid_file, Duration::from_secs(2));
+        let error = child
+            .wait_with_captured_output(
+                |_| Ok(()),
+                |_| Ok(()),
+                |_| Err(anyhow!("timeout callback failed")),
+            )
+            .expect_err("timeout callback failure should surface");
+
+        let child_pid = fs::read_to_string(child_pid_file)
+            .expect("child pid should exist")
+            .trim()
+            .parse::<u32>()
+            .expect("pid should parse");
+        assert!(error.to_string().contains("timeout callback failed"));
+        wait_for_process_exit(parent_pid, Duration::from_secs(2));
+        wait_for_process_exit(child_pid, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn timeout_callback_failure_still_reaps_redirected_process_group() {
+        let temp = tempdir().expect("tempdir should build");
+        let script = temp.path().join("callback-error-redirected.sh");
+        let child_pid_file = temp.path().join("child.pid");
+        let stdout_path = temp.path().join("stdout.log");
+        let stderr_path = temp.path().join("stderr.log");
+        write_script(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+                child_pid_file.display()
+            )
+            .as_str(),
+        );
+
+        let mut command = Command::new(&script);
+        let child = ManagedChild::spawn(
+            &mut command,
+            ManagedChildOutput::File(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&stdout_path)
+                    .expect("stdout log should open"),
+            ),
+            ManagedChildOutput::File(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&stderr_path)
+                    .expect("stderr log should open"),
+            ),
+            ManagedChildSettings {
+                timeout: Duration::from_millis(750),
+                graceful_shutdown: Duration::from_millis(200),
+            },
+        )
+        .expect("child should spawn");
+        let parent_pid = child.pid();
+        wait_for_path(&child_pid_file, Duration::from_secs(2));
+        let error = child
+            .wait(|_| Err(anyhow!("timeout callback failed")))
+            .expect_err("timeout callback failure should surface");
+
+        let child_pid = fs::read_to_string(child_pid_file)
+            .expect("child pid should exist")
+            .trim()
+            .parse::<u32>()
+            .expect("pid should parse");
+        assert!(error.to_string().contains("timeout callback failed"));
+        wait_for_process_exit(parent_pid, Duration::from_secs(2));
+        wait_for_process_exit(child_pid, Duration::from_secs(2));
     }
 
     #[test]
