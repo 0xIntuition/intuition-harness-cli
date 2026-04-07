@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
@@ -21,7 +24,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 
-use crate::agents::run_agent_capture;
+use crate::agents::{AgentContinuation, run_agent_capture_with_continuation};
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, RenderedTemplateFile,
     TemplateContext, ensure_no_unresolved_placeholders, render_template_files, save_issue_metadata,
@@ -45,6 +48,9 @@ use crate::linear::{
     prepare_issue_context, render_ticket_image_summary,
 };
 use crate::output::{MachineIssueSummary, render_json_success};
+use crate::progress::{
+    LoadingPanelData, SPINNER_FRAMES, agent_loading_status_line, render_loading_panel,
+};
 use crate::scaffold::{ensure_backlog_templates, ensure_planning_layout};
 use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
@@ -196,10 +202,31 @@ struct SplitApp {
     proposal: SplitProposal,
     selected_children: MultiSelectFieldState,
     stage: SplitStage,
+    selected_dependencies: MultiSelectFieldState,
     preview_scroll: ScrollState,
     addendum: InputFieldState,
     error: Option<String>,
+    sticky_error: bool,
     copy: CopyUiState,
+    continuation: Option<AgentContinuation>,
+    loading: Option<LoadingApp>,
+    pending: Option<PendingSplitJob>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadingApp {
+    message: String,
+    detail: String,
+    spinner_index: usize,
+}
+
+struct PendingSplitJob {
+    receiver: Receiver<SplitWorkerReport>,
+}
+
+struct SplitWorkerReport {
+    continuation: Option<AgentContinuation>,
+    outcome: Result<SplitProposal>,
 }
 
 #[derive(Debug)]
@@ -208,6 +235,7 @@ enum InteractiveSplitExit {
     Confirmed {
         proposal: SplitProposal,
         selected_indices: Vec<usize>,
+        selected_dependency_indices: Vec<usize>,
     },
 }
 
@@ -216,6 +244,7 @@ enum RenderOnceSplitResult {
     Confirmed {
         proposal: SplitProposal,
         selected_indices: Vec<usize>,
+        selected_dependency_indices: Vec<usize>,
     },
 }
 
@@ -228,6 +257,9 @@ struct SplitApplyContext<'a, C> {
     source: &'a IssueSummary,
     args: &'a SplitArgs,
 }
+
+type DependencyKey = (String, String);
+type DependencySelectionState = (BTreeSet<DependencyKey>, BTreeSet<DependencyKey>);
 
 /// Generate or apply a full inverse-planning split for an existing Linear issue.
 ///
@@ -243,7 +275,15 @@ pub async fn run_split(args: &SplitArgs) -> Result<SplitReport> {
     ensure_backlog_templates(&root, false)?;
     let LinearCommandContext { service, .. } = load_linear_command_context(&args.client, None)?;
     let source = service.load_issue(&args.issue).await?;
-    let proposal = generate_split_proposal(&root, &source, discussion_budgets, None, args)?;
+    let mut continuation = None;
+    let proposal = generate_split_proposal(
+        &root,
+        &source,
+        discussion_budgets,
+        None,
+        args,
+        &mut continuation,
+    )?;
     let remembered_selection = load_remembered_backlog_selection(&root)?;
     let apply_context = SplitApplyContext {
         root: &root,
@@ -268,6 +308,7 @@ pub async fn run_split(args: &SplitArgs) -> Result<SplitReport> {
             &root,
             source.clone(),
             proposal,
+            continuation,
             discussion_budgets,
             args,
         )? {
@@ -275,17 +316,41 @@ pub async fn run_split(args: &SplitArgs) -> Result<SplitReport> {
             RenderOnceSplitResult::Confirmed {
                 proposal,
                 selected_indices,
-            } => apply_split(&apply_context, &proposal, &selected_indices).await,
+                selected_dependency_indices,
+            } => {
+                apply_split(
+                    &apply_context,
+                    &proposal,
+                    &selected_indices,
+                    &selected_dependency_indices,
+                )
+                .await
+            }
         };
     }
 
-    match run_interactive_split_session(&root, source.clone(), proposal, discussion_budgets, args)?
-    {
+    match run_interactive_split_session(
+        &root,
+        source.clone(),
+        proposal,
+        continuation,
+        discussion_budgets,
+        args,
+    )? {
         InteractiveSplitExit::Cancelled => Ok(SplitReport::Cancelled),
         InteractiveSplitExit::Confirmed {
             proposal,
             selected_indices,
-        } => apply_split(&apply_context, &proposal, &selected_indices).await,
+            selected_dependency_indices,
+        } => {
+            apply_split(
+                &apply_context,
+                &proposal,
+                &selected_indices,
+                &selected_dependency_indices,
+            )
+            .await
+        }
     }
 }
 
@@ -295,20 +360,24 @@ fn generate_split_proposal(
     discussion_budgets: TicketDiscussionBudgets,
     addendum: Option<&str>,
     args: &SplitArgs,
+    continuation: &mut Option<AgentContinuation>,
 ) -> Result<SplitProposal> {
     let prepared_context = prepare_issue_context(source, discussion_budgets);
     let prompt = render_split_prompt(root, &prepared_context, addendum)?;
-    let output = run_agent_capture(&RunAgentArgs {
-        root: Some(root.to_path_buf()),
-        route_key: Some(AGENT_ROUTE_BACKLOG_SPLIT.to_string()),
-        agent: args.agent.clone(),
-        prompt,
-        instructions: None,
-        model: args.model.clone(),
-        reasoning: args.reasoning.clone(),
-        transport: None,
-        attachments: Vec::new(),
-    })
+    let output = run_agent_capture_with_continuation(
+        &RunAgentArgs {
+            root: Some(root.to_path_buf()),
+            route_key: Some(AGENT_ROUTE_BACKLOG_SPLIT.to_string()),
+            agent: args.agent.clone(),
+            prompt,
+            instructions: None,
+            model: args.model.clone(),
+            reasoning: args.reasoning.clone(),
+            transport: None,
+            attachments: Vec::new(),
+        },
+        continuation,
+    )
     .with_context(|| {
         format!(
             "{} backlog split requires a configured local agent to generate split proposals",
@@ -486,10 +555,11 @@ fn run_interactive_split_session(
     root: &Path,
     source: IssueSummary,
     proposal: SplitProposal,
+    continuation: Option<AgentContinuation>,
     discussion_budgets: TicketDiscussionBudgets,
     args: &SplitArgs,
 ) -> Result<InteractiveSplitExit> {
-    let mut app = SplitApp::new(source, proposal);
+    let mut app = SplitApp::new(source, proposal, continuation);
 
     let mut stdout = io::stdout();
     enable_raw_mode().context("failed to enable raw mode for split review")?;
@@ -507,9 +577,10 @@ fn run_interactive_split_session(
         Terminal::new(backend).context("failed to initialize the split review terminal")?;
 
     loop {
+        process_pending_split_job(&mut app)?;
         terminal.draw(|frame| render_split_session(frame, &app))?;
 
-        if event::poll(std::time::Duration::from_millis(250))
+        if event::poll(Duration::from_millis(250))
             .context("failed while polling split review input")?
         {
             match event::read().context("failed to read split review input")? {
@@ -520,6 +591,10 @@ fn run_interactive_split_session(
 
                     if is_mouse_toggle_key(key) {
                         app.copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
+                    }
+
+                    if app.loading.is_some() {
                         continue;
                     }
 
@@ -544,9 +619,9 @@ fn run_interactive_split_session(
                     }
                 }
                 Event::Paste(text) => {
-                    if app.stage == SplitStage::Addendum {
+                    if app.loading.is_none() && app.stage == SplitStage::Addendum {
                         let _ = app.addendum.paste(&text);
-                        app.error = None;
+                        clear_split_error(&mut app);
                     }
                 }
                 Event::Mouse(mouse)
@@ -555,6 +630,10 @@ fn run_interactive_split_session(
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     ) =>
                 {
+                    if app.loading.is_some() {
+                        continue;
+                    }
+
                     let terminal_area = terminal.size()?.into();
                     if app.copy.export_active() {
                         let _ = app
@@ -572,6 +651,8 @@ fn run_interactive_split_session(
                 }
                 _ => {}
             }
+        } else {
+            advance_loading_spinner(&mut app);
         }
     }
 }
@@ -580,15 +661,17 @@ fn run_render_once_session(
     root: &Path,
     source: IssueSummary,
     proposal: SplitProposal,
+    continuation: Option<AgentContinuation>,
     discussion_budgets: TicketDiscussionBudgets,
     args: &SplitArgs,
 ) -> Result<RenderOnceSplitResult> {
     let backend = TestBackend::new(args.width, args.height);
     let mut terminal =
         Terminal::new(backend).context("failed to initialize split render-once backend")?;
-    let mut app = SplitApp::new(source, proposal);
+    let mut app = SplitApp::new(source, proposal, continuation);
 
     for event in &args.events {
+        process_pending_split_job_blocking(&mut app)?;
         let key = match event {
             SplitReviewEventArg::Enter => Some(KeyEvent::new(
                 KeyCode::Enter,
@@ -611,7 +694,10 @@ fn run_render_once_session(
                 crossterm::event::KeyModifiers::NONE,
             )),
             SplitReviewEventArg::Paste(text) => {
-                let _ = app.addendum.paste(text);
+                if app.loading.is_none() && app.stage == SplitStage::Addendum {
+                    let _ = app.addendum.paste(text);
+                    clear_split_error(&mut app);
+                }
                 None
             }
         };
@@ -626,14 +712,17 @@ fn run_render_once_session(
                 InteractiveSplitExit::Confirmed {
                     proposal,
                     selected_indices,
+                    selected_dependency_indices,
                 } => Ok(RenderOnceSplitResult::Confirmed {
                     proposal,
                     selected_indices,
+                    selected_dependency_indices,
                 }),
             };
         }
     }
 
+    process_pending_split_job_blocking(&mut app)?;
     terminal
         .draw(|frame| render_split_session(frame, &app))
         .context("failed to render split snapshot")?;
@@ -649,6 +738,10 @@ fn handle_split_key(
     args: &SplitArgs,
     key: KeyEvent,
 ) -> Result<Option<InteractiveSplitExit>> {
+    if app.loading.is_some() {
+        return Ok(None);
+    }
+
     let stage = app.stage;
     match key.code {
         KeyCode::Left | KeyCode::BackTab => {
@@ -660,7 +753,7 @@ fn handle_split_key(
                 SplitStage::Confirm => SplitStage::Addendum,
             };
             app.preview_scroll.reset();
-            app.error = None;
+            clear_split_error_for_navigation(app);
             Ok(None)
         }
         KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
@@ -670,30 +763,51 @@ fn handle_split_key(
                 viewport,
                 app.preview_rows(viewport.width.max(1)),
             );
-            app.error = None;
+            clear_split_error_for_navigation(app);
             Ok(None)
         }
         KeyCode::Up if app.stage == SplitStage::Children => {
             let _ = app.selected_children.handle_key(key);
+            app.sync_dependency_selection();
             app.preview_scroll.reset();
-            app.error = None;
+            clear_split_error_for_navigation(app);
             Ok(None)
         }
         KeyCode::Down if app.stage == SplitStage::Children => {
             let _ = app.selected_children.handle_key(key);
+            app.sync_dependency_selection();
             app.preview_scroll.reset();
-            app.error = None;
+            clear_split_error_for_navigation(app);
             Ok(None)
         }
         KeyCode::Char(' ') if app.stage == SplitStage::Children => {
             let _ = app.selected_children.handle_key(key);
-            app.error = None;
+            app.sync_dependency_selection();
+            clear_split_error(app);
+            Ok(None)
+        }
+        KeyCode::Up if app.stage == SplitStage::Dependencies => {
+            let _ = app.selected_dependencies.handle_key(key);
+            app.preview_scroll.reset();
+            clear_split_error_for_navigation(app);
+            Ok(None)
+        }
+        KeyCode::Down if app.stage == SplitStage::Dependencies => {
+            let _ = app.selected_dependencies.handle_key(key);
+            app.preview_scroll.reset();
+            clear_split_error_for_navigation(app);
+            Ok(None)
+        }
+        KeyCode::Char(' ') if app.stage == SplitStage::Dependencies => {
+            let _ = app.selected_dependencies.handle_key(key);
+            clear_split_error(app);
             Ok(None)
         }
         KeyCode::Enter => match app.stage {
             SplitStage::Source => {
                 app.stage = SplitStage::Children;
                 app.preview_scroll.reset();
+                clear_split_error_for_navigation(app);
                 Ok(None)
             }
             SplitStage::Children => {
@@ -702,17 +816,18 @@ fn handle_split_key(
                         "Select at least one child issue before continuing to dependencies."
                             .to_string(),
                     );
+                    app.sticky_error = false;
                     return Ok(None);
                 }
                 app.stage = SplitStage::Dependencies;
                 app.preview_scroll.reset();
-                app.error = None;
+                clear_split_error(app);
                 Ok(None)
             }
             SplitStage::Dependencies => {
                 app.stage = SplitStage::Addendum;
                 app.preview_scroll.reset();
-                app.error = None;
+                clear_split_error_for_navigation(app);
                 Ok(None)
             }
             SplitStage::Addendum => {
@@ -720,49 +835,190 @@ fn handle_split_key(
                 if addendum.is_empty() {
                     app.stage = SplitStage::Confirm;
                     app.preview_scroll.reset();
-                    app.error = None;
+                    clear_split_error_for_navigation(app);
                     return Ok(None);
                 }
 
-                let proposal = generate_split_proposal(
-                    root,
-                    &app.source,
-                    discussion_budgets,
-                    Some(&addendum),
-                    args,
-                )?;
-                app.proposal = proposal;
-                app.selected_children = SplitApp::selection_for(&app.proposal);
-                app.addendum = InputFieldState::default();
-                app.stage = SplitStage::Source;
-                app.preview_scroll.reset();
-                app.error = None;
+                start_split_refinement(app, root, discussion_budgets, args.clone(), addendum);
                 Ok(None)
             }
             SplitStage::Confirm => Ok(Some(InteractiveSplitExit::Confirmed {
                 proposal: app.proposal.clone(),
                 selected_indices: app.selected_children.selected_indices(),
+                selected_dependency_indices: app.selected_dependency_indices(),
             })),
         },
         _ if app.stage == SplitStage::Addendum && app.addendum.handle_key(key) => {
-            app.error = None;
+            clear_split_error(app);
             Ok(None)
         }
         _ => Ok(None),
     }
 }
 
+fn clear_split_error(app: &mut SplitApp) {
+    app.error = None;
+    app.sticky_error = false;
+}
+
+fn clear_split_error_for_navigation(app: &mut SplitApp) {
+    if !app.sticky_error {
+        app.error = None;
+    }
+}
+
+fn set_split_sticky_error(app: &mut SplitApp, message: String) {
+    app.error = Some(message);
+    app.sticky_error = true;
+}
+
+fn start_split_refinement(
+    app: &mut SplitApp,
+    root: &Path,
+    discussion_budgets: TicketDiscussionBudgets,
+    args: SplitArgs,
+    addendum: String,
+) {
+    app.loading = Some(LoadingApp {
+        message: "Refining split proposal".to_string(),
+        detail: "Rebuilding the child issues, parent rewrite, and dependency suggestions with your guidance.".to_string(),
+        spinner_index: 0,
+    });
+    app.pending = Some(PendingSplitJob {
+        receiver: spawn_split_refinement_job(
+            root.to_path_buf(),
+            app.source.clone(),
+            discussion_budgets,
+            args,
+            addendum,
+            app.continuation.clone(),
+        ),
+    });
+}
+
+fn spawn_split_refinement_job(
+    root: PathBuf,
+    source: IssueSummary,
+    discussion_budgets: TicketDiscussionBudgets,
+    args: SplitArgs,
+    addendum: String,
+    continuation: Option<AgentContinuation>,
+) -> Receiver<SplitWorkerReport> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut continuation = continuation;
+        let outcome = generate_split_proposal(
+            &root,
+            &source,
+            discussion_budgets,
+            Some(&addendum),
+            &args,
+            &mut continuation,
+        );
+        let _ = sender.send(SplitWorkerReport {
+            continuation,
+            outcome,
+        });
+    });
+    receiver
+}
+
+fn process_pending_split_job(app: &mut SplitApp) -> Result<()> {
+    let Some(pending) = app.pending.as_ref() else {
+        return Ok(());
+    };
+
+    match pending.receiver.try_recv() {
+        Ok(report) => finish_pending_split_job(app, report),
+        Err(TryRecvError::Empty) => Ok(()),
+        Err(TryRecvError::Disconnected) => restore_split_after_error(
+            app,
+            "split refinement worker exited before returning a result".to_string(),
+        ),
+    }
+}
+
+fn process_pending_split_job_blocking(app: &mut SplitApp) -> Result<()> {
+    let Some(pending) = app.pending.as_ref() else {
+        return Ok(());
+    };
+
+    let report = pending
+        .receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| {
+            anyhow!("split refinement worker did not finish before render-once timeout: {error}")
+        })?;
+    finish_pending_split_job(app, report)
+}
+
+fn finish_pending_split_job(app: &mut SplitApp, report: SplitWorkerReport) -> Result<()> {
+    let _pending = app
+        .pending
+        .take()
+        .ok_or_else(|| anyhow!("split refinement job disappeared unexpectedly"))?;
+    app.loading = None;
+    app.continuation = report.continuation;
+
+    match report.outcome {
+        Ok(proposal) => {
+            app.proposal = proposal;
+            app.selected_children = SplitApp::selection_for(&app.proposal);
+            app.selected_dependencies = SplitApp::dependency_selection_for(
+                &app.proposal,
+                &app.selected_child_indices(),
+                None,
+            );
+            app.addendum = InputFieldState::default();
+            app.stage = SplitStage::Source;
+            app.preview_scroll.reset();
+            clear_split_error(app);
+            Ok(())
+        }
+        Err(error) => restore_split_after_error(app, error.to_string()),
+    }
+}
+
+fn restore_split_after_error(app: &mut SplitApp, message: String) -> Result<()> {
+    let _pending = app.pending.take();
+    app.loading = None;
+    app.stage = SplitStage::Addendum;
+    set_split_sticky_error(app, message);
+    Ok(())
+}
+
+fn advance_loading_spinner(app: &mut SplitApp) {
+    if let Some(loading) = &mut app.loading {
+        loading.spinner_index = (loading.spinner_index + 1) % SPINNER_FRAMES.len();
+    }
+}
+
 impl SplitApp {
-    fn new(source: IssueSummary, proposal: SplitProposal) -> Self {
+    fn new(
+        source: IssueSummary,
+        proposal: SplitProposal,
+        continuation: Option<AgentContinuation>,
+    ) -> Self {
+        let selected_children = Self::selection_for(&proposal);
+        let selected_child_indices = selected_children.selected_indices();
         Self {
             source,
-            selected_children: Self::selection_for(&proposal),
+            selected_children,
+            selected_dependencies: Self::dependency_selection_for(
+                &proposal,
+                &selected_child_indices,
+                None,
+            ),
             proposal,
             stage: SplitStage::Source,
             preview_scroll: ScrollState::default(),
             addendum: InputFieldState::default(),
             error: None,
+            sticky_error: false,
             copy: CopyUiState::default(),
+            continuation,
+            loading: None,
+            pending: None,
         }
     }
 
@@ -827,21 +1083,120 @@ impl SplitApp {
         self.selected_children.selected_indices()
     }
 
-    fn selected_dependency_suggestions(&self) -> Vec<&SplitDependencySuggestion> {
-        let selected_ids = self
-            .selected_child_indices()
-            .into_iter()
-            .filter_map(|index| self.proposal.child_issues.get(index))
+    fn dependency_key(dependency: &SplitDependencySuggestion) -> DependencyKey {
+        (dependency.blocking.clone(), dependency.blocked.clone())
+    }
+
+    fn visible_dependency_indices_for(
+        proposal: &SplitProposal,
+        selected_child_indices: &[usize],
+    ) -> Vec<usize> {
+        let selected_ids = selected_child_indices
+            .iter()
+            .filter_map(|index| proposal.child_issues.get(*index))
             .map(|child| child.proposal_id.clone())
             .collect::<BTreeSet<_>>();
-        self.proposal
+
+        proposal
             .dependency_suggestions
             .iter()
+            .enumerate()
             .filter(|dependency| {
-                selected_ids.contains(&dependency.blocking)
-                    && selected_ids.contains(&dependency.blocked)
+                selected_ids.contains(&dependency.1.blocking)
+                    && selected_ids.contains(&dependency.1.blocked)
             })
+            .map(|(index, _)| index)
             .collect()
+    }
+
+    fn dependency_selection_for(
+        proposal: &SplitProposal,
+        selected_child_indices: &[usize],
+        previous_selection: Option<&DependencySelectionState>,
+    ) -> MultiSelectFieldState {
+        let visible_indices =
+            Self::visible_dependency_indices_for(proposal, selected_child_indices);
+        let options = visible_indices
+            .iter()
+            .filter_map(|index| proposal.dependency_suggestions.get(*index))
+            .map(|dependency| format!("{} blocks {}", dependency.blocking, dependency.blocked))
+            .collect::<Vec<_>>();
+        let selected = visible_indices
+            .iter()
+            .enumerate()
+            .filter_map(|(visible_index, dependency_index)| {
+                let dependency = proposal.dependency_suggestions.get(*dependency_index)?;
+                let key = Self::dependency_key(dependency);
+                let should_select = match previous_selection {
+                    Some((previous_visible, previous_selected)) => {
+                        !previous_visible.contains(&key) || previous_selected.contains(&key)
+                    }
+                    None => true,
+                };
+                should_select.then_some(visible_index)
+            })
+            .collect::<Vec<_>>();
+        MultiSelectFieldState::new(options, selected)
+    }
+
+    fn visible_dependency_indices(&self) -> Vec<usize> {
+        Self::visible_dependency_indices_for(&self.proposal, &self.selected_child_indices())
+    }
+
+    fn visible_dependency_suggestions(&self) -> Vec<&SplitDependencySuggestion> {
+        self.visible_dependency_indices()
+            .into_iter()
+            .filter_map(|index| self.proposal.dependency_suggestions.get(index))
+            .collect()
+    }
+
+    fn visible_dependency_keys(&self) -> BTreeSet<DependencyKey> {
+        self.visible_dependency_suggestions()
+            .into_iter()
+            .map(Self::dependency_key)
+            .collect()
+    }
+
+    fn selected_dependency_indices(&self) -> Vec<usize> {
+        let visible = self.visible_dependency_indices();
+        self.selected_dependencies
+            .selected_indices()
+            .into_iter()
+            .filter_map(|index| visible.get(index).copied())
+            .collect()
+    }
+
+    fn selected_dependency_keys(&self) -> BTreeSet<DependencyKey> {
+        self.selected_dependency_indices()
+            .into_iter()
+            .filter_map(|index| self.proposal.dependency_suggestions.get(index))
+            .map(Self::dependency_key)
+            .collect()
+    }
+
+    fn selected_dependency_suggestions(&self) -> Vec<&SplitDependencySuggestion> {
+        self.selected_dependency_indices()
+            .into_iter()
+            .filter_map(|index| self.proposal.dependency_suggestions.get(index))
+            .collect()
+    }
+
+    fn selected_dependency(&self) -> Option<&SplitDependencySuggestion> {
+        let visible = self.visible_dependency_indices();
+        visible
+            .get(self.selected_dependencies.cursor())
+            .and_then(|index| self.proposal.dependency_suggestions.get(*index))
+            .or_else(|| self.visible_dependency_suggestions().into_iter().next())
+    }
+
+    fn sync_dependency_selection(&mut self) {
+        let previous_visible = self.visible_dependency_keys();
+        let previous_selected = self.selected_dependency_keys();
+        self.selected_dependencies = Self::dependency_selection_for(
+            &self.proposal,
+            &self.selected_child_indices(),
+            Some(&(previous_visible, previous_selected)),
+        );
     }
 
     fn dependency_preview_markdown(&self) -> String {
@@ -850,15 +1205,40 @@ impl SplitApp {
                 "Selected child issues: {}",
                 self.selected_child_indices().len()
             ),
+            format!(
+                "Resolvable suggestions in scope: {}",
+                self.visible_dependency_indices().len()
+            ),
+            format!(
+                "Dependency links selected for apply: {}",
+                self.selected_dependency_indices().len()
+            ),
             String::new(),
-            "Dependencies".to_string(),
+            "Focused dependency".to_string(),
         ];
-        let selected_dependencies = self.selected_dependency_suggestions();
-        if selected_dependencies.is_empty() {
+        if let Some(dependency) = self.selected_dependency() {
+            if dependency.rationale.trim().is_empty() {
+                lines.push(format!(
+                    "- `{}` blocks `{}`",
+                    dependency.blocking, dependency.blocked
+                ));
+            } else {
+                lines.push(format!(
+                    "- `{}` blocks `{}`: {}",
+                    dependency.blocking, dependency.blocked, dependency.rationale
+                ));
+            }
+        } else {
             lines.push(
                 "- _No resolvable dependency suggestions remain for the current selection._"
                     .to_string(),
             );
+        }
+        lines.push(String::new());
+        lines.push("Selected dependency links".to_string());
+        let selected_dependencies = self.selected_dependency_suggestions();
+        if selected_dependencies.is_empty() {
+            lines.push("- _No dependency links will be created from this proposal._".to_string());
         } else {
             lines.extend(selected_dependencies.into_iter().map(|dependency| {
                 if dependency.rationale.trim().is_empty() {
@@ -925,6 +1305,7 @@ async fn apply_split<C>(
     context: &SplitApplyContext<'_, C>,
     proposal: &SplitProposal,
     selected_indices: &[usize],
+    selected_dependency_indices: &[usize],
 ) -> Result<SplitReport>
 where
     C: crate::linear::LinearClient,
@@ -998,6 +1379,8 @@ where
         if let Err(error) = save_remembered_backlog_selection(root, &child) {
             eprintln!("warning: failed to persist remembered backlog defaults: {error}");
         }
+        created_children.push(child.clone());
+        child_lookup.insert(draft.proposal_id.clone(), child.clone());
 
         let rendered_files = render_split_backlog_files(
             root,
@@ -1008,8 +1391,22 @@ where
                 issue_url: Some(child.url.clone()),
                 ..TemplateContext::default()
             },
-        )?;
-        let issue_dir = write_rendered_backlog_item(root, &child.identifier, &rendered_files)?;
+        )
+        .with_context(|| {
+            format!(
+                "created split children [{}] but failed to render the local backlog packet for `{}`",
+                created_child_identifiers(&created_children),
+                child.identifier
+            )
+        })?;
+        let issue_dir = write_rendered_backlog_item(root, &child.identifier, &rendered_files)
+            .with_context(|| {
+                format!(
+                    "created split children [{}] but failed to write the local backlog packet for `{}`",
+                    created_child_identifiers(&created_children),
+                    child.identifier
+                )
+            })?;
         save_issue_metadata(
             &issue_dir,
             &BacklogIssueMetadata {
@@ -1028,10 +1425,15 @@ where
                 last_pulled_comment_ids: Vec::new(),
                 managed_files: Vec::<ManagedFileRecord>::new(),
             },
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "created split children [{}] but failed to write backlog metadata for `{}`",
+                created_child_identifiers(&created_children),
+                child.identifier
+            )
+        })?;
         backlog_paths.push(display_path(&issue_dir, root));
-        child_lookup.insert(draft.proposal_id.clone(), child.clone());
-        created_children.push(child);
     }
 
     let rewritten_parent = match service
@@ -1054,15 +1456,11 @@ where
     {
         Ok(parent) => parent,
         Err(error) => {
-            let created = created_children
-                .iter()
-                .map(|child| child.identifier.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
             return Err(error).with_context(|| {
                 format!(
                     "created split children [{}] but failed to rewrite parent `{}`",
-                    created, source.identifier
+                    created_child_identifiers(&created_children),
+                    source.identifier
                 )
             });
         }
@@ -1071,7 +1469,13 @@ where
     let mut dependency_links_created = 0usize;
     let mut dependency_link_notes = Vec::new();
     let mut seen_dependencies = BTreeSet::new();
-    for dependency in &proposal.dependency_suggestions {
+    for &dependency_index in selected_dependency_indices {
+        let dependency = proposal
+            .dependency_suggestions
+            .get(dependency_index)
+            .ok_or_else(|| {
+                anyhow!("selected split dependency index `{dependency_index}` is out of bounds")
+            })?;
         let Some(blocking) = child_lookup.get(&dependency.blocking) else {
             dependency_link_notes.push(format!(
                 "skipped `{}` -> `{}` because the blocking child was not selected",
@@ -1110,6 +1514,14 @@ where
         dependency_links_created,
         dependency_link_notes,
     })))
+}
+
+fn created_child_identifiers(children: &[IssueSummary]) -> String {
+    children
+        .iter()
+        .map(|child| child.identifier.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_split_backlog_files(
@@ -1152,6 +1564,11 @@ fn render_issue_markdown(title: &str, description: &str, acceptance_criteria: &[
 }
 
 fn render_split_session(frame: &mut Frame<'_>, app: &SplitApp) {
+    if let Some(loading) = &app.loading {
+        render_loading_frame(frame, loading);
+        return;
+    }
+
     let layout = base_layout(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1262,7 +1679,8 @@ fn render_children_stage(frame: &mut Frame<'_>, app: &SplitApp, body: &[Rect]) {
 }
 
 fn render_dependencies_stage(frame: &mut Frame<'_>, app: &SplitApp, body: &[Rect]) {
-    let dependencies = app.selected_dependency_suggestions();
+    let dependencies = app.visible_dependency_suggestions();
+    let selected = app.selected_dependencies.selected_indices();
     let items = if dependencies.is_empty() {
         vec![ListItem::new(
             "No resolvable dependency suggestions remain.",
@@ -1270,20 +1688,37 @@ fn render_dependencies_stage(frame: &mut Frame<'_>, app: &SplitApp, body: &[Rect
     } else {
         dependencies
             .iter()
-            .map(|dependency| {
+            .enumerate()
+            .map(|(index, dependency)| {
+                let marker = if selected.contains(&index) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
                 ListItem::new(format!(
-                    "{} blocks {}",
+                    "{marker} {} blocks {}",
                     dependency.blocking, dependency.blocked
                 ))
             })
             .collect::<Vec<_>>()
     };
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Dependencies and Order"),
-    );
-    frame.render_widget(list, body[0]);
+    let mut state = ListState::default();
+    if !dependencies.is_empty() {
+        state.select(Some(
+            app.selected_dependencies
+                .cursor()
+                .min(dependencies.len().saturating_sub(1)),
+        ));
+    }
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Dependencies and Order ({}/{})",
+            app.selected_dependency_indices().len(),
+            dependencies.len()
+        )))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(list, body[0], &mut state);
 
     let preview = scrollable_content_paragraph(
         render_markdown(&app.dependency_preview_markdown(), Style::default(), &[]),
@@ -1301,8 +1736,12 @@ fn render_addendum_stage(frame: &mut Frame<'_>, app: &SplitApp, body: &[Rect]) {
             app.selected_child_indices().len()
         )),
         Line::from(format!(
-            "Dependencies in scope: {}",
-            app.selected_dependency_suggestions().len()
+            "Resolvable dependencies in scope: {}",
+            app.visible_dependency_indices().len()
+        )),
+        Line::from(format!(
+            "Dependency links selected: {}",
+            app.selected_dependency_indices().len()
         )),
         Line::from(""),
         Line::styled(
@@ -1358,11 +1797,11 @@ fn render_confirm_stage(frame: &mut Frame<'_>, app: &SplitApp, body: &[Rect]) {
         )),
         Line::from(format!(
             "Dependency links to try: {}",
-            app.selected_dependency_suggestions().len()
+            app.selected_dependency_indices().len()
         )),
         Line::from(""),
         Line::styled(
-            "Press Enter to apply the split: create the selected children, rewrite the parent, and link resolvable dependencies.",
+            "Press Enter to apply the split: create the selected children, rewrite the parent, and link the dependency subset you kept in review.",
             Style::default().add_modifier(Modifier::DIM),
         ),
     ]))
@@ -1402,7 +1841,7 @@ fn render_footer(
             "Up/Down moves through proposed children. Space toggles creation. Enter continues to dependency review. Left returns to the source review.",
         ),
         SplitStage::Dependencies => pane_copy_help(
-            "Review the filtered dependency suggestions and proposed order. Enter continues to the addendum step. Left returns to child selection.",
+            "Up/Down moves through the filtered dependency suggestions. Space toggles whether the focused link will be created. Enter continues to the addendum step. Left returns to child selection.",
         ),
         SplitStage::Addendum => field_copy_help(
             "Type guidance and press Enter to regenerate the proposal, or press Enter on an empty field to continue. Left returns to dependency review.",
@@ -1412,13 +1851,15 @@ fn render_footer(
         ),
     };
 
-    let mut lines = vec![Line::from(help)];
+    let mut lines = Vec::new();
     if let Some(message) = error.or(status) {
-        lines.push(Line::from(""));
         lines.push(Line::styled(
             message.to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         ));
+        lines.push(Line::from(help));
+    } else {
+        lines.push(Line::from(help));
     }
 
     let footer = Paragraph::new(Text::from(lines))
@@ -1433,6 +1874,20 @@ fn base_layout(area: Rect) -> Vec<Rect> {
         .constraints([Constraint::Min(0), Constraint::Length(5)])
         .split(area)
         .to_vec()
+}
+
+fn render_loading_frame(frame: &mut Frame<'_>, app: &LoadingApp) {
+    render_loading_panel(
+        frame,
+        frame.area(),
+        &LoadingPanelData {
+            title: "Agent Working [loading]".to_string(),
+            message: app.message.clone(),
+            detail: app.detail.clone(),
+            spinner_index: app.spinner_index,
+            status_line: agent_loading_status_line().to_string(),
+        },
+    );
 }
 
 fn preview_viewport(area: Rect, stage: SplitStage) -> Rect {
@@ -1652,12 +2107,14 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        RenderOnceSplitResult, SplitApp, SplitChildDraft, SplitDependencySuggestion,
-        SplitParentDraft, SplitProposal, render_issue_markdown, run_render_once_session,
-        validate_split_proposal,
+        LoadingApp, RenderOnceSplitResult, SplitApp, SplitChildDraft, SplitDependencySuggestion,
+        SplitParentDraft, SplitProposal, render_issue_markdown, render_loading_frame,
+        run_render_once_session, snapshot, validate_split_proposal,
     };
     use crate::cli::SplitArgs;
     use crate::linear::{IssueSummary, ProjectRef, TeamRef, WorkflowState};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn issue() -> IssueSummary {
         IssueSummary {
@@ -1752,6 +2209,7 @@ mod tests {
             std::path::Path::new("."),
             issue(),
             proposal(),
+            None,
             crate::linear::TicketDiscussionBudgets::default(),
             &SplitArgs {
                 client: crate::cli::LinearClientArgs {
@@ -1786,10 +2244,28 @@ mod tests {
 
     #[test]
     fn split_app_filters_dependencies_to_selected_children() {
-        let mut app = SplitApp::new(issue(), proposal());
+        let mut app = SplitApp::new(issue(), proposal(), None);
         app.stage = super::SplitStage::Children;
         app.selected_children.toggle_current();
         app.selected_children.toggle_current();
+        app.sync_dependency_selection();
         assert_eq!(app.selected_dependency_suggestions().len(), 1);
+    }
+
+    #[test]
+    fn split_loading_snapshot_shows_agent_panel() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("loading backend should initialize");
+        let loading = LoadingApp {
+            message: "Refining split proposal".to_string(),
+            detail: "Rebuilding the draft with addendum guidance.".to_string(),
+            spinner_index: 1,
+        };
+        terminal
+            .draw(|frame| render_loading_frame(frame, &loading))
+            .expect("loading frame should render");
+        let snapshot = snapshot(terminal.backend());
+        assert!(snapshot.contains("Agent Working [loading]"));
+        assert!(snapshot.contains("Refining split proposal"));
     }
 }

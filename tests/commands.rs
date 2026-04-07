@@ -290,8 +290,13 @@ fn backlog_split_help_describes_inverse_planning_workflow() {
         .success()
         .stdout(predicate::str::contains("IDENTIFIER"))
         .stdout(predicate::str::contains("--no-interactive"))
+        .stdout(predicate::str::contains("--state"))
+        .stdout(predicate::str::contains("--priority"))
         .stdout(predicate::str::contains("--assignee"))
         .stdout(predicate::str::contains("--label"))
+        .stdout(predicate::str::contains("--agent"))
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--reasoning"))
         .stdout(predicate::str::contains("--render-once").not());
 }
 
