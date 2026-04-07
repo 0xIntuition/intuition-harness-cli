@@ -171,6 +171,90 @@ fn config_json_updates_vim_mode_and_returns_effective_value() -> Result<(), Box<
 }
 
 #[test]
+fn config_updates_listen_retry_defaults_and_renders_effective_values() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+            "--listen-retry-initial-backoff",
+            "7",
+            "--listen-retry-max-backoff",
+            "45",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let rendered: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        rendered["app"]["defaults"]["listen"]["retry"]["initial_backoff_seconds"],
+        json!(7)
+    );
+    assert_eq!(
+        rendered["app"]["defaults"]["listen"]["retry"]["max_backoff_seconds"],
+        json!(45)
+    );
+    assert_eq!(
+        rendered["effective"]["listen_retry"]["initial_backoff_seconds"],
+        json!(7)
+    );
+    assert_eq!(
+        rendered["effective"]["listen_retry"]["max_backoff_seconds"],
+        json!(45)
+    );
+
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(config_path)?)?;
+    assert_eq!(
+        saved["defaults"]["listen"]["retry"]["initial_backoff_seconds"].as_integer(),
+        Some(7)
+    );
+    assert_eq!(
+        saved["defaults"]["listen"]["retry"]["max_backoff_seconds"].as_integer(),
+        Some(45)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn config_rejects_listen_retry_max_backoff_below_initial() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--listen-retry-initial-backoff",
+            "30",
+            "--listen-retry-max-backoff",
+            "5",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "listen retry max backoff must be greater than or equal to the initial backoff",
+        ));
+
+    Ok(())
+}
+
+#[test]
 fn setup_json_scaffolds_repo_defaults() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");

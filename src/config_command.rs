@@ -31,7 +31,8 @@ use crate::config::{
     supported_reasoning_options, validate_agent_model, validate_agent_name,
     validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
     validate_fast_plan_question_limit, validate_interactive_plan_follow_up_question_limit,
-    validate_listen_poll_interval_seconds,
+    validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
+    validate_listen_retry_max_backoff_seconds,
 };
 use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
@@ -65,6 +66,18 @@ struct SerializableConfigView<'a> {
     config_path: String,
     detected_agents: &'a [String],
     app: &'a AppConfig,
+    effective: EffectiveConfigView,
+}
+
+#[derive(Debug, Serialize)]
+struct EffectiveConfigView {
+    listen_retry: EffectiveListenRetryView,
+}
+
+#[derive(Debug, Serialize)]
+struct EffectiveListenRetryView {
+    initial_backoff_seconds: u64,
+    max_backoff_seconds: u64,
 }
 
 pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
@@ -165,6 +178,17 @@ fn render_json(view: &ConfigViewData) -> Result<String> {
         config_path: view.config_path.display().to_string(),
         detected_agents: &view.detected_agents,
         app: &view.app_config,
+        effective: EffectiveConfigView {
+            listen_retry: EffectiveListenRetryView {
+                initial_backoff_seconds: view
+                    .app_config
+                    .defaults
+                    .listen
+                    .retry
+                    .initial_backoff_seconds(),
+                max_backoff_seconds: view.app_config.defaults.listen.retry.max_backoff_seconds(),
+            },
+        },
     })?)
 }
 
@@ -223,6 +247,15 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .poll_interval_seconds
             .map(|v| format!("{v}s"))
             .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install listen retry backoff: {}s initial / {}s max",
+        view.app_config
+            .defaults
+            .listen
+            .retry
+            .initial_backoff_seconds(),
+        view.app_config.defaults.listen.retry.max_backoff_seconds()
     ));
     lines.push(format!(
         "Install plan follow-up limit: {}",
@@ -474,6 +507,8 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.assignee_scope.is_some()
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
+        || args.listen_retry_initial_backoff.is_some()
+        || args.listen_retry_max_backoff.is_some()
         || args.plan_follow_up_limit.is_some()
         || args.plan_default_mode.is_some()
         || args.plan_fast_single_ticket.is_some()
@@ -533,6 +568,24 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             interval,
             "listen poll interval",
             validate_listen_poll_interval_seconds,
+        )?;
+    }
+    if let Some(backoff) = &args.listen_retry_initial_backoff {
+        view.app_config
+            .defaults
+            .listen
+            .retry
+            .initial_backoff_seconds = parse_optional_u64(
+            backoff,
+            "listen retry initial backoff",
+            validate_listen_retry_initial_backoff_seconds,
+        )?;
+    }
+    if let Some(backoff) = &args.listen_retry_max_backoff {
+        view.app_config.defaults.listen.retry.max_backoff_seconds = parse_optional_u64(
+            backoff,
+            "listen retry max backoff",
+            validate_listen_retry_max_backoff_seconds,
         )?;
     }
     if let Some(limit) = &args.plan_follow_up_limit {

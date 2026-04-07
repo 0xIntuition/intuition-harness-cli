@@ -696,6 +696,17 @@ struct DynamicLinearState {
     issue_refreshes_after_claim: usize,
     review_transition_applied: bool,
     complete_after_claim_refreshes: usize,
+    fail_workpad_updates_remaining: usize,
+    fail_attachment_creates_remaining: usize,
+    fail_review_transitions_remaining: usize,
+}
+
+#[cfg(unix)]
+#[derive(Default, Clone, Copy)]
+struct DynamicLinearFailurePlan {
+    workpad_update_failures: usize,
+    attachment_create_failures: usize,
+    review_transition_failures: usize,
 }
 
 #[cfg(unix)]
@@ -714,12 +725,25 @@ impl DynamicLinearServer {
     fn start_with_completion_after_refreshes(
         complete_after_claim_refreshes: usize,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_failure_plan(
+            complete_after_claim_refreshes,
+            DynamicLinearFailurePlan::default(),
+        )
+    }
+
+    fn start_with_failure_plan(
+        complete_after_claim_refreshes: usize,
+        failure_plan: DynamicLinearFailurePlan,
+    ) -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(DynamicLinearState {
             complete_after_claim_refreshes,
+            fail_workpad_updates_remaining: failure_plan.workpad_update_failures,
+            fail_attachment_creates_remaining: failure_plan.attachment_create_failures,
+            fail_review_transitions_remaining: failure_plan.review_transition_failures,
             ..DynamicLinearState::default()
         }));
         let thread_shutdown = shutdown.clone();
@@ -974,6 +998,10 @@ fn dynamic_linear_response(
         let mut state = state.lock().expect("state mutex should lock");
         state.claimed = true;
         if body.contains(r#""stateId":"state-3""#) {
+            if state.fail_review_transitions_remaining > 0 {
+                state.fail_review_transitions_remaining -= 1;
+                return Err("Linear request failed with status 503 Service Unavailable".into());
+            }
             state.review_transition_applied = true;
         }
         let (state_id, state_name, state_type) = if state.review_transition_applied {
@@ -1062,6 +1090,11 @@ fn dynamic_linear_response(
     }
 
     if body.contains("mutation UpdateComment") {
+        let mut state = state.lock().expect("state mutex should lock");
+        if state.fail_workpad_updates_remaining > 0 {
+            state.fail_workpad_updates_remaining -= 1;
+            return Err("Linear request failed with status 503 Service Unavailable".into());
+        }
         return Ok(json!({
             "data": {
                 "commentUpdate": {
@@ -1077,6 +1110,11 @@ fn dynamic_linear_response(
     }
 
     if body.contains("mutation CreateAttachment") {
+        let mut state = state.lock().expect("state mutex should lock");
+        if state.fail_attachment_creates_remaining > 0 {
+            state.fail_attachment_creates_remaining -= 1;
+            return Err("Linear request failed with status 503 Service Unavailable".into());
+        }
         return Ok(json!({
             "data": {
                 "attachmentCreate": {

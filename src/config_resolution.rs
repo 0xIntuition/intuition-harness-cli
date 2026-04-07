@@ -1000,6 +1000,26 @@ pub fn validate_listen_poll_interval_seconds(interval: u64) -> Result<()> {
     }
 }
 
+pub fn validate_listen_retry_initial_backoff_seconds(backoff: u64) -> Result<()> {
+    if (1..=3_600).contains(&backoff) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen retry initial backoff must be between 1 and 3600 seconds; got {backoff}"
+        ))
+    }
+}
+
+pub fn validate_listen_retry_max_backoff_seconds(backoff: u64) -> Result<()> {
+    if (1..=3_600).contains(&backoff) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen retry max backoff must be between 1 and 3600 seconds; got {backoff}"
+        ))
+    }
+}
+
 pub(crate) fn validate_merge_validation_repair_attempts(limit: usize) -> Result<()> {
     if limit >= 1 {
         Ok(())

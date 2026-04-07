@@ -1,10 +1,93 @@
 use serde::{Deserialize, Serialize};
 
-use crate::linear::{AttachmentSummary, IssueSummary};
+use crate::linear::{AttachmentSummary, IssueSummary, LinearFailureKind};
 
 use super::{compact_identifier, format_duration, format_number};
 
 pub(super) const COMPLETED_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearFailureSnapshot {
+    pub kind: LinearFailureKind,
+    pub message: String,
+    pub observed_at_epoch_seconds: u64,
+    #[serde(default)]
+    pub status_code: Option<u16>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    #[serde(default)]
+    pub next_retry_at_epoch_seconds: Option<u64>,
+}
+
+impl LinearFailureSnapshot {
+    pub(super) fn retry_label(&self, now_epoch_seconds: u64) -> String {
+        match self.next_retry_at_epoch_seconds {
+            Some(next_retry) if next_retry > now_epoch_seconds => {
+                format_duration(next_retry.saturating_sub(now_epoch_seconds))
+            }
+            Some(_) => "now".to_string(),
+            None => "manual".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPullRequestAttachment {
+    pub number: u64,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLinearSync {
+    #[serde(default)]
+    pub require_issue_refresh: bool,
+    #[serde(default)]
+    pub workpad_body: Option<String>,
+    #[serde(default)]
+    pub pull_request_attachment: Option<PendingPullRequestAttachment>,
+    #[serde(default)]
+    pub review_transition_issue: bool,
+    #[serde(default)]
+    pub review_transition_backlog_issue: Option<String>,
+    #[serde(default)]
+    pub last_failure: Option<LinearFailureSnapshot>,
+}
+
+impl PendingLinearSync {
+    pub(super) fn is_empty(&self) -> bool {
+        !self.require_issue_refresh
+            && self.workpad_body.is_none()
+            && self.pull_request_attachment.is_none()
+            && !self.review_transition_issue
+            && self.review_transition_backlog_issue.is_none()
+    }
+
+    pub(super) fn blocks_agent_turns(&self) -> bool {
+        self.require_issue_refresh
+            || self.review_transition_issue
+            || self.review_transition_backlog_issue.is_some()
+    }
+
+    pub(super) fn operation_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        if self.require_issue_refresh {
+            labels.push("issue refresh".to_string());
+        }
+        if self.workpad_body.is_some() {
+            labels.push("workpad sync".to_string());
+        }
+        if self.pull_request_attachment.is_some() {
+            labels.push("PR attachment".to_string());
+        }
+        if self.review_transition_issue {
+            labels.push("issue review transition".to_string());
+        }
+        if let Some(identifier) = self.review_transition_backlog_issue.as_deref() {
+            labels.push(format!("backlog review transition ({identifier})"));
+        }
+        labels
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -401,6 +484,8 @@ pub struct AgentSession {
     #[serde(default)]
     pub latest_resume_handle: Option<LatestResumeHandle>,
     #[serde(default)]
+    pub pending_linear_sync: Option<PendingLinearSync>,
+    #[serde(default)]
     pub turns: Option<u32>,
     #[serde(default)]
     pub tokens: TokenUsage,
@@ -457,6 +542,16 @@ impl AgentSession {
 
     pub(super) fn pull_request_label(&self) -> String {
         self.pull_request.compact_label()
+    }
+
+    pub(super) fn pending_linear_sync_label(&self) -> Option<String> {
+        self.pending_linear_sync.as_ref().map(|pending| {
+            let operations = pending.operation_labels().join(", ");
+            match pending.last_failure.as_ref() {
+                Some(failure) => format!("{} | {}", operations, failure.kind.label()),
+                None => operations,
+            }
+        })
     }
 
     pub(super) fn canonical_tokens(&self) -> &TokenUsage {
@@ -554,6 +649,12 @@ impl SessionPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ListenState {
     version: u8,
+    #[serde(default)]
+    pub(super) pending_issues: Vec<PendingIssue>,
+    #[serde(default)]
+    pub(super) active_issues: Vec<ActiveIssue>,
+    #[serde(default)]
+    pub(super) degraded: Option<LinearFailureSnapshot>,
     pub(super) sessions: Vec<AgentSession>,
 }
 
@@ -561,6 +662,9 @@ impl Default for ListenState {
     fn default() -> Self {
         Self {
             version: 1,
+            pending_issues: Vec::new(),
+            active_issues: Vec::new(),
+            degraded: None,
             sessions: Vec::new(),
         }
     }
@@ -571,6 +675,9 @@ impl ListenState {
     pub(super) fn from_sessions(sessions: Vec<AgentSession>) -> Self {
         Self {
             version: 1,
+            pending_issues: Vec::new(),
+            active_issues: Vec::new(),
+            degraded: None,
             sessions,
         }
     }
@@ -684,6 +791,7 @@ mod tests {
             pid: None,
             session_id: Some("issue-1".to_string()),
             latest_resume_handle: None,
+            pending_linear_sync: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
             turn_history: Vec::new(),
