@@ -14,8 +14,8 @@ use crate::config::{
     AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPEC, AGENT_ROUTE_BACKLOG_SPLIT,
     AGENT_ROUTE_BACKLOG_TECH, AGENT_ROUTE_CONTEXT_RELOAD, AGENT_ROUTE_CONTEXT_SCAN,
     AGENT_ROUTE_LINEAR_ISSUES_REFINE, AGENT_ROUTE_MERGE, AGENT_ROUTE_RUNTIME_CRON_PROMPT,
-    AgentCommandConfig, AgentRouteConfig, AppConfig, DEFAULT_LINEAR_API_URL,
-    LinearProfileSettings, LinearSettings, METASTACK_CONFIG_ENV, PlanningMeta,
+    AgentCommandConfig, AgentRouteConfig, AppConfig, DEFAULT_LINEAR_API_URL, LinearProfileSettings,
+    LinearSettings, METASTACK_CONFIG_ENV, PlanningMeta,
 };
 use crate::fs::PlanningPaths;
 use crate::linear::{LinearService, ReqwestLinearClient};

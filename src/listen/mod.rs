@@ -6376,6 +6376,13 @@ suffix
             unreachable!("create_attachment is not used in this test")
         }
 
+        async fn create_issue_relation(
+            &self,
+            _request: crate::linear::IssueRelationCreateRequest,
+        ) -> Result<()> {
+            unreachable!("create_issue_relation is not used in this test")
+        }
+
         async fn delete_attachment(&self, _attachment_id: &str) -> Result<()> {
             unreachable!("delete_attachment is not used in this test")
         }
