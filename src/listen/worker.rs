@@ -1,11 +1,12 @@
 use std::cell::RefCell;
 use std::fs;
-use std::io::Write;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -17,14 +18,15 @@ use crate::agent_provider::builtin_provider_adapter;
 use crate::agents::{
     AgentExecutionOptions, AgentTokenUsage, apply_invocation_environment,
     apply_noninteractive_agent_environment, command_args_for_invocation,
-    command_args_for_invocation_with_options, render_invocation_diagnostics,
-    resolve_agent_invocation_for_planning, validate_invocation_command_surface,
+    command_args_for_invocation_with_options, format_agent_config_source,
+    render_invocation_diagnostics, resolve_agent_invocation_for_planning,
+    validate_invocation_command_surface,
 };
 use crate::backlog::load_issue_metadata;
 use crate::cli::{ListenWorkerArgs, RunAgentArgs};
 use crate::config::{
-    AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, LinearConfigOverrides, PlanningMeta,
-    PromptTransport,
+    AGENT_ROUTE_AGENTS_LISTEN, AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION, AppConfig, LinearConfig,
+    LinearConfigOverrides, PlanningMeta, PromptTransport,
 };
 use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resolve_agent_config};
 use crate::fs::sibling_workspace_root;
@@ -45,6 +47,14 @@ use crate::validation::{
 use crate::workflow_contract::render_workflow_contract_for_listen;
 use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
+use super::verification::{
+    BattleTestInput, VerificationBattleTestCase, VerificationBattleTestReport,
+    VerificationCodeReviewReport, VerificationCriterionResult, VerificationE2eReport,
+    VerificationE2eStepReport, VerificationFinding, VerificationRecipeStep, VerificationReport,
+    VerificationRouteDiagnostics, VerificationStatus, VerificationSummary,
+    builtin_quality_criteria, discover_battle_test_inputs, load_route_verification_recipe,
+    truncate_for_evidence,
+};
 use super::{
     BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PendingLinearSync,
     PendingPullRequestAttachment, PullRequestStatus, PullRequestSummary, ResumeProvider,
@@ -63,6 +73,7 @@ const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
 const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
+const E2E_RECIPE_STEP_TIMEOUT_SECONDS: u64 = 300;
 
 fn listen_preflight_failure_header(timestamp: &str) -> String {
     format!(
@@ -173,6 +184,11 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
         canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
+        verification_summary: load_existing_verification_summary(
+            &source_root,
+            project_selector,
+            &args.issue,
+        )?,
         origin: session_origin,
     };
     let mut session_tokens =
@@ -181,7 +197,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
     let mut stalled_turns = 0u32;
     let mut last_review: Option<ReviewReport> = None;
-    let mut remaining_validation_repair_turns = PlanningMeta::load(&workspace_path)
+    let validation_repair_attempts = PlanningMeta::load(&workspace_path)
         .with_context(|| {
             format!(
                 "failed to load repo validation settings from `{}`",
@@ -190,6 +206,8 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         })?
         .validation
         .repair_attempts();
+    let mut remaining_verification_repair_turns = validation_repair_attempts;
+    let mut remaining_validation_repair_turns = validation_repair_attempts;
     if let Err(error) = preflight::run_listen_preflight(
         &service,
         &linear_config,
@@ -342,7 +360,10 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             &issue,
             turn_number,
             &turn_context,
-            last_review.as_ref(),
+            ExecutionTurnDelta {
+                previous_review: last_review.as_ref(),
+                verification_summary: session_context.verification_summary.as_ref(),
+            },
             session_context.latest_resume_handle.as_ref(),
             |current_session_id| {
                 if provider_session_id_state.borrow().as_deref() == Some(current_session_id) {
@@ -419,7 +440,10 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &issue,
                     turn_number,
                     &turn_context,
-                    last_review.as_ref(),
+                    ExecutionTurnDelta {
+                        previous_review: last_review.as_ref(),
+                        verification_summary: session_context.verification_summary.as_ref(),
+                    },
                     None,
                     |current_session_id| {
                         if provider_session_id_retry.borrow().as_deref() == Some(current_session_id)
@@ -634,6 +658,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 session_context: &session_context,
                 provider_session_id: provider_session_id.as_deref(),
                 log_path: &log_path,
+                previous_review: last_review.as_ref(),
             },
         )
         .await?;
@@ -666,10 +691,79 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     session_context: &session_context,
                     provider_session_id: provider_session_id.as_deref(),
                     log_path: &log_path,
+                    previous_review: None,
                 },
             )
             .await?;
             if final_review.approved {
+                let verification = run_verification_phase(
+                    &issue,
+                    turn_number,
+                    &turn_context,
+                    WorkerPhaseContext {
+                        source_root: &source_root,
+                        project_selector,
+                        session_context: &session_context,
+                        provider_session_id: provider_session_id.as_deref(),
+                        log_path: &log_path,
+                        previous_review: None,
+                    },
+                )
+                .await?;
+                session_context.verification_summary = Some(verification.summary_snapshot());
+                sync_review_tracking(
+                    &service,
+                    &issue,
+                    &turn_context,
+                    &app_config,
+                    &mut session_context,
+                    &log_path,
+                    &review,
+                )
+                .await?;
+                if verification.status == VerificationStatus::Failed {
+                    let budget_exhausted = remaining_verification_repair_turns == 0;
+                    let remaining_after_failure =
+                        remaining_verification_repair_turns.saturating_sub(1);
+                    let follow_up_review = review_for_verification_failure(
+                        &review,
+                        &verification,
+                        remaining_after_failure,
+                    );
+                    sync_review_tracking(
+                        &service,
+                        &issue,
+                        &turn_context,
+                        &app_config,
+                        &mut session_context,
+                        &log_path,
+                        &follow_up_review,
+                    )
+                    .await?;
+                    last_review = Some(follow_up_review);
+                    if budget_exhausted {
+                        write_listen_session(
+                            &source_root,
+                            project_selector,
+                            build_worker_session(
+                                &issue,
+                                SessionPhase::Blocked,
+                                compact_blocked_summary(
+                                    "Blocked | verification failed and repair budget exhausted",
+                                    issue.description.as_deref(),
+                                    &log_path,
+                                ),
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &session_context.canonical,
+                            ),
+                        )?;
+                        return Ok(());
+                    }
+                    remaining_verification_repair_turns -= 1;
+                    continue;
+                }
                 let review = match run_pre_pr_validation_gate(
                     PrePrValidationGateContext {
                         issue: &issue,
@@ -680,6 +774,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             session_context: &session_context,
                             provider_session_id: provider_session_id.as_deref(),
                             log_path: &log_path,
+                            previous_review: None,
                         },
                         turns_completed,
                         pr_mutation_description: "review-ready PR promotion",
@@ -743,6 +838,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     branch,
                     &session_context.pull_request,
                     &review,
+                    session_context.verification_summary.as_ref(),
                 )
                 .await
                 {
@@ -945,22 +1041,23 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     return Ok(());
                 }
 
-                write_listen_session(
-                    &source_root,
-                    project_selector,
-                    build_worker_session(
-                        &refreshed_issue,
-                        SessionPhase::Blocked,
-                        compact_blocked_summary(
-                            "Blocked | final review passed but review transition failed",
-                            refreshed_issue.description.as_deref(),
-                            &log_path,
-                        ),
-                        &session_context,
-                        turns_completed,
-                        provider_session_id.as_deref(),
-                        &session_context.canonical,
-                    ),
+                update_pending_linear_sync(&mut session_context.pending_linear_sync, |pending| {
+                    pending.review_transition_issue = true;
+                });
+                append_worker_log(
+                    &log_path,
+                    "pending linear sync",
+                    &[
+                        "Deferred review transition replay without a captured Linear error"
+                            .to_string(),
+                    ],
+                )?;
+                write_pending_linear_sync_blocked_session(
+                    &refreshed_issue,
+                    &session_context,
+                    turns_completed,
+                    provider_session_id.as_deref(),
+                    &log_path,
                 )?;
                 return Ok(());
             }
@@ -1002,6 +1099,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             session_context: &session_context,
                             provider_session_id: provider_session_id.as_deref(),
                             log_path: &log_path,
+                            previous_review: None,
                         },
                         turns_completed,
                         pr_mutation_description: "draft PR publication",
@@ -1046,6 +1144,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     branch,
                     PullRequestPublishMode::Draft,
                     Some(&review),
+                    session_context.verification_summary.as_ref(),
                 )
                 .await
                 {
@@ -1268,6 +1367,7 @@ struct WorkerSessionContext<'a> {
     turn_history: Vec<TurnTokenSnapshot>,
     canonical: CanonicalSessionData,
     pull_request: PullRequestSummary,
+    verification_summary: Option<VerificationSummary>,
     origin: super::state::SessionOrigin,
 }
 
@@ -1277,6 +1377,7 @@ struct AgentPhaseInvocation<'a> {
     turn_number: u32,
     phase_label: &'a str,
     prompt_mode: TurnPromptMode,
+    capture_response_text: bool,
     continuation_handle: Option<&'a LatestResumeHandle>,
 }
 
@@ -1286,6 +1387,7 @@ struct WorkerPhaseContext<'a> {
     session_context: &'a WorkerSessionContext<'a>,
     provider_session_id: Option<&'a str>,
     log_path: &'a Path,
+    previous_review: Option<&'a ReviewReport>,
 }
 
 #[derive(Debug, Default)]
@@ -1348,6 +1450,44 @@ struct PrePrValidationGateContext<'a> {
     phase_context: WorkerPhaseContext<'a>,
     turns_completed: u32,
     pr_mutation_description: &'a str,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct VerificationAgentCriterion {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    status: VerificationStatus,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    findings: Vec<VerificationFinding>,
+    #[serde(default)]
+    remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct VerificationAgentBattleTest {
+    #[serde(default)]
+    input_path: String,
+    #[serde(default)]
+    status: VerificationStatus,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct VerificationAgentOutput {
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    criteria: Vec<VerificationAgentCriterion>,
+    #[serde(default)]
+    battle_tests: Vec<VerificationAgentBattleTest>,
+    #[serde(default)]
+    notes: Vec<String>,
 }
 
 impl From<PullRequestLifecycleResult> for PullRequestSummary {
@@ -1705,7 +1845,11 @@ fn listener_linear_identifier_pr_label(issue: &IssueSummary) -> String {
     format!("id-{}", issue.identifier)
 }
 
-fn listener_pull_request_body(issue: &IssueSummary, review: Option<&ReviewReport>) -> String {
+fn listener_pull_request_body(
+    issue: &IssueSummary,
+    review: Option<&ReviewReport>,
+    verification: Option<&VerificationSummary>,
+) -> String {
     let mut lines = vec![
         format!("# {}", listener_pull_request_title(issue)),
         String::new(),
@@ -1720,6 +1864,13 @@ fn listener_pull_request_body(issue: &IssueSummary, review: Option<&ReviewReport
 
     if let Some(review) = review {
         lines.push(format!("- Latest listener review: {}", review.summary));
+    }
+    if let Some(verification) = verification {
+        lines.push(format!(
+            "- Latest verification: {} ({})",
+            verification.summary,
+            verification.compact_label()
+        ));
     }
 
     lines.extend([
@@ -1753,6 +1904,29 @@ fn listener_pull_request_body(issue: &IssueSummary, review: Option<&ReviewReport
             for item in &review.validation_remaining {
                 lines.push(format!("- Remaining: {item}"));
             }
+        }
+    }
+
+    if let Some(verification) = verification {
+        lines.extend([String::new(), "## Verification".to_string()]);
+        lines.push(format!("- Status: {}", verification.status.display_label()));
+        lines.push(format!("- Summary: {}", verification.summary));
+        if verification.criteria_total > 0 {
+            lines.push(format!(
+                "- Criteria failures: {}/{}",
+                verification.criteria_failed, verification.criteria_total
+            ));
+        }
+        lines.push(format!(
+            "- E2E: {}",
+            verification.e2e_status.display_label()
+        ));
+        lines.push(format!(
+            "- Battle tests: {}",
+            verification.battle_test_status.display_label()
+        ));
+        for item in &verification.remediation {
+            lines.push(format!("- Remediation: {item}"));
         }
     }
 
@@ -1893,11 +2067,16 @@ fn write_listener_pull_request_body(
     workspace_path: &Path,
     issue: &IssueSummary,
     review: Option<&ReviewReport>,
+    verification: Option<&VerificationSummary>,
 ) -> Result<std::path::PathBuf> {
     let path = PlanningPaths::new(workspace_path)
         .agent_dir
         .join(format!("{}-pull-request.md", issue.identifier));
-    write_text_file(&path, &listener_pull_request_body(issue, review), true)?;
+    write_text_file(
+        &path,
+        &listener_pull_request_body(issue, review, verification),
+        true,
+    )?;
     Ok(path)
 }
 
@@ -1969,13 +2148,14 @@ async fn publish_listener_pull_request(
     branch: &str,
     mode: PullRequestPublishMode,
     review: Option<&ReviewReport>,
+    verification: Option<&VerificationSummary>,
 ) -> Result<Option<PullRequestLifecycleResult>> {
     if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
         return Ok(None);
     }
 
     let gh = GhCli;
-    let body_path = write_listener_pull_request_body(workspace_path, issue, review)?;
+    let body_path = write_listener_pull_request_body(workspace_path, issue, review, verification)?;
     let title = listener_pull_request_title(issue);
     let pull_request = gh.publish_branch_pull_request(
         workspace_path,
@@ -1997,13 +2177,15 @@ async fn prepare_listener_pull_request_for_review(
     branch: &str,
     existing_pull_request: &PullRequestSummary,
     review: &ReviewReport,
+    verification: Option<&VerificationSummary>,
 ) -> Result<Option<PullRequestLifecycleResult>> {
     if branch.eq_ignore_ascii_case(LISTEN_PULL_REQUEST_BASE_BRANCH) {
         return Ok(None);
     }
 
     let gh = GhCli;
-    let body_path = write_listener_pull_request_body(workspace_path, issue, Some(review))?;
+    let body_path =
+        write_listener_pull_request_body(workspace_path, issue, Some(review), verification)?;
     let title = listener_pull_request_title(issue);
     let pull_request = if let Some(number) = existing_pull_request.number {
         gh.refresh_pull_request_by_number(workspace_path, number, &title, &body_path)?;
@@ -2090,8 +2272,8 @@ fn output_excerpt(text: &str) -> Option<String> {
         .join(" | ");
     if excerpt.is_empty() {
         None
-    } else if excerpt.len() > 240 {
-        Some(format!("{}...", &excerpt[..237]))
+    } else if excerpt.chars().count() > 240 {
+        Some(truncate_with_ellipsis(&excerpt, 240))
     } else {
         Some(excerpt)
     }
@@ -2172,6 +2354,54 @@ fn review_for_validation_failure(
     push_unique(
         &mut follow_up.notes,
         format!("Validation repair turns remaining after this retry: {remaining_repair_turns}"),
+    );
+    follow_up
+}
+
+fn review_for_verification_failure(
+    review: &ReviewReport,
+    verification: &VerificationReport,
+    remaining_repair_turns: usize,
+) -> ReviewReport {
+    let mut follow_up = review.clone();
+    follow_up.complete = false;
+    follow_up.summary =
+        "Verification failed before ready promotion; repair is required before PR mutation."
+            .to_string();
+    push_unique(
+        &mut follow_up.remaining_items,
+        "Repair the verification findings and rerun the verification gate before ready promotion."
+            .to_string(),
+    );
+    push_unique(
+        &mut follow_up.validation_remaining,
+        "Verification must pass before validation and ready promotion can succeed.".to_string(),
+    );
+    push_unique(
+        &mut follow_up.notes,
+        format!("Verification summary: {}", verification.summary),
+    );
+    if verification.code_review.status == VerificationStatus::Failed {
+        push_unique(
+            &mut follow_up.risks,
+            verification.code_review.summary.clone(),
+        );
+    }
+    if verification.e2e.status == VerificationStatus::Failed {
+        push_unique(&mut follow_up.risks, verification.e2e.summary.clone());
+    }
+    if verification.battle_tests.status == VerificationStatus::Failed {
+        push_unique(
+            &mut follow_up.risks,
+            verification.battle_tests.summary.clone(),
+        );
+    }
+    for item in &verification.remediation {
+        push_unique(&mut follow_up.remaining_items, item.clone());
+    }
+    push_unique(
+        &mut follow_up.notes,
+        format!("Verification repair turns remaining after this retry: {remaining_repair_turns}"),
     );
     follow_up
 }
@@ -2334,9 +2564,24 @@ fn build_listen_run_args(
     turn_number: u32,
     context: &ListenTurnContext<'_>,
     previous_review: Option<&ReviewReport>,
+    verification_summary: Option<&VerificationSummary>,
     has_resume_handle: bool,
 ) -> Result<RunAgentArgs> {
     let use_continuation = has_resume_handle && turn_number > 1;
+    let effective_verification_summary = if turn_number > 1 {
+        match verification_summary.cloned() {
+            Some(summary) => Some(summary),
+            None => load_existing_verification_summary(
+                context.source_root,
+                context.project_selector,
+                &issue.identifier,
+            )
+            .ok()
+            .flatten(),
+        }
+    } else {
+        verification_summary.cloned()
+    };
 
     let prompt = if turn_number > 1 {
         render_execution_delta_prompt(
@@ -2344,6 +2589,7 @@ fn build_listen_run_args(
             turn_number,
             context.max_turns,
             previous_review,
+            effective_verification_summary.as_ref(),
             use_continuation,
         )
     } else {
@@ -2413,6 +2659,32 @@ fn build_final_review_run_args(
     }
 }
 
+fn build_verification_run_args(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+    quality_criteria: &[String],
+    battle_inputs: &[BattleTestInput],
+) -> RunAgentArgs {
+    RunAgentArgs {
+        root: Some(context.source_root.to_path_buf()),
+        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION.to_string()),
+        agent: context.args.agent.clone(),
+        prompt: render_verification_prompt(
+            issue,
+            turn_number,
+            context,
+            quality_criteria,
+            battle_inputs,
+        ),
+        instructions: Some(build_verification_instructions()),
+        model: context.args.model.clone(),
+        reasoning: context.args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    }
+}
+
 pub(super) fn write_preflight_failure(log_path: &Path, error: &anyhow::Error) -> Result<()> {
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
@@ -2432,11 +2704,16 @@ pub(super) fn write_preflight_failure(log_path: &Path, error: &anyhow::Error) ->
     .with_context(|| format!("failed to write `{}`", log_path.display()))
 }
 
+struct ExecutionTurnDelta<'a> {
+    previous_review: Option<&'a ReviewReport>,
+    verification_summary: Option<&'a VerificationSummary>,
+}
+
 fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
-    previous_review: Option<&ReviewReport>,
+    delta: ExecutionTurnDelta<'_>,
     continuation_handle: Option<&LatestResumeHandle>,
     mut on_session_started: impl FnMut(&str) -> Result<()>,
     mut on_usage: impl FnMut(&AgentTokenUsage) -> Result<()>,
@@ -2469,7 +2746,8 @@ fn execute_agent_turn(
         issue,
         turn_number,
         context,
-        previous_review,
+        delta.previous_review,
+        delta.verification_summary,
         has_resume_handle,
     )?;
     execute_agent_run(
@@ -2479,6 +2757,7 @@ fn execute_agent_turn(
             turn_number,
             phase_label: "execute",
             prompt_mode,
+            capture_response_text: false,
             continuation_handle: if use_continuation {
                 continuation_handle
             } else {
@@ -2502,12 +2781,13 @@ fn execute_agent_run(
     let turn_number = phase.turn_number;
     let phase_label = phase.phase_label;
     let prompt_mode = phase.prompt_mode;
+    let capture_response_text = phase.capture_response_text;
     let invocation = resolve_agent_invocation_for_planning(
         context.app_config,
         context.planning_meta,
         &run_args,
     )?;
-    let capture_output = invocation.builtin_provider;
+    let capture_output = invocation.builtin_provider || capture_response_text;
     let command_args = if capture_output {
         let continuation =
             continuation_id_for_invocation(&invocation.agent, phase.continuation_handle);
@@ -2659,8 +2939,6 @@ fn execute_agent_run(
     }
 
     if capture_output {
-        let provider = builtin_provider_adapter(&invocation.agent)
-            .ok_or_else(|| anyhow!("builtin provider `{}` is not configured", invocation.agent))?;
         let stdout = child
             .stdout
             .take()
@@ -2695,6 +2973,7 @@ fn execute_agent_run(
             .open(&log_path)
             .with_context(|| format!("failed to open `{}`", log_path.display()))?;
         let mut raw_stdout = String::new();
+        let provider = builtin_provider_adapter(&invocation.agent);
         let mut continuation = None;
         let mut usage = None;
         let mut latest_resume_handle = None;
@@ -2708,18 +2987,20 @@ fn execute_agent_run(
             if latest_resume_handle.is_none() {
                 latest_resume_handle = parse_resume_handle_line(&invocation.agent, line.as_bytes());
             }
-            let parsed = provider.parse_capture_output(&line)?;
-            if let Some(current_session_id) = parsed.continuation
-                && continuation.as_deref() != Some(current_session_id.as_str())
-            {
-                on_session_started(&current_session_id)?;
-                continuation = Some(current_session_id);
-            }
-            if let Some(update) = parsed.usage
-                && usage.as_ref() != Some(&update)
-            {
-                on_usage(&update)?;
-                usage = Some(update);
+            if let Some(provider) = provider {
+                let parsed = provider.parse_capture_output(&line)?;
+                if let Some(current_session_id) = parsed.continuation
+                    && continuation.as_deref() != Some(current_session_id.as_str())
+                {
+                    on_session_started(&current_session_id)?;
+                    continuation = Some(current_session_id);
+                }
+                if let Some(update) = parsed.usage
+                    && usage.as_ref() != Some(&update)
+                {
+                    on_usage(&update)?;
+                    usage = Some(update);
+                }
             }
         }
 
@@ -2740,28 +3021,39 @@ fn execute_agent_run(
                 stderr_output.trim()
             );
         }
-        let parsed = provider.parse_capture_output(&raw_stdout)?;
         let turn_finished_at = now_epoch_seconds();
+        if let Some(provider) = provider {
+            let parsed = provider.parse_capture_output(&raw_stdout)?;
+            return Ok(TurnExecutionResult {
+                response_text: parsed.response_text.clone(),
+                session_id: parsed.continuation.or(continuation),
+                usage: parsed.usage.or(usage),
+                latest_resume_handle: latest_resume_handle.or_else(|| {
+                    if invocation.agent == "codex" {
+                        resolve_codex_resume_handle(
+                            context.workspace_path,
+                            issue,
+                            turn_started_at,
+                            turn_finished_at,
+                        )
+                    } else {
+                        None
+                    }
+                }),
+                prompt_mode,
+                provider: Some(invocation.agent.clone()),
+                model: invocation.model.clone(),
+                reasoning: invocation.reasoning.clone(),
+            });
+        }
+
         return Ok(TurnExecutionResult {
-            response_text: parsed.response_text.clone(),
-            session_id: parsed.continuation.or(continuation),
-            usage: parsed.usage.or(usage),
-            latest_resume_handle: latest_resume_handle.or_else(|| {
-                if invocation.agent == "codex" {
-                    resolve_codex_resume_handle(
-                        context.workspace_path,
-                        issue,
-                        turn_started_at,
-                        turn_finished_at,
-                    )
-                } else {
-                    None
-                }
-            }),
+            response_text: capture_response_text.then(|| raw_stdout.trim().to_string()),
             prompt_mode,
             provider: Some(invocation.agent.clone()),
             model: invocation.model.clone(),
             reasoning: invocation.reasoning.clone(),
+            ..TurnExecutionResult::default()
         });
     }
 
@@ -3118,11 +3410,19 @@ fn build_final_review_instructions(_: &ListenTurnContext<'_>) -> String {
     )
 }
 
+fn build_verification_instructions() -> String {
+    format!(
+        "You are the verification phase for `{}` listen. Perform a strict code-review verification pass and return JSON only.\n\nReturn an object with this exact shape:\n{{\n  \"summary\": \"short verification summary\",\n  \"criteria\": [\n    {{\n      \"name\": \"criterion copied exactly from the prompt\",\n      \"status\": \"passed or failed\",\n      \"summary\": \"short explanation\",\n      \"findings\": [{{\"file\": \"relative/path.rs\", \"line\": 10, \"message\": \"problem detail\"}}],\n      \"remediation\": \"specific fix guidance\"\n    }}\n  ],\n  \"battle_tests\": [\n    {{\n      \"input_path\": \".intuition/verification/inputs/agents.listen/example.md\",\n      \"status\": \"passed or failed\",\n      \"summary\": \"battle-test assessment\",\n      \"remediation\": \"specific follow-up when failed\"\n    }}\n  ],\n  \"notes\": [\"short operator note\"]\n}}\n\nRequirements:\n- Return every quality criterion from the prompt exactly once.\n- Return every battle-test input from the prompt exactly once when any are provided.\n- Use `failed` when you are not confident the branch satisfies a criterion.\n- Provide file and line findings whenever the workspace evidence makes them available.\n- Do not wrap the JSON in markdown fences.",
+        crate::branding::COMMAND_NAME
+    )
+}
+
 fn render_execution_delta_prompt(
     issue: &IssueSummary,
     turn_number: u32,
     max_turns: u32,
     previous_review: Option<&ReviewReport>,
+    verification_summary: Option<&VerificationSummary>,
     use_continuation: bool,
 ) -> String {
     let header = if use_continuation {
@@ -3136,11 +3436,15 @@ fn render_execution_delta_prompt(
     let review_block = previous_review.map(render_review_delta_block).unwrap_or_else(|| {
         "- No prior structured review is available. Resume from the current workspace and workpad state.\n".to_string()
     });
+    let verification_block = verification_summary
+        .map(render_verification_delta_block)
+        .unwrap_or_default();
     format!(
-        "{header}\nRemaining work for `{identifier}`:\n{review_block}\n\nIssue title: {title}\nURL: {url}",
+        "{header}\nRemaining work for `{identifier}`:\n{review_block}{verification_block}\n\nIssue title: {title}\nURL: {url}",
         header = header,
         identifier = issue.identifier,
         review_block = review_block,
+        verification_block = verification_block,
         title = issue.title,
         url = issue.url
     )
@@ -3183,6 +3487,22 @@ fn render_review_delta_block(review: &ReviewReport) -> String {
     } else {
         lines.join("\n")
     }
+}
+
+fn render_verification_delta_block(summary: &VerificationSummary) -> String {
+    let mut lines = vec![
+        String::new(),
+        "Latest verification:".to_string(),
+        format!("- Summary: {}", summary.summary),
+        format!("- Status: {}", summary.compact_label()),
+    ];
+    if !summary.remediation.is_empty() {
+        lines.push("Verification remediation:".to_string());
+        for item in &summary.remediation {
+            lines.push(format!("- {item}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn render_review_prompt(
@@ -3240,6 +3560,45 @@ fn render_final_review_prompt(
     )
 }
 
+fn render_verification_prompt(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+    quality_criteria: &[String],
+    battle_inputs: &[BattleTestInput],
+) -> String {
+    let battle_block = if battle_inputs.is_empty() {
+        "_No battle-test inputs were provided for this verification pass._".to_string()
+    } else {
+        battle_inputs
+            .iter()
+            .map(|input| {
+                format!(
+                    "- Input: {}\n  Preview:\n{}\n",
+                    input.relative_path,
+                    indent_block(&truncate_for_evidence(&input.preview), "    ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "Perform verification for Linear ticket `{identifier}` after final review on execution turn #{turn_number}.\n\nTicket title: {title}\nTicket URL: {url}\nWorkspace: {workspace}\nExecution route being verified: {execution_route}\nVerification route: {verification_route}\n\nQuality criteria:\n{criteria}\n\nBattle-test inputs:\n{battle_inputs}\n\nReview the current workspace state only. Return JSON only.",
+        identifier = issue.identifier,
+        turn_number = turn_number,
+        title = issue.title,
+        url = issue.url,
+        workspace = context.workspace_path.display(),
+        execution_route = AGENT_ROUTE_AGENTS_LISTEN,
+        verification_route = AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION,
+        criteria = render_string_list(
+            quality_criteria,
+            "_No explicit verification criteria were provided._"
+        ),
+        battle_inputs = battle_block,
+    )
+}
+
 fn render_string_list(values: &[String], empty: &str) -> String {
     if values.is_empty() {
         empty.to_string()
@@ -3250,6 +3609,14 @@ fn render_string_list(values: &[String], empty: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+fn indent_block(value: &str, prefix: &str) -> String {
+    value
+        .lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn extract_acceptance_criteria(description: Option<&str>) -> Vec<String> {
@@ -3372,10 +3739,10 @@ fn strip_code_fence(raw: &str) -> Option<String> {
 
 fn preview_text(value: &str) -> String {
     const MAX_PREVIEW_LEN: usize = 240;
-    if value.len() <= MAX_PREVIEW_LEN {
+    if value.chars().count() <= MAX_PREVIEW_LEN {
         value.to_string()
     } else {
-        format!("{}...", &value[..MAX_PREVIEW_LEN])
+        truncate_with_ellipsis(value, MAX_PREVIEW_LEN)
     }
 }
 
@@ -3412,6 +3779,7 @@ async fn run_review_phase(
                 turn_number,
                 phase_label: "review",
                 prompt_mode: TurnPromptMode::Continuation,
+                capture_response_text: true,
                 continuation_handle: None,
             },
             run_args,
@@ -3428,10 +3796,12 @@ async fn run_review_phase(
             context,
             meaningful_turn_progress,
             turn_progress,
-            matches!(
+            !matches!(
                 phase_context.session_context.pull_request.status,
-                PullRequestStatus::Draft
+                PullRequestStatus::Unpublished
             ),
+            phase_context.previous_review,
+            phase_context.session_context.verification_summary.as_ref(),
         )?
     };
     Ok(report)
@@ -3469,6 +3839,7 @@ async fn run_final_review_phase(
                 turn_number,
                 phase_label: "final-review",
                 prompt_mode: TurnPromptMode::Continuation,
+                capture_response_text: true,
                 continuation_handle: None,
             },
             run_args,
@@ -3484,6 +3855,1024 @@ async fn run_final_review_phase(
     }
 }
 
+async fn run_verification_phase(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+    phase_context: WorkerPhaseContext<'_>,
+) -> Result<VerificationReport> {
+    let verification_settings = &context.app_config.verification;
+    let recipe = load_route_verification_recipe(context.workspace_path, AGENT_ROUTE_AGENTS_LISTEN)?;
+    let quality_criteria =
+        effective_verification_quality_criteria(context.app_config, recipe.as_ref());
+    let battle_test_count = verification_settings.battle_test_count();
+    let (battle_input_dir, battle_inputs) = discover_battle_test_inputs(
+        context.workspace_path,
+        AGENT_ROUTE_AGENTS_LISTEN,
+        battle_test_count,
+    )?;
+    let run_args = build_verification_run_args(
+        issue,
+        turn_number,
+        context,
+        &quality_criteria,
+        &battle_inputs,
+    );
+    let route = resolve_verification_route_diagnostics(context, &run_args)?;
+    write_listen_session(
+        phase_context.source_root,
+        phase_context.project_selector,
+        build_worker_session(
+            issue,
+            SessionPhase::Verifying,
+            compact_session_summary([
+                Some(format!(
+                    "Verifying turn {turn_number} via {}",
+                    route.provider
+                )),
+                Some(format!("see {}", phase_context.log_path.display())),
+            ]),
+            phase_context.session_context,
+            turn_number,
+            phase_context.provider_session_id,
+            &phase_context.session_context.canonical,
+        ),
+    )?;
+    append_worker_log(
+        phase_context.log_path,
+        "verification plan",
+        &render_verification_plan_lines(
+            &route,
+            recipe.as_ref(),
+            &quality_criteria,
+            battle_test_count,
+            &battle_input_dir,
+            &battle_inputs,
+        ),
+    )?;
+
+    let code_review_enabled = verification_settings.code_review_enabled();
+    let mut verifier_notes = Vec::new();
+    let mut code_review = default_code_review_report(code_review_enabled);
+    let mut battle_tests =
+        initial_battle_test_report(battle_test_count, &battle_input_dir, &battle_inputs);
+    let should_run_verifier = code_review_enabled || !battle_inputs.is_empty();
+    if should_run_verifier {
+        match execute_agent_run(
+            AgentPhaseInvocation {
+                issue,
+                context,
+                turn_number,
+                phase_label: "verification",
+                prompt_mode: TurnPromptMode::Continuation,
+                capture_response_text: true,
+                continuation_handle: None,
+            },
+            run_args,
+            |_| Ok(()),
+            |_| Ok(()),
+        ) {
+            Ok(result) => {
+                if let Some(raw) = result
+                    .response_text
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    match parse_agent_json::<VerificationAgentOutput>(raw, "verification") {
+                        Ok(output) => {
+                            if !output.summary.trim().is_empty() {
+                                verifier_notes
+                                    .push(format!("Verifier summary: {}", output.summary.trim()));
+                            }
+                            verifier_notes.extend(output.notes.clone());
+                            code_review = derive_code_review_report(
+                                code_review_enabled,
+                                &quality_criteria,
+                                &output.criteria,
+                            );
+                            battle_tests = derive_battle_test_report(
+                                battle_test_count,
+                                &battle_input_dir,
+                                &battle_inputs,
+                                &output.battle_tests,
+                            );
+                        }
+                        Err(error) => {
+                            verifier_notes.push(error.to_string());
+                            code_review = failed_code_review_report(
+                                code_review_enabled,
+                                &quality_criteria,
+                                "Verifier output was malformed; verification failed closed.",
+                                "Return valid JSON verification output with every requested criterion.",
+                            );
+                            battle_tests = failed_battle_test_report(
+                                battle_test_count,
+                                &battle_input_dir,
+                                &battle_inputs,
+                                "Verifier output was malformed; verification failed closed.",
+                                "Return valid JSON verification output for every sampled battle-test input.",
+                            );
+                        }
+                    }
+                } else {
+                    verifier_notes.push(
+                        "Verifier output was missing; verification failed closed.".to_string(),
+                    );
+                    code_review = failed_code_review_report(
+                        code_review_enabled,
+                        &quality_criteria,
+                        "Verifier output was missing; verification failed closed.",
+                        "Return a structured verification JSON response.",
+                    );
+                    battle_tests = failed_battle_test_report(
+                        battle_test_count,
+                        &battle_input_dir,
+                        &battle_inputs,
+                        "Verifier output was missing; verification failed closed.",
+                        "Return a structured verification JSON response for sampled battle-test inputs.",
+                    );
+                }
+            }
+            Err(error) => {
+                verifier_notes.push(format!("Verification agent execution failed: {error}"));
+                code_review = failed_code_review_report(
+                    code_review_enabled,
+                    &quality_criteria,
+                    "Verification agent execution failed before producing a report.",
+                    "Repair the verification route or command configuration and rerun verification.",
+                );
+                battle_tests = failed_battle_test_report(
+                    battle_test_count,
+                    &battle_input_dir,
+                    &battle_inputs,
+                    "Verification agent execution failed before producing battle-test results.",
+                    "Repair the verification route or command configuration and rerun verification.",
+                );
+            }
+        }
+    }
+
+    let e2e = run_e2e_verification(
+        context.workspace_path,
+        recipe.as_ref(),
+        verification_settings.e2e_verification_enabled(),
+    )?;
+    append_worker_log(
+        phase_context.log_path,
+        "verification e2e",
+        &render_verification_e2e_lines(&e2e),
+    )?;
+
+    let status = aggregate_verification_status(code_review.status, e2e.status, battle_tests.status);
+    let remediation = collect_verification_remediation(&code_review, &e2e, &battle_tests);
+    let summary = render_verification_summary(status, &code_review, &e2e, &battle_tests);
+    let report = VerificationReport {
+        version: 1,
+        issue_identifier: issue.identifier.clone(),
+        turn_number,
+        generated_at_epoch_seconds: now_epoch_seconds(),
+        status,
+        summary,
+        route: Some(route),
+        quality_criteria,
+        code_review,
+        e2e,
+        battle_tests,
+        remediation,
+        notes: verifier_notes,
+    };
+
+    let store = super::store::ListenProjectStore::resolve(
+        phase_context.source_root,
+        phase_context.project_selector,
+    )?;
+    store.write_verification_report(&issue.identifier, &report)?;
+    Ok(report)
+}
+
+fn resolve_verification_route_diagnostics(
+    context: &ListenTurnContext<'_>,
+    run_args: &RunAgentArgs,
+) -> Result<VerificationRouteDiagnostics> {
+    let invocation =
+        resolve_agent_invocation_for_planning(context.app_config, context.planning_meta, run_args)?;
+    Ok(VerificationRouteDiagnostics {
+        route_key: invocation
+            .route_key
+            .clone()
+            .unwrap_or_else(|| AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION.to_string()),
+        provider: invocation.agent.clone(),
+        model: invocation.model.clone(),
+        reasoning: invocation.reasoning.clone(),
+        provider_source: format_agent_config_source(&invocation.provider_source),
+        model_source: invocation
+            .model_source
+            .as_ref()
+            .map(format_agent_config_source),
+        reasoning_source: invocation
+            .reasoning_source
+            .as_ref()
+            .map(format_agent_config_source),
+    })
+}
+
+fn render_verification_plan_lines(
+    route: &VerificationRouteDiagnostics,
+    recipe: Option<&super::verification::LoadedRouteVerificationRecipe>,
+    quality_criteria: &[String],
+    battle_test_count: usize,
+    battle_input_dir: &Path,
+    battle_inputs: &[BattleTestInput],
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("verification_route={}", route.route_key),
+        format!("provider={}", route.provider),
+        format!("model={}", route.model.as_deref().unwrap_or("unset")),
+        format!(
+            "reasoning={}",
+            route.reasoning.as_deref().unwrap_or("unset")
+        ),
+        format!("provider_source={}", route.provider_source),
+        format!(
+            "model_source={}",
+            route.model_source.as_deref().unwrap_or("unset")
+        ),
+        format!(
+            "reasoning_source={}",
+            route.reasoning_source.as_deref().unwrap_or("unset")
+        ),
+        format!("quality_criteria={}", quality_criteria.len()),
+        format!("battle_test_count={battle_test_count}"),
+        format!("battle_input_dir={}", battle_input_dir.display()),
+        format!("sampled_battle_inputs={}", battle_inputs.len()),
+    ];
+    if let Some(recipe) = recipe {
+        lines.push(format!("recipe_path={}", recipe.path.display()));
+        lines.push(format!("recipe_e2e_steps={}", recipe.recipe.e2e.len()));
+    } else {
+        lines.push("recipe_path=missing".to_string());
+    }
+    for criterion in quality_criteria {
+        lines.push(format!("criterion={criterion}"));
+    }
+    for input in battle_inputs {
+        lines.push(format!("battle_input={}", input.relative_path));
+    }
+    lines
+}
+
+fn effective_verification_quality_criteria(
+    app_config: &AppConfig,
+    recipe: Option<&super::verification::LoadedRouteVerificationRecipe>,
+) -> Vec<String> {
+    if let Some(recipe) = recipe
+        && !recipe.recipe.quality_criteria.is_empty()
+    {
+        return recipe.recipe.quality_criteria.clone();
+    }
+
+    let mut criteria = builtin_quality_criteria();
+    for criterion in &app_config.verification.quality_criteria {
+        push_unique(&mut criteria, criterion.clone());
+    }
+    criteria
+}
+
+fn default_code_review_report(enabled: bool) -> VerificationCodeReviewReport {
+    if enabled {
+        VerificationCodeReviewReport {
+            status: VerificationStatus::Skipped,
+            summary: "Awaiting verifier output.".to_string(),
+            criteria: Vec::new(),
+            notes: Vec::new(),
+        }
+    } else {
+        VerificationCodeReviewReport {
+            status: VerificationStatus::Skipped,
+            summary: "Code-review verification disabled by install config.".to_string(),
+            criteria: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+}
+
+fn initial_battle_test_report(
+    battle_test_count: usize,
+    battle_input_dir: &Path,
+    battle_inputs: &[BattleTestInput],
+) -> VerificationBattleTestReport {
+    if battle_test_count == 0 {
+        return VerificationBattleTestReport {
+            status: VerificationStatus::Skipped,
+            summary: "Battle testing disabled by install config.".to_string(),
+            sampled_count: 0,
+            cases: Vec::new(),
+            input_dir: Some(battle_input_dir.display().to_string()),
+        };
+    }
+    if !battle_input_dir.is_dir() {
+        return VerificationBattleTestReport {
+            status: VerificationStatus::Skipped,
+            summary: format!(
+                "Battle-test input directory `{}` is missing.",
+                battle_input_dir.display()
+            ),
+            sampled_count: 0,
+            cases: Vec::new(),
+            input_dir: Some(battle_input_dir.display().to_string()),
+        };
+    }
+    if battle_inputs.is_empty() {
+        return VerificationBattleTestReport {
+            status: VerificationStatus::Skipped,
+            summary: format!(
+                "Battle-test input directory `{}` did not contain any sampled inputs.",
+                battle_input_dir.display()
+            ),
+            sampled_count: 0,
+            cases: Vec::new(),
+            input_dir: Some(battle_input_dir.display().to_string()),
+        };
+    }
+
+    VerificationBattleTestReport {
+        status: VerificationStatus::Skipped,
+        summary: format!(
+            "Awaiting verifier results for {} sampled battle-test input(s).",
+            battle_inputs.len()
+        ),
+        sampled_count: battle_inputs.len(),
+        cases: battle_inputs
+            .iter()
+            .map(|input| VerificationBattleTestCase {
+                input_path: input.relative_path.clone(),
+                status: VerificationStatus::Skipped,
+                summary: "Awaiting verifier result.".to_string(),
+                remediation: None,
+            })
+            .collect(),
+        input_dir: Some(battle_input_dir.display().to_string()),
+    }
+}
+
+fn derive_code_review_report(
+    code_review_enabled: bool,
+    quality_criteria: &[String],
+    reported: &[VerificationAgentCriterion],
+) -> VerificationCodeReviewReport {
+    if !code_review_enabled {
+        return default_code_review_report(false);
+    }
+
+    let mut criteria = Vec::new();
+    let mut failures = 0usize;
+    for expected in quality_criteria {
+        let criterion = match reported
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(expected))
+        {
+            Some(candidate) if candidate.status == VerificationStatus::Passed => {
+                VerificationCriterionResult {
+                    name: expected.clone(),
+                    status: VerificationStatus::Passed,
+                    summary: candidate.summary.clone(),
+                    findings: candidate.findings.clone(),
+                    remediation: candidate.remediation.clone(),
+                }
+            }
+            Some(candidate) => {
+                failures += 1;
+                VerificationCriterionResult {
+                    name: expected.clone(),
+                    status: VerificationStatus::Failed,
+                    summary: if candidate.summary.trim().is_empty() {
+                        "Verifier did not approve this criterion.".to_string()
+                    } else {
+                        candidate.summary.clone()
+                    },
+                    findings: candidate.findings.clone(),
+                    remediation: candidate.remediation.clone().or_else(|| {
+                        Some("Repair the branch until this criterion clearly passes.".to_string())
+                    }),
+                }
+            }
+            None => {
+                failures += 1;
+                VerificationCriterionResult {
+                    name: expected.clone(),
+                    status: VerificationStatus::Failed,
+                    summary: "Verifier omitted this criterion; verification failed closed."
+                        .to_string(),
+                    findings: Vec::new(),
+                    remediation: Some(
+                        "Return an explicit pass/fail result for this criterion.".to_string(),
+                    ),
+                }
+            }
+        };
+        criteria.push(criterion);
+    }
+
+    VerificationCodeReviewReport {
+        status: if failures == 0 {
+            VerificationStatus::Passed
+        } else {
+            VerificationStatus::Failed
+        },
+        summary: if failures == 0 {
+            format!(
+                "Verifier approved all {} quality criterion/criteria.",
+                quality_criteria.len()
+            )
+        } else {
+            format!(
+                "Verifier failed {} of {} quality criterion/criteria.",
+                failures,
+                quality_criteria.len()
+            )
+        },
+        criteria,
+        notes: Vec::new(),
+    }
+}
+
+fn failed_code_review_report(
+    code_review_enabled: bool,
+    quality_criteria: &[String],
+    summary: &str,
+    remediation: &str,
+) -> VerificationCodeReviewReport {
+    if !code_review_enabled {
+        return default_code_review_report(false);
+    }
+
+    VerificationCodeReviewReport {
+        status: VerificationStatus::Failed,
+        summary: summary.to_string(),
+        criteria: quality_criteria
+            .iter()
+            .map(|criterion| VerificationCriterionResult {
+                name: criterion.clone(),
+                status: VerificationStatus::Failed,
+                summary: summary.to_string(),
+                findings: Vec::new(),
+                remediation: Some(remediation.to_string()),
+            })
+            .collect(),
+        notes: Vec::new(),
+    }
+}
+
+fn derive_battle_test_report(
+    battle_test_count: usize,
+    battle_input_dir: &Path,
+    battle_inputs: &[BattleTestInput],
+    reported: &[VerificationAgentBattleTest],
+) -> VerificationBattleTestReport {
+    if battle_inputs.is_empty() {
+        return initial_battle_test_report(battle_test_count, battle_input_dir, battle_inputs);
+    }
+
+    let mut failures = 0usize;
+    let mut cases = Vec::new();
+    for expected in battle_inputs {
+        let case = match reported
+            .iter()
+            .find(|candidate| candidate.input_path == expected.relative_path)
+        {
+            Some(candidate) if candidate.status == VerificationStatus::Passed => {
+                VerificationBattleTestCase {
+                    input_path: expected.relative_path.clone(),
+                    status: VerificationStatus::Passed,
+                    summary: candidate.summary.clone(),
+                    remediation: candidate.remediation.clone(),
+                }
+            }
+            Some(candidate) => {
+                failures += 1;
+                VerificationBattleTestCase {
+                    input_path: expected.relative_path.clone(),
+                    status: VerificationStatus::Failed,
+                    summary: if candidate.summary.trim().is_empty() {
+                        "Verifier did not approve this battle-test input.".to_string()
+                    } else {
+                        candidate.summary.clone()
+                    },
+                    remediation: candidate.remediation.clone().or_else(|| {
+                        Some(
+                            "Repair the branch until this sampled battle-test input passes."
+                                .to_string(),
+                        )
+                    }),
+                }
+            }
+            None => {
+                failures += 1;
+                VerificationBattleTestCase {
+                    input_path: expected.relative_path.clone(),
+                    status: VerificationStatus::Failed,
+                    summary: "Verifier omitted this battle-test input; verification failed closed."
+                        .to_string(),
+                    remediation: Some(
+                        "Return an explicit pass/fail result for this sampled input.".to_string(),
+                    ),
+                }
+            }
+        };
+        cases.push(case);
+    }
+
+    VerificationBattleTestReport {
+        status: if failures == 0 {
+            VerificationStatus::Passed
+        } else {
+            VerificationStatus::Failed
+        },
+        summary: if failures == 0 {
+            format!(
+                "Battle tests passed for {} sampled input(s).",
+                battle_inputs.len()
+            )
+        } else {
+            format!(
+                "Battle tests failed for {} of {} sampled input(s).",
+                failures,
+                battle_inputs.len()
+            )
+        },
+        sampled_count: battle_inputs.len(),
+        cases,
+        input_dir: Some(battle_input_dir.display().to_string()),
+    }
+}
+
+fn failed_battle_test_report(
+    battle_test_count: usize,
+    battle_input_dir: &Path,
+    battle_inputs: &[BattleTestInput],
+    summary: &str,
+    remediation: &str,
+) -> VerificationBattleTestReport {
+    if battle_inputs.is_empty() {
+        return initial_battle_test_report(battle_test_count, battle_input_dir, battle_inputs);
+    }
+
+    VerificationBattleTestReport {
+        status: VerificationStatus::Failed,
+        summary: summary.to_string(),
+        sampled_count: battle_inputs.len(),
+        cases: battle_inputs
+            .iter()
+            .map(|input| VerificationBattleTestCase {
+                input_path: input.relative_path.clone(),
+                status: VerificationStatus::Failed,
+                summary: summary.to_string(),
+                remediation: Some(remediation.to_string()),
+            })
+            .collect(),
+        input_dir: Some(battle_input_dir.display().to_string()),
+    }
+}
+
+fn run_e2e_verification(
+    workspace_path: &Path,
+    recipe: Option<&super::verification::LoadedRouteVerificationRecipe>,
+    enabled: bool,
+) -> Result<VerificationE2eReport> {
+    if !enabled {
+        return Ok(VerificationE2eReport {
+            status: VerificationStatus::Skipped,
+            summary: "E2E verification disabled by install config.".to_string(),
+            recipe_path: recipe.map(|loaded| loaded.path.display().to_string()),
+            steps: Vec::new(),
+        });
+    }
+    let Some(recipe) = recipe else {
+        return Ok(VerificationE2eReport {
+            status: VerificationStatus::Skipped,
+            summary: "No route-scoped verification recipe was found.".to_string(),
+            recipe_path: None,
+            steps: Vec::new(),
+        });
+    };
+    if recipe.recipe.e2e.is_empty() {
+        return Ok(VerificationE2eReport {
+            status: VerificationStatus::Skipped,
+            summary: format!(
+                "Verification recipe `{}` does not define any E2E steps.",
+                recipe.path.display()
+            ),
+            recipe_path: Some(recipe.path.display().to_string()),
+            steps: Vec::new(),
+        });
+    }
+
+    let mut steps = Vec::new();
+    let mut failures = 0usize;
+    for step in &recipe.recipe.e2e {
+        let report = run_e2e_recipe_step(workspace_path, step)?;
+        if report.status == VerificationStatus::Failed {
+            failures += 1;
+        }
+        steps.push(report);
+    }
+
+    Ok(VerificationE2eReport {
+        status: if failures == 0 {
+            VerificationStatus::Passed
+        } else {
+            VerificationStatus::Failed
+        },
+        summary: if failures == 0 {
+            format!("E2E verification passed for {} step(s).", steps.len())
+        } else {
+            format!(
+                "E2E verification failed for {} of {} step(s).",
+                failures,
+                steps.len()
+            )
+        },
+        recipe_path: Some(recipe.path.display().to_string()),
+        steps,
+    })
+}
+
+fn run_e2e_recipe_step(
+    workspace_path: &Path,
+    step: &VerificationRecipeStep,
+) -> Result<VerificationE2eStepReport> {
+    run_e2e_recipe_step_with_timeout(
+        workspace_path,
+        step,
+        Duration::from_secs(E2E_RECIPE_STEP_TIMEOUT_SECONDS),
+    )
+}
+
+fn run_e2e_recipe_step_with_timeout(
+    workspace_path: &Path,
+    step: &VerificationRecipeStep,
+    timeout: Duration,
+) -> Result<VerificationE2eStepReport> {
+    if step.command.is_empty() {
+        return Ok(VerificationE2eStepReport {
+            name: step.name.clone(),
+            command: Vec::new(),
+            status: VerificationStatus::Failed,
+            exit_code: None,
+            assertions: vec!["recipe step must define at least one command token".to_string()],
+            stdout_excerpt: None,
+            stderr_excerpt: None,
+        });
+    }
+
+    let output = run_e2e_recipe_command(workspace_path, step, timeout)?;
+    let mut assertions = Vec::new();
+    if output.timed_out {
+        assertions.push(format!(
+            "step timed out after {}",
+            format_duration_label(timeout)
+        ));
+    } else {
+        let expected_exit_code = step.expect_exit_code.unwrap_or(0);
+        if output.exit_code != Some(expected_exit_code) {
+            assertions.push(format!(
+                "expected exit code {expected_exit_code}, observed {}",
+                output
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            ));
+        }
+    }
+    for expected in &step.expect_stdout_contains {
+        if !output.stdout.contains(expected) {
+            assertions.push(format!("stdout must contain `{expected}`"));
+        }
+    }
+    for expected in &step.expect_stderr_contains {
+        if !output.stderr.contains(expected) {
+            assertions.push(format!("stderr must contain `{expected}`"));
+        }
+    }
+    for expected in &step.expect_paths_exist {
+        let resolved = resolve_workspace_assertion_path(workspace_path, expected)?;
+        if !resolved.exists() {
+            assertions.push(format!("expected path `{expected}` to exist"));
+        }
+    }
+    for expected in &step.expect_paths_missing {
+        let resolved = resolve_workspace_assertion_path(workspace_path, expected)?;
+        if resolved.exists() {
+            assertions.push(format!("expected path `{expected}` to be absent"));
+        }
+    }
+
+    Ok(VerificationE2eStepReport {
+        name: step.name.clone(),
+        command: step.command.clone(),
+        status: if assertions.is_empty() {
+            VerificationStatus::Passed
+        } else {
+            VerificationStatus::Failed
+        },
+        exit_code: output.exit_code,
+        assertions,
+        stdout_excerpt: output_excerpt(&output.stdout),
+        stderr_excerpt: output_excerpt(&output.stderr),
+    })
+}
+
+struct RecipeStepCommandOutput {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+}
+
+fn run_e2e_recipe_command(
+    workspace_path: &Path,
+    step: &VerificationRecipeStep,
+    timeout: Duration,
+) -> Result<RecipeStepCommandOutput> {
+    let mut command = Command::new(&step.command[0]);
+    command.args(&step.command[1..]);
+    command.current_dir(workspace_path);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    configure_command_process_group(&mut command);
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to run verification recipe step `{}` in `{}`",
+            step.name,
+            workspace_path.display()
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        anyhow!(
+            "failed to capture stdout for verification recipe step `{}`",
+            step.name
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        anyhow!(
+            "failed to capture stderr for verification recipe step `{}`",
+            step.name
+        )
+    })?;
+    let stdout_handle = drain_recipe_stream(stdout, step.name.clone(), "stdout");
+    let stderr_handle = drain_recipe_stream(stderr, step.name.clone(), "stderr");
+
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().with_context(|| {
+            format!(
+                "failed to wait for verification recipe step `{}` in `{}`",
+                step.name,
+                workspace_path.display()
+            )
+        })? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            terminate_command_process_group(&mut child).with_context(|| {
+                format!(
+                    "failed to terminate verification recipe step `{}` after timeout",
+                    step.name
+                )
+            })?;
+            break child.wait().with_context(|| {
+                format!(
+                    "failed to reap verification recipe step `{}` after timeout",
+                    step.name
+                )
+            })?;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    Ok(RecipeStepCommandOutput {
+        exit_code: status.code(),
+        stdout: stdout_handle
+            .join()
+            .map_err(|_| anyhow!("stdout drain thread panicked for `{}`", step.name))??,
+        stderr: stderr_handle
+            .join()
+            .map_err(|_| anyhow!("stderr drain thread panicked for `{}`", step.name))??,
+        timed_out,
+    })
+}
+
+fn drain_recipe_stream<R>(
+    mut reader: R,
+    step_name: String,
+    stream_name: &'static str,
+) -> thread::JoinHandle<Result<String>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).with_context(|| {
+            format!("failed to read {stream_name} for verification recipe step `{step_name}`")
+        })?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    })
+}
+
+#[cfg(unix)]
+fn configure_command_process_group(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_command_process_group(_: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_command_process_group(child: &mut std::process::Child) -> Result<()> {
+    let pid = child.id() as i32;
+    if pid > 0 {
+        let result = unsafe { libc::killpg(pid, libc::SIGKILL) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context("failed to kill verification recipe process group");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_command_process_group(child: &mut std::process::Child) -> Result<()> {
+    child
+        .kill()
+        .context("failed to kill verification recipe step")
+}
+
+fn format_duration_label(timeout: Duration) -> String {
+    if timeout.subsec_millis() == 0 && timeout.as_secs() > 0 {
+        format!("{}s", timeout.as_secs())
+    } else {
+        format!("{}ms", timeout.as_millis())
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let mut truncated = value.chars().take(max_chars - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn resolve_workspace_assertion_path(workspace_path: &Path, candidate: &str) -> Result<PathBuf> {
+    let candidate_path = Path::new(candidate);
+    if candidate_path.is_absolute() {
+        bail!("verification recipe paths must be workspace-relative: `{candidate}`");
+    }
+
+    let mut relative = PathBuf::new();
+    for component in candidate_path.components() {
+        match component {
+            std::path::Component::Normal(value) => relative.push(value),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                bail!("verification recipe paths must stay within the workspace: `{candidate}`")
+            }
+        }
+    }
+
+    if relative.as_os_str().is_empty() {
+        bail!("verification recipe path cannot be empty");
+    }
+    Ok(workspace_path.join(relative))
+}
+
+fn render_verification_e2e_lines(report: &VerificationE2eReport) -> Vec<String> {
+    let mut lines = vec![
+        format!("status={}", report.status.label()),
+        format!("summary={}", report.summary),
+    ];
+    if let Some(recipe_path) = report.recipe_path.as_deref() {
+        lines.push(format!("recipe_path={recipe_path}"));
+    }
+    for step in &report.steps {
+        lines.push(format!(
+            "step={} status={} exit_code={}",
+            step.name,
+            step.status.label(),
+            step.exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        ));
+        for assertion in &step.assertions {
+            lines.push(format!("assertion={assertion}"));
+        }
+        if let Some(stdout) = step.stdout_excerpt.as_deref() {
+            lines.push(format!("stdout={stdout}"));
+        }
+        if let Some(stderr) = step.stderr_excerpt.as_deref() {
+            lines.push(format!("stderr={stderr}"));
+        }
+    }
+    lines
+}
+
+fn aggregate_verification_status(
+    code_review: VerificationStatus,
+    e2e: VerificationStatus,
+    battle_tests: VerificationStatus,
+) -> VerificationStatus {
+    if [code_review, e2e, battle_tests]
+        .into_iter()
+        .any(|status| status == VerificationStatus::Failed)
+    {
+        VerificationStatus::Failed
+    } else if [code_review, e2e, battle_tests]
+        .into_iter()
+        .any(|status| status == VerificationStatus::Passed)
+    {
+        VerificationStatus::Passed
+    } else {
+        VerificationStatus::Skipped
+    }
+}
+
+fn render_verification_summary(
+    status: VerificationStatus,
+    code_review: &VerificationCodeReviewReport,
+    e2e: &VerificationE2eReport,
+    battle_tests: &VerificationBattleTestReport,
+) -> String {
+    let mut components = Vec::new();
+    for (component_status, component_summary) in [
+        (code_review.status, code_review.summary.as_str()),
+        (e2e.status, e2e.summary.as_str()),
+        (battle_tests.status, battle_tests.summary.as_str()),
+    ] {
+        if component_status != VerificationStatus::Skipped && !component_summary.trim().is_empty() {
+            components.push(component_summary.trim().to_string());
+        }
+    }
+
+    let prefix = match status {
+        VerificationStatus::Passed => "Verification passed.",
+        VerificationStatus::Failed => "Verification failed.",
+        VerificationStatus::Skipped => "Verification skipped.",
+    };
+    if components.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix} {}", components.join(" "))
+    }
+}
+
+fn collect_verification_remediation(
+    code_review: &VerificationCodeReviewReport,
+    e2e: &VerificationE2eReport,
+    battle_tests: &VerificationBattleTestReport,
+) -> Vec<String> {
+    let mut remediation = Vec::new();
+    for criterion in &code_review.criteria {
+        if let Some(item) = criterion.remediation.as_deref()
+            && criterion.status == VerificationStatus::Failed
+        {
+            push_unique(&mut remediation, item.to_string());
+        }
+    }
+    for step in &e2e.steps {
+        if step.status == VerificationStatus::Failed {
+            for assertion in &step.assertions {
+                push_unique(
+                    &mut remediation,
+                    format!("Repair E2E step `{}`: {assertion}", step.name),
+                );
+            }
+        }
+    }
+    for case in &battle_tests.cases {
+        if let Some(item) = case.remediation.as_deref()
+            && case.status == VerificationStatus::Failed
+        {
+            push_unique(&mut remediation, item.to_string());
+        }
+    }
+    remediation
+}
+
 async fn sync_review_tracking(
     service: &LinearService<ReqwestLinearClient>,
     issue: &IssueSummary,
@@ -3493,7 +4882,7 @@ async fn sync_review_tracking(
     log_path: &Path,
     review: &ReviewReport,
 ) -> Result<()> {
-    let body = render_review_workpad(issue, context, review);
+    let body = render_review_workpad(issue, context, review, session_context);
     let mut updated = false;
     let mut sync_error = None;
     for attempt in 0..3 {
@@ -3568,6 +4957,7 @@ fn render_review_workpad(
     issue: &IssueSummary,
     context: &ListenTurnContext<'_>,
     review: &ReviewReport,
+    session_context: &WorkerSessionContext<'_>,
 ) -> String {
     let mut lines = vec![
         "## Codex Workpad".to_string(),
@@ -3612,12 +5002,29 @@ fn render_review_workpad(
     if review.validation_completed.is_empty() && review.validation_remaining.is_empty() {
         lines.push("- [ ] No explicit validation status recorded.".to_string());
     }
-    let visible_notes = review
-        .notes
-        .iter()
-        .filter(|note| !note.starts_with("Using heuristic review;"))
-        .filter(|note| !note.starts_with("Using heuristic final review;"))
-        .collect::<Vec<_>>();
+    if let Some(verification) = session_context.verification_summary.as_ref() {
+        lines.extend([String::new(), "### Verification".to_string(), String::new()]);
+        lines.push(format!("- Status: {}", verification.status.display_label()));
+        lines.push(format!("- Summary: {}", verification.summary));
+        if verification.criteria_total > 0 {
+            lines.push(format!(
+                "- Criteria failures: {}/{}",
+                verification.criteria_failed, verification.criteria_total
+            ));
+        }
+        lines.push(format!(
+            "- E2E: {}",
+            verification.e2e_status.display_label()
+        ));
+        lines.push(format!(
+            "- Battle tests: {}",
+            verification.battle_test_status.display_label()
+        ));
+        for item in &verification.remediation {
+            lines.push(format!("- [ ] {item}"));
+        }
+    }
+    let visible_notes = review.notes.iter().collect::<Vec<_>>();
     if !review.risks.is_empty() || !visible_notes.is_empty() {
         lines.extend([String::new(), "### Review Notes".to_string(), String::new()]);
         for item in &review.risks {
@@ -3631,10 +5038,7 @@ fn render_review_workpad(
 }
 
 fn agent_backed_review_enabled() -> bool {
-    std::env::var("METASTACK_LISTEN_AGENT_REVIEW")
-        .ok()
-        .as_deref()
-        == Some("1")
+    false
 }
 
 fn heuristic_review_report(
@@ -3642,7 +5046,9 @@ fn heuristic_review_report(
     context: &ListenTurnContext<'_>,
     _meaningful_turn_progress: bool,
     turn_progress: &super::TurnProgress,
-    has_existing_draft_pr: bool,
+    has_existing_pull_request: bool,
+    previous_review: Option<&ReviewReport>,
+    verification_summary: Option<&VerificationSummary>,
 ) -> Result<ReviewReport> {
     let acceptance = extract_acceptance_criteria(issue.description.as_deref());
     let validation = extract_validation_requirements(issue.description.as_deref());
@@ -3656,18 +5062,24 @@ fn heuristic_review_report(
     let backlog_complete = backlog_progress
         .as_ref()
         .is_some_and(|progress| progress.total > 0 && progress.completed == progress.total);
+    let complete_from_retry = has_existing_pull_request
+        && acceptance.is_empty()
+        && validation.is_empty()
+        && (verification_summary
+            .is_some_and(|summary| summary.status == VerificationStatus::Failed)
+            || previous_review.is_some_and(|review| !review.validation_remaining.is_empty()));
     let complete = if backlog_progress
         .as_ref()
         .is_some_and(|progress| progress.total > 0)
     {
-        backlog_complete
-            || (has_existing_draft_pr && acceptance.is_empty() && validation.is_empty())
+        backlog_complete || complete_from_retry
     } else {
-        // Without a backlog checklist the heuristic does not have enough
-        // signal to declare completion.  Let the worker exhaust its turn
-        // budget; the agent-backed review path (METASTACK_LISTEN_AGENT_REVIEW=1)
-        // provides richer completion detection when needed.
-        false
+        // Without a backlog checklist the heuristic still does not have enough
+        // signal to declare completion on its own. The only exception is an
+        // explicit gate-repair retry, where a stored failed verification
+        // summary or the previous review's validation-repair context provides
+        // the missing readiness signal.
+        complete_from_retry
     };
     let changed_items = turn_progress
         .implementation_entries
@@ -3721,7 +5133,10 @@ fn heuristic_review_report(
         },
         validation_remaining: if complete { Vec::new() } else { validation },
         risks: Vec::new(),
-        notes: vec!["Using heuristic review; set `METASTACK_LISTEN_AGENT_REVIEW=1` to enable agent-backed review.".to_string()],
+        notes: vec![
+            "Using heuristic review; dedicated code verification runs in the verification phase."
+                .to_string(),
+        ],
     })
 }
 
@@ -3736,7 +5151,10 @@ fn heuristic_final_review_report(review: &ReviewReport) -> Result<FinalReviewRep
         missing_items: review.remaining_items.clone(),
         validation_gaps: review.validation_remaining.clone(),
         risks: review.risks.clone(),
-        notes: vec!["Using heuristic final review; set `METASTACK_LISTEN_AGENT_REVIEW=1` to enable agent-backed review.".to_string()],
+        notes: vec![
+            "Using heuristic final review; dedicated code verification runs in the verification phase."
+                .to_string(),
+        ],
     })
 }
 
@@ -4017,6 +5435,17 @@ fn load_existing_pull_request(
         .unwrap_or_default())
 }
 
+fn load_existing_verification_summary(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<VerificationSummary>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    Ok(store
+        .load_verification_report(issue_identifier)?
+        .map(|report| report.summary_snapshot()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4024,12 +5453,17 @@ mod tests {
         build_worker_session, continuation_id_for_invocation, parse_claude_resume_handle,
         parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
     };
+    use crate::config::{AppConfig, PlanningMeta};
     use crate::linear::{IssueSummary, TeamRef};
+    use crate::listen::verification::{
+        VerificationRecipeStep, VerificationStatus, VerificationSummary,
+    };
     use crate::listen::{
         CanonicalSessionData, PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage,
     };
     use std::fs;
     use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn issue() -> IssueSummary {
@@ -4120,6 +5554,7 @@ mod tests {
             turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
+            verification_summary: None,
             origin: SessionOrigin::Listen,
         };
         let mut tokens = TokenUsage::default();
@@ -4418,7 +5853,7 @@ mod tests {
         };
 
         // Turn 2 with resume handle → continuation prompt, no instructions.
-        let resumed = super::build_listen_run_args(&issue, 2, &context, None, true)
+        let resumed = super::build_listen_run_args(&issue, 2, &context, None, None, true)
             .expect("build_listen_run_args should succeed");
         assert!(
             resumed.prompt.contains("Continuation guidance"),
@@ -4430,7 +5865,7 @@ mod tests {
         );
 
         // Turn 2 without resume handle → full prompt with instructions.
-        let cold = super::build_listen_run_args(&issue, 2, &context, None, false)
+        let cold = super::build_listen_run_args(&issue, 2, &context, None, None, false)
             .expect("build_listen_run_args should succeed");
         assert!(
             cold.prompt.contains("Execution continuation"),
@@ -4481,7 +5916,7 @@ mod tests {
         };
 
         // Turn 1 with resume handle should still use full prompt (initial context load).
-        let result = super::build_listen_run_args(&issue, 1, &context, None, true)
+        let result = super::build_listen_run_args(&issue, 1, &context, None, None, true)
             .expect("build_listen_run_args should succeed");
         assert!(
             result.prompt.contains("You are working on Linear ticket"),
@@ -4558,6 +5993,34 @@ mod tests {
     }
 
     #[test]
+    fn render_execution_delta_prompt_includes_verification_summary_and_remediation() {
+        let prompt = super::render_execution_delta_prompt(
+            &test_issue("MET-57"),
+            2,
+            4,
+            None,
+            Some(&VerificationSummary {
+                status: VerificationStatus::Failed,
+                summary: "Verification failed on the sampled input.".to_string(),
+                criteria_total: 1,
+                criteria_failed: 1,
+                e2e_status: VerificationStatus::Passed,
+                battle_test_status: VerificationStatus::Failed,
+                remediation: vec![
+                    "Repair the verifier finding.".to_string(),
+                    "Re-run the sampled battle input.".to_string(),
+                ],
+            }),
+            false,
+        );
+
+        assert!(prompt.contains("Latest verification:"));
+        assert!(prompt.contains("Verification failed on the sampled input."));
+        assert!(prompt.contains("Repair the verifier finding."));
+        assert!(prompt.contains("Re-run the sampled battle input."));
+    }
+
+    #[test]
     fn upsert_marked_section_replaces_existing_managed_block() {
         let original = "\
 # Title
@@ -4597,5 +6060,212 @@ old
             "should parse session_id from plain JSON object"
         );
         assert_eq!(handle.unwrap().id, "abc-123");
+    }
+
+    #[test]
+    fn heuristic_review_requires_failed_verification_to_complete_without_backlog_signal() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+        let progress = super::super::TurnProgress {
+            planning_entries: Vec::new(),
+            implementation_entries: vec!["src/lib.rs".to_string()],
+        };
+
+        let report = super::heuristic_review_report(
+            &test_issue("MET-57"),
+            &context,
+            true,
+            &progress,
+            true,
+            None,
+            None,
+        )
+        .expect("heuristic review should succeed");
+
+        assert!(!report.complete);
+        assert!(
+            report.remaining_items.is_empty(),
+            "no acceptance criteria means the heuristic should wait for a stronger signal"
+        );
+    }
+
+    #[test]
+    fn heuristic_review_allows_failed_verification_retry_without_backlog_signal() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+        let progress = super::super::TurnProgress {
+            planning_entries: Vec::new(),
+            implementation_entries: vec!["src/lib.rs".to_string()],
+        };
+
+        let report = super::heuristic_review_report(
+            &test_issue("MET-57"),
+            &context,
+            true,
+            &progress,
+            true,
+            None,
+            Some(&VerificationSummary {
+                status: VerificationStatus::Failed,
+                summary: "Previous verification failed.".to_string(),
+                ..VerificationSummary::default()
+            }),
+        )
+        .expect("heuristic review should succeed");
+
+        assert!(report.complete);
+        assert_eq!(
+            report.summary,
+            "Heuristic review believes the ticket work is complete."
+        );
+    }
+
+    #[test]
+    fn heuristic_review_allows_validation_retry_without_backlog_signal() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "MET-57".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+        let progress = super::super::TurnProgress {
+            planning_entries: Vec::new(),
+            implementation_entries: vec!["src/lib.rs".to_string()],
+        };
+        let report = super::heuristic_review_report(
+            &test_issue("MET-57"),
+            &context,
+            true,
+            &progress,
+            true,
+            Some(&super::ReviewReport {
+                validation_remaining: vec![
+                    "Local validation must pass before ready promotion.".to_string(),
+                ],
+                ..super::ReviewReport::default()
+            }),
+            Some(&VerificationSummary {
+                status: VerificationStatus::Passed,
+                summary: "Verification already passed.".to_string(),
+                ..VerificationSummary::default()
+            }),
+        )
+        .expect("heuristic review should succeed");
+
+        assert!(report.complete);
+    }
+
+    #[test]
+    fn e2e_recipe_step_times_out_cleanly() {
+        let temp = tempdir().expect("tempdir should build");
+        let report = super::run_e2e_recipe_step_with_timeout(
+            temp.path(),
+            &VerificationRecipeStep {
+                name: "sleepy".to_string(),
+                command: vec!["sh".to_string(), "-c".to_string(), "sleep 1".to_string()],
+                ..VerificationRecipeStep::default()
+            },
+            Duration::from_millis(50),
+        )
+        .expect("timed e2e step should return a report");
+
+        assert_eq!(report.status, VerificationStatus::Failed);
+        assert!(
+            report
+                .assertions
+                .iter()
+                .any(|assertion| assertion.contains("timed out")),
+            "assertions={:?}",
+            report.assertions
+        );
     }
 }

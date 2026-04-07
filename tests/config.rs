@@ -84,6 +84,61 @@ fn config_direct_updates_persist_fast_plan_defaults() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn config_direct_updates_persist_verification_defaults() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--verification-code-review",
+            "false",
+            "--verification-e2e",
+            "true",
+            "--verification-battle-test-count",
+            "3",
+            "--verification-quality-criterion",
+            "Route recipe must pass",
+            "--verification-quality-criterion",
+            "Battle samples must stay deterministic",
+        ])
+        .assert()
+        .success();
+
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    assert_eq!(parsed["verification"]["code_review"].as_bool(), Some(false));
+    assert_eq!(
+        parsed["verification"]["e2e_verification"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parsed["verification"]["battle_test_count"].as_integer(),
+        Some(3)
+    );
+    assert_eq!(
+        parsed["verification"]["quality_criteria"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .collect::<Vec<_>>()
+            }),
+        Some(vec![
+            "Route recipe must pass",
+            "Battle samples must stay deterministic",
+        ])
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_json_updates_vim_mode_and_returns_effective_value() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -1520,7 +1575,7 @@ provider = "claude"
     );
     assert_eq!(
         payload["error"]["context"][0],
-        "unknown agent command route key `backlogoops`; supported keys: backlog.spec, backlog.plan, backlog.improve, backlog.split, context.scan, context.reload, linear.issues.refine, agents.listen, agents.workflows.run, runtime.cron.prompt, agents.review, agents.build, merge.run"
+        "unknown agent command route key `backlogoops`; supported keys: backlog.spec, backlog.plan, backlog.improve, backlog.split, context.scan, context.reload, linear.issues.refine, agents.listen, agents.listen.verification, agents.workflows.run, runtime.cron.prompt, agents.review, agents.build, merge.run"
     );
 
     Ok(())

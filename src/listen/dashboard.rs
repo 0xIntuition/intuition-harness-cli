@@ -326,31 +326,13 @@ pub(crate) fn render(
     state: &SessionBrowserState,
 ) {
     let area = frame.area();
-    let footer_height = if area.width >= 110 && area.height >= 30 {
-        8
-    } else {
-        0
-    };
-    let header_height = if area.width >= 120 { 11 } else { 12 };
-    let show_active_issues = data.show_active_issues && !data.active_issues.is_empty();
-    let active_issue_detail =
-        state.detail_mode && matches!(state.focus, FocusPane::ActiveIssues) && data.show_preview;
-    let active_issues_height: u16 = if show_active_issues {
-        let rows = data.active_issues.len() as u16;
-        if active_issue_detail {
-            (rows + 4).clamp(16, 24)
-        } else {
-            (rows + 4).min(16)
-        }
-    } else {
-        0
-    };
-    let mut constraints = vec![Constraint::Length(header_height), Constraint::Min(8)];
-    if active_issues_height > 0 {
-        constraints.push(Constraint::Length(active_issues_height));
+    let layout = dashboard_layout_metrics(area, data, state);
+    let mut constraints = vec![Constraint::Length(layout.header_height), Constraint::Min(8)];
+    if layout.active_issues_height > 0 {
+        constraints.push(Constraint::Length(layout.active_issues_height));
     }
-    if footer_height > 0 {
-        constraints.push(Constraint::Length(footer_height));
+    if layout.footer_height > 0 {
+        constraints.push(Constraint::Length(layout.footer_height));
     }
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -361,11 +343,11 @@ pub(crate) fn render(
     render_sessions(frame, data, sections[1], state);
 
     let mut next_section = 2;
-    if active_issues_height > 0 {
+    if layout.active_issues_height > 0 {
         render_active_issues(frame, data, sections[next_section], state);
         next_section += 1;
     }
-    if footer_height > 0 && next_section < sections.len() {
+    if layout.footer_height > 0 && next_section < sections.len() {
         render_footer(frame, data, state, sections[next_section]);
     }
 
@@ -931,21 +913,14 @@ fn detail_scroll_metrics(
     }
     let session = state.selected_session(data)?;
     let area = Rect::new(0, 0, width, height);
-    let footer_height = if area.width >= 110 && area.height >= 30 {
-        8
-    } else {
-        0
-    };
-    let header_height = if area.width >= 120 { 10 } else { 12 };
-    let constraints = if footer_height > 0 {
-        vec![
-            Constraint::Length(header_height),
-            Constraint::Min(8),
-            Constraint::Length(footer_height),
-        ]
-    } else {
-        vec![Constraint::Length(header_height), Constraint::Min(8)]
-    };
+    let layout = dashboard_layout_metrics(area, data, state);
+    let mut constraints = vec![Constraint::Length(layout.header_height), Constraint::Min(8)];
+    if layout.active_issues_height > 0 {
+        constraints.push(Constraint::Length(layout.active_issues_height));
+    }
+    if layout.footer_height > 0 {
+        constraints.push(Constraint::Length(layout.footer_height));
+    }
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
@@ -962,6 +937,44 @@ fn detail_scroll_metrics(
     let detail_area = detail_panel_area(sessions_sections[1], state.detail_mode)?;
     let detail = data.detail_for_session(&session.issue_identifier);
     Some(detail_content_metrics(session, detail, detail_area))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DashboardLayoutMetrics {
+    header_height: u16,
+    active_issues_height: u16,
+    footer_height: u16,
+}
+
+fn dashboard_layout_metrics(
+    area: Rect,
+    data: &ListenDashboardData,
+    state: &SessionBrowserState,
+) -> DashboardLayoutMetrics {
+    let footer_height = if area.width >= 110 && area.height >= 30 {
+        8
+    } else {
+        0
+    };
+    let header_height = if area.width >= 120 { 11 } else { 12 };
+    let show_active_issues = data.show_active_issues && !data.active_issues.is_empty();
+    let active_issue_detail =
+        state.detail_mode && matches!(state.focus, FocusPane::ActiveIssues) && data.show_preview;
+    let active_issues_height = if show_active_issues {
+        let rows = data.active_issues.len() as u16;
+        if active_issue_detail {
+            (rows + 4).clamp(16, 24)
+        } else {
+            (rows + 4).min(16)
+        }
+    } else {
+        0
+    };
+    DashboardLayoutMetrics {
+        header_height,
+        active_issues_height,
+        footer_height,
+    }
 }
 
 fn detail_panel_area(area: Rect, detail_mode: bool) -> Option<Rect> {
@@ -1074,6 +1087,26 @@ fn render_session_detail_text(
         &mut summary_fields,
         "Log",
         detail.references.log_path.clone(),
+    );
+    if let Some(verification) = detail.verification.as_ref() {
+        summary_fields.push(SummaryField::new(
+            "Verification",
+            format!(
+                "{} ({})",
+                verification.summary,
+                verification.compact_label()
+            ),
+        ));
+    }
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Verification JSON",
+        detail.references.verification_json_path.clone(),
+    );
+    push_optional_summary_field(
+        &mut summary_fields,
+        "Verification Markdown",
+        detail.references.verification_markdown_path.clone(),
     );
 
     let mut lines = vec![
@@ -1413,6 +1446,9 @@ fn phase_style(phase: SessionPhase) -> Style {
             .add_modifier(Modifier::BOLD),
         SessionPhase::FinalReview => Style::default()
             .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        SessionPhase::Verifying => Style::default()
+            .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD),
         SessionPhase::Validating => Style::default()
             .fg(Color::LightMagenta)
@@ -1789,7 +1825,7 @@ mod tests {
 
         assert!(snapshot.contains("Selected Session"));
         assert!(snapshot.contains("PR: draft #321"));
-        assert!(snapshot.contains("Prompt Context"));
+        assert!(snapshot.contains("Verification JSON"));
     }
 
     #[test]
@@ -1869,7 +1905,6 @@ mod tests {
                 resolved_agent: Some("codex".to_string()),
             },
         );
-
         let snapshot = render_dashboard_with_state(
             &data,
             200,
@@ -1882,7 +1917,7 @@ mod tests {
         )
         .expect("detail snapshot should render");
 
-        assert!(snapshot.contains("Recent Log Excerpts"));
+        assert!(snapshot.contains("Published draft PR #321 for review visibility"));
     }
 
     #[test]

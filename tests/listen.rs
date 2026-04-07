@@ -191,6 +191,43 @@ fn listen_detail_path(
 }
 
 #[cfg(unix)]
+fn listen_verification_json_path(
+    config_path: &Path,
+    repo_root: &Path,
+    issue_identifier: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    Ok(listen_project_store_dir(config_path, repo_root, None)?
+        .join("verification")
+        .join(format!("{issue_identifier}.json")))
+}
+
+#[cfg(unix)]
+fn listen_verification_markdown_path(
+    config_path: &Path,
+    repo_root: &Path,
+    issue_identifier: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    Ok(listen_project_store_dir(config_path, repo_root, None)?
+        .join("verification")
+        .join(format!("{issue_identifier}.md")))
+}
+
+#[cfg(unix)]
+fn write_listen_verification_report(
+    config_path: &Path,
+    repo_root: &Path,
+    issue_identifier: &str,
+    report: serde_json::Value,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let path = listen_verification_json_path(config_path, repo_root, issue_identifier)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
+    Ok(path)
+}
+
+#[cfg(unix)]
 fn read_listen_fixture(name: &str) -> Result<String, Box<dyn Error>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -1838,7 +1875,7 @@ fn listen_render_once_demo_can_snapshot_selected_session_detail() -> Result<(), 
         .success()
         .stdout(predicate::str::contains("Selected Session"))
         .stdout(predicate::str::contains("PR: draft #321"))
-        .stdout(predicate::str::contains("Prompt Context"))
+        .stdout(predicate::str::contains("Verification JSON:"))
         .stdout(predicate::str::contains("Workpad: comment-met-13"))
         .stdout(predicate::str::contains("Origin: Listen"));
 
@@ -2133,6 +2170,22 @@ exit 0
         ))
         .stdout(predicate::str::contains(
             "Validation commands: cargo test --test listen -- --test-threads=1",
+        ))
+        .stdout(predicate::str::contains(
+            "Verification code review: enabled",
+        ))
+        .stdout(predicate::str::contains("Verification E2E: enabled"))
+        .stdout(predicate::str::contains(
+            "Verification battle test count: 0",
+        ))
+        .stdout(predicate::str::contains(
+            "Verification Resolved route key: agents.listen.verification",
+        ))
+        .stdout(predicate::str::contains(
+            "Verification Resolved provider: codex",
+        ))
+        .stdout(predicate::str::contains(
+            "Verification Provider source: repo_default",
         ));
     assert!(viewer_mock.calls() >= 1);
 
@@ -6487,6 +6540,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -6511,6 +6567,14 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions-$co
     fs::set_permissions(&stub_path, permissions)?;
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+    fs::create_dir_all(&recipe_dir)?;
+    fs::write(
+        recipe_dir.join("agents.listen.yaml"),
+        r#"quality_criteria:
+  - Verification proof.
+"#,
+    )?;
     let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
@@ -6893,6 +6957,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -7052,6 +7119,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -7213,6 +7283,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -7395,6 +7468,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = failing_server.url.as_str(),
         ),
@@ -7602,6 +7678,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -7771,6 +7850,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -7902,6 +7984,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -8037,6 +8122,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -8171,6 +8259,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -8331,6 +8422,9 @@ default_agent = "stub"
 command = "agent-stub"
 args = ["{{{{payload}}}}"]
 transport = "arg"
+
+[verification]
+code_review = false
 "#,
             api_url = server.url.as_str(),
         ),
@@ -8455,7 +8549,7 @@ printf '%s' 'ok' > repaired.txt
     );
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"blocked\""));
+    assert!(state.contains("\"phase\": \"completed\""));
     assert!(state.contains("\"number\": 321"));
 
     Ok(())
@@ -10023,6 +10117,695 @@ printf '%s' '{"type":"item.completed","item":{"type":"agent_message","text":"cod
     // Session state should have the new resume handle.
     let state = fs::read_to_string(state_path)?;
     assert!(state.contains("\"id\": \"codex-thread-resume-1\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_fails_closed_on_malformed_verifier_output_and_keeps_draft_artifacts()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"],
+    "repair_attempts": 0
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "exec-stub"
+
+[agents.routing.commands."agents.listen.verification"]
+provider = "verify-stub"
+
+[agents.commands.exec-stub]
+command = "exec-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.verify-stub]
+command = "verify-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[verification]
+battle_test_count = 0
+"#,
+        ),
+    )?;
+    fs::write(
+        bin_dir.join("exec-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/exec-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/exec-prompt-$count.txt"
+mkdir -p src
+printf '// malformed verification test\n' > src/exec-turn.rs
+"#,
+    )?;
+    fs::write(
+        bin_dir.join("verify-stub"),
+        r#"#!/bin/sh
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/verify-prompt.txt"
+printf '%s' 'not-json'
+"#,
+    )?;
+    for command_name in ["exec-stub", "verify-stub"] {
+        let mut permissions = fs::metadata(bin_dir.join(command_name))?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(bin_dir.join(command_name), permissions)?;
+    }
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+    fs::create_dir_all(&recipe_dir)?;
+    fs::write(
+        recipe_dir.join("agents.listen.yaml"),
+        r#"quality_criteria:
+  - Verification proof.
+"#,
+    )?;
+    write_listen_verification_report(
+        &config_path,
+        &repo_root,
+        "MET-32",
+        json!({
+            "version": 1,
+            "issue_identifier": "MET-32",
+            "turn_number": 0,
+            "generated_at_epoch_seconds": 1_773_575_000u64,
+            "status": "failed",
+            "summary": "Previous verification failed.",
+            "route": {
+                "route_key": "agents.listen.verification",
+                "provider": "verify-stub",
+                "provider_source": "command_route:agents.listen.verification"
+            },
+            "quality_criteria": [
+                "Verification proof."
+            ],
+            "code_review": {
+                "status": "failed",
+                "summary": "Previous verification failed.",
+                "criteria": [
+                    {
+                        "name": "Verification proof.",
+                        "status": "failed",
+                        "summary": "Verification needs repair.",
+                        "findings": [],
+                        "remediation": "Fix verification issue"
+                    }
+                ],
+                "notes": []
+            },
+            "e2e": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "steps": []
+            },
+            "battle_tests": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "sampled_count": 0,
+                "cases": []
+            },
+            "remediation": [
+                "Fix verification issue"
+            ],
+            "notes": []
+        }),
+    )?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Verification fail-closed",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "blocked",
+            "summary": "Waiting for verification",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "branch": "main",
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/example/repo/pull/321",
+                "status": "draft"
+            },
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--max-turns",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    wait_for_file_substring(&state_path, "\"phase\": \"blocked\"")?;
+    let state = fs::read_to_string(&state_path)?;
+    assert!(state.contains("\"status\": \"draft\""));
+
+    let verification_json = listen_verification_json_path(&config_path, &repo_root, "MET-32")?;
+    let verification_markdown =
+        listen_verification_markdown_path(&config_path, &repo_root, "MET-32")?;
+    wait_for_file_substring(&verification_json, "\"status\": \"failed\"")?;
+    let report = fs::read_to_string(&verification_json)?;
+    assert!(report.contains("Verifier output was malformed"));
+    assert!(report.contains("\"route_key\": \"agents.listen.verification\""));
+    assert!(report.contains("\"provider\": \"verify-stub\""));
+
+    let markdown = fs::read_to_string(&verification_markdown)?;
+    assert!(markdown.contains("Status: Failed"));
+    assert!(markdown.contains("agents.listen.verification"));
+
+    let detail = fs::read_to_string(listen_detail_path(&config_path, &repo_root, "MET-32")?)?;
+    assert!(detail.contains("\"verification\""));
+    assert!(detail.contains("\"verification_json_path\""));
+    assert!(detail.contains("\"verification_markdown_path\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_reenters_execution_with_verification_remediation_and_records_e2e_and_battle_tests()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "validation": {
+    "commands": ["true"],
+    "repair_attempts": 1
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "exec-stub"
+
+[agents.routing.commands."agents.listen.verification"]
+provider = "verify-stub"
+
+[agents.commands.exec-stub]
+command = "exec-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.verify-stub]
+command = "verify-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[verification]
+battle_test_count = 1
+"#,
+        ),
+    )?;
+    fs::write(
+        bin_dir.join("exec-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/exec-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/exec-prompt-$count.txt"
+mkdir -p src
+printf '// execution turn %s\n' "$count" > "src/exec-turn-$count.rs"
+"#,
+    )?;
+    fs::write(
+        bin_dir.join("verify-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/verify-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "$METASTACK_AGENT_PROMPT" > "$TEST_OUTPUT_DIR/verify-prompt-$count.txt"
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"summary":"Initial verification failed","criteria":[{"name":"Branch satisfies the verification proof.","status":"failed","summary":"Verification still needs a repair.","remediation":"Fix verification issue"}],"battle_tests":[{"input_path":".intuition/verification/inputs/agents.listen/sample.md","status":"failed","summary":"Sample input failed.","remediation":"Handle sample input"}],"notes":["first verification failed"]}'
+else
+  printf '%s' '{"summary":"Verification passed","criteria":[{"name":"Branch satisfies the verification proof.","status":"passed","summary":"Verification proof is satisfied."}],"battle_tests":[{"input_path":".intuition/verification/inputs/agents.listen/sample.md","status":"passed","summary":"Sample input passed."}],"notes":["second verification passed"]}'
+fi
+"#,
+    )?;
+    for command_name in ["exec-stub", "verify-stub"] {
+        let mut permissions = fs::metadata(bin_dir.join(command_name))?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(bin_dir.join(command_name), permissions)?;
+    }
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+
+    let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+    fs::create_dir_all(&recipe_dir)?;
+    fs::write(
+        recipe_dir.join("agents.listen.yaml"),
+        r#"quality_criteria:
+  - Branch satisfies the verification proof.
+e2e:
+  - name: workspace-proof
+    command:
+      - sh
+      - -c
+      - printf verification-ok && touch .verification-e2e.txt
+    expect_stdout_contains:
+      - verification-ok
+    expect_paths_exist:
+      - .verification-e2e.txt
+"#,
+    )?;
+    let input_dir = workspace.join(format!(
+        "{}/verification/inputs/agents.listen",
+        branding::PROJECT_DIR
+    ));
+    fs::create_dir_all(&input_dir)?;
+    fs::write(input_dir.join("sample.md"), "sample battle input\n")?;
+    write_listen_verification_report(
+        &config_path,
+        &repo_root,
+        "MET-32",
+        json!({
+            "version": 1,
+            "issue_identifier": "MET-32",
+            "turn_number": 0,
+            "generated_at_epoch_seconds": 1_773_575_000u64,
+            "status": "failed",
+            "summary": "Previous verification failed.",
+            "route": {
+                "route_key": "agents.listen.verification",
+                "provider": "verify-stub",
+                "provider_source": "repo_default"
+            },
+            "quality_criteria": [],
+            "code_review": {
+                "status": "failed",
+                "summary": "Previous verification failed.",
+                "criteria": [],
+                "notes": []
+            },
+            "e2e": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "steps": []
+            },
+            "battle_tests": {
+                "status": "skipped",
+                "summary": "Not run.",
+                "sampled_count": 0,
+                "cases": []
+            },
+            "remediation": [
+                "Repair the verification findings and rerun verification."
+            ],
+            "notes": []
+        }),
+    )?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Verification retry loop",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "blocked",
+            "summary": "Waiting for verification retry",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "branch": "main",
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/example/repo/pull/321",
+                "status": "draft"
+            },
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--max-turns",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    wait_for_path(&stub_dir.join("exec-prompt-2.txt"))?;
+    wait_for_path(&stub_dir.join("verify-count.txt"))?;
+    let verify_count = fs::read_to_string(stub_dir.join("verify-count.txt"))?;
+    let log_contents = listen_log_path(&config_path, &repo_root, "MET-32")
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let state_snapshot = fs::read_to_string(&state_path).unwrap_or_default();
+    assert_eq!(
+        verify_count.trim(),
+        "2",
+        "state={state_snapshot}\nlog={log_contents}"
+    );
+
+    let verification_json = listen_verification_json_path(&config_path, &repo_root, "MET-32")?;
+    wait_for_path(&verification_json)?;
+    wait_for_file_substring(&verification_json, "\"turn_number\": 2")?;
+    let report_text = fs::read_to_string(&verification_json)?;
+    let report: serde_json::Value = serde_json::from_str(&report_text)?;
+    assert_eq!(report["status"], "passed", "report={report_text}");
+    assert_eq!(report["e2e"]["status"], "passed");
+    assert_eq!(report["battle_tests"]["status"], "passed");
+    assert_eq!(report["battle_tests"]["sampled_count"], 1);
+    assert_eq!(
+        report["battle_tests"]["cases"][0]["input_path"],
+        ".intuition/verification/inputs/agents.listen/sample.md"
+    );
+    assert!(
+        report["e2e"]["steps"][0]["stdout_excerpt"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("verification-ok")
+    );
+    assert!(workspace.join(".verification-e2e.txt").is_file());
+
+    let state = fs::read_to_string(&state_path)?;
+    assert!(state.contains("\"phase\": \"completed\""));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_keeps_validation_repair_budget_after_verification_retry()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let api_url = server.url.clone();
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "validation": {
+    "commands": ["validation-stub"],
+    "repair_attempts": 1
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "exec-stub"
+
+[agents.routing.commands."agents.listen.verification"]
+provider = "verify-stub"
+
+[agents.commands.exec-stub]
+command = "exec-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.verify-stub]
+command = "verify-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[verification]
+battle_test_count = 0
+"#,
+        ),
+    )?;
+    fs::write(
+        bin_dir.join("exec-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/exec-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+mkdir -p src
+printf '// execution turn %s\n' "$count" > "src/exec-turn-$count.rs"
+"#,
+    )?;
+    fs::write(
+        bin_dir.join("verify-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/verify-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  printf '%s' '{"summary":"Initial verification failed","criteria":[{"name":"Verification proof.","status":"failed","summary":"Verification needs repair.","remediation":"Fix verification issue"}],"battle_tests":[],"notes":[]}'
+else
+  printf '%s' '{"summary":"Verification passed","criteria":[{"name":"Verification proof.","status":"passed","summary":"Verification proof is satisfied."}],"battle_tests":[],"notes":[]}'
+fi
+"#,
+    )?;
+    fs::write(
+        bin_dir.join("validation-stub"),
+        r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/validation-count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' 'validation failed once' >&2
+  exit 1
+fi
+printf '%s\n' 'validation passed'
+"#,
+    )?;
+    for command_name in ["exec-stub", "verify-stub", "validation-stub"] {
+        let mut permissions = fs::metadata(bin_dir.join(command_name))?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(bin_dir.join(command_name), permissions)?;
+    }
+
+    init_repo_with_origin(&repo_root)?;
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+    fs::create_dir_all(&recipe_dir)?;
+    fs::write(
+        recipe_dir.join("agents.listen.yaml"),
+        r#"quality_criteria:
+  - Verification proof.
+"#,
+    )?;
+    let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+    fs::create_dir_all(&backlog_dir)?;
+    fs::write(
+        backlog_dir.join("index.md"),
+        "# MET-32\n\n## Tasks\n\n- [x] Verification ready\n",
+    )?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": "issue-32",
+            "issue_identifier": "MET-32",
+            "issue_title": "Split verification and validation repair budgets",
+            "project_name": "MetaStack CLI",
+            "team_key": "MET",
+            "issue_url": "https://linear.app/issues/MET-32",
+            "phase": "blocked",
+            "summary": "Waiting for verification retry",
+            "brief_path": null,
+            "workspace_path": workspace.display().to_string(),
+            "branch": "main",
+            "pull_request": {
+                "number": 321,
+                "url": "https://github.com/example/repo/pull/321",
+                "status": "draft"
+            },
+            "workpad_comment_id": "comment-32",
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "pid": null,
+            "session_id": null,
+            "turns": 0,
+            "tokens": {},
+            "canonical": {},
+            "log_path": "logs/MET-32.log"
+        })],
+    )?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&workspace)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen-worker",
+            "--source-root",
+            repo_root.to_str().expect("utf8"),
+            "--workspace",
+            workspace.to_str().expect("utf8"),
+            "--issue",
+            "MET-32",
+            "--workpad-comment-id",
+            "comment-32",
+            "--backlog-issue",
+            "MET-32",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--max-turns",
+            "3",
+        ])
+        .assert()
+        .success();
+
+    wait_for_path(&stub_dir.join("validation-count.txt"))?;
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("validation-count.txt"))?.trim(),
+        "2"
+    );
+
+    let state = fs::read_to_string(&state_path)?;
+    assert!(state.contains("\"phase\": \"completed\""), "state={state}");
 
     Ok(())
 }

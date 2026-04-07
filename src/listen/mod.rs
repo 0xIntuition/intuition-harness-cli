@@ -2,6 +2,7 @@ pub mod dashboard;
 mod preflight;
 mod state;
 pub(crate) mod store;
+mod verification;
 mod worker;
 mod workpad;
 mod workspace;
@@ -29,18 +30,22 @@ use serde::Serialize;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
+use crate::agents::{
+    AgentBriefRequest, TicketMetadata, command_args_for_invocation, render_invocation_diagnostics,
+    resolve_agent_invocation_for_planning, validate_invocation_command_surface, write_agent_brief,
+};
 use crate::backlog::{
     BacklogIssueMetadata, INDEX_FILE_NAME, ManagedFileRecord, TICKET_DISCUSSION_FILE_NAME,
     TemplateContext, render_template_files, save_issue_metadata, write_issue_description,
 };
 use crate::cli::{
     ListenDashboardEventArg, ListenRunArgs, ListenSessionClearArgs, ListenSessionInspectArgs,
-    ListenSessionListArgs, ListenSessionResumeArgs, ListenWorkerArgs,
+    ListenSessionListArgs, ListenSessionResumeArgs, ListenWorkerArgs, RunAgentArgs,
 };
 use crate::config::{
-    AppConfig, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT, LinearConfig, LinearConfigOverrides,
-    ListenAssignmentScope, PlanningListenSettings, PlanningMeta, load_required_planning_meta,
+    AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION, AppConfig, DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT,
+    LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
+    PlanningMeta, load_required_planning_meta,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
 use crate::linear::{
@@ -65,6 +70,7 @@ use store::{
     ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
     pid_is_running, resolve_source_project_root,
 };
+use verification::{VerificationStatus, VerificationSummary};
 
 const TODO_STATE: &str = "Todo";
 const BACKLOG_STATE: &str = "Backlog";
@@ -512,6 +518,16 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     url: Some("https://github.com/metastack-labs/metastack-cli/pull/321".to_string()),
                     status: PullRequestStatus::Draft,
                 },
+                verification: Some(VerificationSummary {
+                    status: VerificationStatus::Passed,
+                    summary: "Verification passed for code review, E2E, and battle tests."
+                        .to_string(),
+                    criteria_total: 3,
+                    criteria_failed: 0,
+                    e2e_status: VerificationStatus::Passed,
+                    battle_test_status: VerificationStatus::Passed,
+                    remediation: Vec::new(),
+                }),
                 latest_resume_handle: Some(LatestResumeHandle {
                     provider: ResumeProvider::Codex,
                     id: "019cedb4-2293-7651-b0b4-dfac4af6a640-019cedb4-229b-7453-825e-3e3da4e1bf2a"
@@ -525,6 +541,14 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     workpad_comment_id: Some("comment-met-13".to_string()),
                     log_path: Some(format!("{}/agents/sessions/MET-13.log", crate::branding::PROJECT_DIR)),
                     branch: Some("met-13-agent-daemon".to_string()),
+                    verification_json_path: Some(format!(
+                        "{}/agents/listen/verification/MET-13.json",
+                        crate::branding::PROJECT_DIR
+                    )),
+                    verification_markdown_path: Some(format!(
+                        "{}/agents/listen/verification/MET-13.md",
+                        crate::branding::PROJECT_DIR
+                    )),
                 },
                 prompt_context: vec![
                     store::SessionContextReference {
@@ -609,6 +633,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     repair: None,
                 },
                 pull_request: PullRequestSummary::default(),
+                verification: None,
                 latest_resume_handle: Some(LatestResumeHandle {
                     provider: ResumeProvider::Claude,
                     id: "019ceda5-0a41-7ef1-bf96-4f26683c1570-019ceda5-0a57-7820-b050-c05e112d66dd"
@@ -622,6 +647,8 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     workpad_comment_id: None,
                     log_path: Some(format!("{}/agents/sessions/MET-17.log", crate::branding::PROJECT_DIR)),
                     branch: Some("met-17-branch-pr-reconciliation".to_string()),
+                    verification_json_path: None,
+                    verification_markdown_path: None,
                 },
                 prompt_context: vec![store::SessionContextReference {
                     label: "Attachment context manifest".to_string(),
@@ -2896,6 +2923,19 @@ fn append_session_inspect_detail_lines(
     if let Some(log_path) = detail.references.log_path.as_deref() {
         lines.push(format!("  - Detail log: {log_path}"));
     }
+    if let Some(verification) = detail.verification.as_ref() {
+        lines.push(format!(
+            "  - Detail verification: {} ({})",
+            verification.summary,
+            verification.compact_label()
+        ));
+    }
+    if let Some(path) = detail.references.verification_json_path.as_deref() {
+        lines.push(format!("  - Detail verification JSON: {path}"));
+    }
+    if let Some(path) = detail.references.verification_markdown_path.as_deref() {
+        lines.push(format!("  - Detail verification markdown: {path}"));
+    }
 
     if !detail.prompt_context.is_empty() {
         lines.push("  - Prompt context:".to_string());
@@ -2971,6 +3011,68 @@ fn detail_tokens(detail: &ListenSessionDetail) -> &TokenUsage {
     } else {
         &detail.tokens
     }
+}
+
+fn render_verification_check_lines(
+    app_config: &AppConfig,
+    planning_meta: &PlanningMeta,
+    working_dir: &Path,
+    args: &ListenRunArgs,
+) -> Result<Vec<String>> {
+    let run_args = RunAgentArgs {
+        root: None,
+        route_key: Some(AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION.to_string()),
+        agent: args.agent.clone(),
+        prompt: "listen verification check".to_string(),
+        instructions: None,
+        model: args.model.clone(),
+        reasoning: args.reasoning.clone(),
+        transport: None,
+        attachments: Vec::new(),
+    };
+    let invocation = resolve_agent_invocation_for_planning(app_config, planning_meta, &run_args)?;
+    let command_args = command_args_for_invocation(&invocation, Some(working_dir))?;
+    let attempted_command = validate_invocation_command_surface(&invocation, &command_args)?;
+    let display_command = attempted_command
+        .lines()
+        .next()
+        .unwrap_or(&attempted_command);
+
+    let mut lines = vec![
+        format!(
+            "Verification code review: {}",
+            if app_config.verification.code_review_enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ),
+        format!(
+            "Verification E2E: {}",
+            if app_config.verification.e2e_verification_enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ),
+        format!(
+            "Verification battle test count: {}",
+            app_config.verification.battle_test_count()
+        ),
+        format!(
+            "Verification quality criteria: {}",
+            if app_config.verification.quality_criteria.is_empty() {
+                "using built-in defaults".to_string()
+            } else {
+                app_config.verification.quality_criteria.join(" | ")
+            }
+        ),
+        format!("Verification resolved command: `{display_command} ...`"),
+    ];
+    for line in render_invocation_diagnostics(&invocation) {
+        lines.push(format!("Verification {line}"));
+    }
+    Ok(lines)
 }
 
 pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String> {
@@ -3449,6 +3551,11 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
                             println!("- Validation profile: unresolved");
                             bail!("{error}");
                         }
+                    }
+                    for line in
+                        render_verification_check_lines(&app_config, &planning_meta, &root, args)?
+                    {
+                        println!("- {line}");
                     }
                     return Ok(());
                 }

@@ -48,6 +48,7 @@ pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
 pub const DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 pub const DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS: usize = 5;
 pub const DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS: usize = 2;
+pub const DEFAULT_VERIFICATION_BATTLE_TEST_COUNT: usize = 0;
 pub const DEFAULT_LISTEN_RETRY_INITIAL_BACKOFF_SECONDS: u64 = 2;
 pub const DEFAULT_LISTEN_RETRY_MAX_BACKOFF_SECONDS: u64 = 60;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
@@ -58,6 +59,7 @@ pub const AGENT_ROUTE_CONTEXT_SCAN: &str = "context.scan";
 pub const AGENT_ROUTE_CONTEXT_RELOAD: &str = "context.reload";
 pub const AGENT_ROUTE_LINEAR_ISSUES_REFINE: &str = "linear.issues.refine";
 pub const AGENT_ROUTE_AGENTS_LISTEN: &str = "agents.listen";
+pub const AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION: &str = "agents.listen.verification";
 pub const AGENT_ROUTE_AGENTS_WORKFLOWS_RUN: &str = "agents.workflows.run";
 pub const AGENT_ROUTE_RUNTIME_CRON_PROMPT: &str = "runtime.cron.prompt";
 pub const AGENT_ROUTE_AGENTS_REVIEW: &str = "agents.review";
@@ -74,6 +76,8 @@ pub struct AppConfig {
     pub agents: AgentSettings,
     #[serde(default)]
     pub merge: MergeSettings,
+    #[serde(default)]
+    pub verification: VerificationSettings,
     #[serde(default)]
     pub defaults: InstallDefaults,
     #[serde(default)]
@@ -302,6 +306,15 @@ pub struct MergeSettings {
     pub validation_repair_attempts: Option<usize>,
     pub validation_transient_retry_attempts: Option<usize>,
     pub publication_retry_attempts: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VerificationSettings {
+    pub code_review: Option<bool>,
+    pub e2e_verification: Option<bool>,
+    pub battle_test_count: Option<usize>,
+    #[serde(default)]
+    pub quality_criteria: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -555,6 +568,7 @@ impl AppConfig {
         self.validate_global_agent_defaults()?;
         self.validate_agent_routes()?;
         self.merge.validate()?;
+        self.verification.validate()?;
         Ok(())
     }
 
@@ -1078,6 +1092,34 @@ impl MergeSettings {
         }
         if let Some(limit) = self.publication_retry_attempts {
             validate_merge_publication_retry_attempts(limit)?;
+        }
+        Ok(())
+    }
+}
+
+impl VerificationSettings {
+    pub fn code_review_enabled(&self) -> bool {
+        self.code_review.unwrap_or(true)
+    }
+
+    pub fn e2e_verification_enabled(&self) -> bool {
+        self.e2e_verification.unwrap_or(true)
+    }
+
+    pub fn battle_test_count(&self) -> usize {
+        self.battle_test_count
+            .unwrap_or(DEFAULT_VERIFICATION_BATTLE_TEST_COUNT)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self
+            .quality_criteria
+            .iter()
+            .any(|criterion| criterion.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "verification quality criteria cannot contain empty entries"
+            ));
         }
         Ok(())
     }

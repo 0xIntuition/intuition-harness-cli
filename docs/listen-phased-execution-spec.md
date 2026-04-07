@@ -29,8 +29,9 @@ Each listener cycle for an active ticket follows these phases:
 1. `execute`
 2. `review`
 3. `continue` or `final_review`
-4. `validate`
-5. `publish`
+4. `verify`
+5. `validate`
+6. `publish`
 
 ### Execute
 
@@ -47,7 +48,7 @@ The execution phase must attempt to complete as much of the remaining ticket wor
 
 ### Review
 
-The review phase is a separate agent pass that compares the current workspace against:
+The review phase compares the current workspace against:
 
 - Linear acceptance criteria
 - explicit validation requirements
@@ -93,6 +94,38 @@ When the review phase reports `complete = true`, the listener runs one more fast
 - `notes`
 
 If final review fails, the missing items become the next continuation delta and execution resumes.
+
+### Verify
+
+When final review approves the work, the listener runs a dedicated verification phase before any
+local validation or PR mutation.
+
+Verification resolves the dedicated `agents.listen.verification` route through the same
+provider/model/reasoning precedence and launch-diagnostics path used by other agent-backed
+commands. The verification pass combines:
+
+- built-in quality criteria
+- install-scoped `[verification]` criteria extensions and booleans
+- route-scoped recipe overrides from `<project-dir>/verification/recipes/agents.listen.yaml`
+- deterministic battle-test inputs from `<project-dir>/verification/inputs/agents.listen/`
+
+Verification persists one structured JSON report plus a markdown mirror alongside the other listen
+artifacts. The latest compact verification summary is mirrored into inspect output, dashboard
+detail, PR body rendering, and workpad reporting.
+
+The verification report includes:
+
+- overall status and summary
+- resolved verification-route diagnostics
+- per-criterion code-review results with findings and remediation
+- route-scoped E2E step results with bounded runtime plus bounded stdout/stderr evidence
+- aggregate battle-test sampling results
+- remediation items for the next repair turn
+
+If the verifier output is missing or malformed, verification fails closed instead of silently
+approving the ticket. Verification failures use their own bounded retry budget: the draft PR stays
+in place, remediation is injected into the next execution turn, and the worker blocks when the
+verification repair budget is exhausted.
 
 ### Validate
 
@@ -164,6 +197,14 @@ The active `## Codex Workpad` comment is rewritten after each review phase to sh
 - validation checklist
 - risks / notes
 
+### Verification Reports
+
+Each verification pass writes:
+
+- a JSON report under the listen store verification directory
+- a markdown report under the same verification directory
+- a compact summary mirrored into the session detail artifact
+
 ### Local Backlog
 
 If a local backlog entry exists, the listener updates a managed section in `index.md`:
@@ -187,10 +228,12 @@ A ticket is complete only when:
 
 - review says the ticket deliverables are complete
 - final review approves the result
+- verification passes
 - publish / Linear review handoff succeeds
 
 ## Turn Budget
 
-`max_turns` limits execution turns, not the lightweight review/final-review passes around each turn.
+`max_turns` limits execution turns, not the lightweight review/final-review/verification passes
+around each turn.
 
 This preserves quality while keeping the main execution loop bounded.

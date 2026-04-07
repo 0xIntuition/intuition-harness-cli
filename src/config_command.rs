@@ -365,6 +365,26 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
         view.app_config.merge.publication_retry_attempts()
     ));
     lines.push(format!(
+        "Verification code review: {}",
+        render_optional_bool(view.app_config.verification.code_review)
+    ));
+    lines.push(format!(
+        "Verification E2E: {}",
+        render_optional_bool(view.app_config.verification.e2e_verification)
+    ));
+    lines.push(format!(
+        "Verification battle tests: {}",
+        view.app_config
+            .verification
+            .battle_test_count
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Verification quality criteria: {}",
+        render_label_summary(&view.app_config.verification.quality_criteria)
+    ));
+    lines.push(format!(
         "Advanced route overrides: {}",
         render_route_override_summary(&view.app_config)
     ));
@@ -503,6 +523,10 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.merge_validation_repair_attempts.is_some()
         || args.merge_validation_transient_retry_attempts.is_some()
         || args.merge_publication_retry_attempts.is_some()
+        || args.verification_code_review.is_some()
+        || args.verification_e2e.is_some()
+        || args.verification_battle_test_count.is_some()
+        || !args.verification_quality_criteria.is_empty()
         || args.default_assignee.is_some()
         || args.default_state.is_some()
         || args.default_priority.is_some()
@@ -669,6 +693,29 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             })
             .transpose()?;
     }
+    if let Some(enabled) = &args.verification_code_review {
+        view.app_config.verification.code_review =
+            parse_optional_bool(enabled, "verification code review")?;
+    }
+    if let Some(enabled) = &args.verification_e2e {
+        view.app_config.verification.e2e_verification =
+            parse_optional_bool(enabled, "verification e2e")?;
+    }
+    if let Some(limit) = &args.verification_battle_test_count {
+        view.app_config.verification.battle_test_count = normalize_optional(limit)
+            .map(|value| {
+                value.parse::<usize>().map_err(|error| {
+                    anyhow!(
+                        "verification battle test count must be a non-negative integer: {error}"
+                    )
+                })
+            })
+            .transpose()?;
+    }
+    if !args.verification_quality_criteria.is_empty() {
+        view.app_config.verification.quality_criteria =
+            parse_string_list(&args.verification_quality_criteria)?;
+    }
     if let Some(default_assignee) = &args.default_assignee {
         view.app_config.backlog.default_assignee = normalize_optional(default_assignee);
     }
@@ -758,6 +805,33 @@ fn parse_optional_priority(value: &str) -> Result<Option<u8>> {
         .map_err(|_| anyhow!("backlog default priority must be an integer between 1 and 4"))?;
     validate_backlog_default_priority(priority)?;
     Ok(Some(priority))
+}
+
+fn parse_string_list(values: &[String]) -> Result<Vec<String>> {
+    if values
+        .iter()
+        .any(|value| value.trim().eq_ignore_ascii_case("none"))
+    {
+        return Ok(Vec::new());
+    }
+    let parsed = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if parsed.is_empty() {
+        return Err(anyhow!("list entries cannot be empty"));
+    }
+    Ok(parsed)
+}
+
+fn render_optional_bool(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "enabled".to_string(),
+        Some(false) => "disabled".to_string(),
+        None => "unset".to_string(),
+    }
 }
 
 fn parse_default_labels(values: &[String]) -> Result<Vec<String>> {
