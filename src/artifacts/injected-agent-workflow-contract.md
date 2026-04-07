@@ -6,4 +6,5 @@
 - Do not require a repo-root `WORKFLOW.md`; repo overlay files are optional additive guidance only.
 - Preserve existing behavior outside the requested change and avoid unrelated refactors unless they are required to complete the task safely.
 - When code or docs change, validate the affected command paths with targeted tests or deterministic command proofs before finishing.
+- Keep packet-local execution proof in `.metastack/backlog/<ISSUE>/validation.md`, record reviewer-facing repo-level evidence in `artifacts/validation/<TICKET>.md`, and do not write ticket-specific evidence to repo-root `validation.md`.
 - Surface real blockers explicitly when required auth, permissions, or other mandatory inputs are missing.

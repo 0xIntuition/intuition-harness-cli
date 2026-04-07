@@ -784,6 +784,10 @@ mod tests {
             .iter()
             .find(|file| file.relative_path == "README.md")
             .expect("canonical README template should exist");
+        let index = files
+            .iter()
+            .find(|file| file.relative_path == "index.md")
+            .expect("canonical index template should exist");
         let validation = files
             .iter()
             .find(|file| file.relative_path == "validation.md")
@@ -798,6 +802,24 @@ mod tests {
             readme
                 .contents
                 .contains(&format!("`{} backlog tech`", crate::branding::COMMAND_NAME))
+        );
+        assert!(
+            readme
+                .contents
+                .contains("`artifacts/validation/<TICKET>.md`"),
+            "readme should explain where repo-level reviewer evidence belongs"
+        );
+        assert!(
+            index
+                .contents
+                .contains("Packet-local validation evidence is recorded in `validation.md`."),
+            "index should preserve the packet-local validation contract"
+        );
+        assert!(
+            index
+                .contents
+                .contains("`artifacts/validation/<TICKET>.md`"),
+            "index should mention the repo-level reviewer evidence path"
         );
         assert!(validation.contents.contains(&format!(
             "`{} backlog sync pull {{{{issue_identifier}}}}`",

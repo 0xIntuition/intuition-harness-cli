@@ -12,7 +12,7 @@ This directory is the canonical backlog template embedded into `{{brand.command_
 - `decisions.md`: decision log
 - `risks.md`: risk register and open questions
 - `implementation.md`: concrete implementation touchpoints
-- `validation.md`: command proofs and evidence notes
+- `validation.md`: packet-local command proofs and execution notes
 
 ## Supporting Folders
 
@@ -29,3 +29,4 @@ This directory is the canonical backlog template embedded into `{{brand.command_
 2. Keep this template lightweight. Add large docs only when needed.
 3. Use relative links that resolve from each file's own directory.
 4. `index.md` is the required root document for both planning and technical generation.
+5. Reviewer-facing repo-level PR evidence belongs in the repository root at `artifacts/validation/<TICKET>.md`.
