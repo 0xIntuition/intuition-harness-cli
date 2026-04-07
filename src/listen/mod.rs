@@ -1126,6 +1126,22 @@ fn render_watch_scope(assignment_scope: ListenAssignmentScope, viewer: Option<&U
     }
 }
 
+fn should_preserve_last_known_linear_snapshot(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("linear request failed")
+            || message.contains("failed to reach the linear graphql endpoint")
+            || message.contains("failed to read the linear response body")
+            || message.contains("failed to decode the linear response payload")
+            || message.contains("failed to upload file contents to linear storage")
+            || message.contains("failed to read the linear upload response body")
+            || message.contains("linear file upload failed")
+            || message.contains("linear returned no data")
+            || message.contains("failed to access linear api")
+            || message.contains("not found in linear")
+    })
+}
+
 fn issue_assignee_filter(
     assignment_scope: ListenAssignmentScope,
     viewer: Option<&UserRef>,
@@ -1201,17 +1217,27 @@ where
     C: LinearClient,
 {
     async fn run_cycle_resilient(&self) -> Result<ListenCycleData> {
-        match self.run_cycle().await {
+        let viewer = match self.resolve_cycle_viewer().await {
+            Ok(viewer) => viewer,
+            Err(error) if should_preserve_last_known_linear_snapshot(&error) => {
+                return self.build_degraded_cycle(&error, None);
+            }
+            Err(error) => return Err(error),
+        };
+
+        match self.run_cycle_with_viewer(viewer.as_ref()).await {
             Ok(cycle) => Ok(cycle),
-            Err(error) => self.build_degraded_cycle(&error),
+            Err(error) if should_preserve_last_known_linear_snapshot(&error) => {
+                self.build_degraded_cycle(&error, viewer.as_ref())
+            }
+            Err(error) => Err(error),
         }
     }
 
-    async fn run_cycle(&self) -> Result<ListenCycleData> {
+    async fn run_cycle_with_viewer(&self, viewer: Option<&UserRef>) -> Result<ListenCycleData> {
         self.store.ensure_layout()?;
         let mut state = self.store.load_state()?;
-        let viewer = self.resolve_cycle_viewer().await?;
-        let filters = self.filters_with_viewer(viewer.as_ref());
+        let filters = self.filters_with_viewer(viewer);
         let pending = self.service.list_issues(filters.clone()).await?;
         let in_progress_issues = self
             .service
@@ -1230,7 +1256,8 @@ where
             pending.len(),
             active_issues.len()
         )];
-        self.reconcile_sessions(&mut state, &mut notes).await?;
+        self.reconcile_sessions(&mut state, &mut notes, viewer)
+            .await?;
         let required_labels = self.listen_settings.required_label_names();
         if !required_labels.is_empty() {
             notes.push(format!(
@@ -1240,7 +1267,7 @@ where
         }
         notes.push(format!(
             "Watching: {}.",
-            self.watch_scope_label_with(viewer.as_ref())
+            self.watch_scope_label_with(viewer)
         ));
         let mut claimed_this_cycle = 0usize;
         let mut claimed_identifiers = Vec::new();
@@ -1250,7 +1277,7 @@ where
             if state.blocks_pickup(&issue.identifier) {
                 continue;
             }
-            if let Some(reason) = self.skip_reason_with_viewer(issue, viewer.as_ref()) {
+            if let Some(reason) = self.skip_reason_with_viewer(issue, viewer) {
                 notes.push(format!("Skipped {}: {}.", issue.identifier, reason));
                 continue;
             }
@@ -1304,7 +1331,7 @@ where
 
         Ok(ListenCycleData {
             scope,
-            watch_scope: self.watch_scope_label_with(viewer.as_ref()),
+            watch_scope: self.watch_scope_label_with(viewer),
             claimed_this_cycle,
             pending_issues,
             active_issues,
@@ -1317,7 +1344,11 @@ where
         })
     }
 
-    fn build_degraded_cycle(&self, error: &anyhow::Error) -> Result<ListenCycleData> {
+    fn build_degraded_cycle(
+        &self,
+        error: &anyhow::Error,
+        viewer: Option<&UserRef>,
+    ) -> Result<ListenCycleData> {
         self.store.ensure_layout()?;
         let mut state = self.store.load_state()?;
         let classified = classify_linear_failure(error);
@@ -1379,7 +1410,7 @@ where
         ];
         Ok(ListenCycleData {
             scope,
-            watch_scope: self.watch_scope_label(),
+            watch_scope: self.watch_scope_label_with(viewer),
             claimed_this_cycle: 0,
             pending_issues: state.pending_issues.clone(),
             active_issues: state.active_issues.clone(),
@@ -1396,6 +1427,7 @@ where
         &self,
         state: &mut ListenState,
         notes: &mut Vec<String>,
+        viewer: Option<&UserRef>,
     ) -> Result<()> {
         let pruned = state.prune_completed_sessions_older_than(
             now_epoch_seconds(),
@@ -1437,7 +1469,9 @@ where
 
             if !matches!(session.phase, SessionPhase::Completed)
                 && normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo"
-                && self.session_drop_reason(&issue).is_none()
+                && self
+                    .session_drop_reason_with_viewer(&issue, viewer)
+                    .is_none()
             {
                 match self
                     .service
@@ -1502,7 +1536,7 @@ where
             if !matches!(
                 session.phase,
                 SessionPhase::Completed | SessionPhase::Blocked | SessionPhase::Paused
-            ) && let Some(reason) = self.session_drop_reason(&issue)
+            ) && let Some(reason) = self.session_drop_reason_with_viewer(&issue, viewer)
             {
                 session.phase = SessionPhase::Completed;
                 session.summary = reason.clone();
@@ -2027,8 +2061,17 @@ where
         }
     }
 
+    #[cfg(test)]
     fn session_drop_reason(&self, issue: &IssueSummary) -> Option<String> {
-        let viewer = self.viewer.as_ref()?;
+        self.session_drop_reason_with_viewer(issue, self.viewer.as_ref())
+    }
+
+    fn session_drop_reason_with_viewer(
+        &self,
+        issue: &IssueSummary,
+        viewer: Option<&UserRef>,
+    ) -> Option<String> {
+        let viewer = viewer?;
         match self.listen_settings.assignment_scope() {
             ListenAssignmentScope::Any => None,
             ListenAssignmentScope::ViewerOnly => match issue.assignee.as_ref() {
@@ -4419,7 +4462,7 @@ mod tests {
     };
     use crate::listen::dashboard::SessionBrowserAction;
     use crate::listen::store::ListenProjectStore;
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use crossterm::event::KeyCode;
     use std::collections::HashMap;
@@ -5634,6 +5677,24 @@ suffix
         );
     }
 
+    #[test]
+    fn degraded_cycle_watch_scope_does_not_reuse_stale_startup_viewer() -> Result<()> {
+        let (_temp, daemon) = test_daemon(
+            ListenAssignmentScope::ViewerOrUnassigned,
+            issue_with_assignee("MET-62", None),
+        )?;
+
+        let cycle = daemon.build_degraded_cycle(
+            &anyhow!("Linear request failed with status 429 Too Many Requests"),
+            None,
+        )?;
+
+        assert_eq!(cycle.watch_scope, "viewer + unassigned");
+        assert_ne!(cycle.watch_scope, "Kames + unassigned");
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn reconcile_sessions_marks_reassigned_issue_completed_after_turn_ends() -> Result<()> {
         let temp = tempdir()?;
@@ -5682,13 +5743,15 @@ suffix
                 dashboard_active_issues: None,
                 dashboard_preview: None,
             },
-            viewer: Some(UserRef {
-                id: "viewer-1".to_string(),
-                name: "Kames".to_string(),
-                email: Some("sudo@example.com".to_string()),
-            }),
+            viewer: None,
             service,
         };
+        let cycle_viewer = UserRef {
+            id: "viewer-1".to_string(),
+            name: "Kames".to_string(),
+            email: Some("sudo@example.com".to_string()),
+        };
+        let workspace = repo.join("workspace");
         let mut state = ListenState::from_sessions(vec![super::AgentSession {
             issue_id: Some(issue.id.clone()),
             issue_identifier: issue.identifier.clone(),
@@ -5720,7 +5783,9 @@ suffix
         }]);
         let mut notes = Vec::new();
 
-        daemon.reconcile_sessions(&mut state, &mut notes).await?;
+        daemon
+            .reconcile_sessions(&mut state, &mut notes, Some(&cycle_viewer))
+            .await?;
 
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].phase, SessionPhase::Completed);
@@ -5787,13 +5852,15 @@ suffix
                 dashboard_active_issues: None,
                 dashboard_preview: None,
             },
-            viewer: Some(UserRef {
-                id: "viewer-1".to_string(),
-                name: "Kames".to_string(),
-                email: Some("sudo@example.com".to_string()),
-            }),
+            viewer: None,
             service,
         };
+        let cycle_viewer = UserRef {
+            id: "viewer-1".to_string(),
+            name: "Kames".to_string(),
+            email: Some("sudo@example.com".to_string()),
+        };
+        let workspace = repo.join("workspace");
         let mut state = ListenState::from_sessions(vec![super::AgentSession {
             issue_id: Some(issue.id.clone()),
             issue_identifier: issue.identifier.clone(),
@@ -5807,7 +5874,7 @@ suffix
             backlog_issue_identifier: None,
             backlog_issue_title: None,
             backlog_path: None,
-            workspace_path: Some(repo.join("workspace").display().to_string()),
+            workspace_path: Some(workspace.display().to_string()),
             branch: Some("met-89-recovery".to_string()),
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: Some("comment-89".to_string()),
@@ -5825,7 +5892,9 @@ suffix
         }]);
         let mut notes = Vec::new();
 
-        daemon.reconcile_sessions(&mut state, &mut notes).await?;
+        daemon
+            .reconcile_sessions(&mut state, &mut notes, Some(&cycle_viewer))
+            .await?;
 
         let edits = edits.lock().expect("edits lock should succeed");
         assert_eq!(edits.as_slice(), &["state-2".to_string()]);
@@ -5837,6 +5906,100 @@ suffix
                 .any(|note| note.contains("restored it to `In Progress`")),
             "expected Todo recovery note, got {notes:?}"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_cycle_resilient_returns_non_linear_errors_without_entering_degraded_mode()
+    -> Result<()> {
+        let temp = tempdir()?;
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve(repo, None)?;
+        let issue = in_progress_issue();
+        let client = SessionOnlyClient {
+            issue: issue.clone(),
+        };
+        let service = LinearService::new(client, Some("MET".to_string()));
+        let daemon = AgentDaemon {
+            root: repo.to_path_buf(),
+            store,
+            filters: IssueListFilters {
+                state: Some(TODO_STATE.to_string()),
+                limit: 25,
+                ..IssueListFilters::default()
+            },
+            max_pickups: 1,
+            linear_config: LinearConfig {
+                api_key: "token".to_string(),
+                api_url: "https://linear.example/graphql".to_string(),
+                default_team: Some("MET".to_string()),
+            },
+            app_config: AppConfig::default(),
+            planning_meta: PlanningMeta::default(),
+            worker_agent: None,
+            worker_model: None,
+            worker_reasoning: None,
+            listen_settings: PlanningListenSettings {
+                required_labels: None,
+                assignment_scope: Some(ListenAssignmentScope::Any),
+                refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
+                instructions_path: None,
+                poll_interval_seconds: None,
+                dashboard_active_issues: None,
+                dashboard_preview: None,
+            },
+            viewer: None,
+            service,
+        };
+        let state = ListenState::from_sessions(vec![super::AgentSession {
+            issue_id: Some(issue.id.clone()),
+            issue_identifier: issue.identifier.clone(),
+            issue_title: issue.title.clone(),
+            project_name: issue.project.as_ref().map(|project| project.name.clone()),
+            team_key: issue.team.key.clone(),
+            issue_url: issue.url.clone(),
+            phase: SessionPhase::Completed,
+            summary: "Complete".to_string(),
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1_773_575_000,
+            pid: None,
+            session_id: Some(issue.id.clone()),
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            origin: SessionOrigin::Listen,
+        }]);
+        daemon.store.save_state(&state)?;
+        let state_path = daemon.store.paths().state_path.clone();
+        fs::remove_file(&state_path)?;
+        fs::create_dir(&state_path)?;
+
+        let error = daemon
+            .run_cycle_resilient()
+            .await
+            .expect_err("non-Linear failures should propagate");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("failed to read")
+                || rendered.contains("Is a directory")
+                || rendered.contains("is a directory"),
+            "expected state read failure, got {rendered}"
+        );
+        assert!(!super::should_preserve_last_known_linear_snapshot(&error));
 
         Ok(())
     }
@@ -5915,6 +6078,17 @@ suffix
         }
     }
 
+    fn in_progress_issue() -> IssueSummary {
+        IssueSummary {
+            state: Some(crate::linear::WorkflowState {
+                id: "state-2".to_string(),
+                name: IN_PROGRESS_STATE.to_string(),
+                kind: Some("started".to_string()),
+            }),
+            ..test_issue("MET-90")
+        }
+    }
+
     #[derive(Clone)]
     struct ReassignmentClient {
         issue: IssueSummary,
@@ -5939,6 +6113,97 @@ suffix
             _filters: &IssueListFilters,
         ) -> Result<Vec<IssueSummary>> {
             Ok(vec![self.issue.clone()])
+        }
+
+        async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {
+            unreachable!("list_issue_labels is not used in this test")
+        }
+
+        async fn get_issue(&self, _issue_id: &str) -> Result<IssueSummary> {
+            Ok(self.issue.clone())
+        }
+
+        async fn list_teams(&self) -> Result<Vec<TeamSummary>> {
+            unreachable!("list_teams is not used in this test")
+        }
+
+        async fn viewer(&self) -> Result<UserRef> {
+            unreachable!("viewer is not used in this test")
+        }
+
+        async fn create_issue(&self, _request: IssueCreateRequest) -> Result<IssueSummary> {
+            unreachable!("create_issue is not used in this test")
+        }
+
+        async fn create_issue_label(&self, _request: IssueLabelCreateRequest) -> Result<LabelRef> {
+            unreachable!("create_issue_label is not used in this test")
+        }
+
+        async fn update_issue(
+            &self,
+            _issue_id: &str,
+            _request: IssueUpdateRequest,
+        ) -> Result<IssueSummary> {
+            unreachable!("update_issue is not used in this test")
+        }
+
+        async fn create_comment(&self, _issue_id: &str, _body: String) -> Result<IssueComment> {
+            unreachable!("create_comment is not used in this test")
+        }
+
+        async fn update_comment(&self, _comment_id: &str, _body: String) -> Result<IssueComment> {
+            unreachable!("update_comment is not used in this test")
+        }
+
+        async fn upload_file(
+            &self,
+            _filename: &str,
+            _content_type: &str,
+            _contents: Vec<u8>,
+        ) -> Result<String> {
+            unreachable!("upload_file is not used in this test")
+        }
+
+        async fn create_attachment(
+            &self,
+            _request: AttachmentCreateRequest,
+        ) -> Result<AttachmentSummary> {
+            unreachable!("create_attachment is not used in this test")
+        }
+
+        async fn delete_attachment(&self, _attachment_id: &str) -> Result<()> {
+            unreachable!("delete_attachment is not used in this test")
+        }
+
+        async fn download_file(&self, _url: &str) -> Result<Vec<u8>> {
+            unreachable!("download_file is not used in this test")
+        }
+    }
+
+    #[derive(Clone)]
+    struct SessionOnlyClient {
+        issue: IssueSummary,
+    }
+
+    #[async_trait]
+    impl LinearClient for SessionOnlyClient {
+        async fn list_projects(&self, _limit: usize) -> Result<Vec<ProjectSummary>> {
+            unreachable!("list_projects is not used in this test")
+        }
+
+        async fn list_users(&self, _limit: usize) -> Result<Vec<UserRef>> {
+            unreachable!("list_users is not used in this test")
+        }
+
+        async fn list_issues(&self, _limit: usize) -> Result<Vec<IssueSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_filtered_issues(
+            &self,
+            _filters: &IssueListFilters,
+        ) -> Result<Vec<IssueSummary>> {
+            Ok(Vec::new())
         }
 
         async fn list_issue_labels(&self, _team: Option<&str>) -> Result<Vec<LabelRef>> {

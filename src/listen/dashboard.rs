@@ -407,7 +407,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
             runtime_line(
                 "Linear status",
                 &data.runtime.linear_status,
-                Color::LightRed,
+                linear_status_color(data.degraded.is_some()),
             ),
             runtime_line("Dashboard", &data.runtime.dashboard, Color::LightCyan),
             runtime_line(
@@ -520,7 +520,7 @@ fn render_header(frame: &mut Frame<'_>, data: &ListenDashboardData, area: Rect) 
         runtime_line(
             "Linear status",
             &data.runtime.linear_status,
-            Color::LightRed,
+            linear_status_color(data.degraded.is_some()),
         ),
         runtime_line("Project", &data.runtime.project, Color::White),
         runtime_line("Watching", &data.watch_scope, Color::LightGreen),
@@ -1332,6 +1332,14 @@ fn runtime_line(label: &str, value: &str, color: Color) -> Line<'static> {
     ])
 }
 
+fn linear_status_color(is_degraded: bool) -> Color {
+    if is_degraded {
+        Color::LightRed
+    } else {
+        Color::LightGreen
+    }
+}
+
 fn label_style() -> Style {
     Style::default()
         .fg(Color::Gray)
@@ -1441,12 +1449,13 @@ fn snapshot(backend: &TestBackend) -> String {
 mod tests {
     use std::path::Path;
 
+    use ratatui::style::Color;
     use ratatui::text::Line;
 
     use super::{
         FocusPane, SessionBrowserAction, SessionBrowserState, detail_scroll_metrics,
-        render_active_issue_detail_text, render_dashboard, render_dashboard_with_state,
-        render_dashboard_with_view, render_session_detail_text,
+        linear_status_color, render_active_issue_detail_text, render_dashboard,
+        render_dashboard_with_state, render_dashboard_with_view, render_session_detail_text,
     };
     use crate::listen::{
         DashboardRuntimeContext, ListenCycleData, SessionListView, SessionPhase,
@@ -1462,6 +1471,12 @@ mod tests {
                 crate::branding::PROJECT_DIR
             ),
         )
+    }
+
+    #[test]
+    fn linear_status_color_reflects_degraded_state() {
+        assert_eq!(linear_status_color(false), Color::LightGreen);
+        assert_eq!(linear_status_color(true), Color::LightRed);
     }
 
     #[test]
