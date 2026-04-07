@@ -12,10 +12,10 @@ use crate::config::{
     AGENT_ROUTE_AGENTS_BUILD, AGENT_ROUTE_AGENTS_LISTEN, AGENT_ROUTE_AGENTS_LISTEN_VERIFICATION,
     AGENT_ROUTE_AGENTS_REVIEW, AGENT_ROUTE_AGENTS_WORKFLOWS_RUN, AGENT_ROUTE_BACKLOG_IMPROVE,
     AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPEC, AGENT_ROUTE_BACKLOG_SPLIT,
-    AGENT_ROUTE_CONTEXT_RELOAD, AGENT_ROUTE_CONTEXT_SCAN, AGENT_ROUTE_LINEAR_ISSUES_REFINE,
-    AGENT_ROUTE_MERGE, AGENT_ROUTE_RUNTIME_CRON_PROMPT, AgentCommandConfig, AgentRouteConfig,
-    AppConfig, DEFAULT_LINEAR_API_URL, LinearProfileSettings, LinearSettings, METASTACK_CONFIG_ENV,
-    PlanningMeta,
+    AGENT_ROUTE_BACKLOG_TECH, AGENT_ROUTE_CONTEXT_RELOAD, AGENT_ROUTE_CONTEXT_SCAN,
+    AGENT_ROUTE_LINEAR_ISSUES_REFINE, AGENT_ROUTE_MERGE, AGENT_ROUTE_RUNTIME_CRON_PROMPT,
+    AgentCommandConfig, AgentRouteConfig, AppConfig, DEFAULT_LINEAR_API_URL, LinearProfileSettings,
+    LinearSettings, METASTACK_CONFIG_ENV, PlanningMeta,
 };
 use crate::fs::PlanningPaths;
 use crate::linear::{LinearService, ReqwestLinearClient};
@@ -434,6 +434,11 @@ pub fn supported_agent_route_definitions() -> &'static [AgentRouteDefinition] {
             label: concat!(env!("BRAND_COMMAND_NAME"), " backlog split"),
         },
         AgentRouteDefinition {
+            key: AGENT_ROUTE_BACKLOG_TECH,
+            family: "backlog",
+            label: concat!(env!("BRAND_COMMAND_NAME"), " backlog tech"),
+        },
+        AgentRouteDefinition {
             key: AGENT_ROUTE_CONTEXT_SCAN,
             family: "context",
             label: concat!(env!("BRAND_COMMAND_NAME"), " context scan"),
@@ -565,7 +570,22 @@ pub fn resolve_agent_route(
         validate_agent_name(app_config, provider)?;
     }
 
-    let route_command = app_config.agents.routing.commands.get(definition.key);
+    let route_command = app_config
+        .agents
+        .routing
+        .commands
+        .get(definition.key)
+        .or_else(|| {
+            if definition.key == AGENT_ROUTE_BACKLOG_TECH {
+                app_config
+                    .agents
+                    .routing
+                    .commands
+                    .get(AGENT_ROUTE_BACKLOG_SPLIT)
+            } else {
+                None
+            }
+        });
     let route_family = app_config.agents.routing.families.get(definition.family);
     let repo_provider = normalize_optional_ref(planning_meta.agent.provider.as_deref())
         .map(|value| normalize_agent_name(&value));

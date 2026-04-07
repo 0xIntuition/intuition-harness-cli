@@ -1,179 +1,76 @@
-# Validation Evidence
+# Validation - ENG-10510
 
-## ENG-10505: Shared validation profiles and listen repair gates
+## Required Checks
 
-### Command Proofs
-
-- `cargo test --test config -- --test-threads=1`
-- `cargo test --test merge -- --test-threads=1`
-- `cargo test --test listen listen_check_reports_codex_config_status_and_linear_api_validation -- --exact`
-- `cargo test --test listen listen_sessions_inspect_renders_validating_phase -- --exact`
-- `cargo test --test listen listen_worker_retries_failed_pre_pr_validation_and_blocks_when_budget_is_exhausted -- --exact`
-- `cargo test --test listen listen_worker_repairs_failing_pr_checks_and_reuses_the_same_pull_request -- --exact`
-- `cargo test --test listen listen_check_reports_viewer_only_scope_in_preflight_summary -- --exact`
-- `cargo test --test listen listen_once_blocks_after_repeated_noop_turns -- --exact`
-- `cargo test --test listen listen_once_bootstraps_workspace_clone_workpad_and_agent_session -- --exact`
+- `cargo test --test commands`
+- `cargo test --test config`
+- `cargo test --test technical`
+- `cargo test --test backlog_split`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `make quality`
+- `cargo run -- backlog --help`
+- `cargo run -- backlog split --help`
 
-### Results
+## Deterministic Command Proofs
 
-Validated locally on 2026-04-06 in the ENG-10505 workspace after merging the current `origin/main`.
+- Interactive `meta backlog split <ISSUE>`
+  - Covered by `cargo test --test backlog_split`
+  - `backlog_split_render_once_shows_review_flow_snapshot` proves the guided review flow renders the split session for `MET-35`
+- Non-interactive `meta backlog split --no-interactive <ISSUE>`
+  - Covered by `cargo test --test backlog_split`
+  - `backlog_split_no_interactive_emits_structured_proposal_json` proves the command emits the `backlog.split` JSON envelope with child issues, parent rewrite, and dependency suggestions
+- Apply path proof
+  - Covered by `cargo test --test backlog_split`
+  - `backlog_split_render_once_events_can_apply_split_end_to_end` proves reviewed splits create child issues, write one backlog packet per child, rewrite the parent, and create dependency links
 
-- `cargo test --test config -- --test-threads=1`
+## Results
+
+- `cargo test --test commands`
   - passed
-  - covered repo-scoped validation defaults and retry-budget validation constraints
+  - confirmed `meta backlog --help` lists `split` as a first-class subcommand
+  - confirmed `meta backlog tech --help` no longer advertises `split`
+  - confirmed `meta backlog split --help` exposes the inverse-planning surface
 
-- `cargo test --test merge -- --test-threads=1`
+- `cargo test --test config`
   - passed
-  - proved merge now prefers repo-scoped validation profiles before heuristic fallback
+  - confirmed `backlog.tech` is accepted as a route key
+  - confirmed legacy `backlog.split` command-route config still falls back for `backlog.tech`
 
-- `cargo test --test listen listen_check_reports_codex_config_status_and_linear_api_validation -- --exact`
+- `cargo test --test technical`
   - passed
-  - proved `meta agents listen --check --root .` reports validation profile source, optional label, and commands
+  - confirmed existing `meta backlog tech` child-derivation behavior still creates the technical child issue and local backlog files
 
-- `cargo test --test listen listen_sessions_inspect_renders_validating_phase -- --exact`
+- `cargo test --test backlog_split`
   - passed
-  - proved persisted session inspection renders `Validating`
-
-- `cargo test --test listen listen_worker_retries_failed_pre_pr_validation_and_blocks_when_budget_is_exhausted -- --exact`
-  - passed
-  - proved pre-PR validation failure re-enters the repair loop, consumes the dedicated retry budget, and blocks PR mutation when exhausted
-
-- `cargo test --test listen listen_worker_repairs_failing_pr_checks_and_reuses_the_same_pull_request -- --exact`
-  - passed
-  - proved post-PR CI failure reuses the same branch PR, reruns local validation, and preserves the `metastack` label plus Linear attachment path on the reused PR lifecycle
-
-- `cargo test --test listen listen_check_reports_viewer_only_scope_in_preflight_summary -- --exact`
-  - passed
-  - regression proof that `--check` still succeeds for minimal repo fixtures when validation is explicitly configured
-
-- `cargo test --test listen listen_once_blocks_after_repeated_noop_turns -- --exact`
-  - passed
-  - regression proof that minimal listener workers still block on repeated no-op turns when validation is explicitly configured
-
-- `cargo test --test listen listen_once_bootstraps_workspace_clone_workpad_and_agent_session -- --exact`
-  - passed
-  - regression proof that listener bootstrap, inspect, list, and resume flows still work with the new phase set
+  - confirmed non-interactive proposal JSON under the `backlog.split` envelope
+  - confirmed render-once split review snapshot for an existing parent issue
+  - confirmed end-to-end split apply creates child issues, writes `.metastack/backlog/<CHILD>/` packets, rewrites the parent, and creates dependency links
 
 - `cargo clippy --all-targets --all-features -- -D warnings`
   - passed
 
+- `cargo run -- backlog --help`
+  - passed
+  - showed `split` alongside `spec`, `plan`, `improve`, `tech`, and `sync`
+
+- `cargo run -- backlog split --help`
+  - passed
+  - showed `intu backlog split [OPTIONS] <IDENTIFIER>` plus `--state`, `--priority`, `--label`, `--assignee`, and `--no-interactive`
+
+## Full Quality Gate
+
 - `make quality`
   - passed
-  - covered `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and the full `cargo test -- --test-threads=1` suite
-
-### Focused Proof Notes
-
-- Shared resolver evidence and the scope/non-goals note are captured in [`artifacts/snapshot-listen-validation-gates-2026-04-06.md`](artifacts/snapshot-listen-validation-gates-2026-04-06.md) and indexed from [`artifacts/README.md`](artifacts/README.md).
-- `SessionPhase::Validating` is represented in worker state, inspect output, and dashboard styling.
-- The legacy [`WORKFLOW.md`](WORKFLOW.md), repo [`README.md`](README.md), and [`docs/listen-phased-execution-spec.md`](docs/listen-phased-execution-spec.md) describe the validating phase plus the pre-PR and post-PR repair loop.
-- The local ENG-10292 packet referenced in the ticket text was not present in this workspace, so no packet-local sync was performed on this branch.
-
-## MET-113: `meta agents improve` TUI workflow
-
-### Command Proofs
-
-- `cargo test --test agents_improve -- --test-threads=1`
-- `cargo test --test commands -- --test-threads=1`
-- `cargo test --test merge -- --test-threads=1`
-- `cargo test --test review -- --test-threads=1`
-- `cargo test --test listen -- --test-threads=1`
-- `cargo test --all-targets --all-features -- --test-threads=1`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `meta agents improve --root . --render-once` command-path proof (via integration test)
-- `make quality`
-- `cargo run -- agents execute --help`
-
-### Results
-
-- `cargo test --test agents_improve -- --test-threads=1`
-  - 7 passed
-  - proved empty-state render-once shows "No open PRs" and "No improve sessions"
-  - proved open PRs render with number, title, and author
-  - proved Tab switches to Sessions tab
-  - proved Enter on a PR opens PR detail view with author, branch, and back-nav hint
-  - proved Enter-then-Back returns to PR list
-  - proved persisted session loads and renders in the session detail view
-  - proved completed session with stacked PR number renders session count and phase label
-
-- `cargo test --test commands -- --test-threads=1`
-  - 28 passed
-  - confirmed `meta agents improve` is discoverable via `meta agents --help`
-
-- `cargo test --test merge -- --test-threads=1`
-  - 22 passed, no regressions from improve changes
-
-- `cargo test --test review -- --test-threads=1`
-  - 30 passed, no regressions from improve changes
-
-- `cargo test --test listen -- --test-threads=1`
-  - 53 passed, no regressions from improve changes
-
-- `cargo test --all-targets --all-features -- --test-threads=1`
-  - 1003 total tests passed across all test binaries (633 unit + 370 integration)
-  - 0 failures
-
-- `cargo clippy --all-targets --all-features -- -D warnings`
-  - passed with zero warnings
-  - confirmed all new code (`SessionOrigin`, `execute_issue`, dashboard labeling, takeover guards) is warning-free
-- `make quality`
-  - passed (`fmt-check`, `clippy`, `test`, `release-verify` all green)
-- `cargo run -- agents execute --help`
-  - passed
-  - confirmed CLI help shows `Execute a one-off headless agent run for a single Linear issue` with `<ISSUE_ID>` positional argument and all expected options (`--root`, `--max-turns`, `--agent`, `--model`, `--reasoning`, `--json`, etc.)
-
-#### Execute-specific proofs (from MET-45)
-
-- `cargo test --test commands -- --test-threads=1`
-  - passed (28 tests)
-  - confirmed `meta agents execute <ISSUE_ID>` is represented in CLI help and command dispatch
-- `cargo test --test listen -- --test-threads=1`
-  - passed (56 tests)
-  - **Deterministic execute startup proof**: test exercises `execute_issue` bootstrap path through shared session persistence and workspace provisioning with a stubbed Linear/GitHub/provider fixture
-  - **Dashboard execute-origin labeling proof**: `listen_sessions_inspect_shows_execute_origin_label` confirms sessions with `origin: execute` display `(execute-origin)` in session inspect output
-  - **No auto-claim proof**: reconciliation loop blocks execute-origin sessions from automatic resume, setting phase to `Blocked` with summary `Execute-origin | awaiting manual takeover`
-  - **Render-once dashboard proof**: `listen_render_once_demo_detail_shows_execute_origin_for_execute_session` confirms the dashboard detail view renders "This session was started by `meta agents execute`" for execute-origin sessions
+  - `cargo fmt --check` passed
+  - `cargo clippy --all-targets --all-features -- -D warnings` passed
+  - the serial full suite now completes cleanly, including `tests/listen.rs`
+  - this rerun also confirms the CI-only `cargo fmt --check` drift is resolved for `src/config_resolution.rs`
 
 ## Acceptance Criteria Mapping
 
 | Criterion | Evidence |
-|---|---|
-| `meta agents execute <ISSUE_ID>` in CLI help and dispatch | `cargo run -- agents execute --help` shows the command; `tests/commands.rs` exercises dispatch |
-| Execute-started runs reuse shared bootstrap logic | `execute_issue` calls extracted `run_issue_bootstrap` from `src/listen/mod.rs` — same path as listen |
-| Persisted session state records explicit run origin | `SessionOrigin` enum (`Listen` / `Execute`) in `src/listen/state.rs`; serialized in session store |
-| Listen polling does not auto-claim execute-origin sessions | Reconciliation guard in `src/listen/mod.rs:1330` blocks auto-resume; test confirms `Blocked` phase |
-| Operator can explicitly take over via continuation path | `meta listen sessions resume` still works on execute-origin sessions; dashboard shows takeover copy |
-| Workspace safety rules enforced | `execute_issue` uses `ensure_workspace_path_is_safe` before workspace creation |
-| Repository docs explain execute vs listen | `README.md` updated with `agents execute` section and usage examples |
-
-### Coverage Summary
-
-| Area | Tests | Status |
-|------|-------|--------|
-| Session model (state.rs) | serialization round-trip, upsert, active/completed split, terminal phases, branch naming, PR title/body | all pass |
-| Persistence (store.rs) | round-trip load/save, empty default, PR body file write | all pass |
-| Dashboard (dashboard.rs) | empty/populated render-once, tab switch, up/down nav, enter/back navigation, detail views | all pass |
-| Execution (execution.rs) | session creation, publish args derivation, phase transitions, failure recording | all pass |
-| Workspace (workspace.rs) | branch derivation | all pass |
-| Integration (agents_improve.rs) | 7 end-to-end render-once tests with gh stub | all pass |
-| Regression (commands, merge, review, listen) | existing test suites unaffected | all pass |
-
-### Persisted Session Layout
-
-```
-.metastack/
-  agents/
-    improve/
-      sessions/
-        state.json          # versioned state with all sessions
-        <session-id>.pr-body.md  # stacked PR body for publication
-```
-
-### Notes
-
-- Validated on 2026-03-22 at commit `3ee847b` on branch `met-113-technical-implement-the-end-to-end-meta-agents-improve-tui-workf`.
-- All integration tests use a deterministic `gh` stub that returns canned JSON for `gh pr list`.
-- The earlier listen test flake (1 of 53) was timing-related and not caused by improve changes; it passed consistently on re-run.
-- Execute-specific validation: 2026-03-22 at `e3132e0` on branch `met-45-add-meta-agents-execute-with-shared-session-persistence-and-liste`.
-- All validation used deterministic local agent stubs and stubbed Linear/GitHub fixtures; no live API calls.
+| --- | --- |
+| `meta backlog --help` lists `split` and `meta backlog tech` no longer advertises `split` | `cargo test --test commands`; `cargo run -- backlog --help`; `cargo run -- backlog split --help` |
+| `meta backlog split --no-interactive <ISSUE>` emits structured JSON proposals under `backlog.split` | `cargo test --test backlog_split` (`backlog_split_no_interactive_emits_structured_proposal_json`) |
+| Interactive split runs stay inside one ratatui flow | `cargo test --test backlog_split` (`backlog_split_render_once_shows_review_flow_snapshot`) |
+| Approved split runs create child issues, backlog packets, parent rewrite, and dependency links | `cargo test --test backlog_split` (`backlog_split_render_once_events_can_apply_split_end_to_end`) |
+| Existing `meta backlog tech` behavior and routing remain green | `cargo test --test technical`; `cargo test --test config` |

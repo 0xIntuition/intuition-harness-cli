@@ -28,7 +28,7 @@ Most planning tools split work across issue trackers, docs, scripts, and ad hoc 
 - `meta runtime config` saves install-scoped Linear and agent defaults.
 - `meta runtime setup` bootstraps the repo and saves repo-scoped defaults under `.metastack/`.
 - `meta context scan` turns the codebase into reusable planning context.
-- `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
+- `meta backlog spec`, `meta backlog plan`, `meta backlog split`, `meta backlog improve`, `meta backlog tech`, `meta linear issues refine`, and `meta agents workflows` generate structured backlog work.
 - `meta merge` batches open GitHub PRs into one isolated aggregate merge run and publish step.
 - `meta linear ...` and `meta backlog sync` keep Linear and local files aligned.
 - `meta agents review` audits GitHub PRs in a guided dashboard, queues `metastack`-labeled PRs for explicit human approval, and can open remediation PRs when required.
@@ -229,7 +229,7 @@ A typical end-to-end loop looks like this:
 2. Run `meta runtime setup` once per repository to scaffold `.metastack/` and save repo defaults.
 3. Run `meta backlog spec` to create or refine the repo-local `.metastack/SPEC.md`.
 4. Run `meta context scan` to refresh the repo context under `.metastack/codebase/`.
-5. Use `meta backlog plan` or `meta backlog tech` to create structured backlog work.
+5. Use `meta backlog plan`, `meta backlog split`, or `meta backlog tech` to create structured backlog work.
 6. Use `meta linear ...`, `meta dashboard ...`, or `meta backlog sync` to coordinate with Linear.
 7. Use `meta merge` when you want to batch open GitHub PRs in one isolated aggregate merge run.
 8. Use `meta agents listen` when you want unattended ticket execution inside a dedicated workspace clone.
@@ -244,6 +244,7 @@ meta runtime setup --team MET --project "MetaStack CLI"
 meta backlog spec --root .
 meta context scan
 meta backlog plan --request "Break the next release into Linear-ready tickets"
+meta backlog split MET-35
 meta backlog tech MET-35
 ```
 
@@ -376,6 +377,7 @@ Supported command route keys:
 - `backlog.plan`
 - `backlog.improve`
 - `backlog.split`
+- `backlog.tech`
 - `context.scan`
 - `context.reload`
 - `linear.issues.refine`
@@ -488,7 +490,7 @@ For unattended `meta agents listen` runs, setup should be paired with a provider
 
 If setup finds canonical template files with local changes, interactive TTY runs prompt for `overwrite`, `skip`, or `cancel`. Non-interactive paths such as `--json` and direct flag updates stop with a clear error instead of silently overwriting those backlog template files.
 
-Repo-dependent commands such as `meta backlog plan`, `meta backlog tech`, `meta backlog sync`, and `meta agents listen` now require repo setup and point back to `meta runtime setup` when `.metastack/meta.json` is missing.
+Repo-dependent commands such as `meta backlog plan`, `meta backlog split`, `meta backlog tech`, `meta backlog sync`, and `meta agents listen` now require repo setup and point back to `meta runtime setup` when `.metastack/meta.json` is missing.
 
 Example repo-scoped config:
 
@@ -517,7 +519,7 @@ Precedence is consistent across the CLI:
 
 - Linear-backed commands use `CLI flag override -> install-scoped repo auth -> repo .metastack/meta.json/profile -> global config -> LINEAR_* environment fallback`
 - Agent-backed launches use `CLI override -> repo .metastack/meta.json -> global config`
-- Default issue status for standalone tickets resolves as `CLI --state override -> velocity_defaults.state (zero-prompt) -> repo backlog.default_state -> global backlog.default_state -> built-in "Backlog"`. Child tickets created by `meta backlog tech` inherit the parent issue's status instead of using the configured default; explicit `--state` overrides still take precedence.
+- Default issue status for standalone tickets resolves as `CLI --state override -> velocity_defaults.state (zero-prompt) -> repo backlog.default_state -> global backlog.default_state -> built-in "Backlog"`. Child tickets created by `meta backlog split` follow that standalone resolution path. Child tickets created by `meta backlog tech` inherit the parent issue's status instead of using the configured default; explicit `--state` overrides still take precedence.
 - `meta linear issues create` also resolves the default issue status from repo and global config when no `--state` flag is provided.
 - The CLI is read-only for workflow state selection: onboarding and config pickers query existing states from the Linear team but cannot create new ones. If a configured `default_state` does not match any state on the target team, the command fails with a clear error. Create new workflow states in the Linear UI first. See [`docs/linear-workflow-state-creation.md`](docs/linear-workflow-state-creation.md) for the full decision.
 
@@ -663,6 +665,7 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 | Command | Promptless mode | JSON selector | Machine output behavior |
 | --- | --- | --- | --- |
 | `meta backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta backlog split` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
 | `meta backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
 | `meta backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
 | `meta linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
@@ -686,6 +689,7 @@ This matrix is the contract for agent callers deciding whether to drive a comman
 | Command | `--no-interactive` | `--json` | `--render-once` |
 | --- | --- | --- | --- |
 | `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog split` | required for promptless runs; implies JSON | n/a | not supported |
 | `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
 | `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
 | `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
@@ -873,13 +877,29 @@ The command is repo-local by design: it targets only `.metastack/SPEC.md`, does 
 
 For deterministic automation, pass `--no-interactive` with `--request` and optional repeated `--answer` values. Hidden `--render-once` hooks exist for snapshot testing of the major TUI states.
 
+### `backlog split`
+
+Split an existing Linear issue into a reviewed inverse-planning proposal, then optionally apply that proposal by creating child backlog issues, rewriting the parent into an umbrella ticket, and linking dependencies:
+
+```bash
+meta backlog split --api-key "$LINEAR_API_KEY" MET-35
+meta backlog split --api-key "$LINEAR_API_KEY" --no-interactive MET-35
+```
+
+The command requires a configured local agent, or one of the built-in supported agents (`codex` / `claude`) available on `PATH`.
+
+`meta backlog split` uses the same repo-root scope contract as `meta backlog plan`: the agent sees the active repository identity derived from the resolved root, defaults work to the top-level repository directory, and should only propose a narrower split when the user explicitly requested a subproject.
+
+Interactive runs stay inside one ratatui review flow: source issue review, proposed child review and selection, dependency review, addendum entry, final confirmation, apply, or cancel. Approved runs create one `.metastack/backlog/<CHILD>/` packet per created issue, rewrite the source ticket into an umbrella parent, and create dependency links for any reviewed suggestions that still resolve after final selection.
+
+`meta backlog split` accepts `--no-interactive`, `--state`, `--priority`, repeated `--label`, and `--assignee`. In machine mode, `meta backlog split --no-interactive <ISSUE>` emits a structured proposal with child issues, a parent rewrite, and dependency suggestions as JSON under the `backlog.split` command envelope. Missing-input failures also emit structured JSON.
+
 ### `backlog tech`
 
 Create a technical sub-issue from an existing Linear parent issue and have the configured local agent turn the repo template into a concrete backlog item:
 
 ```bash
 meta backlog tech --api-key "$LINEAR_API_KEY" MET-35
-meta backlog split --api-key "$LINEAR_API_KEY" MET-35
 meta backlog derive --api-key "$LINEAR_API_KEY" MET-35
 ```
 
@@ -893,7 +913,7 @@ The command requires a configured local agent, or one of the built-in supported 
 
 In machine mode, `meta backlog tech --no-interactive <ISSUE>` emits the created child issue, parent issue, and local backlog path as JSON. Missing-input failures also emit structured JSON.
 
-Across `meta backlog plan`, `meta backlog spec`, and `meta backlog tech`, recovered generation failures now stay visible until the next real edit or resubmit instead of disappearing on routine navigation. If capture-mode execution fails with `agent returned empty response — check provider CLI version or agent configuration`, treat that as a provider CLI regression or local agent-command misconfiguration before debugging downstream JSON parsing.
+Across `meta backlog plan`, `meta backlog spec`, `meta backlog split`, and `meta backlog tech`, recovered generation failures now stay visible until the next real edit or resubmit instead of disappearing on routine navigation. If capture-mode execution fails with `agent returned empty response — check provider CLI version or agent configuration`, treat that as a provider CLI regression or local agent-command misconfiguration before debugging downstream JSON parsing.
 
 In a TTY, the parent-issue picker now uses the shared Linear issue browser:
 
@@ -1480,10 +1500,10 @@ Reference:
 
 - [`docs/agent-daemon.md`](docs/agent-daemon.md)
 
-Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog tech` resolve the repo-scoped issue-label defaults to real Linear label IDs before issue creation, falling back to `plan` / `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
+Linear commands also read repo-scoped defaults from `.metastack/meta.json`, plus optional project-specific Linear auth stored in install-scoped CLI config for the current repo root. Repo defaults should store the canonical Linear project ID; `meta setup --project <NAME>` resolves names to IDs before saving, while older name-based values are still resolved at read time for compatibility. When repo values are absent, MetaStack falls back to install-scoped onboarding defaults for the default project, listen label, listen assignment scope, listen refresh policy, listen poll interval, interactive plan follow-up question limit, and plan/technical issue labels. `meta listen` also reads the optional `listen.required_labels` filter list, assignee filter, instructions file, and default poll interval from `.metastack/meta.json`; legacy `listen.required_label` values still load for compatibility, but new saves persist the list form and accept comma-separated labels in `meta runtime setup`. An issue is eligible when any configured listen label matches one of its Linear labels case-insensitively. Canonical assignee-scope values are `any`, `viewer_only`, and `viewer_or_unassigned`, while the legacy value `viewer` still loads as `viewer_or_unassigned` for compatibility. `--all-assignees` provides a run-scoped opt-out without changing repo config. Interactive `meta plan` reads the optional `plan.interactive_follow_up_questions` override there and `meta plan` / `meta backlog split` resolve the repo-scoped planning label defaults to real Linear label IDs before issue creation, falling back to `plan` when unset. `meta backlog tech` resolves the technical label the same way, falling back to `technical` when unset. Backlog ticket creation also merges optional global and repo `[backlog]` defaults with the contract `CLI override > repo override > global override > built-in behavior`; zero-prompt runs additionally consult remembered project/team selections and `velocity_defaults` before the repo/global fallbacks. The optional `linear.ticket_context.discussion_prompt_chars` and `linear.ticket_context.discussion_persisted_chars` settings control the comment-character budgets used for agent-facing and persisted `context/ticket-discussion.md` output. During `meta setup` saves and onboarding saves, MetaStack checks that the effective listen, plan, technical, and required listen labels exist on the selected team and creates any missing team labels so later issue creation stays deterministic. When `meta linear issues list` returns no rows, it prints the applied filters so hidden defaults remain visible.
 ## Agent Configuration
 
-Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents build`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
+Agent-backed commands use stable route keys so different workflows can resolve different defaults from the same install-scoped config. `meta backlog spec`, `meta backlog plan`, `meta backlog improve`, `meta backlog split`, `meta backlog tech`, `meta context scan`, `meta context reload`, `meta linear issues refine`, `meta agents build`, `meta agents workflows run`, `meta runtime cron run`, `meta agents listen`, and `meta merge run` all resolve provider/model/reasoning in this order:
 
 1. explicit CLI overrides such as `--agent`, `--provider`, `--model`, and `--reasoning`
 2. command route override
@@ -1510,7 +1530,7 @@ This is intentionally stricter than Codex `--full-auto`: in `codex-cli 0.115.0`,
 
 Agent launches receive:
 
-For `meta plan`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen`, the rendered agent prompt also includes a shared repo-target contract derived from the resolved command root:
+For `meta plan`, `meta backlog split`, `meta backlog tech`, `meta issues refine`, `meta scan`, and `meta listen`, the rendered agent prompt also includes a shared repo-target contract derived from the resolved command root:
 
 - the built-in workflow contract shipped in `src/artifacts/injected-agent-workflow-contract.md`
 - the resolved `RepoTarget` scope block, including repo identity and root path
