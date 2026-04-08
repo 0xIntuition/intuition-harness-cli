@@ -35,8 +35,9 @@ use crate::config::{
     validate_interactive_technical_follow_up_question_limit,
     validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
     validate_listen_ci_poll_interval_seconds, validate_listen_ci_poll_timeout_seconds,
-    validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
-    validate_listen_retry_max_backoff_seconds, validate_technical_refinement_round_limit,
+    validate_listen_context_budget_tokens, validate_listen_poll_interval_seconds,
+    validate_listen_retry_initial_backoff_seconds, validate_listen_retry_max_backoff_seconds,
+    validate_technical_refinement_round_limit,
 };
 use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
@@ -286,6 +287,15 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .listen
             .poll_interval_seconds
             .map(|v| format!("{v}s"))
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install context budget: {}",
+        view.app_config
+            .defaults
+            .listen
+            .context_budget_tokens
+            .map(|value| format!("{value} tokens"))
             .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
@@ -595,6 +605,7 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.assignee_scope.is_some()
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
+        || args.listen_context_budget_tokens.is_some()
         || args.listen_ci_poll_interval.is_some()
         || args.listen_ci_poll_timeout.is_some()
         || args.listen_ci_timeout_behavior.is_some()
@@ -663,6 +674,13 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             interval,
             "listen poll interval",
             validate_listen_poll_interval_seconds,
+        )?;
+    }
+    if let Some(tokens) = &args.listen_context_budget_tokens {
+        view.app_config.defaults.listen.context_budget_tokens = parse_optional_u64(
+            tokens,
+            "listen context budget",
+            validate_listen_context_budget_tokens,
         )?;
     }
     if let Some(interval) = &args.listen_ci_poll_interval {

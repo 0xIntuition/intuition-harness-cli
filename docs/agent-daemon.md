@@ -62,6 +62,7 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
     loads and reconciliation, while blocked sessions are retained until explicit cleanup.
 21. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
 22. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, append one explicit per-turn token summary line to the worker log after each completed turn, persist additive per-turn token history in `session-details/<TICKET>.json`, and leave token fields blank instead of failing when providers omit exact usage data.
+23. Each listen run resolves one numeric context budget before any hidden worker spawn with the contract `--context-budget-tokens` override, then repo `.metastack/meta.json` `listen.context_budget_tokens`, then install `[defaults.listen].context_budget_tokens`, then built-in default `180000`. The worker derives `ContextPressure` from cumulative known input tokens on completed turns only, uses `pending_linear_sync.workpad_body` before the active workpad comment for one-time managed `#### Context Checkpoint` detection and preservation, clears the stored resume handle after a successful checkpoint turn, and renders the derived pressure in the selected-session detail pane without adding a new session-table column.
 
 This mirrors the scheduler + status-surface split in Symphony while using one clear workspace
 contract: each claimed ticket gets its own standalone clone and ticket branch under the configured
@@ -87,9 +88,11 @@ Primary options:
   `linear.project_id` when configured.
 - `--max-pickups <N>`: cap newly claimed issues per poll.
 - `--poll-interval <SECONDS>`: refresh cadence for the live loop. Overrides the repo-scoped default when set.
+- `--context-budget-tokens <TOKENS>`: override the listen known-input-token budget for this run and every hidden worker it launches. `meta listen sessions resume` exposes the same override for resumed sessions.
 - `--once`: run a single live cycle and print a textual summary.
 - `--render-once`: run a single cycle and print a deterministic ratatui snapshot.
 - `--demo`: skip Linear and render sample queue/session data.
+- repo-scoped and install-scoped context-budget persistence live on `meta runtime setup --listen-context-budget-tokens <TOKENS>` and `meta runtime config --listen-context-budget-tokens <TOKENS>`. Unset values fall back to `180000`.
 - install-scoped listen retry backoff is configured through `meta runtime config
   --listen-retry-initial-backoff <SECONDS> --listen-retry-max-backoff <SECONDS>`. Unset values
   fall back to `2s` initial and `60s` max.
@@ -165,6 +168,12 @@ dashboard can show cumulative `in`, `out`, and `total` counts when usage is avai
 unsupported or missing counts still render as `n/a`. The same capture result now also produces a
 per-turn snapshot with `turn`, `prompt_mode`, and partial-or-complete token counts so the worker
 log and `meta listen sessions inspect --turns` share one source of truth for turn-by-turn usage.
+The selected-session detail pane derives `Context Pressure` from the selected session's
+`turn_history` using the same shared pressure mapping the worker uses for checkpointing and
+critical-turn limiting; there is no separate persisted pressure field. Workpad checkpoint
+detection and preservation use the effective workpad body contract `pending_linear_sync.workpad_body`
+first, active unresolved `## Codex Workpad` body second, so transient sync failures do not
+duplicate the managed checkpoint block.
 The built-in capture path is timeout-aware and no longer waits for provider stdout to reach EOF
 before the worker can recover. Timeout summaries are mirrored into session detail, dashboard
 detail, and textual inspect output as `Last timeout`, while repeated no-progress completed turns

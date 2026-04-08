@@ -48,6 +48,7 @@ use crate::validation::{
 use crate::workflow_contract::render_workflow_contract_for_listen;
 use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
+use super::state::{ContextPressure, completed_turn_known_input_tokens};
 use super::verification::{
     BattleTestInput, VerificationBattleTestCase, VerificationBattleTestReport,
     VerificationCodeReviewReport, VerificationCriterionResult, VerificationE2eReport,
@@ -55,6 +56,10 @@ use super::verification::{
     VerificationRouteDiagnostics, VerificationStatus, VerificationSummary,
     builtin_quality_criteria, discover_battle_test_inputs, load_route_verification_recipe,
     truncate_for_evidence,
+};
+use super::workpad::{
+    context_checkpoint_present, effective_workpad_body, extract_context_checkpoint,
+    extract_unmanaged_review_notes, extract_workpad_section_lines,
 };
 use super::{
     BACKLOG_STATE, BlockedCategory, BlockedReason, CanonicalSessionData, LatestResumeHandle,
@@ -179,6 +184,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         workpad_comment_id: &args.workpad_comment_id,
         backlog_issue: backlog_issue.as_ref(),
         max_turns: args.max_turns,
+        context_budget_tokens: args.context_budget_tokens,
     };
     let session_origin = load_existing_session_origin(&source_root, project_selector, &args.issue)?;
     let mut session_context = WorkerSessionContext {
@@ -328,6 +334,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         }
 
         let turn_number = turns_completed + 1;
+        let turn_plan = plan_execution_turn(&turn_context, &issue, &session_context, turn_number);
         let snapshot_before = capture_workspace_snapshot(&workspace_path, &args.issue)?;
         write_listen_session(
             &source_root,
@@ -338,7 +345,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 compact_running_summary(
                     issue.description.as_deref(),
                     turn_number,
-                    args.max_turns,
+                    turn_plan.max_turns,
                     0,
                 ),
                 &session_context,
@@ -370,6 +377,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             &issue,
             turn_number,
             &turn_context,
+            turn_plan,
             ExecutionTurnDelta {
                 previous_review: last_review.as_ref(),
                 verification_summary: session_context.verification_summary.as_ref(),
@@ -389,7 +397,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         compact_running_summary(
                             issue.description.as_deref(),
                             turn_number,
-                            args.max_turns,
+                            turn_plan.max_turns,
                             0,
                         ),
                         &session_context,
@@ -416,7 +424,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         compact_running_summary(
                             issue.description.as_deref(),
                             turn_number,
-                            args.max_turns,
+                            turn_plan.max_turns,
                             0,
                         ),
                         &session_context,
@@ -450,6 +458,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &issue,
                     turn_number,
                     &turn_context,
+                    turn_plan,
                     ExecutionTurnDelta {
                         previous_review: last_review.as_ref(),
                         verification_summary: session_context.verification_summary.as_ref(),
@@ -471,7 +480,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                 compact_running_summary(
                                     issue.description.as_deref(),
                                     turn_number,
-                                    args.max_turns,
+                                    turn_plan.max_turns,
                                     0,
                                 ),
                                 &session_context,
@@ -498,7 +507,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                 compact_running_summary(
                                     issue.description.as_deref(),
                                     turn_number,
-                                    args.max_turns,
+                                    turn_plan.max_turns,
                                     0,
                                 ),
                                 &session_context,
@@ -568,20 +577,13 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             }
         };
         session_context.last_timeout = turn_result.timeout.clone();
-        session_context.latest_resume_handle = turn_result
-            .latest_resume_handle
-            .or(session_context.latest_resume_handle);
-        if session_context.latest_resume_handle.is_some() {
-            eprintln!(
-                "listen: captured resume handle for {} on turn {turn_number}",
-                issue.identifier,
-            );
-        } else {
-            eprintln!(
-                "listen: no resume handle captured for {} on turn {turn_number}",
-                issue.identifier,
-            );
-        }
+        update_resume_handle_after_turn(
+            &mut session_context,
+            &turn_result,
+            turn_plan,
+            &issue.identifier,
+            turn_number,
+        );
         provider_session_id = turn_result
             .session_id
             .or_else(|| provider_session_id_state.into_inner());
@@ -650,6 +652,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 return Ok(());
             }
         }
+        let context_checkpoint =
+            (turn_plan.checkpoint_turn && turn_result.timeout.is_none()).then(|| {
+                build_context_checkpoint(
+                    &issue,
+                    &turn_context,
+                    &session_context,
+                    turn_number,
+                    turn_plan,
+                    &snapshot_after.status_entries,
+                )
+            });
 
         if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
             continue;
@@ -668,7 +681,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         Some(super::ticket_progress_summary(issue.description.as_deref())),
                         Some(format!(
                             "{} turn(s) remaining",
-                            args.max_turns.saturating_sub(turns_completed)
+                            turn_plan.remaining_execution_turns_after_current(turn_number)
                         )),
                     ]),
                     &session_context,
@@ -677,7 +690,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     &session_context.canonical,
                 ),
             )?;
-            sync_review_tracking(
+            sync_review_tracking_with_checkpoint(
                 &service,
                 &issue,
                 &turn_context,
@@ -685,9 +698,21 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 &mut session_context,
                 &log_path,
                 &review,
+                context_checkpoint.as_deref(),
             )
             .await?;
             last_review = Some(review);
+            if turn_plan.last_execution_turn {
+                return block_for_context_pressure_limit(
+                    &source_root,
+                    project_selector,
+                    &issue,
+                    &session_context,
+                    turns_completed,
+                    provider_session_id.as_deref(),
+                    &log_path,
+                );
+            }
             if turns_completed >= args.max_turns {
                 let blocked = blocked_reason(BlockedCategory::Turn, timeout.summary_label(), false);
                 write_listen_session(
@@ -736,7 +761,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             },
         )
         .await?;
-        sync_review_tracking(
+        sync_review_tracking_with_checkpoint(
             &service,
             &issue,
             &turn_context,
@@ -744,6 +769,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             &mut session_context,
             &log_path,
             &review,
+            context_checkpoint.as_deref(),
         )
         .await?;
         last_review = Some(review.clone());
@@ -902,6 +928,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         )?;
                         return Ok(());
                     }
+                    if turn_plan.last_execution_turn {
+                        return block_for_context_pressure_limit(
+                            &source_root,
+                            project_selector,
+                            &issue,
+                            &session_context,
+                            turns_completed,
+                            provider_session_id.as_deref(),
+                            &log_path,
+                        );
+                    }
                     remaining_verification_repair_turns -= 1;
                     continue;
                 }
@@ -938,6 +975,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         )
                         .await?;
                         last_review = Some(review);
+                        if turn_plan.last_execution_turn {
+                            return block_for_context_pressure_limit(
+                                &source_root,
+                                project_selector,
+                                &issue,
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &log_path,
+                            );
+                        }
                         continue;
                     }
                     ValidationGateOutcome::Exhausted(review) => {
@@ -1064,6 +1112,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         PostPublicationCiGateOutcome::Passed => {}
                         PostPublicationCiGateOutcome::Retry(follow_up_review) => {
                             last_review = Some(follow_up_review);
+                            if turn_plan.last_execution_turn {
+                                return block_for_context_pressure_limit(
+                                    &source_root,
+                                    project_selector,
+                                    &issue,
+                                    &session_context,
+                                    turns_completed,
+                                    provider_session_id.as_deref(),
+                                    &log_path,
+                                );
+                            }
                             continue;
                         }
                         PostPublicationCiGateOutcome::Blocked => return Ok(()),
@@ -1250,6 +1309,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         )
                         .await?;
                         last_review = Some(review);
+                        if turn_plan.last_execution_turn {
+                            return block_for_context_pressure_limit(
+                                &source_root,
+                                project_selector,
+                                &issue,
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &log_path,
+                            );
+                        }
                         continue;
                     }
                     ValidationGateOutcome::Exhausted(review) => {
@@ -1321,6 +1391,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                 PostPublicationCiGateOutcome::Passed => {}
                                 PostPublicationCiGateOutcome::Retry(follow_up_review) => {
                                     last_review = Some(follow_up_review);
+                                    if turn_plan.last_execution_turn {
+                                        return block_for_context_pressure_limit(
+                                            &source_root,
+                                            project_selector,
+                                            &issue,
+                                            &session_context,
+                                            turns_completed,
+                                            provider_session_id.as_deref(),
+                                            &log_path,
+                                        );
+                                    }
                                     continue;
                                 }
                                 PostPublicationCiGateOutcome::Blocked => return Ok(()),
@@ -1356,6 +1437,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 return Ok(());
             }
 
+            if turn_plan.last_execution_turn {
+                return block_for_context_pressure_limit(
+                    &source_root,
+                    project_selector,
+                    &issue,
+                    &session_context,
+                    turns_completed,
+                    provider_session_id.as_deref(),
+                    &log_path,
+                );
+            }
+
             write_listen_session(
                 &source_root,
                 project_selector,
@@ -1365,7 +1458,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_running_summary(
                         issue.description.as_deref(),
                         turns_completed,
-                        args.max_turns,
+                        turn_plan.max_turns,
                         stalled_turns,
                     ),
                     &session_context,
@@ -1375,6 +1468,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 ),
             )?;
         } else {
+            if turn_plan.last_execution_turn {
+                return block_for_context_pressure_limit(
+                    &source_root,
+                    project_selector,
+                    &issue,
+                    &session_context,
+                    turns_completed,
+                    provider_session_id.as_deref(),
+                    &log_path,
+                );
+            }
             write_listen_session(
                 &source_root,
                 project_selector,
@@ -1384,7 +1488,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     compact_running_summary(
                         issue.description.as_deref(),
                         turns_completed,
-                        args.max_turns,
+                        turn_plan.max_turns,
                         stalled_turns,
                     ),
                     &session_context,
@@ -1456,6 +1560,7 @@ struct ListenTurnContext<'a> {
     workpad_comment_id: &'a str,
     backlog_issue: Option<&'a IssueSummary>,
     max_turns: u32,
+    context_budget_tokens: u64,
 }
 
 struct WorkerSessionContext<'a> {
@@ -1507,6 +1612,168 @@ struct TurnExecutionResult {
     model: Option<String>,
     reasoning: Option<String>,
     response_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecutionTurnPlan {
+    pressure: ContextPressure,
+    known_input_tokens: u64,
+    checkpoint_turn: bool,
+    last_execution_turn: bool,
+    max_turns: u32,
+}
+
+impl ExecutionTurnPlan {
+    fn new(
+        pressure: ContextPressure,
+        known_input_tokens: u64,
+        checkpoint_turn: bool,
+        last_execution_turn: bool,
+        turn_number: u32,
+        max_turns: u32,
+    ) -> Self {
+        Self {
+            pressure,
+            known_input_tokens,
+            checkpoint_turn,
+            last_execution_turn,
+            max_turns: if last_execution_turn {
+                turn_number
+            } else {
+                max_turns
+            },
+        }
+    }
+
+    fn remaining_execution_turns_after_current(self, turn_number: u32) -> u32 {
+        self.max_turns.saturating_sub(turn_number)
+    }
+}
+
+fn plan_execution_turn(
+    context: &ListenTurnContext<'_>,
+    issue: &IssueSummary,
+    session_context: &WorkerSessionContext<'_>,
+    turn_number: u32,
+) -> ExecutionTurnPlan {
+    let known_input_tokens = completed_turn_known_input_tokens(&session_context.turn_history);
+    let pressure = ContextPressure::from_turn_history(
+        &session_context.turn_history,
+        context.context_budget_tokens,
+    );
+    let effective_workpad = effective_workpad_body(
+        issue,
+        session_context.pending_linear_sync.as_ref(),
+        context.workpad_comment_id,
+    );
+    let checkpoint_turn = matches!(pressure, ContextPressure::High | ContextPressure::Critical)
+        && !effective_workpad
+            .as_deref()
+            .is_some_and(context_checkpoint_present);
+    ExecutionTurnPlan::new(
+        pressure,
+        known_input_tokens,
+        checkpoint_turn,
+        pressure == ContextPressure::Critical,
+        turn_number,
+        context.max_turns,
+    )
+}
+
+fn build_context_checkpoint(
+    issue: &IssueSummary,
+    context: &ListenTurnContext<'_>,
+    session_context: &WorkerSessionContext<'_>,
+    turn_number: u32,
+    plan: ExecutionTurnPlan,
+    workspace_status_entries: &[String],
+) -> String {
+    let effective_body = effective_workpad_body(
+        issue,
+        session_context.pending_linear_sync.as_ref(),
+        context.workpad_comment_id,
+    );
+    let completed = effective_body
+        .as_deref()
+        .map(|body| extract_workpad_section_lines(body, "### Completed"))
+        .unwrap_or_default();
+    let remaining = effective_body
+        .as_deref()
+        .map(|body| extract_workpad_section_lines(body, "### Remaining"))
+        .unwrap_or_default();
+    let validation = effective_body
+        .as_deref()
+        .map(|body| extract_workpad_section_lines(body, "### Validation"))
+        .unwrap_or_default();
+    let known_input_tokens = completed_turn_known_input_tokens(&session_context.turn_history);
+
+    let mut lines = vec![
+        "#### Context Checkpoint".to_string(),
+        String::new(),
+        format!("- Captured at: {}", now_timestamp()),
+        format!("- Turn: {turn_number}"),
+        format!("- Session phase: {}", SessionPhase::Running.display_label()),
+        format!("- Context pressure: {}", plan.pressure.label()),
+        format!(
+            "- Known input tokens: {} / {}",
+            super::format_number(known_input_tokens),
+            super::format_number(context.context_budget_tokens)
+        ),
+        format!(
+            "- Branch: {}",
+            session_context.branch.unwrap_or("unavailable")
+        ),
+        String::new(),
+        "##### Completed".to_string(),
+        String::new(),
+    ];
+    push_checkpoint_section(&mut lines, completed);
+    lines.extend([String::new(), "##### Remaining".to_string(), String::new()]);
+    push_checkpoint_section(&mut lines, remaining);
+    lines.extend([String::new(), "##### Validation".to_string(), String::new()]);
+    push_checkpoint_section(&mut lines, validation);
+    lines.extend([String::new(), "##### Workspace".to_string(), String::new()]);
+    if workspace_status_entries.is_empty() {
+        lines.push("- clean working tree".to_string());
+    } else {
+        for entry in workspace_status_entries {
+            lines.push(format!("- {entry}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn push_checkpoint_section(lines: &mut Vec<String>, section_lines: Vec<String>) {
+    if section_lines.is_empty() {
+        lines.push("- unavailable".to_string());
+    } else {
+        lines.extend(section_lines);
+    }
+}
+
+fn update_resume_handle_after_turn(
+    session_context: &mut WorkerSessionContext<'_>,
+    turn_result: &TurnExecutionResult,
+    turn_plan: ExecutionTurnPlan,
+    issue_identifier: &str,
+    turn_number: u32,
+) {
+    session_context.latest_resume_handle = turn_result
+        .latest_resume_handle
+        .clone()
+        .or(session_context.latest_resume_handle.clone());
+    if turn_plan.checkpoint_turn && turn_result.timeout.is_none() {
+        session_context.latest_resume_handle = None;
+    }
+    if session_context.latest_resume_handle.is_some() {
+        eprintln!("listen: captured resume handle for {issue_identifier} on turn {turn_number}",);
+    } else if turn_plan.checkpoint_turn {
+        eprintln!(
+            "listen: cleared resume handle after checkpoint turn for {issue_identifier} on turn {turn_number}",
+        );
+    } else {
+        eprintln!("listen: no resume handle captured for {issue_identifier} on turn {turn_number}",);
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2982,6 +3249,7 @@ fn build_listen_run_args(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    plan: ExecutionTurnPlan,
     previous_review: Option<&ReviewReport>,
     verification_summary: Option<&VerificationSummary>,
     has_resume_handle: bool,
@@ -3006,26 +3274,34 @@ fn build_listen_run_args(
         render_execution_delta_prompt(
             issue,
             turn_number,
-            context.max_turns,
+            plan.max_turns,
             previous_review,
             effective_verification_summary.as_ref(),
             use_continuation,
+            plan,
+            &context_pressure_guidance(plan, context, use_continuation),
         )
     } else {
-        render_agent_prompt(
+        let mut prompt = render_agent_prompt(
             issue,
             context.workspace_path,
             context.workpad_comment_id,
             context.backlog_issue,
             turn_number,
-            context.max_turns,
-        )
+            plan.max_turns,
+        );
+        let guidance = context_pressure_guidance(plan, context, use_continuation);
+        if !guidance.is_empty() {
+            prompt.push_str("\n\nContext pressure guidance:\n");
+            prompt.push_str(&guidance);
+        }
+        prompt
     };
 
     let instructions = if use_continuation {
         None
     } else {
-        Some(build_agent_instructions(issue, turn_number, context)?)
+        Some(build_agent_instructions(issue, turn_number, context, plan)?)
     };
 
     Ok(RunAgentArgs {
@@ -3128,10 +3404,14 @@ struct ExecutionTurnDelta<'a> {
     verification_summary: Option<&'a VerificationSummary>,
 }
 
+// Execution turns need the current delta, continuation state, and two output callbacks; a local
+// lint allowance keeps the call sites direct.
+#[allow(clippy::too_many_arguments)]
 fn execute_agent_turn(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    plan: ExecutionTurnPlan,
     delta: ExecutionTurnDelta<'_>,
     continuation_handle: Option<&LatestResumeHandle>,
     mut on_session_started: impl FnMut(&str) -> Result<()>,
@@ -3157,7 +3437,7 @@ fn execute_agent_turn(
     };
     eprintln!(
         "listen: turn {turn_number}/{} for {} | resume={has_resume_handle} | prompt_mode={}",
-        context.max_turns,
+        plan.max_turns,
         issue.identifier,
         prompt_mode.label(),
     );
@@ -3165,6 +3445,7 @@ fn execute_agent_turn(
         issue,
         turn_number,
         context,
+        plan,
         delta.previous_review,
         delta.verification_summary,
         has_resume_handle,
@@ -3803,6 +4084,7 @@ fn build_agent_instructions(
     issue: &IssueSummary,
     turn_number: u32,
     context: &ListenTurnContext<'_>,
+    plan: ExecutionTurnPlan,
 ) -> Result<String> {
     let repo_target = RepoTarget::with_workspace(context.source_root, context.workspace_path);
     let workflow_contract = render_workflow_contract_for_listen(context.source_root, repo_target)?;
@@ -3871,10 +4153,23 @@ fn build_agent_instructions(
     if turn_number > 1 {
         sections.push(format!(
             "This is continuation turn {turn_number} of {}. Resume from the current workspace and workpad state instead of restarting from scratch.",
-            context.max_turns
+            plan.max_turns
         ));
         sections.push(
             "The previous turn completed normally, but the issue is still active. Do not repeat finished investigation or validation unless the new code changes require it."
+                .to_string(),
+        );
+    }
+
+    if plan.checkpoint_turn {
+        sections.push(
+            "This is a dedicated context-checkpoint turn. Consolidate the current state, capture review progress clearly, and avoid starting broad new implementation work unless it is required to land the checkpoint safely."
+                .to_string(),
+        );
+    }
+    if plan.last_execution_turn {
+        sections.push(
+            "This is the final remaining execution turn before context exhaustion. Prioritize wrap-up, checkpointing, and leaving the branch plus workpad in a resumable state for later review and recovery."
                 .to_string(),
         );
     }
@@ -3910,6 +4205,9 @@ fn build_verification_instructions() -> String {
     )
 }
 
+// Continuation prompts intentionally keep review, verification, and pressure inputs separate so
+// tests can assert each branch directly.
+#[allow(clippy::too_many_arguments)]
 fn render_execution_delta_prompt(
     issue: &IssueSummary,
     turn_number: u32,
@@ -3917,6 +4215,8 @@ fn render_execution_delta_prompt(
     previous_review: Option<&ReviewReport>,
     verification_summary: Option<&VerificationSummary>,
     use_continuation: bool,
+    _plan: ExecutionTurnPlan,
+    pressure_guidance: &str,
 ) -> String {
     let header = if use_continuation {
         render_continuation_prompt(issue, turn_number, max_turns)
@@ -3932,7 +4232,7 @@ fn render_execution_delta_prompt(
     let verification_block = verification_summary
         .map(render_verification_delta_block)
         .unwrap_or_default();
-    format!(
+    let mut prompt = format!(
         "{header}\nRemaining work for `{identifier}`:\n{review_block}{verification_block}\n\nIssue title: {title}\nURL: {url}",
         header = header,
         identifier = issue.identifier,
@@ -3940,7 +4240,62 @@ fn render_execution_delta_prompt(
         verification_block = verification_block,
         title = issue.title,
         url = issue.url
-    )
+    );
+    if !pressure_guidance.is_empty() {
+        prompt.push_str("\n\nContext pressure guidance:\n");
+        prompt.push_str(pressure_guidance);
+    }
+    prompt
+}
+
+fn context_pressure_guidance(
+    plan: ExecutionTurnPlan,
+    context: &ListenTurnContext<'_>,
+    use_continuation: bool,
+) -> String {
+    let mut lines = Vec::new();
+    let warning = format!(
+        "- Known completed-turn input tokens are approaching the listen context budget ({}/{}).",
+        super::format_number(plan.known_input_tokens),
+        super::format_number(context.context_budget_tokens)
+    );
+    match plan.pressure {
+        ContextPressure::Elevated if use_continuation => {
+            lines.push(format!("- Context pressure: {}.", plan.pressure.label()));
+            lines.push(warning);
+            lines.push(
+                "- Keep changes tight and refresh the workpad with the exact remaining work before ending the turn."
+                    .to_string(),
+            );
+        }
+        ContextPressure::High | ContextPressure::Critical if plan.checkpoint_turn => {
+            lines.push(format!("- Context pressure: {}.", plan.pressure.label()));
+            lines.push(format!(
+                "- Known completed-turn input tokens are at or above the checkpoint threshold ({}/{}).",
+                super::format_number(plan.known_input_tokens),
+                super::format_number(context.context_budget_tokens)
+            ));
+            lines.push(
+                "- Use this turn to create a durable context checkpoint: summarize completed work, capture exact remaining work, and refresh validation status."
+                    .to_string(),
+            );
+            lines.push(
+                "- Avoid starting broad new implementation unless it is required to leave the branch in a safe resumable state."
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    if plan.last_execution_turn {
+        if lines.is_empty() {
+            lines.push(format!("- Context pressure: {}.", plan.pressure.label()));
+        }
+        lines.push(
+            "- This is the final remaining execution turn. Prioritize wrap-up and leave the workspace plus workpad ready for review or recovery."
+                .to_string(),
+        );
+    }
+    lines.join("\n")
 }
 
 fn render_review_delta_block(review: &ReviewReport) -> String {
@@ -4074,6 +4429,7 @@ pub(crate) fn review_prompt_hardening_probe() -> (String, String, String, String
         workpad_comment_id: "comment-1".to_string(),
         backlog_issue: None,
         max_turns: 20,
+        context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         api_key: None,
         api_url: None,
         profile: None,
@@ -4092,6 +4448,7 @@ pub(crate) fn review_prompt_hardening_probe() -> (String, String, String, String
         workpad_comment_id: "comment-1",
         backlog_issue: None,
         max_turns: 20,
+        context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
     };
     let issue = IssueSummary {
         id: "ENG-10749-id".to_string(),
@@ -5748,7 +6105,33 @@ async fn sync_review_tracking(
     log_path: &Path,
     review: &ReviewReport,
 ) -> Result<()> {
-    let body = render_review_workpad(issue, context, review, session_context);
+    sync_review_tracking_with_checkpoint(
+        service,
+        issue,
+        context,
+        app_config,
+        session_context,
+        log_path,
+        review,
+        None,
+    )
+    .await
+}
+
+// Review sync needs the service, current issue/context, mutable session state, and optional
+// checkpoint payload at the same call site.
+#[allow(clippy::too_many_arguments)]
+async fn sync_review_tracking_with_checkpoint(
+    service: &LinearService<ReqwestLinearClient>,
+    issue: &IssueSummary,
+    context: &ListenTurnContext<'_>,
+    app_config: &AppConfig,
+    session_context: &mut WorkerSessionContext<'_>,
+    log_path: &Path,
+    review: &ReviewReport,
+    context_checkpoint: Option<&str>,
+) -> Result<()> {
+    let body = render_review_workpad(issue, context, review, session_context, context_checkpoint);
     let mut updated = false;
     let mut sync_error = None;
     for attempt in 0..3 {
@@ -5824,7 +6207,22 @@ fn render_review_workpad(
     context: &ListenTurnContext<'_>,
     review: &ReviewReport,
     session_context: &WorkerSessionContext<'_>,
+    context_checkpoint: Option<&str>,
 ) -> String {
+    let effective_workpad = effective_workpad_body(
+        issue,
+        session_context.pending_linear_sync.as_ref(),
+        context.workpad_comment_id,
+    );
+    let preserved_review_notes = effective_workpad
+        .as_deref()
+        .map(extract_unmanaged_review_notes)
+        .unwrap_or_default();
+    let preserved_checkpoint = context_checkpoint.map(str::to_string).or_else(|| {
+        effective_workpad
+            .as_deref()
+            .and_then(extract_context_checkpoint)
+    });
     let mut lines = vec![
         "## Codex Workpad".to_string(),
         String::new(),
@@ -5891,7 +6289,11 @@ fn render_review_workpad(
         }
     }
     let visible_notes = review.notes.iter().collect::<Vec<_>>();
-    if !review.risks.is_empty() || !visible_notes.is_empty() {
+    if !review.risks.is_empty()
+        || !visible_notes.is_empty()
+        || !preserved_review_notes.is_empty()
+        || preserved_checkpoint.is_some()
+    {
         lines.extend([String::new(), "### Review Notes".to_string(), String::new()]);
         for item in &review.risks {
             lines.push(format!("- Risk: {item}"));
@@ -5899,8 +6301,59 @@ fn render_review_workpad(
         for item in visible_notes {
             lines.push(format!("- Note: {item}"));
         }
+        if !preserved_review_notes.is_empty() {
+            if !review.risks.is_empty() || !review.notes.is_empty() {
+                lines.push(String::new());
+            }
+            lines.extend(preserved_review_notes);
+        }
+        if let Some(checkpoint) = preserved_checkpoint {
+            if !review.risks.is_empty()
+                || !review.notes.is_empty()
+                || !lines.last().is_some_and(String::is_empty)
+            {
+                lines.push(String::new());
+            }
+            lines.extend(checkpoint.lines().map(str::to_string));
+        }
     }
     lines.join("\n")
+}
+
+fn block_for_context_pressure_limit(
+    source_root: &Path,
+    project_selector: Option<&str>,
+    issue: &IssueSummary,
+    session_context: &WorkerSessionContext<'_>,
+    turns_completed: u32,
+    provider_session_id: Option<&str>,
+    log_path: &Path,
+) -> Result<()> {
+    let blocked = blocked_reason(
+        BlockedCategory::Turn,
+        "critical context pressure reached the final execution turn",
+        false,
+    );
+    write_listen_session(
+        source_root,
+        project_selector,
+        build_worker_blocked_session(
+            issue,
+            blocked.clone(),
+            compact_session_summary([
+                Some(blocked.summary_headline()),
+                Some(
+                    "execution turn limit reduced to one under critical context pressure"
+                        .to_string(),
+                ),
+                Some(format!("see {}", log_path.display())),
+            ]),
+            session_context,
+            turns_completed,
+            provider_session_id,
+            &session_context.canonical,
+        ),
+    )
 }
 
 fn agent_backed_review_enabled() -> bool {
@@ -6353,17 +6806,22 @@ fn load_existing_verification_summary(
 #[cfg(test)]
 mod tests {
     use super::{
-        LatestResumeHandle, Path, ResumeProvider, Value, WorkerSessionContext,
-        build_worker_session, continuation_id_for_invocation, parse_claude_resume_handle,
-        parse_codex_resume_handle, query_codex_threads, read_codex_session_index,
+        ExecutionTurnPlan, LatestResumeHandle, ListenTurnContext, Path, ResumeProvider,
+        ReviewReport, TurnExecutionResult, Value, WorkerSessionContext, build_worker_session,
+        continuation_id_for_invocation, parse_claude_resume_handle, parse_codex_resume_handle,
+        plan_execution_turn, query_codex_threads, read_codex_session_index, render_review_workpad,
+        update_resume_handle_after_turn,
     };
     use crate::config::{AppConfig, PlanningMeta};
-    use crate::linear::{IssueSummary, TeamRef};
+    use crate::linear::{IssueComment, IssueSummary, TeamRef};
+    use crate::listen::state::ContextPressure;
     use crate::listen::verification::{
         VerificationRecipeStep, VerificationStatus, VerificationSummary,
     };
     use crate::listen::{
-        CanonicalSessionData, PullRequestSummary, SessionOrigin, SessionPhase, TokenUsage,
+        CanonicalSessionData, PendingLinearSync, PullRequestSummary, SessionOrigin, SessionPhase,
+        SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage, TurnPromptMode,
+        TurnTokenSnapshot,
     };
     use std::fs;
     use std::sync::{Mutex, OnceLock};
@@ -6425,6 +6883,88 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn turn_snapshot(turn: u32, input_tokens: Option<u64>) -> TurnTokenSnapshot {
+        TurnTokenSnapshot {
+            turn,
+            prompt_mode: TurnPromptMode::FullPrompt,
+            tokens: TokenUsage {
+                input: input_tokens,
+                output: None,
+            },
+            captured_at_epoch_seconds: 1,
+        }
+    }
+
+    fn listen_worker_args(
+        source_root: &Path,
+        workspace_path: &Path,
+        context_budget_tokens: u64,
+    ) -> crate::cli::ListenWorkerArgs {
+        crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace_path.to_path_buf(),
+            issue: "ENG-10782".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        }
+    }
+
+    fn listen_turn_context<'a>(
+        app_config: &'a AppConfig,
+        planning_meta: &'a PlanningMeta,
+        args: &'a crate::cli::ListenWorkerArgs,
+        source_root: &'a Path,
+        workspace_path: &'a Path,
+    ) -> ListenTurnContext<'a> {
+        ListenTurnContext {
+            app_config,
+            planning_meta,
+            args,
+            source_root,
+            project_selector: None,
+            workspace_path,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: args.max_turns,
+            context_budget_tokens: args.context_budget_tokens,
+        }
+    }
+
+    fn worker_session_context<'a>(
+        source_root: &'a Path,
+        workspace_path: &'a Path,
+        turn_history: Vec<TurnTokenSnapshot>,
+    ) -> WorkerSessionContext<'a> {
+        WorkerSessionContext {
+            source_root,
+            project_selector: None,
+            workspace_path,
+            branch: Some("eng-10782"),
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            pid: None,
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: None,
+            turn_history,
+            canonical: CanonicalSessionData::default(),
+            pull_request: PullRequestSummary::default(),
+            github_ci_summary: None,
+            verification_summary: None,
+            origin: SessionOrigin::Listen,
+        }
     }
 
     fn set_env_var(key: &str, value: &str) {
@@ -6738,6 +7278,7 @@ mod tests {
             workpad_comment_id: "comment-1".to_string(),
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             api_key: None,
             api_url: None,
             profile: None,
@@ -6756,10 +7297,13 @@ mod tests {
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         };
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 2, 20);
 
         // Turn 2 with resume handle → continuation prompt, no instructions.
-        let resumed = super::build_listen_run_args(&issue, 2, &context, None, None, true)
+        let resumed = super::build_listen_run_args(&issue, 2, &context, plan, None, None, true)
             .expect("build_listen_run_args should succeed");
         assert!(
             resumed.prompt.contains("Continuation guidance"),
@@ -6771,7 +7315,7 @@ mod tests {
         );
 
         // Turn 2 without resume handle → full prompt with instructions.
-        let cold = super::build_listen_run_args(&issue, 2, &context, None, None, false)
+        let cold = super::build_listen_run_args(&issue, 2, &context, plan, None, None, false)
             .expect("build_listen_run_args should succeed");
         assert!(
             cold.prompt.contains("Execution continuation"),
@@ -6801,6 +7345,7 @@ mod tests {
             workpad_comment_id: "comment-1".to_string(),
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             api_key: None,
             api_url: None,
             profile: None,
@@ -6819,10 +7364,13 @@ mod tests {
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         };
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 1, 20);
 
         // Turn 1 with resume handle should still use full prompt (initial context load).
-        let result = super::build_listen_run_args(&issue, 1, &context, None, None, true)
+        let result = super::build_listen_run_args(&issue, 1, &context, plan, None, None, true)
             .expect("build_listen_run_args should succeed");
         assert!(
             result.prompt.contains("You are working on Linear ticket"),
@@ -6831,6 +7379,128 @@ mod tests {
         assert!(
             result.instructions.is_some(),
             "turn 1 should always include instructions"
+        );
+    }
+
+    #[test]
+    fn build_listen_run_args_only_warns_for_elevated_pressure_on_continuations() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = listen_worker_args(
+            source_root,
+            workspace,
+            crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+        );
+        let context =
+            listen_turn_context(&app_config, &planning_meta, &args, source_root, workspace);
+        let plan = ExecutionTurnPlan::new(ContextPressure::Elevated, 140_000, false, false, 2, 20);
+        let issue = test_issue("ENG-10782");
+
+        let resumed = super::build_listen_run_args(&issue, 2, &context, plan, None, None, true)
+            .expect("resumed run args should build");
+        assert!(resumed.prompt.contains("Context pressure guidance:"));
+        assert!(resumed.prompt.contains("Context pressure: elevated."));
+
+        let cold = super::build_listen_run_args(&issue, 2, &context, plan, None, None, false)
+            .expect("cold run args should build");
+        assert!(!cold.prompt.contains("Context pressure guidance:"));
+        assert!(!cold.prompt.contains("Context pressure: elevated."));
+    }
+
+    #[test]
+    fn update_resume_handle_after_turn_keeps_handle_on_normal_turns() {
+        let temp = tempdir().expect("tempdir should build");
+        let mut session_context =
+            worker_session_context(temp.path(), temp.path(), vec![turn_snapshot(1, Some(20))]);
+        session_context.latest_resume_handle = Some(LatestResumeHandle {
+            provider: ResumeProvider::Claude,
+            id: "existing-handle".to_string(),
+        });
+
+        update_resume_handle_after_turn(
+            &mut session_context,
+            &TurnExecutionResult {
+                latest_resume_handle: Some(LatestResumeHandle {
+                    provider: ResumeProvider::Claude,
+                    id: "new-handle".to_string(),
+                }),
+                ..TurnExecutionResult::default()
+            },
+            ExecutionTurnPlan::new(ContextPressure::Normal, 20, false, false, 2, 20),
+            "ENG-10782",
+            2,
+        );
+
+        assert_eq!(
+            session_context
+                .latest_resume_handle
+                .as_ref()
+                .map(|handle| handle.id.as_str()),
+            Some("new-handle")
+        );
+    }
+
+    #[test]
+    fn update_resume_handle_after_turn_clears_handle_after_checkpoint_turn() {
+        let temp = tempdir().expect("tempdir should build");
+        let mut session_context =
+            worker_session_context(temp.path(), temp.path(), vec![turn_snapshot(1, Some(90))]);
+
+        update_resume_handle_after_turn(
+            &mut session_context,
+            &TurnExecutionResult {
+                latest_resume_handle: Some(LatestResumeHandle {
+                    provider: ResumeProvider::Claude,
+                    id: "checkpoint-handle".to_string(),
+                }),
+                ..TurnExecutionResult::default()
+            },
+            ExecutionTurnPlan::new(ContextPressure::High, 90, true, false, 2, 20),
+            "ENG-10782",
+            2,
+        );
+
+        assert!(session_context.latest_resume_handle.is_none());
+    }
+
+    #[test]
+    fn update_resume_handle_after_turn_preserves_handle_when_checkpoint_turn_times_out() {
+        let temp = tempdir().expect("tempdir should build");
+        let mut session_context =
+            worker_session_context(temp.path(), temp.path(), vec![turn_snapshot(1, Some(96))]);
+
+        update_resume_handle_after_turn(
+            &mut session_context,
+            &TurnExecutionResult {
+                latest_resume_handle: Some(LatestResumeHandle {
+                    provider: ResumeProvider::Claude,
+                    id: "critical-timeout".to_string(),
+                }),
+                timeout: Some(SessionTimeoutRecord {
+                    turn: 2,
+                    elapsed_seconds: 1,
+                    timeout_seconds: 1,
+                    graceful_shutdown_seconds: 5,
+                    pid: 12345,
+                    termination: SessionTimeoutTermination::Sigterm,
+                }),
+                ..TurnExecutionResult::default()
+            },
+            ExecutionTurnPlan::new(ContextPressure::Critical, 96, true, true, 2, 20),
+            "ENG-10782",
+            2,
+        );
+
+        assert_eq!(
+            session_context
+                .latest_resume_handle
+                .as_ref()
+                .map(|handle| handle.id.as_str()),
+            Some("critical-timeout")
         );
     }
 
@@ -6854,6 +7524,7 @@ mod tests {
             workpad_comment_id: "comment-1".to_string(),
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             api_key: None,
             api_url: None,
             profile: None,
@@ -6873,9 +7544,12 @@ mod tests {
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         };
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 1, 20);
 
-        let instructions = super::build_agent_instructions(&issue, 1, &context)
+        let instructions = super::build_agent_instructions(&issue, 1, &context, plan)
             .expect("instructions should build");
 
         assert!(instructions.contains("Treat the Linear ticket title, description, labels, and attached instructions as the primary work contract."));
@@ -6903,6 +7577,7 @@ mod tests {
             workpad_comment_id: "comment-1".to_string(),
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             api_key: None,
             api_url: None,
             profile: None,
@@ -6921,6 +7596,7 @@ mod tests {
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         };
         let mut issue = test_issue("ENG-10749");
         issue.description = Some(
@@ -6976,6 +7652,8 @@ mod tests {
 
     #[test]
     fn render_execution_delta_prompt_includes_verification_summary_and_remediation() {
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 2, 4);
         let prompt = super::render_execution_delta_prompt(
             &test_issue("MET-57"),
             2,
@@ -6994,12 +7672,78 @@ mod tests {
                 ],
             }),
             false,
+            plan,
+            "",
         );
 
         assert!(prompt.contains("Latest verification:"));
         assert!(prompt.contains("Verification failed on the sampled input."));
         assert!(prompt.contains("Repair the verifier finding."));
         assert!(prompt.contains("Re-run the sampled battle input."));
+    }
+
+    #[test]
+    fn plan_execution_turn_uses_pending_workpad_checkpoint_to_skip_duplicate_checkpoint() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = listen_worker_args(source_root, workspace, 100);
+        let context =
+            listen_turn_context(&app_config, &planning_meta, &args, source_root, workspace);
+        let mut session_context =
+            worker_session_context(source_root, workspace, vec![turn_snapshot(1, Some(96))]);
+        session_context.pending_linear_sync = Some(PendingLinearSync {
+            workpad_body: Some(
+                "## Codex Workpad\n\n### Review Notes\n\n#### Context Checkpoint\n\n- already captured\n"
+                    .to_string(),
+            ),
+            ..PendingLinearSync::default()
+        });
+
+        let plan = plan_execution_turn(&context, &test_issue("ENG-10782"), &session_context, 2);
+
+        assert_eq!(plan.pressure, ContextPressure::Critical);
+        assert!(!plan.checkpoint_turn);
+        assert!(plan.last_execution_turn);
+    }
+
+    #[test]
+    fn render_review_workpad_preserves_existing_context_checkpoint() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        let source_root = temp.path();
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+        let args = listen_worker_args(
+            source_root,
+            workspace,
+            crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+        );
+        let context =
+            listen_turn_context(&app_config, &planning_meta, &args, source_root, workspace);
+        let mut issue = test_issue("ENG-10782");
+        issue.comments = vec![IssueComment {
+            id: "comment-1".to_string(),
+            body: "## Codex Workpad\n\n### Review Notes\n\n- Manual note\n\n#### Context Checkpoint\n\n- Pressure: high\n"
+                .to_string(),
+            created_at: None,
+            user_name: None,
+            resolved_at: None,
+        }];
+        let session_context = worker_session_context(source_root, workspace, Vec::new());
+        let review = ReviewReport {
+            summary: "Review complete".to_string(),
+            complete: false,
+            ..ReviewReport::default()
+        };
+
+        let body = render_review_workpad(&issue, &context, &review, &session_context, None);
+
+        assert!(body.contains("#### Context Checkpoint"));
+        assert!(body.contains("- Pressure: high"));
+        assert!(body.contains("- Manual note"));
     }
 
     #[test]
@@ -7060,6 +7804,7 @@ old
             workpad_comment_id: "comment-1".to_string(),
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             api_key: None,
             api_url: None,
             profile: None,
@@ -7078,6 +7823,7 @@ old
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         };
         let progress = super::super::TurnProgress {
             planning_entries: Vec::new(),
@@ -7118,6 +7864,7 @@ old
             workpad_comment_id: "comment-1".to_string(),
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             api_key: None,
             api_url: None,
             profile: None,
@@ -7136,6 +7883,7 @@ old
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         };
         let progress = super::super::TurnProgress {
             planning_entries: Vec::new(),
@@ -7180,6 +7928,7 @@ old
             workpad_comment_id: "comment-1".to_string(),
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             api_key: None,
             api_url: None,
             profile: None,
@@ -7198,6 +7947,7 @@ old
             workpad_comment_id: "comment-1",
             backlog_issue: None,
             max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
         };
         let progress = super::super::TurnProgress {
             planning_entries: Vec::new(),

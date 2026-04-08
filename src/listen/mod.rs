@@ -12,6 +12,7 @@ pub(crate) use worker::review_prompt_hardening_probe;
 
 use std::collections::{BTreeSet, HashMap};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
 use std::io::{self, BufRead, BufReader};
@@ -954,6 +955,7 @@ struct AgentDaemon<C> {
     worker_agent: Option<String>,
     worker_model: Option<String>,
     worker_reasoning: Option<String>,
+    worker_context_budget_tokens: u64,
     listen_settings: PlanningListenSettings,
     viewer: Option<UserRef>,
     service: LinearService<C>,
@@ -2327,39 +2329,19 @@ where
 
         let mut command = Command::new(current_exe);
         command.current_dir(&self.root);
-        command.arg("listen-worker").arg("--source-root").arg(
-            self.root
-                .to_str()
-                .ok_or_else(|| anyhow!("source root is not valid utf-8"))?,
-        );
-        if let Some(project_selector) = self.store.identity().project_selector.as_deref() {
-            command.arg("--project").arg(project_selector);
-        }
-        command
-            .arg("--workspace")
-            .arg(
-                workspace_path
-                    .to_str()
-                    .ok_or_else(|| anyhow!("workspace path is not valid utf-8"))?,
-            )
-            .arg("--issue")
-            .arg(&issue.identifier)
-            .arg("--workpad-comment-id")
-            .arg(workpad_comment_id)
-            .arg("--max-turns")
-            .arg(DEFAULT_LISTEN_MAX_TURNS.to_string());
-        if let Some(backlog_issue_identifier) = backlog_issue_identifier {
-            command.arg("--backlog-issue").arg(backlog_issue_identifier);
-        }
-        if let Some(agent) = self.worker_agent.as_deref() {
-            command.arg("--agent").arg(agent);
-        }
-        if let Some(model) = self.worker_model.as_deref() {
-            command.arg("--model").arg(model);
-        }
-        if let Some(reasoning) = self.worker_reasoning.as_deref() {
-            command.arg("--reasoning").arg(reasoning);
-        }
+        command.args(build_listen_worker_cli_args(
+            &self.root,
+            self.store.identity().project_selector.as_deref(),
+            workspace_path,
+            &issue.identifier,
+            workpad_comment_id,
+            backlog_issue_identifier,
+            DEFAULT_LISTEN_MAX_TURNS,
+            self.worker_context_budget_tokens,
+            self.worker_agent.as_deref(),
+            self.worker_model.as_deref(),
+            self.worker_reasoning.as_deref(),
+        ));
         command.stdout(Stdio::from(stdout));
         command.stderr(Stdio::from(stderr));
         command.stdin(Stdio::null());
@@ -3465,6 +3447,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
     ensure_planning_layout(&root, false)?;
     let app_config = AppConfig::load()?;
     let listen_settings = planning_meta.listen.clone();
+    let context_budget_tokens = planning_meta.effective_listen_context_budget_tokens(&app_config);
 
     let config = LinearConfig::new_with_root(
         Some(&root),
@@ -3589,39 +3572,19 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
 
     let mut command = Command::new(current_exe);
     command.current_dir(&root);
-    command.arg("listen-worker").arg("--source-root").arg(
-        root.to_str()
-            .ok_or_else(|| anyhow!("source root is not valid utf-8"))?,
-    );
-    if let Some(project_selector) = store.identity().project_selector.as_deref() {
-        command.arg("--project").arg(project_selector);
-    }
-    command
-        .arg("--workspace")
-        .arg(
-            workspace
-                .workspace_path
-                .to_str()
-                .ok_or_else(|| anyhow!("workspace path is not valid utf-8"))?,
-        )
-        .arg("--issue")
-        .arg(&detailed_issue.identifier)
-        .arg("--workpad-comment-id")
-        .arg(&workpad_comment.id)
-        .arg("--max-turns")
-        .arg(args.max_turns.to_string());
-    command
-        .arg("--backlog-issue")
-        .arg(&backlog_issue.issue.identifier);
-    if let Some(agent) = args.agent.as_deref() {
-        command.arg("--agent").arg(agent);
-    }
-    if let Some(model) = args.model.as_deref() {
-        command.arg("--model").arg(model);
-    }
-    if let Some(reasoning) = args.reasoning.as_deref() {
-        command.arg("--reasoning").arg(reasoning);
-    }
+    command.args(build_listen_worker_cli_args(
+        &root,
+        store.identity().project_selector.as_deref(),
+        &workspace.workspace_path,
+        &detailed_issue.identifier,
+        &workpad_comment.id,
+        Some(&backlog_issue.issue.identifier),
+        args.max_turns,
+        context_budget_tokens,
+        args.agent.as_deref(),
+        args.model.as_deref(),
+        args.reasoning.as_deref(),
+    ));
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
     command.stdin(Stdio::null());
@@ -3716,6 +3679,8 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let validation_profile = resolve_validation_profile(&root, &planning_meta, &[]);
     let poll_interval_seconds =
         resolve_listen_poll_interval_seconds(args, &planning_meta, &app_config);
+    let context_budget_tokens =
+        resolve_listen_context_budget_tokens(args, &planning_meta, &app_config);
     let mut listen_settings = planning_meta.listen.clone();
     if listen_settings.assignment_scope.is_none() {
         listen_settings.assignment_scope =
@@ -3932,6 +3897,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         worker_agent: args.agent.clone(),
         worker_model: args.model.clone(),
         worker_reasoning: args.reasoning.clone(),
+        worker_context_budget_tokens: context_budget_tokens,
         listen_settings,
         viewer,
         service,
@@ -4351,6 +4317,72 @@ fn resolve_listen_poll_interval_seconds(
     args.poll_interval
         .unwrap_or_else(|| planning_meta.effective_listen_poll_interval_seconds(app_config))
         .max(1)
+}
+
+fn resolve_listen_context_budget_tokens(
+    args: &ListenRunArgs,
+    planning_meta: &PlanningMeta,
+    app_config: &AppConfig,
+) -> u64 {
+    args.context_budget_tokens
+        .unwrap_or_else(|| planning_meta.effective_listen_context_budget_tokens(app_config))
+        .max(1)
+}
+
+// Hidden worker launches thread through the resolved repo/run settings explicitly so long-lived
+// sessions do not drift if config changes later.
+#[allow(clippy::too_many_arguments)]
+fn build_listen_worker_cli_args(
+    source_root: &Path,
+    project_selector: Option<&str>,
+    workspace_path: &Path,
+    issue_identifier: &str,
+    workpad_comment_id: &str,
+    backlog_issue_identifier: Option<&str>,
+    max_turns: u32,
+    context_budget_tokens: u64,
+    agent: Option<&str>,
+    model: Option<&str>,
+    reasoning: Option<&str>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("listen-worker"),
+        OsString::from("--source-root"),
+        source_root.as_os_str().to_os_string(),
+    ];
+    if let Some(project_selector) = project_selector {
+        args.push(OsString::from("--project"));
+        args.push(OsString::from(project_selector));
+    }
+    args.extend([
+        OsString::from("--workspace"),
+        workspace_path.as_os_str().to_os_string(),
+        OsString::from("--issue"),
+        OsString::from(issue_identifier),
+        OsString::from("--workpad-comment-id"),
+        OsString::from(workpad_comment_id),
+        OsString::from("--max-turns"),
+        OsString::from(max_turns.to_string()),
+        OsString::from("--context-budget-tokens"),
+        OsString::from(context_budget_tokens.to_string()),
+    ]);
+    if let Some(backlog_issue_identifier) = backlog_issue_identifier {
+        args.push(OsString::from("--backlog-issue"));
+        args.push(OsString::from(backlog_issue_identifier));
+    }
+    if let Some(agent) = agent {
+        args.push(OsString::from("--agent"));
+        args.push(OsString::from(agent));
+    }
+    if let Some(model) = model {
+        args.push(OsString::from("--model"));
+        args.push(OsString::from(model));
+    }
+    if let Some(reasoning) = reasoning {
+        args.push(OsString::from("--reasoning"));
+        args.push(OsString::from(reasoning));
+    }
+    args
 }
 
 fn build_dashboard_data(
@@ -6367,12 +6399,14 @@ suffix
             worker_agent: None,
             worker_model: None,
             worker_reasoning: None,
+            worker_context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             listen_settings: PlanningListenSettings {
                 required_labels: None,
                 assignment_scope: Some(scope),
                 refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
+                context_budget_tokens: None,
                 dashboard_active_issues: None,
                 dashboard_preview: None,
             },
@@ -6508,6 +6542,120 @@ suffix
     }
 
     #[test]
+    fn resolve_listen_context_budget_tokens_prefers_cli_repo_install_then_default() {
+        let default_args = crate::cli::ListenRunArgs {
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            project: None,
+            root: ".".into(),
+            limit: 25,
+            max_pickups: 1,
+            poll_interval: None,
+            context_budget_tokens: None,
+            all_assignees: false,
+            check: false,
+            once: false,
+            json: false,
+            render_once: false,
+            events: Vec::new(),
+            demo: false,
+            width: 120,
+            height: 40,
+            agent: None,
+            model: None,
+            reasoning: None,
+            hide_active_issues: false,
+            hide_preview: false,
+        };
+        let app_config = AppConfig::default();
+        let planning_meta = PlanningMeta::default();
+
+        assert_eq!(
+            super::resolve_listen_context_budget_tokens(&default_args, &planning_meta, &app_config),
+            crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS
+        );
+
+        let install_config = AppConfig {
+            defaults: crate::config::InstallDefaults {
+                listen: crate::config::InstallListenSettings {
+                    context_budget_tokens: Some(222_000),
+                    ..crate::config::InstallListenSettings::default()
+                },
+                ..crate::config::InstallDefaults::default()
+            },
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            super::resolve_listen_context_budget_tokens(
+                &default_args,
+                &planning_meta,
+                &install_config
+            ),
+            222_000
+        );
+
+        let repo_meta = PlanningMeta {
+            listen: PlanningListenSettings {
+                context_budget_tokens: Some(111_000),
+                ..PlanningListenSettings::default()
+            },
+            ..PlanningMeta::default()
+        };
+        assert_eq!(
+            super::resolve_listen_context_budget_tokens(&default_args, &repo_meta, &install_config),
+            111_000
+        );
+
+        let cli_args = crate::cli::ListenRunArgs {
+            context_budget_tokens: Some(99_000),
+            ..default_args
+        };
+        assert_eq!(
+            super::resolve_listen_context_budget_tokens(&cli_args, &repo_meta, &install_config),
+            99_000
+        );
+    }
+
+    #[test]
+    fn build_listen_worker_cli_args_includes_context_budget_tokens() {
+        let args = super::build_listen_worker_cli_args(
+            Path::new("/tmp/source"),
+            Some("project-1"),
+            Path::new("/tmp/workspace"),
+            "ENG-10782",
+            "comment-1",
+            Some("ENG-10776"),
+            7,
+            155_000,
+            Some("codex"),
+            Some("gpt-5.4"),
+            Some("high"),
+        );
+        let rendered = args
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--context-budget-tokens", "155000"])
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--project", "project-1"])
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--backlog-issue", "ENG-10776"])
+        );
+    }
+
+    #[test]
     fn degraded_cycle_watch_scope_does_not_reuse_stale_startup_viewer() -> Result<()> {
         let (_temp, daemon) = test_daemon(
             ListenAssignmentScope::ViewerOrUnassigned,
@@ -6564,12 +6712,14 @@ suffix
             worker_agent: None,
             worker_model: None,
             worker_reasoning: None,
+            worker_context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             listen_settings: PlanningListenSettings {
                 required_labels: None,
                 assignment_scope: Some(ListenAssignmentScope::ViewerOrUnassigned),
                 refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
+                context_budget_tokens: None,
                 dashboard_active_issues: None,
                 dashboard_preview: None,
             },
@@ -6675,12 +6825,14 @@ suffix
             worker_agent: None,
             worker_model: None,
             worker_reasoning: None,
+            worker_context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             listen_settings: PlanningListenSettings {
                 required_labels: None,
                 assignment_scope: Some(ListenAssignmentScope::ViewerOrUnassigned),
                 refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
+                context_budget_tokens: None,
                 dashboard_active_issues: None,
                 dashboard_preview: None,
             },
@@ -6775,12 +6927,14 @@ suffix
             worker_agent: None,
             worker_model: None,
             worker_reasoning: None,
+            worker_context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             listen_settings: PlanningListenSettings {
                 required_labels: None,
                 assignment_scope: Some(ListenAssignmentScope::Any),
                 refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
                 instructions_path: None,
                 poll_interval_seconds: None,
+                context_budget_tokens: None,
                 dashboard_active_issues: None,
                 dashboard_preview: None,
             },

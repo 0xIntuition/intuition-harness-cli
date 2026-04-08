@@ -1039,6 +1039,9 @@ pub struct ConfigArgs {
     /// Update the install-scoped listen poll interval (seconds).
     #[arg(long)]
     pub poll_interval: Option<String>,
+    /// Update the install-scoped listen context budget in tokens.
+    #[arg(long = "listen-context-budget-tokens")]
+    pub listen_context_budget_tokens: Option<String>,
     /// Update the install-scoped GitHub CI settle poll interval (seconds).
     #[arg(long)]
     pub listen_ci_poll_interval: Option<String>,
@@ -1203,6 +1206,15 @@ pub struct SetupArgs {
         )
     )]
     pub listen_poll_interval: Option<String>,
+    #[arg(
+        long = "listen-context-budget-tokens",
+        help = concat!(
+            "Update the default known-input token budget used by `",
+            env!("BRAND_COMMAND_NAME"),
+            " listen`."
+        )
+    )]
+    pub listen_context_budget_tokens: Option<String>,
     #[arg(
         long,
         help = concat!(
@@ -1427,6 +1439,9 @@ pub struct ListenRunArgs {
     /// Poll interval in seconds for the live daemon loop.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub poll_interval: Option<u64>,
+    /// Override the listen context budget (known input tokens) for this run.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub context_budget_tokens: Option<u64>,
     /// Watch Todo issues for all assignees during this run without changing repo setup.
     #[arg(long)]
     pub all_assignees: bool,
@@ -1736,6 +1751,12 @@ pub struct ListenWorkerArgs {
     /// Maximum number of agent turns to allow before the worker stops.
     #[arg(long, default_value_t = 20)]
     pub max_turns: u32,
+    /// Resolved listen context budget to use for this worker's entire lifetime.
+    #[arg(
+        long,
+        default_value_t = crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS
+    )]
+    pub context_budget_tokens: u64,
     /// Linear API token. Falls back to LINEAR_API_KEY.
     #[arg(long, hide_env_values = true)]
     pub api_key: Option<String>,

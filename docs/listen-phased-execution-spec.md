@@ -46,6 +46,30 @@ The execution phase receives:
 
 The execution phase must attempt to complete as much of the remaining ticket work as possible before stopping.
 
+Before the first worker turn, the command path resolves one numeric listen context budget with
+this precedence:
+
+- `meta agents listen --context-budget-tokens <TOKENS>` or `meta listen sessions resume --context-budget-tokens <TOKENS>`
+- repo `.metastack/meta.json` `listen.context_budget_tokens`
+- install `[defaults.listen].context_budget_tokens`
+- built-in default `180000`
+
+The worker derives `ContextPressure` from cumulative known input tokens across completed turns
+only:
+
+- `normal`: usage `< 70%`
+- `elevated`: usage `>= 70%` and `< 85%`
+- `high`: usage `>= 85%` and `< 95%`
+- `critical`: usage `>= 95%`
+
+Pressure changes execution behavior without creating a new persisted pressure field:
+
+- `elevated` adds a warning plus concise progress-capture hint to continuation prompts only
+- `high` triggers one dedicated checkpoint turn when the effective workpad body does not yet carry
+  the managed `#### Context Checkpoint` block
+- `critical` keeps that one-time checkpoint behavior, injects a wrap-up directive into the active
+  execution prompt branch, and caps only the remaining execution-turn budget to one
+
 Each execution turn is also bounded by the shared listen subprocess supervisor:
 
 - install-scoped `defaults.listen.agent_turn_timeout_seconds` defaults to `1800`
@@ -91,7 +115,8 @@ If the review phase reports incomplete work, the next execution turn receives co
 - validation still required
 - risks that still need attention
 
-This continuation path avoids re-injecting the full ticket context when it is not necessary.
+This continuation path avoids re-injecting the full ticket context when it is not necessary. When
+pressure is `elevated`, this is the only prompt branch that receives the pressure warning.
 
 ### Final Review
 
@@ -235,6 +260,13 @@ The active `## Codex Workpad` comment is rewritten after each review phase to sh
 - validation checklist
 - risks / notes
 
+The effective workpad body is `pending_linear_sync.workpad_body` when present and otherwise the
+active unresolved `## Codex Workpad` comment body from Linear. One managed `#### Context
+Checkpoint` block lives under `### Review Notes`, is detected from that effective body, and is
+preserved through later review-workpad rewrites so transient sync failures do not duplicate it.
+That checkpoint records the current pressure state, turns completed, known input tokens,
+completed/remaining/validation checklist state, and current workspace status.
+
 ### Verification Reports
 
 Each verification pass writes:
@@ -262,6 +294,9 @@ The install-scoped listen store also carries:
 - the latest timeout snapshot for a timed-out worker turn, including turn number, elapsed time,
   timeout limit, PID, graceful-shutdown window, and final termination path
 
+Context pressure itself is not persisted. The selected-session detail pane derives `Context
+Pressure` from the selected `AgentSession.turn_history` using the shared pressure mapping.
+
 ## Completion Rules
 
 The listener no longer treats backlog completeness as the completion gate.
@@ -281,5 +316,9 @@ around each turn.
 Timed-out subprocesses still consume execution turns. The listener records the timeout, feeds the
 next continuation turn through the existing retry/repair path when budget remains, and blocks with
 timeout-specific reporting when the turn budget is exhausted.
+
+Under `critical` context pressure, only the remaining execution-turn budget is reduced to one. The
+review, final-review, verify, validate, and publish phases still execute normally after that final
+execution turn completes.
 
 This preserves quality while keeping the main execution loop bounded.

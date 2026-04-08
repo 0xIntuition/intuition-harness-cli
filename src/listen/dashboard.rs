@@ -6,8 +6,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, Terminal};
 
-use super::state::{explicit_resume_id_label, explicit_resume_provider_label};
+use super::state::{ContextPressure, explicit_resume_id_label, explicit_resume_provider_label};
 use super::{ActiveIssue, ListenDashboardData, ListenSessionDetail, SessionListView, SessionPhase};
+use crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS;
 use crate::session_runtime::{SummaryField, push_optional_summary_field};
 use crate::tui::copy::{CopyPayload, CopyUiState, pane_copy_help};
 use crate::tui::markdown::render_markdown;
@@ -1057,6 +1058,14 @@ fn render_session_detail_text(
         SummaryField::new("Summary", detail.summary.clone()),
         SummaryField::new("Turns", detail.turns.unwrap_or(0).to_string()),
         SummaryField::new("Tokens", detail.tokens.display_compact()),
+        SummaryField::new(
+            "Context Pressure",
+            ContextPressure::from_turn_history(
+                &session.turn_history,
+                DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+            )
+            .label(),
+        ),
         SummaryField::new("PR", detail.pull_request.compact_label()),
         SummaryField::new(
             "Resume Provider",
@@ -1159,6 +1168,16 @@ fn render_session_detail_text(
             .iter()
             .map(|field| detail_line(field.label, &field.value)),
     );
+    if session.origin.is_execute() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "This session was started by `{} agents execute`. Use R to resume/adopt or clear it to re-pick.",
+                crate::branding::COMMAND_NAME
+            ),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
 
     if let Some(blocked) = detail.blocked.as_ref() {
         lines.push(Line::from(""));
@@ -1212,17 +1231,6 @@ fn render_session_detail_text(
                 excerpt.line_number, excerpt.text
             )));
         }
-    }
-
-    if session.origin.is_execute() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "This session was started by `{} agents execute`. Use R to resume/adopt or clear it to re-pick.",
-                crate::branding::COMMAND_NAME
-            ),
-            Style::default().fg(Color::Yellow),
-        )));
     }
 
     lines.push(Line::from(""));
@@ -1537,7 +1545,8 @@ mod tests {
     use crate::listen::store::SessionMilestone;
     use crate::listen::{
         BlockedCategory, BlockedReason, DashboardRuntimeContext, ListenCycleData,
-        PullRequestStatus, SessionListView, SessionPhase, build_dashboard_data,
+        PullRequestStatus, SessionListView, SessionPhase, TokenUsage, TurnPromptMode,
+        TurnTokenSnapshot, build_dashboard_data,
     };
     use crate::tui::scroll::clamp_offset;
 
@@ -2203,6 +2212,38 @@ mod tests {
 
         assert!(rendered.contains("PR Ref: #321"));
         assert!(!rendered.contains("PR URL:"));
+    }
+
+    #[test]
+    fn selected_session_detail_uses_session_turn_history_for_context_pressure() {
+        let mut cycle = demo_cycle();
+        let session = cycle
+            .sessions
+            .first_mut()
+            .expect("demo data should include a session");
+        session.turn_history = vec![TurnTokenSnapshot {
+            turn: 1,
+            prompt_mode: TurnPromptMode::FullPrompt,
+            tokens: TokenUsage {
+                input: Some(171_000),
+                output: None,
+            },
+            captured_at_epoch_seconds: 1,
+        }];
+        let detail = cycle
+            .session_details
+            .get_mut(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        detail.turn_history.clear();
+
+        let rendered = render_session_detail_text(session, detail)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Context Pressure: critical"));
     }
 
     #[test]
