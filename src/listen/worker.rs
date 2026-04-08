@@ -526,6 +526,23 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         result
                     }
                     Err(retry_error) => {
+                        if let Err(seed_error) = seed_execution_turn_canonical_metadata(
+                            &issue,
+                            turn_number,
+                            &turn_context,
+                            turn_plan,
+                            ExecutionTurnDelta {
+                                previous_review: last_review.as_ref(),
+                                verification_summary: session_context.verification_summary.as_ref(),
+                            },
+                            None,
+                            &mut session_context.canonical,
+                        ) {
+                            eprintln!(
+                                "warning: failed to seed canonical listen metadata for {} turn {turn_number} before persisting resume-retry failure: {seed_error:#}",
+                                issue.identifier,
+                            );
+                        }
                         let blocked = blocked_reason(
                             BlockedCategory::Turn,
                             format!(
@@ -556,6 +573,23 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 }
             }
             Err(error) => {
+                if let Err(seed_error) = seed_execution_turn_canonical_metadata(
+                    &issue,
+                    turn_number,
+                    &turn_context,
+                    turn_plan,
+                    ExecutionTurnDelta {
+                        previous_review: last_review.as_ref(),
+                        verification_summary: session_context.verification_summary.as_ref(),
+                    },
+                    session_context.latest_resume_handle.as_ref(),
+                    &mut session_context.canonical,
+                ) {
+                    eprintln!(
+                        "warning: failed to seed canonical listen metadata for {} turn {turn_number} before persisting turn failure: {seed_error:#}",
+                        issue.identifier,
+                    );
+                }
                 let blocked = blocked_reason(
                     BlockedCategory::Turn,
                     format!("turn {turn_number}/{} failed", args.max_turns),
@@ -3416,6 +3450,47 @@ pub(super) fn write_preflight_failure(log_path: &Path, error: &anyhow::Error) ->
 struct ExecutionTurnDelta<'a> {
     previous_review: Option<&'a ReviewReport>,
     verification_summary: Option<&'a VerificationSummary>,
+}
+
+fn seed_execution_turn_canonical_metadata(
+    issue: &IssueSummary,
+    turn_number: u32,
+    context: &ListenTurnContext<'_>,
+    plan: ExecutionTurnPlan,
+    delta: ExecutionTurnDelta<'_>,
+    continuation_handle: Option<&LatestResumeHandle>,
+    canonical: &mut CanonicalSessionData,
+) -> Result<()> {
+    let effective_agent = resolve_effective_listen_agent(
+        context.app_config,
+        context.planning_meta,
+        context.args.agent.as_deref(),
+    );
+    let has_resume_handle = continuation_handle
+        .filter(|handle| {
+            effective_agent
+                .as_deref()
+                .is_some_and(|agent| handle.matches_agent(agent))
+        })
+        .is_some();
+    let run_args = build_listen_run_args(
+        issue,
+        turn_number,
+        context,
+        plan,
+        delta.previous_review,
+        delta.verification_summary,
+        has_resume_handle,
+    )?;
+    let invocation = resolve_agent_invocation_for_planning(
+        context.app_config,
+        context.planning_meta,
+        &run_args,
+    )?;
+    canonical.provider = Some(invocation.agent);
+    canonical.model = invocation.model;
+    canonical.reasoning = invocation.reasoning;
+    Ok(())
 }
 
 // Execution turns need the current delta, continuation state, and two output callbacks; a local
