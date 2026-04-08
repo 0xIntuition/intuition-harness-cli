@@ -57,10 +57,11 @@ use super::verification::{
     truncate_for_evidence,
 };
 use super::{
-    BACKLOG_STATE, CanonicalSessionData, LatestResumeHandle, MAX_STALLED_TURNS, PendingLinearSync,
-    PendingPullRequestAttachment, PullRequestStatus, PullRequestSummary, ResumeProvider,
-    SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage, TurnPromptMode,
-    TurnTokenSnapshot, agent_log_path, backlog_progress_for_issue_dir, capture_workspace_snapshot,
+    BACKLOG_STATE, BlockedCategory, BlockedReason, CanonicalSessionData, LatestResumeHandle,
+    MAX_STALLED_TURNS, PendingLinearSync, PendingPullRequestAttachment, PullRequestStatus,
+    PullRequestSummary, ResumeProvider, SessionPhase, SessionTimeoutRecord,
+    SessionTimeoutTermination, TokenUsage, TurnPromptMode, TurnTokenSnapshot, agent_log_path,
+    backlog_progress_for_issue_dir, blocked_reason, capture_workspace_snapshot,
     compact_blocked_summary, compact_completed_summary, compact_running_summary,
     compact_session_summary, compare_workspace_snapshots, current_workspace_branch,
     issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
@@ -224,17 +225,14 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
     .await
     {
         write_preflight_failure(&log_path, &error)?;
+        let blocked = blocked_reason(BlockedCategory::Setup, "missing exec capability", false);
         write_listen_session(
             &source_root,
             project_selector,
-            build_worker_session(
+            build_worker_blocked_session(
                 &issue,
-                SessionPhase::Blocked,
-                compact_blocked_summary(
-                    "Blocked | missing exec capability",
-                    issue.description.as_deref(),
-                    &log_path,
-                ),
+                blocked.clone(),
+                compact_blocked_summary(&blocked, issue.description.as_deref(), &log_path),
                 &session_context,
                 turns_completed,
                 provider_session_id.as_deref(),
@@ -297,17 +295,14 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         }
 
         if turns_completed >= args.max_turns {
+            let blocked = blocked_reason(BlockedCategory::Turn, "turn limit reached", false);
             write_listen_session(
                 &source_root,
                 project_selector,
-                build_worker_session(
+                build_worker_blocked_session(
                     &issue,
-                    SessionPhase::Blocked,
-                    compact_blocked_summary(
-                        "Blocked | turn limit reached",
-                        issue.description.as_deref(),
-                        &log_path,
-                    ),
+                    blocked.clone(),
+                    compact_blocked_summary(&blocked, issue.description.as_deref(), &log_path),
                     &session_context,
                     turns_completed,
                     provider_session_id.as_deref(),
@@ -506,17 +501,22 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         result
                     }
                     Err(retry_error) => {
+                        let blocked = blocked_reason(
+                            BlockedCategory::Turn,
+                            format!(
+                                "turn {turn_number}/{} failed (resume retry)",
+                                args.max_turns
+                            ),
+                            true,
+                        );
                         write_listen_session(
                             &source_root,
                             project_selector,
-                            build_worker_session(
+                            build_worker_blocked_session(
                                 &issue,
-                                SessionPhase::Blocked,
+                                blocked.clone(),
                                 compact_blocked_summary(
-                                    &format!(
-                                        "Blocked | turn {turn_number}/{} failed (resume retry)",
-                                        args.max_turns
-                                    ),
+                                    &blocked,
                                     issue.description.as_deref(),
                                     &log_path,
                                 ),
@@ -531,17 +531,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 }
             }
             Err(error) => {
+                let blocked = blocked_reason(
+                    BlockedCategory::Turn,
+                    format!("turn {turn_number}/{} failed", args.max_turns),
+                    true,
+                );
                 write_listen_session(
                     &source_root,
                     project_selector,
-                    build_worker_session(
+                    build_worker_blocked_session(
                         &issue,
-                        SessionPhase::Blocked,
-                        compact_blocked_summary(
-                            &format!("Blocked | turn {turn_number}/{} failed", args.max_turns),
-                            issue.description.as_deref(),
-                            &log_path,
-                        ),
+                        blocked.clone(),
+                        compact_blocked_summary(&blocked, issue.description.as_deref(), &log_path),
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
@@ -673,14 +674,15 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             .await?;
             last_review = Some(review);
             if turns_completed >= args.max_turns {
+                let blocked = blocked_reason(BlockedCategory::Turn, timeout.summary_label(), false);
                 write_listen_session(
                     &source_root,
                     project_selector,
-                    build_worker_session(
+                    build_worker_blocked_session(
                         &issue,
-                        SessionPhase::Blocked,
+                        blocked.clone(),
                         compact_session_summary([
-                            Some(format!("Blocked | {}", timeout.summary_label())),
+                            Some(blocked.summary_headline()),
                             Some("turn budget exhausted".to_string()),
                             Some(format!("see {}", log_path.display())),
                         ]),
@@ -799,14 +801,19 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     .await?;
                     last_review = Some(follow_up_review);
                     if budget_exhausted {
+                        let blocked = blocked_reason(
+                            BlockedCategory::Gate,
+                            "verification failed and repair budget exhausted",
+                            false,
+                        );
                         write_listen_session(
                             &source_root,
                             project_selector,
-                            build_worker_session(
+                            build_worker_blocked_session(
                                 &issue,
-                                SessionPhase::Blocked,
+                                blocked.clone(),
                                 compact_blocked_summary(
-                                    "Blocked | verification failed and repair budget exhausted",
+                                    &blocked,
                                     issue.description.as_deref(),
                                     &log_path,
                                 ),
@@ -901,14 +908,19 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 {
                     Ok(pull_request) => pull_request,
                     Err(error) => {
+                        let blocked = blocked_reason(
+                            BlockedCategory::Infra,
+                            "failed to prepare GitHub PR for review",
+                            true,
+                        );
                         write_listen_session(
                             &source_root,
                             project_selector,
-                            build_worker_session(
+                            build_worker_blocked_session(
                                 &issue,
-                                SessionPhase::Blocked,
+                                blocked.clone(),
                                 compact_blocked_summary(
-                                    "Blocked | failed to prepare GitHub PR for review",
+                                    &blocked,
                                     issue.description.as_deref(),
                                     &log_path,
                                 ),
@@ -982,14 +994,19 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             &render_check_failure_lines(number, &failing_checks),
                         )?;
                         if budget_exhausted {
+                            let blocked = blocked_reason(
+                                BlockedCategory::Gate,
+                                "CI repair budget exhausted",
+                                false,
+                            );
                             write_listen_session(
                                 &source_root,
                                 project_selector,
-                                build_worker_session(
+                                build_worker_blocked_session(
                                     &issue,
-                                    SessionPhase::Blocked,
+                                    blocked.clone(),
                                     compact_blocked_summary(
-                                        "Blocked | CI repair budget exhausted",
+                                        &blocked,
                                         issue.description.as_deref(),
                                         &log_path,
                                     ),
@@ -1257,14 +1274,19 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                                     &render_check_failure_lines(number, &failing_checks),
                                 )?;
                                 if budget_exhausted {
+                                    let blocked = blocked_reason(
+                                        BlockedCategory::Gate,
+                                        "CI repair budget exhausted",
+                                        false,
+                                    );
                                     write_listen_session(
                                         &source_root,
                                         project_selector,
-                                        build_worker_session(
+                                        build_worker_blocked_session(
                                             &issue,
-                                            SessionPhase::Blocked,
+                                            blocked.clone(),
                                             compact_blocked_summary(
-                                                "Blocked | CI repair budget exhausted",
+                                                &blocked,
                                                 issue.description.as_deref(),
                                                 &log_path,
                                             ),
@@ -1289,17 +1311,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             }
 
             if stalled_turns >= MAX_STALLED_TURNS {
+                let blocked = blocked_reason(
+                    BlockedCategory::Turn,
+                    format!("stalled after {stalled_turns} turn(s)"),
+                    false,
+                );
                 write_listen_session(
                     &source_root,
                     project_selector,
-                    build_worker_session(
+                    build_worker_blocked_session(
                         &issue,
-                        SessionPhase::Blocked,
-                        compact_blocked_summary(
-                            &format!("Blocked | stalled after {stalled_turns} turn(s)"),
-                            issue.description.as_deref(),
-                            &log_path,
-                        ),
+                        blocked.clone(),
+                        compact_blocked_summary(&blocked, issue.description.as_deref(), &log_path),
                         &session_context,
                         turns_completed,
                         provider_session_id.as_deref(),
@@ -2099,8 +2122,9 @@ fn write_pending_linear_sync_blocked_session(
     provider_session_id: Option<&str>,
     log_path: &Path,
 ) -> Result<()> {
+    let blocked = blocked_reason(BlockedCategory::Infra, "pending Linear sync", true);
     let summary = compact_session_summary([
-        Some("Blocked | pending Linear sync".to_string()),
+        Some(blocked.summary_headline()),
         session_context
             .pending_linear_sync
             .as_ref()
@@ -2110,9 +2134,9 @@ fn write_pending_linear_sync_blocked_session(
     write_listen_session(
         session_context.source_root,
         session_context.project_selector,
-        build_worker_session(
+        build_worker_blocked_session(
             issue,
-            SessionPhase::Blocked,
+            blocked.clone(),
             summary,
             session_context,
             turns_completed,
@@ -2568,14 +2592,19 @@ async fn run_pre_pr_validation_gate(
         gate_context.pr_mutation_description,
     );
     if budget_exhausted {
+        let blocked = blocked_reason(
+            BlockedCategory::Gate,
+            "validation failed and repair budget exhausted",
+            false,
+        );
         write_listen_session(
             gate_context.phase_context.source_root,
             gate_context.phase_context.project_selector,
-            build_worker_session(
+            build_worker_blocked_session(
                 gate_context.issue,
-                SessionPhase::Blocked,
+                blocked.clone(),
                 compact_blocked_summary(
-                    "Blocked | validation failed and repair budget exhausted",
+                    &blocked,
                     gate_context.issue.description.as_deref(),
                     gate_context.phase_context.log_path,
                 ),
@@ -5387,6 +5416,7 @@ fn build_worker_session(
         issue_url: issue.url.clone(),
         phase,
         summary,
+        blocked: None,
         brief_path: Some(
             PlanningPaths::new(context.workspace_path)
                 .agent_briefs_dir
@@ -5431,6 +5461,28 @@ fn build_worker_session(
         ),
         origin: context.origin,
     }
+}
+
+fn build_worker_blocked_session(
+    issue: &IssueSummary,
+    blocked: BlockedReason,
+    summary: String,
+    context: &WorkerSessionContext<'_>,
+    turns: u32,
+    session_id: Option<&str>,
+    canonical: &CanonicalSessionData,
+) -> super::AgentSession {
+    let mut session = build_worker_session(
+        issue,
+        SessionPhase::Blocked,
+        summary,
+        context,
+        turns,
+        session_id,
+        canonical,
+    );
+    session.blocked = Some(blocked);
+    session
 }
 
 fn load_existing_session_tokens(

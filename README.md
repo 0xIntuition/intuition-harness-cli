@@ -1332,19 +1332,20 @@ state instead of discarding the session. The next `meta agents listen`, `meta ag
 `meta listen sessions resume` attempt replays that pending sync immediately after Linear recovers
 and clears the deferred state on success.
 
-When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and default textual inspection output render session-level `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The worker also appends one per-turn token summary line to the per-issue log and persists additive turn-history snapshots in the mirrored detail artifact so `meta listen sessions inspect --turns` can render the exact turn order, prompt mode (`full_prompt` or `continuation`), and per-turn token counts without reparsing raw provider JSON. The listener also persists canonical provider, model, reasoning, and token metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`. Persisted worker logs are a small compatibility surface for that repair pass: the current branded `--- intu listen turn ...` / `--- intu listen preflight failed @ ...` headers and the legacy `--- meta ...` equivalents remain readable, and preflight-failure blocks act only as repair boundaries rather than as recoverable canonical metadata on their own.
-The interactive dashboard has two primary panes: **Agent Sessions** (active and completed listener
+When built-in `codex` or `claude` workers emit structured usage telemetry, `meta agents listen` accumulates session-level input and output tokens across repeated turns. Runtime summaries, detail panes, and default textual inspection output render session-level `in`, `out`, and `total`, while the session table keeps a compact total-only token column. The worker also appends one per-turn token summary line to the per-issue log and persists additive turn-history snapshots in the mirrored detail artifact so `meta listen sessions inspect --turns` can render the exact turn order, prompt mode (`full_prompt` or `continuation`), and per-turn token counts without reparsing raw provider JSON. The listener also persists canonical provider, model, reasoning, token metadata, and optional blocked-taxonomy metadata into install-scoped session state plus mirrored detail artifacts so mixed-provider histories total correctly across Codex and Claude runs and blocked failures render consistently across the CLI and dashboard. On startup, the listener performs a best-effort historical repair pass from canonical detail data, legacy state, and worker logs; when exact counts still cannot be recovered, the dashboard and textual summaries continue to show `n/a`. Persisted worker logs are a small compatibility surface for that repair pass: the current branded `--- intu listen turn ...` / `--- intu listen preflight failed @ ...` headers and the legacy `--- meta ...` equivalents remain readable, and preflight-failure blocks act only as repair boundaries rather than as recoverable canonical metadata on their own.
+The interactive dashboard has two primary panes: **Agent Sessions** (active, blocked, and completed listener
 workers) and **In Progress Issues - All Users** (all Linear issues currently in `In Progress`). The In Progress Issues
 pane displays each issue's short title, assignee, and whether an open GitHub PR is attached.
 GitHub enrichment considers only open PRs; closed or merged PRs are not shown as active
 attachments. Issues with no assignee or no PR attachment are handled gracefully.
 
 Use `Tab` to switch focus between the Agent Sessions and In Progress Issues panes. When focused on
-Agent Sessions, `Left`/`Right` (or `h`/`l` in vim mode) switch between Active and Completed
-session views. Press `Enter` on a selected item to open a detail/preview pane: session detail
-shows milestones, references, prompt context, PR state, and log excerpts; In Progress Issue detail
-shows the full issue description, assignee, PR link, and Linear URL. `Esc` or `Backspace` closes
-detail mode, and `PgUp`/`PgDn` scrolls the focused detail pane.
+Agent Sessions, `Left`/`Right` (or `h`/`l` in vim mode) cycle between Active, Blocked, and
+Completed session views. Press `Enter` on a selected item to open a detail/preview pane: session
+detail shows milestones, references, prompt context, PR state, log excerpts, and a `Block Detail`
+section with category, reason, retryable status, and suggested action when the selected session is
+blocked; In Progress Issue detail shows the full issue description, assignee, PR link, and Linear
+URL. `Esc` or `Backspace` closes detail mode, and `PgUp`/`PgDn` scrolls the focused detail pane.
 
 Both panes can be independently hidden via CLI flags or config:
 - `--hide-active-issues` hides the In Progress Issues pane for this run
@@ -1354,8 +1355,9 @@ Both panes can be independently hidden via CLI flags or config:
 
 When `vim_mode` is enabled, the dashboard also accepts `h`/`l` as aliases for left/right and
 `j`/`k` as aliases for up/down. The session table renders a compact `PR` badge (`none`,
-`draft #N`, `ready #N`). Press `P` to pause a running session, `R` to resume paused or retry
-blocked.
+`draft #N`, `ready #N`) plus category-aware blocked STAGE labels such as `Setup Err`, `Turn Err`,
+`Gate Err`, or `Infra Err`; legacy sessions without blocked metadata continue to render plain
+`Blocked`. Press `P` to pause a running session, `R` to resume paused or retry blocked.
 
 The resolved execution agent is shown in both the interactive dashboard header and the textual
 `--once` runtime summary so operators can confirm which configured worker route the listener will
@@ -1427,10 +1429,11 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 `meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
 `meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
 fields when available, including PR URL/state, workspace/backlog/workpad references, recent
-milestones, prompt-context references, compact log excerpts, and a fallback `Detail PR Ref: #N`
-line when the detail artifact only carries a PR number. Pass `--turns` to append the persisted
-per-turn token breakdown (`turn N tokens: in ... | out ... | prompt_mode=...`) from the detail
-artifact; without that flag the inspect output stays compact.
+milestones, prompt-context references, compact log excerpts, optional blocked category/retryability
+metadata, and a fallback `Detail PR Ref: #N` line when the detail artifact only carries a PR
+number. Pass `--turns` to append the persisted per-turn token breakdown (`turn N tokens: in ... |
+out ... | prompt_mode=...`) from the detail artifact; without that flag the inspect output stays
+compact.
 The interactive selected-session detail pane follows the same fallback contract and shows `PR Ref:
 #N` when the detail artifact has a PR number but no published PR URL yet.
 Within the live dashboard, `P` pauses the selected running worker, and `R` either resumes a paused

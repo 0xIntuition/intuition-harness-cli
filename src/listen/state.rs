@@ -500,6 +500,8 @@ pub struct AgentSession {
     pub issue_url: String,
     pub phase: SessionPhase,
     pub summary: String,
+    #[serde(default)]
+    pub blocked: Option<BlockedReason>,
     pub brief_path: Option<String>,
     #[serde(default)]
     pub backlog_issue_identifier: Option<String>,
@@ -540,13 +542,128 @@ pub struct AgentSession {
     pub origin: SessionOrigin,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedCategory {
+    Setup,
+    Turn,
+    Gate,
+    Infra,
+    #[default]
+    Other,
+}
+
+impl BlockedCategory {
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Setup => "Setup",
+            Self::Turn => "Turn",
+            Self::Gate => "Gate",
+            Self::Infra => "Infra",
+            Self::Other => "Blocked",
+        }
+    }
+
+    pub fn stage_label(self) -> &'static str {
+        match self {
+            Self::Setup => "Setup Err",
+            Self::Turn => "Turn Err",
+            Self::Gate => "Gate Err",
+            Self::Infra => "Infra Err",
+            Self::Other => "Blocked",
+        }
+    }
+
+    fn suggested_action(self, retryable: bool) -> &'static str {
+        match (self, retryable) {
+            (Self::Setup, true) => {
+                "Restore the missing setup prerequisites, then retry the session."
+            }
+            (Self::Setup, false) => "Fix the workspace or tool setup before retrying this session.",
+            (Self::Turn, true) => "Inspect the worker log, repair the turn failure, then retry.",
+            (Self::Turn, false) => {
+                "Investigate the turn failure and adjust the ticket plan before retrying."
+            }
+            (Self::Gate, true) => {
+                "Resolve the review or validation gate failure, then retry the session."
+            }
+            (Self::Gate, false) => {
+                "Repair the blocking review or validation failure before retrying."
+            }
+            (Self::Infra, true) => {
+                "Wait for the dependency or supervisor to recover, then retry the session."
+            }
+            (Self::Infra, false) => "Restore the dependency or orchestration path before retrying.",
+            (Self::Other, true) => "Inspect the session log and retry once the blocker is cleared.",
+            (Self::Other, false) => {
+                "Inspect the session log and resolve the blocker before retrying."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedReason {
+    pub category: BlockedCategory,
+    pub reason: String,
+    pub retryable: bool,
+}
+
+impl BlockedReason {
+    pub fn new(category: BlockedCategory, reason: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            category,
+            reason: reason.into(),
+            retryable,
+        }
+    }
+
+    pub fn summary_headline(&self) -> String {
+        let reason = self.reason.trim();
+        if reason.is_empty() {
+            "Blocked".to_string()
+        } else {
+            format!("Blocked | {reason}")
+        }
+    }
+
+    pub fn stage_label(&self) -> &'static str {
+        self.category.stage_label()
+    }
+
+    pub fn category_label(&self) -> &'static str {
+        self.category.display_label()
+    }
+
+    pub fn suggested_action(&self) -> &'static str {
+        self.category.suggested_action(self.retryable)
+    }
+}
+
 impl AgentSession {
     pub(super) fn issue_matches(&self, identifier: &str) -> bool {
         self.issue_identifier.eq_ignore_ascii_case(identifier)
     }
 
-    pub(super) fn stage_label(&self) -> &'static str {
-        self.phase.display_label()
+    pub(super) fn stage_label(&self) -> String {
+        self.blocked
+            .as_ref()
+            .map(|blocked| blocked.stage_label().to_string())
+            .unwrap_or_else(|| self.phase.display_label().to_string())
+    }
+
+    pub(super) fn blocked_category_label(&self) -> Option<&'static str> {
+        self.blocked.as_ref().map(BlockedReason::category_label)
+    }
+
+    pub(super) fn blocked_retry_label(&self) -> Option<&'static str> {
+        self.blocked
+            .as_ref()
+            .map(|blocked| if blocked.retryable { "yes" } else { "no" })
+    }
+
+    pub(super) fn blocked_suggested_action(&self) -> Option<&'static str> {
+        self.blocked.as_ref().map(BlockedReason::suggested_action)
     }
 
     pub(super) fn pid_label(&self) -> String {
@@ -826,6 +943,7 @@ mod tests {
             issue_url: "https://linear.app/issues/ENG-10194".to_string(),
             phase: SessionPhase::Running,
             summary: "Running".to_string(),
+            blocked: None,
             brief_path: None,
             backlog_issue_identifier: None,
             backlog_issue_title: None,
