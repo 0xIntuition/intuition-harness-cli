@@ -1168,11 +1168,13 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Refresh policy"))
         .stdout(predicate::str::contains("Poll interval"))
         .stdout(predicate::str::contains("Plan follow-ups"))
+        .stdout(predicate::str::contains("Tech follow-ups"))
         .stdout(predicate::str::contains("Plan mode"))
         .stdout(predicate::str::contains("Fast single-ticket"))
         .stdout(predicate::str::contains("Fast plan questions"))
-        .stdout(predicate::str::contains("14. Plan label"))
-        .stdout(predicate::str::contains("15. Tech label"));
+        .stdout(predicate::str::contains("Tech refinements"))
+        .stdout(predicate::str::contains("Plan label"))
+        .stdout(predicate::str::contains("Tech label"));
 
     Ok(())
 }
@@ -1294,8 +1296,10 @@ default_reasoning = "high"
         .assert()
         .success()
         .stdout(predicate::str::contains("Steps"))
-        .stdout(predicate::str::contains("Default reasoning"))
-        .stdout(predicate::str::contains("high"))
+        .stdout(predicate::str::contains("Tech follow-ups"))
+        .stdout(predicate::str::contains("Tech refinements"))
+        .stdout(predicate::str::contains("Default agent"))
+        .stdout(predicate::str::contains("codex"))
         .stdout(predicate::str::contains("MetaStack Team West"))
         .stdout(predicate::str::contains("Summary"));
 
@@ -1444,9 +1448,10 @@ default_model = "gpt-5.4"
         .stdout(predicate::str::contains("Summary"))
         .stdout(predicate::str::contains("Issue status"))
         .stdout(predicate::str::contains("agent ticket needing extra room"))
-        .stdout(predicate::str::contains("18. Plan label"))
-        .stdout(predicate::str::contains("19. Tech label"))
-        .stdout(predicate::str::contains("20. Save"));
+        .stdout(predicate::str::contains("15. Tech Q&A"))
+        .stdout(predicate::str::contains("19. Tech refine"))
+        .stdout(predicate::str::contains("20. Plan label"))
+        .stdout(predicate::str::contains("21. Tech label"));
 
     Ok(())
 }

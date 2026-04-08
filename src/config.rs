@@ -22,9 +22,11 @@ pub use crate::config_resolution::{
     validate_agent_name, validate_agent_reasoning, validate_backlog_default_priority,
     validate_backlog_labels, validate_fast_plan_question_limit,
     validate_interactive_plan_follow_up_question_limit,
+    validate_interactive_technical_follow_up_question_limit,
     validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
     validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
     validate_listen_retry_max_backoff_seconds, validate_supported_agent,
+    validate_technical_refinement_round_limit,
 };
 use crate::config_resolution::{
     config_path_from_env_or_home, default_linear_api_url, normalize_optional_ref,
@@ -43,6 +45,12 @@ pub const MAX_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
 pub const DEFAULT_FAST_PLAN_QUESTION_LIMIT: usize = 3;
 pub const MIN_FAST_PLAN_QUESTION_LIMIT: usize = 0;
 pub const MAX_FAST_PLAN_QUESTION_LIMIT: usize = 10;
+pub const DEFAULT_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT: usize = 3;
+pub const MIN_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT: usize = 0;
+pub const MAX_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT: usize = 10;
+pub const DEFAULT_TECHNICAL_REFINEMENT_ROUND_LIMIT: usize = 3;
+pub const MIN_TECHNICAL_REFINEMENT_ROUND_LIMIT: usize = 0;
+pub const MAX_TECHNICAL_REFINEMENT_ROUND_LIMIT: usize = 10;
 pub const DEFAULT_SYNC_DISCUSSION_FILE_CHAR_LIMIT: usize = 20_000;
 pub const DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT: usize = 6_000;
 pub const DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS: usize = 6;
@@ -105,6 +113,8 @@ pub struct PlanningMeta {
     #[serde(default)]
     pub plan: PlanningPlanSettings,
     #[serde(default)]
+    pub technical: PlanningTechnicalSettings,
+    #[serde(default)]
     pub issue_labels: PlanningIssueLabels,
 }
 
@@ -116,6 +126,8 @@ pub struct InstallDefaults {
     pub listen: InstallListenSettings,
     #[serde(default)]
     pub plan: InstallPlanSettings,
+    #[serde(default)]
+    pub technical: InstallTechnicalSettings,
     #[serde(default)]
     pub ui: InstallUiSettings,
     #[serde(default)]
@@ -151,6 +163,12 @@ pub struct InstallPlanSettings {
     pub default_mode: Option<PlanDefaultMode>,
     pub fast_single_ticket: Option<bool>,
     pub fast_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstallTechnicalSettings {
+    pub interactive_follow_up_questions: Option<usize>,
+    pub refinement_rounds: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -256,6 +274,12 @@ pub struct PlanningPlanSettings {
     pub default_mode: Option<PlanDefaultMode>,
     pub fast_single_ticket: Option<bool>,
     pub fast_questions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanningTechnicalSettings {
+    pub interactive_follow_up_questions: Option<usize>,
+    pub refinement_rounds: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -730,6 +754,20 @@ impl PlanningMeta {
             .unwrap_or(DEFAULT_FAST_PLAN_QUESTION_LIMIT)
     }
 
+    /// Returns the repo-scoped technical follow-up limit, falling back to the built-in default.
+    pub fn technical_follow_up_question_limit(&self) -> usize {
+        self.technical
+            .interactive_follow_up_questions
+            .unwrap_or(DEFAULT_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT)
+    }
+
+    /// Returns the repo-scoped technical refinement limit, falling back to the built-in default.
+    pub fn technical_refinement_round_limit(&self) -> usize {
+        self.technical
+            .refinement_rounds
+            .unwrap_or(DEFAULT_TECHNICAL_REFINEMENT_ROUND_LIMIT)
+    }
+
     /// Resolves the effective Linear project selector using repo defaults before install defaults.
     pub fn effective_project_id(&self, app_config: &AppConfig) -> Option<String> {
         normalize_optional_ref(self.linear.project_id.as_deref())
@@ -806,6 +844,25 @@ impl PlanningMeta {
             .unwrap_or_else(|| self.fast_question_limit())
     }
 
+    /// Resolves the effective technical follow-up limit using repo defaults before install defaults.
+    pub fn effective_technical_follow_up_question_limit(&self, app_config: &AppConfig) -> usize {
+        self.technical
+            .interactive_follow_up_questions
+            .or(app_config
+                .defaults
+                .technical
+                .interactive_follow_up_questions)
+            .unwrap_or_else(|| self.technical_follow_up_question_limit())
+    }
+
+    /// Resolves the effective technical refinement limit using repo defaults before install defaults.
+    pub fn effective_technical_refinement_round_limit(&self, app_config: &AppConfig) -> usize {
+        self.technical
+            .refinement_rounds
+            .or(app_config.defaults.technical.refinement_rounds)
+            .unwrap_or_else(|| self.technical_refinement_round_limit())
+    }
+
     /// Resolves the effective planning label using repo defaults before install defaults.
     pub fn effective_plan_label(&self, app_config: &AppConfig) -> String {
         self.issue_labels
@@ -877,6 +934,12 @@ impl PlanningMeta {
         }
         if let Some(limit) = self.plan.fast_questions {
             validate_fast_plan_question_limit(limit)?;
+        }
+        if let Some(limit) = self.technical.interactive_follow_up_questions {
+            validate_interactive_technical_follow_up_question_limit(limit)?;
+        }
+        if let Some(limit) = self.technical.refinement_rounds {
+            validate_technical_refinement_round_limit(limit)?;
         }
         self.validation.validate()?;
         self.sync.validate()?;
@@ -996,6 +1059,12 @@ impl InstallDefaults {
         }
         if let Some(limit) = self.plan.fast_questions {
             validate_fast_plan_question_limit(limit)?;
+        }
+        if let Some(limit) = self.technical.interactive_follow_up_questions {
+            validate_interactive_technical_follow_up_question_limit(limit)?;
+        }
+        if let Some(limit) = self.technical.refinement_rounds {
+            validate_technical_refinement_round_limit(limit)?;
         }
         Ok(())
     }
@@ -1265,10 +1334,11 @@ mod tests {
         DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
-        InstallListenSettings, InstallPlanSettings, InstallUiSettings, ListenAssignmentScope,
-        METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError, PlanningAgentSettings,
-        PlanningIssueLabels, PlanningListenSettings, PlanningMeta, PlanningPlanSettings,
-        PlanningSyncSettings, PlanningValidationSettings, VelocityAutoAssign, VelocityDefaults,
+        InstallListenSettings, InstallPlanSettings, InstallTechnicalSettings, InstallUiSettings,
+        ListenAssignmentScope, METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError,
+        PlanningAgentSettings, PlanningIssueLabels, PlanningListenSettings, PlanningMeta,
+        PlanningPlanSettings, PlanningSyncSettings, PlanningTechnicalSettings,
+        PlanningValidationSettings, VelocityAutoAssign, VelocityDefaults,
         is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
         parse_listen_required_labels_csv, resolve_agent_config, resolve_agent_route,
         validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
@@ -1449,6 +1519,10 @@ mod tests {
                     interactive_follow_up_questions: Some(4),
                     ..InstallPlanSettings::default()
                 },
+                technical: InstallTechnicalSettings {
+                    interactive_follow_up_questions: Some(2),
+                    refinement_rounds: Some(3),
+                },
                 ui: InstallUiSettings { vim_mode: true },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),
@@ -1484,6 +1558,14 @@ mod tests {
         assert_eq!(
             planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             4
+        );
+        assert_eq!(
+            planning_meta.effective_technical_follow_up_question_limit(&app_config),
+            2
+        );
+        assert_eq!(
+            planning_meta.effective_technical_refinement_round_limit(&app_config),
+            3
         );
         assert!(app_config.vim_mode_enabled());
         assert_eq!(planning_meta.effective_plan_label(&app_config), "planning");
@@ -1605,6 +1687,10 @@ mod tests {
                     interactive_follow_up_questions: Some(4),
                     ..InstallPlanSettings::default()
                 },
+                technical: InstallTechnicalSettings {
+                    interactive_follow_up_questions: Some(2),
+                    refinement_rounds: Some(3),
+                },
                 ui: InstallUiSettings { vim_mode: true },
                 issue_labels: PlanningIssueLabels {
                     plan: Some("planning".to_string()),
@@ -1628,6 +1714,10 @@ mod tests {
             plan: PlanningPlanSettings {
                 interactive_follow_up_questions: Some(9),
                 ..PlanningPlanSettings::default()
+            },
+            technical: PlanningTechnicalSettings {
+                interactive_follow_up_questions: Some(5),
+                refinement_rounds: Some(6),
             },
             issue_labels: PlanningIssueLabels {
                 plan: Some("repo-plan".to_string()),
@@ -1661,6 +1751,14 @@ mod tests {
         assert_eq!(
             planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             9
+        );
+        assert_eq!(
+            planning_meta.effective_technical_follow_up_question_limit(&app_config),
+            5
+        );
+        assert_eq!(
+            planning_meta.effective_technical_refinement_round_limit(&app_config),
+            6
         );
         assert!(app_config.vim_mode_enabled());
         assert_eq!(planning_meta.effective_plan_label(&app_config), "repo-plan");

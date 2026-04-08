@@ -283,6 +283,19 @@ fn meta_backlog_spec_help_exposes_new_subcommand() {
 }
 
 #[test]
+fn backlog_tech_help_lists_repeated_non_interactive_answers() {
+    cli()
+        .args(["backlog", "tech", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[IDENTIFIER]"))
+        .stdout(predicate::str::contains("--answer <ANSWERS>"))
+        .stdout(predicate::str::contains("--no-interactive"))
+        .stdout(predicate::str::contains("--label <LABELS>"))
+        .stdout(predicate::str::contains("--agent"));
+}
+
+#[test]
 fn backlog_split_help_describes_inverse_planning_workflow() {
     cli()
         .args(["backlog", "split", "--help"])

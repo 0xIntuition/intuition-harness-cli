@@ -841,6 +841,38 @@ pub fn validate_fast_plan_question_limit(limit: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validates the interactive follow-up question limit used by `meta backlog tech`.
+pub fn validate_interactive_technical_follow_up_question_limit(limit: usize) -> Result<()> {
+    if (crate::config::MIN_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT
+        ..=crate::config::MAX_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT)
+        .contains(&limit)
+    {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "interactive technical follow-up question limit must be between {} and {}; got {limit}",
+            crate::config::MIN_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT,
+            crate::config::MAX_INTERACTIVE_TECHNICAL_FOLLOW_UP_QUESTION_LIMIT
+        ))
+    }
+}
+
+/// Validates the refinement-round limit used by `meta backlog tech`.
+pub fn validate_technical_refinement_round_limit(limit: usize) -> Result<()> {
+    if (crate::config::MIN_TECHNICAL_REFINEMENT_ROUND_LIMIT
+        ..=crate::config::MAX_TECHNICAL_REFINEMENT_ROUND_LIMIT)
+        .contains(&limit)
+    {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "technical refinement round limit must be between {} and {}; got {limit}",
+            crate::config::MIN_TECHNICAL_REFINEMENT_ROUND_LIMIT,
+            crate::config::MAX_TECHNICAL_REFINEMENT_ROUND_LIMIT
+        ))
+    }
+}
+
 fn resolve_supported_model(
     provider: &str,
     explicit: Option<AgentValueCandidate>,

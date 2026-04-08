@@ -1054,6 +1054,9 @@ pub struct ConfigArgs {
     /// Update the install-scoped plan follow-up question limit.
     #[arg(long)]
     pub plan_follow_up_limit: Option<String>,
+    /// Update the install-scoped technical follow-up question limit.
+    #[arg(long)]
+    pub technical_follow_up_limit: Option<String>,
     #[arg(
         long,
         help = concat!(
@@ -1069,6 +1072,9 @@ pub struct ConfigArgs {
     /// Update the install-scoped fast planning follow-up batch size.
     #[arg(long)]
     pub plan_fast_questions: Option<String>,
+    /// Update the install-scoped technical refinement round limit.
+    #[arg(long)]
+    pub technical_refinement_limit: Option<String>,
     /// Enable or disable install-scoped vim navigation aliases for supported TUI flows.
     #[arg(long, value_enum)]
     pub vim_mode: Option<VimModeArg>,
@@ -1200,6 +1206,15 @@ pub struct SetupArgs {
     #[arg(
         long,
         help = concat!(
+            "Update the interactive `",
+            env!("BRAND_COMMAND_NAME"),
+            " backlog tech` follow-up question limit."
+        )
+    )]
+    pub technical_follow_up_question_limit: Option<String>,
+    #[arg(
+        long,
+        help = concat!(
             "Update the repo-scoped default mode for `",
             env!("BRAND_COMMAND_NAME"),
             " backlog plan`. Supported values: `normal`, `fast`, or `none`."
@@ -1212,6 +1227,9 @@ pub struct SetupArgs {
     /// Update the repo-scoped fast planning follow-up batch size.
     #[arg(long)]
     pub plan_fast_questions: Option<String>,
+    /// Update the repo-scoped technical refinement round limit.
+    #[arg(long)]
+    pub technical_refinement_round_limit: Option<String>,
     #[arg(
         long,
         help = concat!(
@@ -1463,6 +1481,9 @@ pub struct TechnicalArgs {
     /// Override the assignee attached to created backlog issues. Supports `viewer`, user IDs, names, and emails.
     #[arg(long)]
     pub assignee: Option<String>,
+    /// Provide follow-up answers in the same order the technical agent asks them.
+    #[arg(long = "answer")]
+    pub answers: Vec<String>,
     /// Skip the ratatui workflow and require explicit input instead of prompting.
     #[arg(long)]
     pub no_interactive: bool,

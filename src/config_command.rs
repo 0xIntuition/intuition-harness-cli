@@ -31,9 +31,10 @@ use crate::config::{
     supported_reasoning_options, validate_agent_model, validate_agent_name,
     validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
     validate_fast_plan_question_limit, validate_interactive_plan_follow_up_question_limit,
+    validate_interactive_technical_follow_up_question_limit,
     validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
     validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
-    validate_listen_retry_max_backoff_seconds,
+    validate_listen_retry_max_backoff_seconds, validate_technical_refinement_round_limit,
 };
 use crate::tui::copy::{
     CopyPayload, CopyUiState, copy_overlay_viewport, field_copy_help, pane_copy_help,
@@ -298,6 +299,15 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .unwrap_or_else(|| "unset".to_string())
     ));
     lines.push(format!(
+        "Install technical follow-up limit: {}",
+        view.app_config
+            .defaults
+            .technical
+            .interactive_follow_up_questions
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
         "Install default plan mode: {}",
         display_plan_default_mode(view.app_config.defaults.plan.default_mode)
     ));
@@ -311,6 +321,15 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .defaults
             .plan
             .fast_questions
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install technical refinement limit: {}",
+        view.app_config
+            .defaults
+            .technical
+            .refinement_rounds
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unset".to_string())
     ));
@@ -543,9 +562,11 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.listen_retry_initial_backoff.is_some()
         || args.listen_retry_max_backoff.is_some()
         || args.plan_follow_up_limit.is_some()
+        || args.technical_follow_up_limit.is_some()
         || args.plan_default_mode.is_some()
         || args.plan_fast_single_ticket.is_some()
         || args.plan_fast_questions.is_some()
+        || args.technical_refinement_limit.is_some()
         || args.vim_mode.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
@@ -648,6 +669,16 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             validate_interactive_plan_follow_up_question_limit,
         )?;
     }
+    if let Some(limit) = &args.technical_follow_up_limit {
+        view.app_config
+            .defaults
+            .technical
+            .interactive_follow_up_questions = parse_optional_usize(
+            limit,
+            "technical follow-up question limit",
+            validate_interactive_technical_follow_up_question_limit,
+        )?;
+    }
     if let Some(mode) = &args.plan_default_mode {
         view.app_config.defaults.plan.default_mode =
             parse_optional_plan_default_mode(mode, "plan default mode")?;
@@ -661,6 +692,13 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             limit,
             "fast plan question limit",
             validate_fast_plan_question_limit,
+        )?;
+    }
+    if let Some(limit) = &args.technical_refinement_limit {
+        view.app_config.defaults.technical.refinement_rounds = parse_optional_usize(
+            limit,
+            "technical refinement round limit",
+            validate_technical_refinement_round_limit,
         )?;
     }
     if let Some(vim_mode) = args.vim_mode {
@@ -1043,9 +1081,11 @@ enum ConfigStep {
     RefreshPolicy,
     PollInterval,
     PlanFollowUpLimit,
+    TechnicalFollowUpLimit,
     PlanDefaultMode,
     PlanFastSingleTicket,
     PlanFastQuestions,
+    TechnicalRefinementLimit,
     VimMode,
     PlanLabel,
     TechnicalLabel,
@@ -1057,7 +1097,7 @@ enum ConfigStep {
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 20] {
+    fn all() -> [Self; 22] {
         [
             Self::ApiKey,
             Self::Team,
@@ -1068,9 +1108,11 @@ impl ConfigStep {
             Self::RefreshPolicy,
             Self::PollInterval,
             Self::PlanFollowUpLimit,
+            Self::TechnicalFollowUpLimit,
             Self::PlanDefaultMode,
             Self::PlanFastSingleTicket,
             Self::PlanFastQuestions,
+            Self::TechnicalRefinementLimit,
             Self::VimMode,
             Self::PlanLabel,
             Self::TechnicalLabel,
@@ -1110,9 +1152,11 @@ impl ConfigStep {
             Self::RefreshPolicy => "Refresh policy",
             Self::PollInterval => "Poll interval",
             Self::PlanFollowUpLimit => "Plan follow-ups",
+            Self::TechnicalFollowUpLimit => "Tech follow-ups",
             Self::PlanDefaultMode => "Plan mode",
             Self::PlanFastSingleTicket => "Fast plan shape",
             Self::PlanFastQuestions => "Fast plan questions",
+            Self::TechnicalRefinementLimit => "Tech refinements",
             Self::VimMode => "Vim mode",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
@@ -1135,9 +1179,11 @@ impl ConfigStep {
             Self::RefreshPolicy => "Workspace refresh policy",
             Self::PollInterval => "Listen poll interval",
             Self::PlanFollowUpLimit => "Plan follow-up limit",
+            Self::TechnicalFollowUpLimit => "Technical follow-up limit",
             Self::PlanDefaultMode => "Default plan mode",
             Self::PlanFastSingleTicket => "Fast single-ticket default",
             Self::PlanFastQuestions => "Fast follow-up batch size",
+            Self::TechnicalRefinementLimit => "Technical refinement limit",
             Self::VimMode => "Install-scoped vim navigation",
             Self::PlanLabel => "Default plan label",
             Self::TechnicalLabel => "Default technical label",
@@ -1171,9 +1217,11 @@ struct ConfigApp {
     listen_label: InputFieldState,
     poll_interval: InputFieldState,
     plan_follow_up_limit: InputFieldState,
+    technical_follow_up_limit: InputFieldState,
     plan_default_mode: SelectFieldState,
     plan_fast_single_ticket: SelectFieldState,
     plan_fast_questions: InputFieldState,
+    technical_refinement_limit: InputFieldState,
     vim_mode: SelectFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
@@ -1200,9 +1248,11 @@ struct SubmittedConfig {
     refresh_policy: ListenRefreshPolicy,
     poll_interval_seconds: Option<u64>,
     interactive_follow_up_questions: Option<usize>,
+    technical_follow_up_questions: Option<usize>,
     plan_default_mode: Option<PlanDefaultMode>,
     fast_single_ticket: Option<bool>,
     fast_questions: Option<usize>,
+    technical_refinement_rounds: Option<usize>,
     vim_mode: bool,
     plan_label: Option<String>,
     technical_label: Option<String>,
@@ -1293,6 +1343,14 @@ impl ConfigApp {
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
             ),
+            technical_follow_up_limit: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .technical
+                    .interactive_follow_up_questions
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
             plan_default_mode: SelectFieldState::new(
                 plan_mode_options,
                 match view.app_config.defaults.plan.default_mode {
@@ -1314,6 +1372,14 @@ impl ConfigApp {
                     .defaults
                     .plan
                     .fast_questions
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            technical_refinement_limit: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .technical
+                    .refinement_rounds
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
             ),
@@ -1579,8 +1645,14 @@ impl ConfigApp {
                     ConfigStep::PlanFollowUpLimit => {
                         let _ = self.plan_follow_up_limit.handle_key(key);
                     }
+                    ConfigStep::TechnicalFollowUpLimit => {
+                        let _ = self.technical_follow_up_limit.handle_key(key);
+                    }
                     ConfigStep::PlanFastQuestions => {
                         let _ = self.plan_fast_questions.handle_key(key);
+                    }
+                    ConfigStep::TechnicalRefinementLimit => {
+                        let _ = self.technical_refinement_limit.handle_key(key);
                     }
                     ConfigStep::VimMode => {}
                     ConfigStep::PlanLabel => {
@@ -1628,9 +1700,15 @@ impl ConfigApp {
             ConfigStep::PlanFollowUpLimit => self
                 .plan_follow_up_limit
                 .copy_payload("config plan follow-up limit"),
+            ConfigStep::TechnicalFollowUpLimit => self
+                .technical_follow_up_limit
+                .copy_payload("config technical follow-up limit"),
             ConfigStep::PlanFastQuestions => self
                 .plan_fast_questions
                 .copy_payload("config fast plan questions"),
+            ConfigStep::TechnicalRefinementLimit => self
+                .technical_refinement_limit
+                .copy_payload("config technical refinement limit"),
             ConfigStep::PlanLabel => self.plan_label.copy_payload("config plan label"),
             ConfigStep::TechnicalLabel => {
                 self.technical_label.copy_payload("config technical label")
@@ -1725,8 +1803,14 @@ impl ConfigApp {
             ConfigStep::PlanFollowUpLimit => {
                 let _ = self.plan_follow_up_limit.paste(text);
             }
+            ConfigStep::TechnicalFollowUpLimit => {
+                let _ = self.technical_follow_up_limit.paste(text);
+            }
             ConfigStep::PlanFastQuestions => {
                 let _ = self.plan_fast_questions.paste(text);
+            }
+            ConfigStep::TechnicalRefinementLimit => {
+                let _ = self.technical_refinement_limit.paste(text);
             }
             ConfigStep::VimMode => {}
             ConfigStep::PlanLabel => {
@@ -1778,6 +1862,10 @@ impl ConfigApp {
                     summarize_optional_value(&self.plan_follow_up_limit),
                 ),
                 (
+                    "Tech follow-ups",
+                    summarize_optional_value(&self.technical_follow_up_limit),
+                ),
+                (
                     "Plan mode",
                     summarize_optional_select(&self.plan_default_mode, "Leave unset"),
                 ),
@@ -1788,6 +1876,10 @@ impl ConfigApp {
                 (
                     "Fast questions",
                     summarize_optional_value(&self.plan_fast_questions),
+                ),
+                (
+                    "Tech refinements",
+                    summarize_optional_value(&self.technical_refinement_limit),
                 ),
                 (
                     "Vim mode",
@@ -1870,10 +1962,20 @@ impl ConfigApp {
             "plan follow-up question limit",
             validate_interactive_plan_follow_up_question_limit,
         )?;
+        let technical_follow_up_questions = parse_optional_usize(
+            self.technical_follow_up_limit.value(),
+            "technical follow-up question limit",
+            validate_interactive_technical_follow_up_question_limit,
+        )?;
         let fast_questions = parse_optional_usize(
             self.plan_fast_questions.value(),
             "fast plan question limit",
             validate_fast_plan_question_limit,
+        )?;
+        let technical_refinement_rounds = parse_optional_usize(
+            self.technical_refinement_limit.value(),
+            "technical refinement round limit",
+            validate_technical_refinement_round_limit,
         )?;
 
         Ok(SubmittedConfig {
@@ -1889,6 +1991,7 @@ impl ConfigApp {
             },
             poll_interval_seconds,
             interactive_follow_up_questions,
+            technical_follow_up_questions,
             plan_default_mode: match self.plan_default_mode.selected() {
                 1 => Some(PlanDefaultMode::Normal),
                 2 => Some(PlanDefaultMode::Fast),
@@ -1900,6 +2003,7 @@ impl ConfigApp {
                 _ => None,
             },
             fast_questions,
+            technical_refinement_rounds,
             vim_mode: self.vim_mode.selected() == 1,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
@@ -1933,9 +2037,14 @@ impl SubmittedConfig {
             .defaults
             .plan
             .interactive_follow_up_questions = self.interactive_follow_up_questions;
+        view.app_config
+            .defaults
+            .technical
+            .interactive_follow_up_questions = self.technical_follow_up_questions;
         view.app_config.defaults.plan.default_mode = self.plan_default_mode;
         view.app_config.defaults.plan.fast_single_ticket = self.fast_single_ticket;
         view.app_config.defaults.plan.fast_questions = self.fast_questions;
+        view.app_config.defaults.technical.refinement_rounds = self.technical_refinement_rounds;
         view.app_config.defaults.ui.vim_mode = self.vim_mode;
         view.app_config.defaults.issue_labels.plan = self.plan_label.clone();
         view.app_config.defaults.issue_labels.technical = self.technical_label.clone();
@@ -2884,6 +2993,16 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
                 crate::branding::COMMAND_NAME
             ),
         ),
+        ConfigStep::TechnicalFollowUpLimit => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.technical_follow_up_limit,
+            &format!(
+                "Max total follow-up questions across one `{} backlog tech` run (0-10).",
+                crate::branding::COMMAND_NAME
+            ),
+        ),
         ConfigStep::PlanDefaultMode => {
             render_select_panel(frame, area, &title, &app.plan_default_mode)
         }
@@ -2896,6 +3015,16 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
             &title,
             &app.plan_fast_questions,
             "Max follow-up questions in the one-round fast planning Q&A (0-10).",
+        ),
+        ConfigStep::TechnicalRefinementLimit => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.technical_refinement_limit,
+            &format!(
+                "Max refinement rounds for interactive `{} backlog tech` review (0-10).",
+                crate::branding::COMMAND_NAME
+            ),
         ),
         ConfigStep::VimMode => render_select_panel(frame, area, &title, &app.vim_mode),
         ConfigStep::PlanLabel => render_input_panel(
@@ -2957,7 +3086,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         | ConfigStep::ListenLabel
         | ConfigStep::PollInterval
         | ConfigStep::PlanFollowUpLimit
+        | ConfigStep::TechnicalFollowUpLimit
         | ConfigStep::PlanFastQuestions
+        | ConfigStep::TechnicalRefinementLimit
         | ConfigStep::PlanLabel
         | ConfigStep::TechnicalLabel
         | ConfigStep::DefaultProfile => field_copy_help(

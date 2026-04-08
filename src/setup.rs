@@ -31,7 +31,9 @@ use crate::config::{
     supported_agent_models, supported_agent_names, supported_reasoning_options,
     validate_agent_model, validate_agent_name, validate_agent_reasoning,
     validate_backlog_default_priority, validate_backlog_labels, validate_fast_plan_question_limit,
-    validate_interactive_plan_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    validate_interactive_plan_follow_up_question_limit,
+    validate_interactive_technical_follow_up_question_limit, validate_listen_poll_interval_seconds,
+    validate_technical_refinement_round_limit,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
@@ -88,9 +90,11 @@ struct SetupApp {
     instructions_path: InputFieldState,
     listen_poll_interval: InputFieldState,
     interactive_plan_limit: InputFieldState,
+    technical_follow_up_limit: InputFieldState,
     plan_default_mode: SelectFieldState,
     plan_fast_single_ticket: SelectFieldState,
     plan_fast_questions: InputFieldState,
+    technical_refinement_limit: InputFieldState,
     plan_label: InputFieldState,
     technical_label: InputFieldState,
     summary_scroll: ScrollState,
@@ -115,9 +119,11 @@ struct SubmittedSetup {
     instructions_path: Option<String>,
     listen_poll_interval: Option<u64>,
     interactive_plan_limit: Option<usize>,
+    technical_follow_up_limit: Option<usize>,
     plan_default_mode: Option<PlanDefaultMode>,
     fast_single_ticket: Option<bool>,
     fast_questions: Option<usize>,
+    technical_refinement_limit: Option<usize>,
     plan_label: Option<String>,
     technical_label: Option<String>,
 }
@@ -145,16 +151,18 @@ enum SetupStep {
     InstructionsPath,
     ListenPollInterval,
     InteractivePlanLimit,
+    TechnicalFollowUpLimit,
     PlanDefaultMode,
     PlanFastSingleTicket,
     PlanFastQuestions,
+    TechnicalRefinementLimit,
     PlanLabel,
     TechnicalLabel,
     Save,
 }
 
 impl SetupStep {
-    fn all() -> [Self; 20] {
+    fn all() -> [Self; 22] {
         [
             Self::LinearAuth,
             Self::LinearApiKey,
@@ -170,9 +178,11 @@ impl SetupStep {
             Self::InstructionsPath,
             Self::ListenPollInterval,
             Self::InteractivePlanLimit,
+            Self::TechnicalFollowUpLimit,
             Self::PlanDefaultMode,
             Self::PlanFastSingleTicket,
             Self::PlanFastQuestions,
+            Self::TechnicalRefinementLimit,
             Self::PlanLabel,
             Self::TechnicalLabel,
             Self::Save,
@@ -212,9 +222,11 @@ impl SetupStep {
             Self::InstructionsPath => "Instructions file",
             Self::ListenPollInterval => "Listen poll interval",
             Self::InteractivePlanLimit => "Plan follow-up limit",
+            Self::TechnicalFollowUpLimit => "Tech follow-up limit",
             Self::PlanDefaultMode => "Plan mode",
             Self::PlanFastSingleTicket => "Fast plan shape",
             Self::PlanFastQuestions => "Fast plan questions",
+            Self::TechnicalRefinementLimit => "Tech refinement limit",
             Self::PlanLabel => "Plan issue label",
             Self::TechnicalLabel => "Technical issue label",
             Self::Save => "Save",
@@ -237,9 +249,11 @@ impl SetupStep {
             Self::InstructionsPath => "Instructions",
             Self::ListenPollInterval => "Poll interval",
             Self::InteractivePlanLimit => "Plan limit",
+            Self::TechnicalFollowUpLimit => "Tech Q&A",
             Self::PlanDefaultMode => "Plan mode",
             Self::PlanFastSingleTicket => "Fast shape",
             Self::PlanFastQuestions => "Fast questions",
+            Self::TechnicalRefinementLimit => "Tech refine",
             Self::PlanLabel => "Plan label",
             Self::TechnicalLabel => "Tech label",
             Self::Save => "Save",
@@ -262,9 +276,11 @@ impl SetupStep {
             Self::InstructionsPath => "Listen instructions file",
             Self::ListenPollInterval => "Listen poll interval in seconds",
             Self::InteractivePlanLimit => "Interactive plan follow-up question limit",
+            Self::TechnicalFollowUpLimit => "Interactive technical follow-up question limit",
             Self::PlanDefaultMode => "Default plan mode",
             Self::PlanFastSingleTicket => "Default fast ticket shape",
             Self::PlanFastQuestions => "Default fast follow-up batch size",
+            Self::TechnicalRefinementLimit => "Technical refinement round limit",
             Self::PlanLabel => "Default plan issue label",
             Self::TechnicalLabel => "Default technical issue label",
             Self::Save => "Save repo setup",
@@ -518,6 +534,10 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_plan_limit(view.planning_meta.plan.interactive_follow_up_questions)
     ));
     lines.push(format!(
+        "Technical follow-up limit: {}",
+        display_plan_limit(view.planning_meta.technical.interactive_follow_up_questions)
+    ));
+    lines.push(format!(
         "Default plan mode: {}",
         display_plan_default_mode(view.planning_meta.plan.default_mode)
     ));
@@ -528,6 +548,10 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
     lines.push(format!(
         "Fast plan question limit: {}",
         display_fast_question_limit(view.planning_meta.plan.fast_questions)
+    ));
+    lines.push(format!(
+        "Technical refinement limit: {}",
+        display_plan_limit(view.planning_meta.technical.refinement_rounds)
     ));
     lines.push(format!(
         "Plan issue label: {}",
@@ -622,9 +646,11 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.instructions_path.is_some()
         || args.listen_poll_interval.is_some()
         || args.interactive_plan_follow_up_question_limit.is_some()
+        || args.technical_follow_up_question_limit.is_some()
         || args.plan_default_mode.is_some()
         || args.plan_fast_single_ticket.is_some()
         || args.plan_fast_questions.is_some()
+        || args.technical_refinement_round_limit.is_some()
         || args.plan_label.is_some()
         || args.technical_label.is_some()
         || args.default_assignee.is_some()
@@ -739,6 +765,10 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     if let Some(limit) = &args.interactive_plan_follow_up_question_limit {
         view.planning_meta.plan.interactive_follow_up_questions = parse_plan_limit(limit)?;
     }
+    if let Some(limit) = &args.technical_follow_up_question_limit {
+        view.planning_meta.technical.interactive_follow_up_questions =
+            parse_technical_follow_up_limit(limit)?;
+    }
     if let Some(mode) = &args.plan_default_mode {
         view.planning_meta.plan.default_mode =
             parse_optional_plan_default_mode(mode, "plan default mode")?;
@@ -750,6 +780,9 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     if let Some(limit) = &args.plan_fast_questions {
         view.planning_meta.plan.fast_questions =
             parse_fast_plan_limit(limit, "fast plan question limit")?;
+    }
+    if let Some(limit) = &args.technical_refinement_round_limit {
+        view.planning_meta.technical.refinement_rounds = parse_technical_refinement_limit(limit)?;
     }
     if let Some(label) = &args.plan_label {
         view.planning_meta.issue_labels.plan = normalize_optional(label);
@@ -943,6 +976,13 @@ impl SetupApp {
                     .map(|value| value.to_string())
                     .unwrap_or_default(),
             ),
+            technical_follow_up_limit: InputFieldState::new(
+                view.planning_meta
+                    .technical
+                    .interactive_follow_up_questions
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
             plan_default_mode: SelectFieldState::new(
                 plan_mode_options,
                 match view.planning_meta.plan.default_mode {
@@ -963,6 +1003,13 @@ impl SetupApp {
                 view.planning_meta
                     .plan
                     .fast_questions
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ),
+            technical_refinement_limit: InputFieldState::new(
+                view.planning_meta
+                    .technical
+                    .refinement_rounds
                     .map(|value| value.to_string())
                     .unwrap_or_default(),
             ),
@@ -1209,8 +1256,14 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.paste(text);
             }
+            SetupStep::TechnicalFollowUpLimit => {
+                let _ = self.technical_follow_up_limit.paste(text);
+            }
             SetupStep::PlanFastQuestions => {
                 let _ = self.plan_fast_questions.paste(text);
+            }
+            SetupStep::TechnicalRefinementLimit => {
+                let _ = self.technical_refinement_limit.paste(text);
             }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.paste(text);
@@ -1257,8 +1310,14 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => {
                 let _ = self.interactive_plan_limit.handle_key(key);
             }
+            SetupStep::TechnicalFollowUpLimit => {
+                let _ = self.technical_follow_up_limit.handle_key(key);
+            }
             SetupStep::PlanFastQuestions => {
                 let _ = self.plan_fast_questions.handle_key(key);
+            }
+            SetupStep::TechnicalRefinementLimit => {
+                let _ = self.technical_refinement_limit.handle_key(key);
             }
             SetupStep::PlanLabel => {
                 let _ = self.plan_label.handle_key(key);
@@ -1320,7 +1379,9 @@ impl SetupApp {
             | SetupStep::InstructionsPath
             | SetupStep::ListenPollInterval
             | SetupStep::InteractivePlanLimit
+            | SetupStep::TechnicalFollowUpLimit
             | SetupStep::PlanFastQuestions
+            | SetupStep::TechnicalRefinementLimit
             | SetupStep::PlanLabel
             | SetupStep::TechnicalLabel => {}
         }
@@ -1389,6 +1450,10 @@ impl SetupApp {
                     summarize_optional(&self.interactive_plan_limit),
                 ),
                 (
+                    "Technical follow-up limit",
+                    summarize_optional(&self.technical_follow_up_limit),
+                ),
+                (
                     "Plan mode",
                     summarize_optional_select(&self.plan_default_mode, "Leave unset"),
                 ),
@@ -1399,6 +1464,10 @@ impl SetupApp {
                 (
                     "Fast questions",
                     summarize_optional(&self.plan_fast_questions),
+                ),
+                (
+                    "Technical refinement limit",
+                    summarize_optional(&self.technical_refinement_limit),
                 ),
                 ("Plan label", summarize_optional(&self.plan_label)),
                 ("Technical label", summarize_optional(&self.technical_label)),
@@ -1424,9 +1493,15 @@ impl SetupApp {
             SetupStep::InteractivePlanLimit => self
                 .interactive_plan_limit
                 .copy_payload("repo setup interactive plan limit"),
+            SetupStep::TechnicalFollowUpLimit => self
+                .technical_follow_up_limit
+                .copy_payload("repo setup technical follow-up limit"),
             SetupStep::PlanFastQuestions => self
                 .plan_fast_questions
                 .copy_payload("repo setup fast plan questions"),
+            SetupStep::TechnicalRefinementLimit => self
+                .technical_refinement_limit
+                .copy_payload("repo setup technical refinement limit"),
             SetupStep::PlanLabel => self.plan_label.copy_payload("repo setup plan label"),
             SetupStep::TechnicalLabel => self
                 .technical_label
@@ -1520,6 +1595,9 @@ impl SetupApp {
             instructions_path: normalize_optional(self.instructions_path.value()),
             listen_poll_interval: parse_poll_interval(self.listen_poll_interval.value())?,
             interactive_plan_limit: parse_plan_limit(self.interactive_plan_limit.value())?,
+            technical_follow_up_limit: parse_technical_follow_up_limit(
+                self.technical_follow_up_limit.value(),
+            )?,
             plan_default_mode: match self.plan_default_mode.selected() {
                 1 => Some(PlanDefaultMode::Normal),
                 2 => Some(PlanDefaultMode::Fast),
@@ -1533,6 +1611,9 @@ impl SetupApp {
             fast_questions: parse_fast_plan_limit(
                 self.plan_fast_questions.value(),
                 "fast plan question limit",
+            )?,
+            technical_refinement_limit: parse_technical_refinement_limit(
+                self.technical_refinement_limit.value(),
             )?,
             plan_label: normalize_optional(self.plan_label.value()),
             technical_label: normalize_optional(self.technical_label.value()),
@@ -1567,9 +1648,12 @@ impl SubmittedSetup {
         view.planning_meta.listen.instructions_path = self.instructions_path.clone();
         view.planning_meta.listen.poll_interval_seconds = self.listen_poll_interval;
         view.planning_meta.plan.interactive_follow_up_questions = self.interactive_plan_limit;
+        view.planning_meta.technical.interactive_follow_up_questions =
+            self.technical_follow_up_limit;
         view.planning_meta.plan.default_mode = self.plan_default_mode;
         view.planning_meta.plan.fast_single_ticket = self.fast_single_ticket;
         view.planning_meta.plan.fast_questions = self.fast_questions;
+        view.planning_meta.technical.refinement_rounds = self.technical_refinement_limit;
         view.planning_meta.issue_labels.plan = self.plan_label.clone();
         view.planning_meta.issue_labels.technical = self.technical_label.clone();
         Ok(())
@@ -1876,6 +1960,17 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
                 " backlog plan` interactive follow-up limit between 1 and 10."
             ),
         ),
+        SetupStep::TechnicalFollowUpLimit => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.technical_follow_up_limit,
+            concat!(
+                "Optional total follow-up question budget for one `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog tech` run between 0 and 10."
+            ),
+        ),
         SetupStep::PlanDefaultMode => {
             render_select_panel(frame, area, &title, &app.plan_default_mode)
         }
@@ -1888,6 +1983,17 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &SetupApp, area: Rect) {
             &title,
             &app.plan_fast_questions,
             "Optional fast planning follow-up batch size between 0 and 10.",
+        ),
+        SetupStep::TechnicalRefinementLimit => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.technical_refinement_limit,
+            concat!(
+                "Optional refinement round limit for interactive `",
+                env!("BRAND_COMMAND_NAME"),
+                " backlog tech` review between 0 and 10."
+            ),
         ),
         SetupStep::PlanLabel => render_input_panel(
             frame,
@@ -2229,6 +2335,19 @@ fn parse_plan_limit(value: &str) -> Result<Option<usize>> {
     Ok(Some(limit))
 }
 
+fn parse_technical_follow_up_limit(value: &str) -> Result<Option<usize>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let limit = value.parse::<usize>().map_err(|_| {
+        anyhow!(
+            "interactive technical follow-up question limit must be a whole number between 0 and 10"
+        )
+    })?;
+    validate_interactive_technical_follow_up_question_limit(limit)?;
+    Ok(Some(limit))
+}
+
 fn parse_fast_plan_limit(value: &str, label: &str) -> Result<Option<usize>> {
     let Some(value) = normalize_optional(value) else {
         return Ok(None);
@@ -2237,6 +2356,17 @@ fn parse_fast_plan_limit(value: &str, label: &str) -> Result<Option<usize>> {
         .parse::<usize>()
         .map_err(|_| anyhow!("{label} must be a whole number between 0 and 10"))?;
     validate_fast_plan_question_limit(limit)?;
+    Ok(Some(limit))
+}
+
+fn parse_technical_refinement_limit(value: &str) -> Result<Option<usize>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let limit = value.parse::<usize>().map_err(|_| {
+        anyhow!("technical refinement round limit must be a whole number between 0 and 10")
+    })?;
+    validate_technical_refinement_round_limit(limit)?;
     Ok(Some(limit))
 }
 
