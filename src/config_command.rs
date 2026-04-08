@@ -1139,6 +1139,9 @@ enum ConfigStep {
     AssignmentScope,
     RefreshPolicy,
     PollInterval,
+    CiPollInterval,
+    CiPollTimeout,
+    CiTimeoutBehavior,
     PlanFollowUpLimit,
     TechnicalFollowUpLimit,
     PlanDefaultMode,
@@ -1156,7 +1159,7 @@ enum ConfigStep {
 }
 
 impl ConfigStep {
-    fn all() -> [Self; 22] {
+    fn all() -> [Self; 25] {
         [
             Self::ApiKey,
             Self::Team,
@@ -1166,6 +1169,9 @@ impl ConfigStep {
             Self::AssignmentScope,
             Self::RefreshPolicy,
             Self::PollInterval,
+            Self::CiPollInterval,
+            Self::CiPollTimeout,
+            Self::CiTimeoutBehavior,
             Self::PlanFollowUpLimit,
             Self::TechnicalFollowUpLimit,
             Self::PlanDefaultMode,
@@ -1210,6 +1216,9 @@ impl ConfigStep {
             Self::AssignmentScope => "Assignee scope",
             Self::RefreshPolicy => "Refresh policy",
             Self::PollInterval => "Poll interval",
+            Self::CiPollInterval => "CI poll interval",
+            Self::CiPollTimeout => "CI poll timeout",
+            Self::CiTimeoutBehavior => "CI timeout behavior",
             Self::PlanFollowUpLimit => "Plan follow-ups",
             Self::TechnicalFollowUpLimit => "Tech follow-ups",
             Self::PlanDefaultMode => "Plan mode",
@@ -1237,6 +1246,9 @@ impl ConfigStep {
             Self::AssignmentScope => "Listen assignee scope",
             Self::RefreshPolicy => "Workspace refresh policy",
             Self::PollInterval => "Listen poll interval",
+            Self::CiPollInterval => "GitHub CI settle poll interval",
+            Self::CiPollTimeout => "GitHub CI settle timeout",
+            Self::CiTimeoutBehavior => "GitHub CI settle timeout behavior",
             Self::PlanFollowUpLimit => "Plan follow-up limit",
             Self::TechnicalFollowUpLimit => "Technical follow-up limit",
             Self::PlanDefaultMode => "Default plan mode",
@@ -1275,6 +1287,8 @@ struct ConfigApp {
     default_issue_status: InputFieldState,
     listen_label: InputFieldState,
     poll_interval: InputFieldState,
+    ci_poll_interval: InputFieldState,
+    ci_poll_timeout: InputFieldState,
     plan_follow_up_limit: InputFieldState,
     technical_follow_up_limit: InputFieldState,
     plan_default_mode: SelectFieldState,
@@ -1286,6 +1300,7 @@ struct ConfigApp {
     technical_label: InputFieldState,
     assignment_scope: SelectFieldState,
     refresh_policy: SelectFieldState,
+    ci_timeout_behavior: SelectFieldState,
     default_profile: InputFieldState,
     default_reasoning: SelectFieldState,
     agent_field: SelectFieldState,
@@ -1306,6 +1321,9 @@ struct SubmittedConfig {
     assignment_scope: ListenAssignmentScope,
     refresh_policy: ListenRefreshPolicy,
     poll_interval_seconds: Option<u64>,
+    ci_poll_interval_seconds: Option<u64>,
+    ci_poll_timeout_seconds: Option<u64>,
+    ci_timeout_behavior: ListenCiTimeoutBehavior,
     interactive_follow_up_questions: Option<usize>,
     technical_follow_up_questions: Option<usize>,
     plan_default_mode: Option<PlanDefaultMode>,
@@ -1355,6 +1373,10 @@ impl ConfigApp {
             "Reuse workspace and refresh from origin/main".to_string(),
             "Recreate workspace from origin/main".to_string(),
         ];
+        let ci_timeout_behavior_options = vec![
+            "Block review handoff".to_string(),
+            "Warn and continue handoff".to_string(),
+        ];
 
         let mut app = Self {
             keybindings: KeybindingPolicy::new(view.app_config.vim_mode_enabled()),
@@ -1391,6 +1413,22 @@ impl ConfigApp {
                     .defaults
                     .listen
                     .poll_interval_seconds
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            ci_poll_interval: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .listen
+                    .ci_poll_interval_seconds
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+            ci_poll_timeout: InputFieldState::new(
+                view.app_config
+                    .defaults
+                    .listen
+                    .ci_poll_timeout_seconds
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
             ),
@@ -1483,6 +1521,19 @@ impl ConfigApp {
                 {
                     ListenRefreshPolicy::ReuseAndRefresh => 0,
                     ListenRefreshPolicy::RecreateFromOriginMain => 1,
+                },
+            ),
+            ci_timeout_behavior: SelectFieldState::new(
+                ci_timeout_behavior_options,
+                match view
+                    .app_config
+                    .defaults
+                    .listen
+                    .ci_timeout_behavior
+                    .unwrap_or_default()
+                {
+                    ListenCiTimeoutBehavior::Block => 0,
+                    ListenCiTimeoutBehavior::WarnAndProceed => 1,
                 },
             ),
             default_profile: InputFieldState::new(
@@ -1601,6 +1652,7 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(-1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(-1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(-1),
+                    ConfigStep::CiTimeoutBehavior => self.ci_timeout_behavior.move_by(-1),
                     ConfigStep::PlanDefaultMode => self.plan_default_mode.move_by(-1),
                     ConfigStep::PlanFastSingleTicket => self.plan_fast_single_ticket.move_by(-1),
                     ConfigStep::VimMode => {
@@ -1633,6 +1685,7 @@ impl ConfigApp {
                     ConfigStep::DefaultReasoning => self.default_reasoning.move_by(1),
                     ConfigStep::AssignmentScope => self.assignment_scope.move_by(1),
                     ConfigStep::RefreshPolicy => self.refresh_policy.move_by(1),
+                    ConfigStep::CiTimeoutBehavior => self.ci_timeout_behavior.move_by(1),
                     ConfigStep::PlanDefaultMode => self.plan_default_mode.move_by(1),
                     ConfigStep::PlanFastSingleTicket => self.plan_fast_single_ticket.move_by(1),
                     ConfigStep::VimMode => {
@@ -1701,6 +1754,12 @@ impl ConfigApp {
                     ConfigStep::PollInterval => {
                         let _ = self.poll_interval.handle_key(key);
                     }
+                    ConfigStep::CiPollInterval => {
+                        let _ = self.ci_poll_interval.handle_key(key);
+                    }
+                    ConfigStep::CiPollTimeout => {
+                        let _ = self.ci_poll_timeout.handle_key(key);
+                    }
                     ConfigStep::PlanFollowUpLimit => {
                         let _ = self.plan_follow_up_limit.handle_key(key);
                     }
@@ -1725,6 +1784,7 @@ impl ConfigApp {
                     }
                     ConfigStep::AssignmentScope
                     | ConfigStep::RefreshPolicy
+                    | ConfigStep::CiTimeoutBehavior
                     | ConfigStep::PlanDefaultMode
                     | ConfigStep::PlanFastSingleTicket
                     | ConfigStep::DefaultReasoning
@@ -1756,6 +1816,12 @@ impl ConfigApp {
             ConfigStep::PollInterval => self
                 .poll_interval
                 .copy_payload("config listen poll interval"),
+            ConfigStep::CiPollInterval => self
+                .ci_poll_interval
+                .copy_payload("config listen GitHub CI settle poll interval"),
+            ConfigStep::CiPollTimeout => self
+                .ci_poll_timeout
+                .copy_payload("config listen GitHub CI settle timeout"),
             ConfigStep::PlanFollowUpLimit => self
                 .plan_follow_up_limit
                 .copy_payload("config plan follow-up limit"),
@@ -1782,6 +1848,10 @@ impl ConfigApp {
             ConfigStep::RefreshPolicy => CopyPayload::new(
                 "config refresh policy",
                 self.refresh_policy.selected_label().unwrap_or("unset"),
+            ),
+            ConfigStep::CiTimeoutBehavior => CopyPayload::new(
+                "config GitHub CI timeout behavior",
+                self.ci_timeout_behavior.selected_label().unwrap_or("unset"),
             ),
             ConfigStep::PlanDefaultMode => CopyPayload::new(
                 "config plan default mode",
@@ -1829,6 +1899,7 @@ impl ConfigApp {
             self.step,
             ConfigStep::AssignmentScope
                 | ConfigStep::RefreshPolicy
+                | ConfigStep::CiTimeoutBehavior
                 | ConfigStep::PlanDefaultMode
                 | ConfigStep::PlanFastSingleTicket
                 | ConfigStep::VimMode
@@ -1859,6 +1930,12 @@ impl ConfigApp {
             ConfigStep::PollInterval => {
                 let _ = self.poll_interval.paste(text);
             }
+            ConfigStep::CiPollInterval => {
+                let _ = self.ci_poll_interval.paste(text);
+            }
+            ConfigStep::CiPollTimeout => {
+                let _ = self.ci_poll_timeout.paste(text);
+            }
             ConfigStep::PlanFollowUpLimit => {
                 let _ = self.plan_follow_up_limit.paste(text);
             }
@@ -1883,6 +1960,7 @@ impl ConfigApp {
             }
             ConfigStep::AssignmentScope
             | ConfigStep::RefreshPolicy
+            | ConfigStep::CiTimeoutBehavior
             | ConfigStep::PlanDefaultMode
             | ConfigStep::PlanFastSingleTicket
             | ConfigStep::Agent
@@ -1915,6 +1993,21 @@ impl ConfigApp {
                 (
                     "Poll interval",
                     summarize_optional_value(&self.poll_interval),
+                ),
+                (
+                    "CI poll interval",
+                    summarize_optional_value(&self.ci_poll_interval),
+                ),
+                (
+                    "CI poll timeout",
+                    summarize_optional_value(&self.ci_poll_timeout),
+                ),
+                (
+                    "CI timeout behavior",
+                    self.ci_timeout_behavior
+                        .selected_label()
+                        .unwrap_or("Block review handoff")
+                        .to_string(),
                 ),
                 (
                     "Plan follow-ups",
@@ -2016,6 +2109,16 @@ impl ConfigApp {
             "listen poll interval",
             validate_listen_poll_interval_seconds,
         )?;
+        let ci_poll_interval_seconds = parse_optional_u64(
+            self.ci_poll_interval.value(),
+            "listen GitHub CI settle poll interval",
+            validate_listen_ci_poll_interval_seconds,
+        )?;
+        let ci_poll_timeout_seconds = parse_optional_u64(
+            self.ci_poll_timeout.value(),
+            "listen GitHub CI settle timeout",
+            validate_listen_ci_poll_timeout_seconds,
+        )?;
         let interactive_follow_up_questions = parse_optional_usize(
             self.plan_follow_up_limit.value(),
             "plan follow-up question limit",
@@ -2049,6 +2152,12 @@ impl ConfigApp {
                 _ => ListenRefreshPolicy::ReuseAndRefresh,
             },
             poll_interval_seconds,
+            ci_poll_interval_seconds,
+            ci_poll_timeout_seconds,
+            ci_timeout_behavior: match self.ci_timeout_behavior.selected() {
+                1 => ListenCiTimeoutBehavior::WarnAndProceed,
+                _ => ListenCiTimeoutBehavior::Block,
+            },
             interactive_follow_up_questions,
             technical_follow_up_questions,
             plan_default_mode: match self.plan_default_mode.selected() {
@@ -2092,6 +2201,9 @@ impl SubmittedConfig {
         view.app_config.defaults.listen.assignment_scope = Some(self.assignment_scope);
         view.app_config.defaults.listen.refresh_policy = Some(self.refresh_policy);
         view.app_config.defaults.listen.poll_interval_seconds = self.poll_interval_seconds;
+        view.app_config.defaults.listen.ci_poll_interval_seconds = self.ci_poll_interval_seconds;
+        view.app_config.defaults.listen.ci_poll_timeout_seconds = self.ci_poll_timeout_seconds;
+        view.app_config.defaults.listen.ci_timeout_behavior = Some(self.ci_timeout_behavior);
         view.app_config
             .defaults
             .plan
@@ -3042,6 +3154,23 @@ fn render_step_panel(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
                 crate::branding::COMMAND_NAME
             ),
         ),
+        ConfigStep::CiPollInterval => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.ci_poll_interval,
+            "Poll interval in seconds for post-publication GitHub CI settle checks (e.g. 30).",
+        ),
+        ConfigStep::CiPollTimeout => render_input_panel(
+            frame,
+            area,
+            &title,
+            &app.ci_poll_timeout,
+            "Timeout in seconds for post-publication GitHub CI settle checks (e.g. 900).",
+        ),
+        ConfigStep::CiTimeoutBehavior => {
+            render_select_panel(frame, area, &title, &app.ci_timeout_behavior)
+        }
         ConfigStep::PlanFollowUpLimit => render_input_panel(
             frame,
             area,
@@ -3144,6 +3273,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         | ConfigStep::DefaultIssueStatus
         | ConfigStep::ListenLabel
         | ConfigStep::PollInterval
+        | ConfigStep::CiPollInterval
+        | ConfigStep::CiPollTimeout
         | ConfigStep::PlanFollowUpLimit
         | ConfigStep::TechnicalFollowUpLimit
         | ConfigStep::PlanFastQuestions
@@ -3155,6 +3286,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
         ),
         ConfigStep::AssignmentScope
         | ConfigStep::RefreshPolicy
+        | ConfigStep::CiTimeoutBehavior
         | ConfigStep::PlanDefaultMode
         | ConfigStep::PlanFastSingleTicket
         | ConfigStep::VimMode

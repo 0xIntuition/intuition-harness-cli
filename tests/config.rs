@@ -285,6 +285,77 @@ fn config_updates_listen_timeout_defaults_and_renders_effective_values()
 }
 
 #[test]
+fn config_updates_listen_ci_settle_defaults_and_renders_effective_values()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+
+    let output = cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "config",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "--json",
+            "--listen-ci-poll-interval",
+            "11",
+            "--listen-ci-poll-timeout",
+            "44",
+            "--listen-ci-timeout-behavior",
+            "warn-and-proceed",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let rendered: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        rendered["app"]["defaults"]["listen"]["ci_poll_interval_seconds"],
+        json!(11)
+    );
+    assert_eq!(
+        rendered["app"]["defaults"]["listen"]["ci_poll_timeout_seconds"],
+        json!(44)
+    );
+    assert_eq!(
+        rendered["app"]["defaults"]["listen"]["ci_timeout_behavior"],
+        json!("warn_and_proceed")
+    );
+    assert_eq!(
+        rendered["effective"]["listen_ci_settle"]["ci_poll_interval_seconds"],
+        json!(11)
+    );
+    assert_eq!(
+        rendered["effective"]["listen_ci_settle"]["ci_poll_timeout_seconds"],
+        json!(44)
+    );
+    assert_eq!(
+        rendered["effective"]["listen_ci_settle"]["timeout_behavior"],
+        json!("warn_and_proceed")
+    );
+
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(config_path)?)?;
+    assert_eq!(
+        saved["defaults"]["listen"]["ci_poll_interval_seconds"].as_integer(),
+        Some(11)
+    );
+    assert_eq!(
+        saved["defaults"]["listen"]["ci_poll_timeout_seconds"].as_integer(),
+        Some(44)
+    );
+    assert_eq!(
+        saved["defaults"]["listen"]["ci_timeout_behavior"].as_str(),
+        Some("warn_and_proceed")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn config_rejects_listen_retry_max_backoff_below_initial() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -1167,11 +1238,14 @@ default_reasoning = "medium"
         .stdout(predicate::str::contains("Assignee scope"))
         .stdout(predicate::str::contains("Refresh policy"))
         .stdout(predicate::str::contains("Poll interval"))
+        .stdout(predicate::str::contains("CI poll interval"))
+        .stdout(predicate::str::contains("CI poll timeout"))
+        .stdout(predicate::str::contains("CI timeout behavior"))
         .stdout(predicate::str::contains("Plan follow-ups"))
         .stdout(predicate::str::contains("Tech follow-ups"))
         .stdout(predicate::str::contains("Plan mode"))
         .stdout(predicate::str::contains("Fast single-ticket"))
-        .stdout(predicate::str::contains("Fast plan questions"))
+        .stdout(predicate::str::contains("Fast plan shape"))
         .stdout(predicate::str::contains("Tech refinements"))
         .stdout(predicate::str::contains("Plan label"))
         .stdout(predicate::str::contains("Tech label"));
@@ -1296,10 +1370,9 @@ default_reasoning = "high"
         .assert()
         .success()
         .stdout(predicate::str::contains("Steps"))
+        .stdout(predicate::str::contains("CI poll interval"))
+        .stdout(predicate::str::contains("CI timeout behavior"))
         .stdout(predicate::str::contains("Tech follow-ups"))
-        .stdout(predicate::str::contains("Tech refinements"))
-        .stdout(predicate::str::contains("Default agent"))
-        .stdout(predicate::str::contains("codex"))
         .stdout(predicate::str::contains("MetaStack Team West"))
         .stdout(predicate::str::contains("Summary"));
 
