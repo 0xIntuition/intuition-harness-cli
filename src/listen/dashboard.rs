@@ -37,6 +37,7 @@ pub(crate) struct SessionBrowserState {
     pub(crate) focus: FocusPane,
     pub(crate) view: SessionListView,
     pub(crate) selected_active: usize,
+    pub(crate) selected_blocked: usize,
     pub(crate) selected_completed: usize,
     pub(crate) selected_active_issue: usize,
     pub(crate) detail_mode: bool,
@@ -64,6 +65,7 @@ impl Default for SessionBrowserState {
             focus: FocusPane::default(),
             view: SessionListView::Active,
             selected_active: 0,
+            selected_blocked: 0,
             selected_completed: 0,
             selected_active_issue: 0,
             detail_mode: false,
@@ -76,8 +78,10 @@ impl Default for SessionBrowserState {
 impl SessionBrowserState {
     pub(crate) fn normalize(&mut self, data: &ListenDashboardData) {
         let active_len = data.sessions_for_view(SessionListView::Active).len();
+        let blocked_len = data.sessions_for_view(SessionListView::Blocked).len();
         let completed_len = data.sessions_for_view(SessionListView::Completed).len();
         self.selected_active = clamp_index(self.selected_active, active_len);
+        self.selected_blocked = clamp_index(self.selected_blocked, blocked_len);
         self.selected_completed = clamp_index(self.selected_completed, completed_len);
         self.selected_active_issue =
             clamp_index(self.selected_active_issue, data.active_issues.len());
@@ -118,6 +122,9 @@ impl SessionBrowserState {
                 SessionListView::Active => {
                     self.selected_active = self.selected_active.saturating_sub(1);
                 }
+                SessionListView::Blocked => {
+                    self.selected_blocked = self.selected_blocked.saturating_sub(1);
+                }
                 SessionListView::Completed => {
                     self.selected_completed = self.selected_completed.saturating_sub(1);
                 }
@@ -135,6 +142,9 @@ impl SessionBrowserState {
             FocusPane::Sessions => match self.view {
                 SessionListView::Active => {
                     self.selected_active = self.selected_active.saturating_add(1);
+                }
+                SessionListView::Blocked => {
+                    self.selected_blocked = self.selected_blocked.saturating_add(1);
                 }
                 SessionListView::Completed => {
                     self.selected_completed = self.selected_completed.saturating_add(1);
@@ -155,6 +165,7 @@ impl SessionBrowserState {
         let sessions = data.sessions_for_view(self.view);
         let index = match self.view {
             SessionListView::Active => self.selected_active,
+            SessionListView::Blocked => self.selected_blocked,
             SessionListView::Completed => self.selected_completed,
         };
         sessions.get(index).copied()
@@ -199,13 +210,21 @@ impl SessionBrowserState {
             }
             SessionBrowserAction::Left => {
                 if matches!(self.focus, FocusPane::Sessions) {
-                    self.view = SessionListView::Active;
+                    self.view = match self.view {
+                        SessionListView::Active => SessionListView::Completed,
+                        SessionListView::Blocked => SessionListView::Active,
+                        SessionListView::Completed => SessionListView::Blocked,
+                    };
                 }
                 self.detail_scroll = 0;
             }
             SessionBrowserAction::Right => {
                 if matches!(self.focus, FocusPane::Sessions) {
-                    self.view = SessionListView::Completed;
+                    self.view = match self.view {
+                        SessionListView::Active => SessionListView::Blocked,
+                        SessionListView::Blocked => SessionListView::Completed,
+                        SessionListView::Completed => SessionListView::Active,
+                    };
                 }
                 self.detail_scroll = 0;
             }
@@ -563,6 +582,8 @@ fn render_sessions(
         Span::styled("Views: ", label_style()),
         session_view_badge(SessionListView::Active, view, counts.active),
         Span::raw(" "),
+        session_view_badge(SessionListView::Blocked, view, counts.blocked),
+        Span::raw(" "),
         session_view_badge(SessionListView::Completed, view, counts.completed),
         Span::styled(nav_hint, Style::default().fg(Color::DarkGray)),
     ]))
@@ -574,6 +595,10 @@ fn render_sessions(
             SessionListView::Active => empty_state(
                 "No active agent sessions are currently tracked.",
                 "New claimed tickets will appear here once workers start.",
+            ),
+            SessionListView::Blocked => empty_state(
+                "No blocked agent sessions are currently tracked.",
+                "Blocked workers will appear here when operator attention is required.",
             ),
             SessionListView::Completed => empty_state(
                 "No completed agent sessions are currently tracked.",
@@ -789,6 +814,7 @@ fn render_session_table(
     let is_focused = matches!(state.focus, FocusPane::Sessions);
     let selected_index = match view {
         SessionListView::Active => state.selected_active,
+        SessionListView::Blocked => state.selected_blocked,
         SessionListView::Completed => state.selected_completed,
     };
     let rows = sessions.into_iter().enumerate().map(|(index, session)| {
@@ -1134,6 +1160,18 @@ fn render_session_detail_text(
             .map(|field| detail_line(field.label, &field.value)),
     );
 
+    if let Some(blocked) = detail.blocked.as_ref() {
+        lines.push(Line::from(""));
+        lines.push(section_header("Block Detail"));
+        lines.push(detail_line("Category", blocked.category_label()));
+        lines.push(detail_line("Reason", &blocked.reason));
+        lines.push(detail_line(
+            "Retryable",
+            if blocked.retryable { "yes" } else { "no" },
+        ));
+        lines.push(detail_line("Suggested action", blocked.suggested_action()));
+    }
+
     if !detail.prompt_context.is_empty() {
         lines.push(Line::from(""));
         lines.push(section_header("Prompt Context"));
@@ -1295,7 +1333,7 @@ fn session_list_copy_text(
         lines.push(Line::from(format!(
             "{selected}{} [{}] {}",
             session.issue_identifier,
-            session.phase.display_label(),
+            session.stage_label(),
             session.issue_title
         )));
         lines.push(Line::from(format!(
@@ -1497,8 +1535,8 @@ mod tests {
         render_dashboard_with_state, render_dashboard_with_view, render_session_detail_text,
     };
     use crate::listen::{
-        DashboardRuntimeContext, ListenCycleData, SessionListView, SessionPhase,
-        build_dashboard_data,
+        BlockedCategory, BlockedReason, DashboardRuntimeContext, ListenCycleData, SessionListView,
+        SessionPhase, build_dashboard_data,
     };
     use crate::tui::scroll::clamp_offset;
 
@@ -1891,6 +1929,67 @@ mod tests {
     }
 
     #[test]
+    fn detail_panel_surfaces_blocked_stage_and_block_detail() {
+        let mut cycle = demo_cycle();
+        let blocked =
+            BlockedReason::new(BlockedCategory::Gate, "CI repair budget exhausted", false);
+        let session = cycle
+            .sessions
+            .first_mut()
+            .expect("demo data should include a session");
+        session.phase = SessionPhase::Blocked;
+        session.summary = blocked.summary_headline();
+        session.blocked = Some(blocked.clone());
+
+        let detail = cycle
+            .session_details
+            .get_mut(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        detail.phase = SessionPhase::Blocked;
+        detail.summary = blocked.summary_headline();
+        detail.blocked = Some(blocked);
+
+        let data = build_dashboard_data(
+            &cycle,
+            &DashboardRuntimeContext {
+                started_at_epoch_seconds: 1_773_568_249,
+                now_epoch_seconds: 1_773_575_600,
+                poll_interval_seconds: 7,
+                dashboard_label: "terminal dashboard (TUI)",
+                dashboard_refresh_seconds: 1,
+                linear_refresh_seconds: 15,
+                vim_mode: false,
+                show_active_issues: true,
+                show_preview: true,
+                resolved_agent: Some("codex".to_string()),
+            },
+        );
+
+        let state = SessionBrowserState {
+            view: SessionListView::Blocked,
+            detail_mode: true,
+            ..SessionBrowserState::default()
+        };
+        let session = state
+            .selected_session(&data)
+            .expect("blocked view should include the selected session");
+        let detail = data
+            .detail_for_session(&session.issue_identifier)
+            .expect("blocked session detail should be available");
+        let rendered = render_session_detail_text(session, detail)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Gate Err"));
+        assert!(rendered.contains("Block Detail"));
+        assert!(rendered.contains("Category: Gate"));
+        assert!(rendered.contains("Retryable: no"));
+    }
+
+    #[test]
     fn render_once_detail_scroll_reveals_log_excerpts() {
         let cycle = demo_cycle();
         let data = build_dashboard_data(
@@ -2211,6 +2310,10 @@ mod tests {
 
         let mut state = SessionBrowserState::default();
         assert_eq!(state.view, SessionListView::Active);
+
+        state.apply_action(&data, SessionBrowserAction::Tab);
+        assert_eq!(state.view, SessionListView::Blocked);
+        assert_eq!(state.focus, FocusPane::Sessions);
 
         state.apply_action(&data, SessionBrowserAction::Tab);
         assert_eq!(state.view, SessionListView::Completed);

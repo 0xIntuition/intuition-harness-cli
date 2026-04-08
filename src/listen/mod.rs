@@ -60,12 +60,16 @@ use crate::tui::copy::copy_overlay_viewport;
 use crate::tui::keybindings::is_copy_key;
 use crate::validation::resolve_validation_profile;
 pub use state::{
-    ActiveIssue, AgentSession, CanonicalSessionData, LatestResumeHandle, LinearFailureSnapshot,
-    PendingIssue, PendingLinearSync, PendingPullRequestAttachment, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, SessionTimeoutRecord,
-    SessionTimeoutTermination, TokenUsage, TurnPromptMode, TurnTokenSnapshot,
+    ActiveIssue, AgentSession, BlockedCategory, BlockedReason, CanonicalSessionData,
+    LatestResumeHandle, LinearFailureSnapshot, PendingIssue, PendingLinearSync,
+    PendingPullRequestAttachment, PullRequestStatus, PullRequestSummary, ResumeProvider,
+    SessionOrigin, SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage,
+    TurnPromptMode, TurnTokenSnapshot,
 };
-use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label};
+use state::{
+    COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
+    explicit_resume_provider_label,
+};
 use store::{
     ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
     pid_is_running, resolve_source_project_root,
@@ -145,7 +149,7 @@ impl ListenDashboardData {
                 lines.push(format!(
                     "  - {} [{}]{} {}",
                     session.issue_identifier,
-                    session.phase.display_label(),
+                    session.stage_label(),
                     origin_tag,
                     session.summary
                 ));
@@ -163,7 +167,10 @@ impl ListenDashboardData {
         self.sessions
             .iter()
             .filter(|session| match view {
-                SessionListView::Active => !session.phase.is_completed(),
+                SessionListView::Active => {
+                    !session.phase.is_completed() && session.phase != SessionPhase::Blocked
+                }
+                SessionListView::Blocked => session.phase == SessionPhase::Blocked,
                 SessionListView::Completed => session.phase.is_completed(),
             })
             .collect()
@@ -196,6 +203,7 @@ pub struct ListenRuntimeSummary {
 pub(crate) enum SessionListView {
     #[default]
     Active,
+    Blocked,
     Completed,
 }
 
@@ -203,13 +211,15 @@ impl SessionListView {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Active => "Active",
+            Self::Blocked => "Blocked",
             Self::Completed => "Completed",
         }
     }
 
     pub(crate) fn toggle(self) -> Self {
         match self {
-            Self::Active => Self::Completed,
+            Self::Active => Self::Blocked,
+            Self::Blocked => Self::Completed,
             Self::Completed => Self::Active,
         }
     }
@@ -218,6 +228,7 @@ impl SessionListView {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SessionListCounts {
     pub active: usize,
+    pub blocked: usize,
     pub completed: usize,
 }
 
@@ -228,6 +239,8 @@ impl SessionListCounts {
             .fold(Self::default(), |mut counts, session| {
                 if session.phase.is_completed() {
                     counts.completed += 1;
+                } else if session.phase == SessionPhase::Blocked {
+                    counts.blocked += 1;
                 } else {
                     counts.active += 1;
                 }
@@ -349,6 +362,7 @@ impl ListenCycleData {
                         .to_string(),
                     phase: SessionPhase::BriefReady,
                     summary: "Brief ready | backlog MET-14 | worker active".to_string(),
+                    blocked: None,
                     brief_path: Some(format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR)),
                     backlog_issue_identifier: Some("MET-14".to_string()),
                     backlog_issue_title: Some("Technical: Agent Daemon".to_string()),
@@ -404,6 +418,7 @@ impl ListenCycleData {
                         .to_string(),
                     phase: SessionPhase::Claimed,
                     summary: "Claimed | preparing workspace".to_string(),
+                    blocked: None,
                     brief_path: None,
                     backlog_issue_identifier: None,
                     backlog_issue_title: None,
@@ -491,6 +506,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 session_updated_at_epoch_seconds: reference_now - 1_180,
                 phase: SessionPhase::BriefReady,
                 summary: "Brief ready | backlog MET-14 | worker active".to_string(),
+                blocked: None,
                 turns: Some(1),
                 tokens: TokenUsage {
                     input: Some(9_614_112),
@@ -611,6 +627,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 session_updated_at_epoch_seconds: reference_now - 2_940,
                 phase: SessionPhase::Claimed,
                 summary: "Claimed | preparing workspace".to_string(),
+                blocked: None,
                 turns: Some(1),
                 tokens: TokenUsage {
                     input: Some(8_380_959),
@@ -1114,12 +1131,24 @@ fn compact_completed_summary(
     ])
 }
 
-fn compact_blocked_summary(headline: &str, description: Option<&str>, log_path: &Path) -> String {
+fn compact_blocked_summary(
+    blocked: &BlockedReason,
+    description: Option<&str>,
+    log_path: &Path,
+) -> String {
     compact_session_summary([
-        Some(headline.to_string()),
+        Some(blocked.summary_headline()),
         Some(ticket_progress_summary(description)),
         Some(log_reference_summary(log_path)),
     ])
+}
+
+fn blocked_reason(
+    category: BlockedCategory,
+    reason: impl Into<String>,
+    retryable: bool,
+) -> BlockedReason {
+    BlockedReason::new(category, reason, retryable)
 }
 
 fn mark_running_session_stale(
@@ -1133,9 +1162,13 @@ fn mark_running_session_stale(
         .clone()
         .unwrap_or_else(|| fallback_log_path.display().to_string());
     session.phase = SessionPhase::Blocked;
+    session.blocked = Some(blocked_reason(BlockedCategory::Infra, "worker died", true));
     session.log_path = Some(log_path.clone());
     session.summary = compact_session_summary([
-        Some("Blocked | worker died".to_string()),
+        session
+            .blocked
+            .as_ref()
+            .map(BlockedReason::summary_headline),
         Some(format!("stale pid {pid}")),
         Some(log_reference_summary(Path::new(&log_path))),
     ]);
@@ -1342,11 +1375,13 @@ where
             })
             .map(PendingIssue::from)
             .collect::<Vec<_>>();
-        let sessions = state.sorted_sessions();
-        state.pending_issues = pending_issues.clone();
-        state.active_issues = active_issues.clone();
-        state.degraded = None;
-        self.store.save_state(&state)?;
+        let mut persisted_state = self.store.load_state()?;
+        persisted_state.sessions = merge_cycle_sessions(persisted_state.sessions, state.sessions);
+        persisted_state.pending_issues = pending_issues.clone();
+        persisted_state.active_issues = active_issues.clone();
+        persisted_state.degraded = None;
+        self.store.save_state(&persisted_state)?;
+        let sessions = persisted_state.sorted_sessions();
         let session_details = self
             .store
             .load_session_details(&sessions)?
@@ -1619,7 +1654,16 @@ where
                 session.workpad_comment_id.as_deref(),
             ) else {
                 session.phase = SessionPhase::Blocked;
-                session.summary = "Blocked | missing workspace or workpad context".to_string();
+                session.blocked = Some(blocked_reason(
+                    BlockedCategory::Setup,
+                    "missing workspace or workpad context",
+                    false,
+                ));
+                session.summary = session
+                    .blocked
+                    .as_ref()
+                    .map(BlockedReason::summary_headline)
+                    .unwrap_or_else(|| "Blocked".to_string());
                 session.updated_at_epoch_seconds = now_epoch_seconds();
                 reconciled.push(session);
                 continue;
@@ -1628,7 +1672,16 @@ where
             let workspace_path = PathBuf::from(workspace_path);
             if !workspace_path.is_dir() {
                 session.phase = SessionPhase::Blocked;
-                session.summary = "Blocked | workspace missing".to_string();
+                session.blocked = Some(blocked_reason(
+                    BlockedCategory::Setup,
+                    "workspace missing",
+                    false,
+                ));
+                session.summary = session
+                    .blocked
+                    .as_ref()
+                    .map(BlockedReason::summary_headline)
+                    .unwrap_or_else(|| "Blocked".to_string());
                 session.updated_at_epoch_seconds = now_epoch_seconds();
                 reconciled.push(session);
                 continue;
@@ -1638,8 +1691,16 @@ where
             // they require explicit operator takeover through `meta listen sessions resume`.
             if session.origin.is_execute() {
                 session.phase = SessionPhase::Blocked;
+                session.blocked = Some(blocked_reason(
+                    BlockedCategory::Other,
+                    "execute-origin awaiting manual takeover",
+                    false,
+                ));
                 session.summary = compact_session_summary([
-                    Some("Execute-origin | awaiting manual takeover".to_string()),
+                    session
+                        .blocked
+                        .as_ref()
+                        .map(BlockedReason::summary_headline),
                     session
                         .backlog_issue_identifier
                         .as_ref()
@@ -1663,6 +1724,7 @@ where
             ) {
                 Ok(pid) => {
                     session.phase = SessionPhase::Running;
+                    session.blocked = None;
                     session.pid = Some(pid);
                     session.summary = compact_session_summary([
                         Some("Resumed worker".to_string()),
@@ -1683,9 +1745,15 @@ where
                 }
                 Err(_error) => {
                     session.phase = SessionPhase::Blocked;
-                    session.summary = compact_session_summary([Some(
-                        "Blocked | worker resume failed".to_string(),
-                    )]);
+                    session.blocked = Some(blocked_reason(
+                        BlockedCategory::Infra,
+                        "worker resume failed",
+                        true,
+                    ));
+                    session.summary = compact_session_summary([session
+                        .blocked
+                        .as_ref()
+                        .map(BlockedReason::summary_headline)]);
                     session.updated_at_epoch_seconds = now_epoch_seconds();
                     reconciled.push(session);
                 }
@@ -1822,10 +1890,15 @@ where
         let detailed_issue = match self.service.load_issue(&updated_issue.identifier).await {
             Ok(issue) => issue,
             Err(_error) => {
-                return Ok(self.build_session(
+                let blocked = blocked_reason(
+                    BlockedCategory::Infra,
+                    "issue refresh failed before workspace setup",
+                    true,
+                );
+                return Ok(self.build_blocked_session(
                     &updated_issue,
-                    SessionPhase::Blocked,
-                    "Blocked | issue refresh failed before workspace setup".to_string(),
+                    blocked.clone(),
+                    blocked.summary_headline(),
                     SessionArtifacts::default(),
                     updated_at_epoch_seconds,
                 ));
@@ -1843,10 +1916,12 @@ where
         {
             Ok(workspace) => workspace,
             Err(_error) => {
-                return Ok(self.build_session(
+                let blocked =
+                    blocked_reason(BlockedCategory::Setup, "workspace setup failed", false);
+                return Ok(self.build_blocked_session(
                     &detailed_issue,
-                    SessionPhase::Blocked,
-                    "Blocked | workspace setup failed".to_string(),
+                    blocked.clone(),
+                    blocked.summary_headline(),
                     SessionArtifacts::default(),
                     updated_at_epoch_seconds,
                 ));
@@ -1869,11 +1944,12 @@ where
         {
             let log_path = self.agent_log_path(&detailed_issue.identifier);
             let _ = worker::write_preflight_failure(&log_path, &error);
-            return Ok(self.build_session(
+            let blocked = blocked_reason(BlockedCategory::Setup, "missing exec capability", false);
+            return Ok(self.build_blocked_session(
                 &detailed_issue,
-                SessionPhase::Blocked,
+                blocked.clone(),
                 compact_session_summary([
-                    Some("Blocked | missing exec capability".to_string()),
+                    Some(blocked.summary_headline()),
                     Some(truncate_summary(&error.to_string(), 72)),
                 ]),
                 SessionArtifacts {
@@ -1890,10 +1966,11 @@ where
         {
             Ok(backlog_issue) => backlog_issue,
             Err(_error) => {
-                return Ok(self.build_session(
+                let blocked = blocked_reason(BlockedCategory::Setup, "backlog setup failed", false);
+                return Ok(self.build_blocked_session(
                     &detailed_issue,
-                    SessionPhase::Blocked,
-                    "Blocked | backlog setup failed".to_string(),
+                    blocked.clone(),
+                    blocked.summary_headline(),
                     SessionArtifacts {
                         workspace: Some(&workspace),
                         ..SessionArtifacts::default()
@@ -1911,10 +1988,15 @@ where
         {
             Ok(summary) => summary,
             Err(_error) => {
-                return Ok(self.build_session(
+                let blocked = blocked_reason(
+                    BlockedCategory::Setup,
+                    "attachment context setup failed",
+                    false,
+                );
+                return Ok(self.build_blocked_session(
                     &detailed_issue,
-                    SessionPhase::Blocked,
-                    "Blocked | attachment context setup failed".to_string(),
+                    blocked.clone(),
+                    blocked.summary_headline(),
                     SessionArtifacts {
                         backlog_issue: Some(&backlog_issue.issue),
                         backlog_path: Some(backlog_issue.issue_dir.display().to_string()),
@@ -1957,11 +2039,13 @@ where
             {
                 Ok(comment) => comment,
                 Err(_error) => {
-                    return Ok(self.build_session(
+                    let blocked =
+                        blocked_reason(BlockedCategory::Infra, "workpad sync failed", true);
+                    return Ok(self.build_blocked_session(
                         &detailed_issue,
-                        SessionPhase::Blocked,
+                        blocked.clone(),
                         compact_session_summary([
-                            Some("Blocked | workpad sync failed".to_string()),
+                            Some(blocked.summary_headline()),
                             Some("local backlog".to_string()),
                         ]),
                         SessionArtifacts {
@@ -2000,24 +2084,27 @@ where
                 },
                 updated_at_epoch_seconds,
             )),
-            Err(_error) => Ok(self.build_session(
-                &detailed_issue,
-                SessionPhase::Blocked,
-                compact_session_summary([
-                    Some("Blocked | worker launch failed".to_string()),
-                    Some("local backlog".to_string()),
-                ]),
-                SessionArtifacts {
-                    brief_path,
-                    backlog_issue: Some(&backlog_issue.issue),
-                    backlog_path: Some(backlog_issue.issue_dir.display().to_string()),
-                    workspace: Some(&workspace),
-                    workpad_comment: Some(&workpad_comment),
-                    log_path: Some(log_path.display().to_string()),
-                    ..SessionArtifacts::default()
-                },
-                updated_at_epoch_seconds,
-            )),
+            Err(_error) => {
+                let blocked = blocked_reason(BlockedCategory::Infra, "worker launch failed", true);
+                Ok(self.build_blocked_session(
+                    &detailed_issue,
+                    blocked.clone(),
+                    compact_session_summary([
+                        Some(blocked.summary_headline()),
+                        Some("local backlog".to_string()),
+                    ]),
+                    SessionArtifacts {
+                        brief_path,
+                        backlog_issue: Some(&backlog_issue.issue),
+                        backlog_path: Some(backlog_issue.issue_dir.display().to_string()),
+                        workspace: Some(&workspace),
+                        workpad_comment: Some(&workpad_comment),
+                        log_path: Some(log_path.display().to_string()),
+                        ..SessionArtifacts::default()
+                    },
+                    updated_at_epoch_seconds,
+                ))
+            }
         }
     }
 
@@ -2138,6 +2225,7 @@ where
             issue_url: issue.url.clone(),
             phase,
             summary,
+            blocked: None,
             brief_path: artifacts.brief_path,
             backlog_issue_identifier: artifacts
                 .backlog_issue
@@ -2165,6 +2253,25 @@ where
             log_path: artifacts.log_path,
             origin: SessionOrigin::Listen,
         }
+    }
+
+    fn build_blocked_session(
+        &self,
+        issue: &IssueSummary,
+        blocked: BlockedReason,
+        summary: String,
+        artifacts: SessionArtifacts<'_>,
+        updated_at_epoch_seconds: u64,
+    ) -> AgentSession {
+        let mut session = self.build_session(
+            issue,
+            SessionPhase::Blocked,
+            summary,
+            artifacts,
+            updated_at_epoch_seconds,
+        );
+        session.blocked = Some(blocked);
+        session
     }
 
     fn spawn_listen_worker(
@@ -2266,6 +2373,74 @@ where
             .context("failed to launch the hidden listen worker")?;
 
         Ok(child.id())
+    }
+}
+
+fn merge_cycle_sessions(
+    persisted_sessions: Vec<AgentSession>,
+    daemon_sessions: Vec<AgentSession>,
+) -> Vec<AgentSession> {
+    let mut merged = persisted_sessions;
+    for daemon_session in daemon_sessions {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|session| session.issue_matches(&daemon_session.issue_identifier))
+        {
+            if should_replace_persisted_session(existing, &daemon_session) {
+                *existing = daemon_session;
+            }
+        } else {
+            merged.push(daemon_session);
+        }
+    }
+    merged
+}
+
+fn should_replace_persisted_session(
+    persisted_session: &AgentSession,
+    daemon_session: &AgentSession,
+) -> bool {
+    match daemon_session
+        .updated_at_epoch_seconds
+        .cmp(&persisted_session.updated_at_epoch_seconds)
+    {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            session_progress_rank(daemon_session) > session_progress_rank(persisted_session)
+        }
+    }
+}
+
+fn session_progress_rank(session: &AgentSession) -> (u8, u32, u64, u8, u8, u8, u8, u8, u8, u8, u8) {
+    (
+        session_phase_rank(session.phase),
+        session.turns.unwrap_or_default(),
+        session.canonical.tokens.total().unwrap_or_default(),
+        u8::from(session.canonical.provider.is_some()),
+        u8::from(session.canonical.model.is_some()),
+        u8::from(session.canonical.reasoning.is_some()),
+        u8::from(session.latest_resume_handle.is_some()),
+        u8::from(session.session_id.is_some()),
+        u8::from(session.pending_linear_sync.is_some()),
+        u8::from(session.last_timeout.is_some()),
+        u8::from(session.blocked.is_some()),
+    )
+}
+
+fn session_phase_rank(phase: SessionPhase) -> u8 {
+    match phase {
+        SessionPhase::Claimed => 0,
+        SessionPhase::BriefReady => 1,
+        SessionPhase::Running => 2,
+        SessionPhase::Reviewing => 3,
+        SessionPhase::FinalReview => 4,
+        SessionPhase::Verifying => 5,
+        SessionPhase::Validating => 6,
+        SessionPhase::Publishing => 7,
+        SessionPhase::Paused => 8,
+        SessionPhase::Blocked => 9,
+        SessionPhase::Completed => 10,
     }
 }
 
@@ -2720,7 +2895,7 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     for project in projects {
         let latest = project.latest_session.as_ref();
         let phase = latest
-            .map(|session| session.phase.display_label().to_string())
+            .map(AgentSession::stage_label)
             .unwrap_or_else(|| "Idle".to_string());
         let updated = latest
             .map(|session| format_duration(now.saturating_sub(session.updated_at_epoch_seconds)))
@@ -2794,9 +2969,18 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push("Latest session:".to_string());
         lines.push(format!("  - Issue: {}", session.issue_identifier));
         lines.push(format!("  - Title: {}", session.issue_title));
-        lines.push(format!("  - Phase: {}", session.phase.display_label()));
+        lines.push(format!("  - Phase: {}", session.stage_label()));
         lines.push(format!("  - Origin: {}", session.origin_label()));
         lines.push(format!("  - Summary: {}", session.summary));
+        if let Some(category) = session.blocked_category_label() {
+            lines.push(format!("  - Blocked category: {category}"));
+        }
+        if let Some(retryable) = session.blocked_retry_label() {
+            lines.push(format!("  - Blocked retryable: {retryable}"));
+        }
+        if let Some(action) = session.blocked_suggested_action() {
+            lines.push(format!("  - Blocked action: {action}"));
+        }
         lines.push(format!("  - PR: {}", session.pull_request_label()));
         lines.push(format!(
             "  - Tokens: {}",
@@ -2813,7 +2997,10 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         if let Some(reasoning) = session.canonical.reasoning.as_deref() {
             lines.push(format!("  - Reasoning: {reasoning}"));
         }
-        lines.push(format!("  - Resume provider: {}", session.provider_label()));
+        lines.push(format!(
+            "  - Resume provider: {}",
+            explicit_resume_provider_label(session.latest_resume_handle.as_ref())
+        ));
         lines.push(format!(
             "  - Resume ID: {}",
             explicit_resume_id_label(session.latest_resume_handle.as_ref())
@@ -2849,7 +3036,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
             lines.push(format!(
                 "  - {} [{}] {} | tokens {}{}",
                 session.issue_identifier,
-                session.phase.display_label(),
+                session.stage_label(),
                 session.summary,
                 session.canonical_tokens().display_compact(),
                 pending_sync
@@ -2892,6 +3079,20 @@ fn append_session_inspect_detail_lines(
         "  - Detail tokens: {}",
         detail_tokens(detail).display_compact()
     ));
+    if let Some(blocked) = detail.blocked.as_ref() {
+        lines.push(format!(
+            "  - Detail blocked category: {}",
+            blocked.category_label()
+        ));
+        lines.push(format!(
+            "  - Detail blocked retryable: {}",
+            if blocked.retryable { "yes" } else { "no" }
+        ));
+        lines.push(format!(
+            "  - Detail blocked action: {}",
+            blocked.suggested_action()
+        ));
+    }
     lines.push(format!(
         "  - Detail resume ID: {}",
         explicit_resume_id_label(detail.latest_resume_handle.as_ref())
@@ -3109,13 +3310,7 @@ pub fn run_listen_session_clear(args: &ListenSessionClearArgs) -> Result<String>
     let cleared = outcome
         .cleared_sessions
         .iter()
-        .map(|session| {
-            format!(
-                "{} [{}]",
-                session.issue_identifier,
-                session.phase.display_label()
-            )
-        })
+        .map(|session| format!("{} [{}]", session.issue_identifier, session.stage_label()))
         .collect::<Vec<_>>()
         .join(", ");
     Ok(format!(
@@ -3332,6 +3527,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         issue_url: detailed_issue.url.clone(),
         phase: SessionPhase::Running,
         summary: compact_pickup_summary(workpad_reused, &attachment_context, pid),
+        blocked: None,
         brief_path,
         backlog_issue_identifier: Some(backlog_issue.issue.identifier.clone()),
         backlog_issue_title: Some(backlog_issue.issue.title.clone()),
@@ -4063,17 +4259,19 @@ fn build_dashboard_data(
         scope: cycle.scope.clone(),
         watch_scope: cycle.watch_scope.clone(),
         cycle_summary: format!(
-            "{} pending, {} active / {} completed sessions, {} claimed this cycle",
+            "{} pending, {} active / {} blocked / {} completed sessions, {} claimed this cycle",
             cycle.pending_issues.len(),
             session_counts.active,
+            session_counts.blocked,
             session_counts.completed,
             cycle.claimed_this_cycle
         ),
         vim_mode: runtime.vim_mode,
         runtime: ListenRuntimeSummary {
             agents: format!(
-                "{} active / {} completed / {} queued",
+                "{} active / {} blocked / {} completed / {} queued",
                 session_counts.active,
+                session_counts.blocked,
                 session_counts.completed,
                 cycle.pending_issues.len()
             ),
@@ -4569,12 +4767,12 @@ impl Drop for TerminalCleanup {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDaemon, AgentSession, CanonicalSessionData, DashboardRuntimeContext,
-        IN_PROGRESS_STATE, ListenCycleData, ListenState, PullRequestSummary, SessionOrigin,
-        SessionPhase, TODO_STATE, TokenUsage, capture_workspace_snapshot, compact_identifier,
-        format_duration, format_number, listen_browser_action, listen_scope_label,
-        mark_running_session_stale, render_agent_prompt, render_continuation_prompt,
-        required_label_skip_reason,
+        AgentDaemon, AgentSession, BlockedCategory, CanonicalSessionData, DashboardRuntimeContext,
+        IN_PROGRESS_STATE, ListenCycleData, ListenState, PullRequestSummary, SessionListCounts,
+        SessionOrigin, SessionPhase, TODO_STATE, TokenUsage, blocked_reason,
+        capture_workspace_snapshot, compact_identifier, format_duration, format_number,
+        listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
+        render_continuation_prompt, required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -4763,6 +4961,7 @@ suffix
                 issue_url: "https://linear.app/issues/ENG-1".to_string(),
                 phase: SessionPhase::Running,
                 summary: "running".to_string(),
+                blocked: None,
                 brief_path: None,
                 backlog_issue_identifier: None,
                 backlog_issue_title: None,
@@ -4796,6 +4995,7 @@ suffix
                 issue_url: "https://linear.app/issues/ENG-2".to_string(),
                 phase: SessionPhase::Completed,
                 summary: "done".to_string(),
+                blocked: None,
                 brief_path: None,
                 backlog_issue_identifier: None,
                 backlog_issue_title: None,
@@ -4839,6 +5039,7 @@ suffix
             issue_url: "https://linear.app/issues/ENG-1".to_string(),
             phase: SessionPhase::Running,
             summary: "running".to_string(),
+            blocked: None,
             brief_path: None,
             backlog_issue_identifier: None,
             backlog_issue_title: None,
@@ -4888,6 +5089,7 @@ suffix
                     issue_url: "https://linear.app/issues/ENG-1".to_string(),
                     phase: SessionPhase::Running,
                     summary: "running".to_string(),
+                    blocked: None,
                     brief_path: None,
                     backlog_issue_identifier: None,
                     backlog_issue_title: None,
@@ -4927,6 +5129,7 @@ suffix
                     issue_url: "https://linear.app/issues/ENG-2".to_string(),
                     phase: SessionPhase::Completed,
                     summary: "done".to_string(),
+                    blocked: None,
                     brief_path: None,
                     backlog_issue_identifier: None,
                     backlog_issue_title: None,
@@ -4966,6 +5169,7 @@ suffix
                     issue_url: "https://linear.app/issues/ENG-3".to_string(),
                     phase: SessionPhase::Blocked,
                     summary: "blocked".to_string(),
+                    blocked: None,
                     brief_path: None,
                     backlog_issue_identifier: None,
                     backlog_issue_title: None,
@@ -5028,6 +5232,7 @@ suffix
                 issue_url: "https://linear.app/issues/ENG-1".to_string(),
                 phase: SessionPhase::Running,
                 summary: "running".to_string(),
+                blocked: None,
                 brief_path: None,
                 backlog_issue_identifier: None,
                 backlog_issue_title: None,
@@ -5103,6 +5308,138 @@ suffix
     }
 
     #[test]
+    fn session_counts_split_active_blocked_and_completed() {
+        let mut cycle = ListenCycleData::demo(
+            Path::new("."),
+            format!(
+                "{}/agents/sessions/listen-state.json",
+                crate::branding::PROJECT_DIR
+            ),
+        );
+        let blocked = blocked_reason(BlockedCategory::Infra, "pending Linear sync", true);
+        cycle.sessions[1].phase = SessionPhase::Blocked;
+        cycle.sessions[1].summary = blocked.summary_headline();
+        cycle.sessions[1].blocked = Some(blocked);
+        cycle.sessions.push(AgentSession {
+            issue_id: Some("issue-3".to_string()),
+            issue_identifier: "MET-33".to_string(),
+            issue_title: "Completed ticket".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/metastack-backlog/issue/MET-33/completed".to_string(),
+            phase: SessionPhase::Completed,
+            summary: "Complete".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1_773_575_540,
+            pid: None,
+            session_id: None,
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: None,
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            origin: SessionOrigin::Listen,
+        });
+
+        let counts = SessionListCounts::from_sessions(&cycle.sessions);
+        assert_eq!(counts.active, 1);
+        assert_eq!(counts.blocked, 1);
+        assert_eq!(counts.completed, 1);
+
+        let runtime = DashboardRuntimeContext {
+            started_at_epoch_seconds: 1_773_568_249,
+            now_epoch_seconds: 1_773_575_600,
+            poll_interval_seconds: 7,
+            dashboard_label: "terminal summary",
+            dashboard_refresh_seconds: 1,
+            linear_refresh_seconds: 15,
+            vim_mode: false,
+            show_active_issues: true,
+            show_preview: true,
+            resolved_agent: Some("claude".to_string()),
+        };
+        let dashboard = super::build_dashboard_data(&cycle, &runtime);
+
+        assert!(
+            dashboard
+                .cycle_summary
+                .contains("1 active / 1 blocked / 1 completed sessions")
+        );
+        assert_eq!(
+            dashboard.runtime.agents,
+            "1 active / 1 blocked / 1 completed / 1 queued"
+        );
+    }
+
+    #[test]
+    fn merge_cycle_sessions_preserves_richer_worker_updates() {
+        let daemon_session = AgentSession {
+            issue_id: Some("issue-64".to_string()),
+            issue_identifier: "MET-64".to_string(),
+            issue_title: "Builtin Claude listen agent".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/64".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1_773_575_600,
+            pid: Some(42),
+            session_id: None,
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: None,
+            turns: Some(0),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            origin: SessionOrigin::Listen,
+        };
+        let mut worker_session = daemon_session.clone();
+        worker_session.turns = Some(1);
+        worker_session.canonical = CanonicalSessionData {
+            provider: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("high".to_string()),
+            tokens: TokenUsage {
+                input: Some(210),
+                output: Some(34),
+            },
+            repair: None,
+        };
+
+        let merged =
+            super::merge_cycle_sessions(vec![worker_session.clone()], vec![daemon_session]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].turns, Some(1));
+        assert_eq!(merged[0].canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(merged[0].canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(merged[0].canonical.reasoning.as_deref(), Some("high"));
+        assert_eq!(merged[0].canonical.tokens.input, Some(210));
+        assert_eq!(merged[0].canonical.tokens.output, Some(34));
+    }
+
+    #[test]
     fn parse_codex_thread_id_from_log_reads_latest_started_event() -> Result<()> {
         let temp = tempdir()?;
         let log_path = temp.path().join("MET-7.log");
@@ -5145,6 +5482,7 @@ suffix
             issue_url: "https://linear.app/issues/ENG-9".to_string(),
             phase: SessionPhase::Running,
             summary: "running".to_string(),
+            blocked: None,
             brief_path: None,
             backlog_issue_identifier: None,
             backlog_issue_title: None,
@@ -5199,6 +5537,7 @@ suffix
             issue_url: "https://linear.app/issues/ENG-10".to_string(),
             phase: SessionPhase::Running,
             summary: "running".to_string(),
+            blocked: None,
             brief_path: None,
             backlog_issue_identifier: None,
             backlog_issue_title: None,
@@ -5362,6 +5701,7 @@ suffix
             issue_url: "https://linear.app/issues/eng-10163".to_string(),
             phase: SessionPhase::Running,
             summary: "Running".to_string(),
+            blocked: None,
             brief_path: Some(format!(
                 "{}/agents/briefs/ENG-10163.md",
                 crate::branding::PROJECT_DIR
@@ -5926,6 +6266,7 @@ suffix
             issue_url: issue.url.clone(),
             phase: SessionPhase::Running,
             summary: "turn 1/20".to_string(),
+            blocked: None,
             brief_path: None,
             backlog_issue_identifier: None,
             backlog_issue_title: None,
@@ -6036,6 +6377,7 @@ suffix
             issue_url: issue.url.clone(),
             phase: SessionPhase::Blocked,
             summary: "Blocked | waiting for follow-up".to_string(),
+            blocked: None,
             brief_path: None,
             backlog_issue_identifier: None,
             backlog_issue_title: None,
@@ -6129,6 +6471,7 @@ suffix
             issue_url: issue.url.clone(),
             phase: SessionPhase::Completed,
             summary: "Complete".to_string(),
+            blocked: None,
             brief_path: None,
             backlog_issue_identifier: None,
             backlog_issue_title: None,

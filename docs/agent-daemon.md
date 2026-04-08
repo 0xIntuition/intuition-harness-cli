@@ -107,7 +107,15 @@ Primary options:
   falling back to a legacy `session_id`.
 - `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
   `--all`; it refuses to remove any targeted record whose stored PID is still alive.
-- Live dashboard keys: `Tab` toggles between active and completed sessions, `Left` selects active sessions, `Right` selects completed sessions, `Up` / `Down` move the selected row, `Enter` toggles the selected-session detail pane, `Esc` / `Backspace` close detail mode, `PgUp` / `PgDn` scroll the detail pane, `P` pauses the selected running worker, `R` resumes a paused worker or retries a blocked session, `Ctrl+Y` copies the focused pane with the shared export fallback, and `q` / `Ctrl-C` exits.
+- `listen sessions list` and `inspect` surface the structured blocked taxonomy when it is present:
+  blocked stages render as `Setup Err`, `Turn Err`, `Gate Err`, or `Infra Err`, while legacy
+  sessions without blocked metadata stay on the generic `Blocked` fallback.
+- Live dashboard keys: `Tab` toggles between panes or session views, `Left` cycles toward active
+  sessions, `Right` cycles toward blocked and completed sessions, `Up` / `Down` move the selected
+  row, `Enter` toggles the selected-session detail pane, `Esc` / `Backspace` close detail mode,
+  `PgUp` / `PgDn` scroll the detail pane, `P` pauses the selected running worker, `R` resumes a
+  paused worker or retries a blocked session, `Ctrl+Y` copies the focused pane with the shared
+  export fallback, and `q` / `Ctrl-C` exits.
 
 Examples:
 
@@ -156,7 +164,9 @@ log and `meta listen sessions inspect --turns` share one source of truth for tur
 The built-in capture path is timeout-aware and no longer waits for provider stdout to reach EOF
 before the worker can recover. Timeout summaries are mirrored into session detail, dashboard
 detail, and textual inspect output as `Last timeout`, while repeated no-progress completed turns
-continue to surface as stall summaries.
+continue to surface as stall summaries. Blocked sessions now also persist one additive blocked
+contract with category, reason, and retryable status so session list rows, textual inspect output,
+and the selected-session `Block Detail` pane stay aligned.
 Listen-mode built-in launches also switch to machine-readable provider output so the worker can
 capture the latest provider-native resume target for the current turn. Codex uses
 `codex exec --json`, Claude uses `claude -p --verbose --output-format=stream-json`, and both

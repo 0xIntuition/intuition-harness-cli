@@ -19,9 +19,10 @@ use crate::session_runtime::{
 };
 
 use super::state::{
-    AgentSession, COMPLETED_SESSION_TTL_SECONDS, CanonicalRepairRecord, CanonicalRepairStatus,
-    CanonicalSessionData, LatestResumeHandle, ListenState, PendingLinearSync, PullRequestStatus,
-    PullRequestSummary, SessionPhase, TokenUsage, TurnTokenSnapshot,
+    AgentSession, BlockedReason, COMPLETED_SESSION_TTL_SECONDS, CanonicalRepairRecord,
+    CanonicalRepairStatus, CanonicalSessionData, LatestResumeHandle, ListenState,
+    PendingLinearSync, PullRequestStatus, PullRequestSummary, SessionPhase, TokenUsage,
+    TurnTokenSnapshot,
 };
 use super::verification::{VerificationReport, VerificationSummary};
 
@@ -167,6 +168,8 @@ pub(crate) struct ListenSessionDetail {
     pub(super) session_updated_at_epoch_seconds: u64,
     pub(super) phase: SessionPhase,
     pub(super) summary: String,
+    #[serde(default)]
+    pub blocked: Option<BlockedReason>,
     #[serde(default)]
     pub turns: Option<u32>,
     #[serde(default)]
@@ -382,6 +385,7 @@ impl ListenProjectStore {
             return Ok(false);
         };
         session.phase = SessionPhase::BriefReady;
+        session.blocked = None;
         session.pid = None;
         session.summary = "Retrying from previous workspace state".to_string();
         session.updated_at_epoch_seconds = now_epoch_seconds();
@@ -406,6 +410,7 @@ impl ListenProjectStore {
         }
         send_process_signal(pid, ProcessSignal::Pause)?;
         session.phase = SessionPhase::Paused;
+        session.blocked = None;
         session.summary = compact_session_summary([
             Some("Paused by operator".to_string()),
             Some(format!("pid {pid}")),
@@ -436,6 +441,7 @@ impl ListenProjectStore {
         }
         send_process_signal(pid, ProcessSignal::Resume)?;
         session.phase = SessionPhase::Running;
+        session.blocked = None;
         session.summary = compact_session_summary([
             Some("Resumed by operator".to_string()),
             Some(format!("pid {pid}")),
@@ -779,6 +785,7 @@ impl ListenProjectStore {
                 session_updated_at_epoch_seconds: session.updated_at_epoch_seconds,
                 phase: session.phase,
                 summary: session.summary.clone(),
+                blocked: session.blocked.clone(),
                 turns: session.turns,
                 tokens: session.tokens.clone(),
                 turn_history: session.turn_history.clone(),
@@ -801,6 +808,7 @@ impl ListenProjectStore {
         detail.session_updated_at_epoch_seconds = session.updated_at_epoch_seconds;
         detail.phase = session.phase;
         detail.summary = session.summary.clone();
+        detail.blocked = session.blocked.clone();
         detail.turns = session.turns;
         detail.tokens = session.tokens.clone();
         detail.turn_history = session.turn_history.clone();
@@ -1706,6 +1714,7 @@ mod tests {
             issue_url: format!("https://linear.app/metastack/{issue_identifier}"),
             phase,
             summary: format!("{issue_identifier} summary"),
+            blocked: None,
             brief_path: Some(format!(
                 "{}/agents/briefs/{issue_identifier}.md",
                 crate::branding::PROJECT_DIR
@@ -1949,6 +1958,7 @@ mod tests {
                 session_updated_at_epoch_seconds: 100,
                 phase: SessionPhase::Completed,
                 summary: "detail without state".to_string(),
+                blocked: None,
                 turns: Some(1),
                 tokens: TokenUsage::default(),
                 turn_history: Vec::new(),

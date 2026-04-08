@@ -235,6 +235,8 @@ The install-scoped listen store also carries:
 
 - degraded Linear state, including failure kind, failure message, and retry timing
 - deferred worker-side `pending_linear_sync` metadata for replayable remote operations
+- optional blocked-session taxonomy metadata with category, reason, and retryable status so
+  blocked rows, textual inspect output, and selected-session detail all render from one contract
 - the latest timeout snapshot for a timed-out worker turn, including turn number, elapsed time,
   timeout limit, PID, graceful-shutdown window, and final termination path
 

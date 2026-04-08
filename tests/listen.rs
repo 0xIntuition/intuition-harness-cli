@@ -841,6 +841,9 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
                     "provider": "codex",
                     "id": "019d0763-afc9-70d1-8022-51624918cf76"
                 },
+                "canonical": {
+                    "provider": "claude"
+                },
                 "turns": 2,
                 "tokens": {
                     "input": 210,
@@ -878,7 +881,7 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .success()
         .stdout(predicate::str::contains("PROVIDER"))
         .stdout(predicate::str::contains("RESUME ID"))
-        .stdout(predicate::str::contains("codex"))
+        .stdout(predicate::str::contains("claude"))
         .stdout(predicate::str::contains(
             "019d0763-afc9-70d1-8022-51624918cf76",
         ));
@@ -897,6 +900,7 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .success()
         .stdout(predicate::str::contains("Latest session:"))
         .stdout(predicate::str::contains("Detail file:"))
+        .stdout(predicate::str::contains("Provider: claude"))
         .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
         .stdout(predicate::str::contains("Resume provider: codex"))
         .stdout(predicate::str::contains(
@@ -981,6 +985,116 @@ fn listen_sessions_list_and_inspect_show_explicit_unavailable_resume_metadata()
         .stdout(predicate::str::contains("Resume provider: unavailable"))
         .stdout(predicate::str::contains("Resume ID: unavailable"))
         .stdout(predicate::str::contains("legacy-session-should-not-surface").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_list_and_inspect_keep_legacy_blocked_fallback_without_metadata()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut session = listen_session_json("ENG-10184", "blocked", 1_773_575_100, None);
+    session["summary"] = json!("Blocked | workspace missing");
+    write_listen_store_session(&config_path, &repo_root, vec![session])?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Blocked"))
+        .stdout(predicate::str::contains("Setup Err").not());
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Phase: Blocked"))
+        .stdout(predicate::str::contains("Blocked category").not());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_sessions_list_and_inspect_surface_structured_blocked_category()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let mut session = listen_session_json("ENG-10185", "blocked", 1_773_575_100, None);
+    session["summary"] = json!("Blocked | workspace missing");
+    session["blocked"] = json!({
+        "category": "setup",
+        "reason": "workspace missing",
+        "retryable": false
+    });
+    write_listen_store_session(&config_path, &repo_root, vec![session])?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Setup Err"));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Phase: Setup Err"))
+        .stdout(predicate::str::contains("Blocked category: Setup"))
+        .stdout(predicate::str::contains("Blocked retryable: no"))
+        .stdout(predicate::str::contains("ENG-10185 [Setup Err]"));
 
     Ok(())
 }
@@ -6945,10 +7059,31 @@ sleep 5
     assert!(state.contains("turn 2 timeout"));
     assert!(state.contains("claude-timeout-session-2"));
     assert!(!state.to_ascii_lowercase().contains("stalled"));
+    let state_json: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(
+        state_json["sessions"][0]["blocked"]["category"],
+        json!("turn")
+    );
+    let state_blocked_reason = state_json["sessions"][0]["blocked"]["reason"]
+        .as_str()
+        .expect("blocked reason should be a string");
+    assert!(state_blocked_reason.contains("turn 2 timeout | elapsed 1s | limit 1s | pid "));
+    assert!(state_blocked_reason.ends_with(" | sigterm"));
+    assert_eq!(
+        state_json["sessions"][0]["blocked"]["retryable"],
+        json!(false)
+    );
 
     let detail_path = listen_detail_path(&config_path, &repo_root, "MET-32")?;
     let detail: serde_json::Value = serde_json::from_slice(&fs::read(&detail_path)?)?;
     assert_eq!(detail["phase"], json!("blocked"));
+    assert_eq!(detail["blocked"]["category"], json!("turn"));
+    let detail_blocked_reason = detail["blocked"]["reason"]
+        .as_str()
+        .expect("detail blocked reason should be a string");
+    assert!(detail_blocked_reason.contains("turn 2 timeout | elapsed 1s | limit 1s | pid "));
+    assert!(detail_blocked_reason.ends_with(" | sigterm"));
+    assert_eq!(detail["blocked"]["retryable"], json!(false));
     assert_eq!(detail["last_timeout"]["turn"], json!(2));
     assert_eq!(detail["last_timeout"]["timeout_seconds"], json!(1));
     assert_eq!(
@@ -6976,6 +7111,33 @@ sleep 5
         "detail={detail}"
     );
     assert!(!detail.to_string().to_ascii_lowercase().contains("stalled"));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Turn Err"));
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Phase: Turn Err"))
+        .stdout(predicate::str::contains("Blocked category: Turn"))
+        .stdout(predicate::str::contains("Detail blocked category: Turn"))
+        .stdout(predicate::str::contains(
+            "Detail last timeout: turn 2 timeout",
+        ));
 
     Ok(())
 }
