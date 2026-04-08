@@ -544,17 +544,23 @@ pub struct AgentSession {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Categorizes the primary reason a listen session is blocked.
 pub enum BlockedCategory {
+    /// Missing setup prerequisites blocked the session before useful execution could continue.
     Setup,
+    /// A worker turn failed or exhausted its available execution budget.
     Turn,
+    /// Review, verification, or validation gates blocked the session.
     Gate,
+    /// Infrastructure, dependency, or orchestration recovery blocked the session.
     Infra,
+    /// The session is blocked for a reason that does not fit one of the explicit categories.
     #[default]
     Other,
 }
 
 impl BlockedCategory {
-    pub fn display_label(self) -> &'static str {
+    fn display_label(self) -> &'static str {
         match self {
             Self::Setup => "Setup",
             Self::Turn => "Turn",
@@ -564,7 +570,7 @@ impl BlockedCategory {
         }
     }
 
-    pub fn stage_label(self) -> &'static str {
+    fn stage_label(self) -> &'static str {
         match self {
             Self::Setup => "Setup Err",
             Self::Turn => "Turn Err",
@@ -603,14 +609,22 @@ impl BlockedCategory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Persists the structured blocked taxonomy alongside a blocked listen session.
 pub struct BlockedReason {
+    /// The high-level blocked category used for labels and summary counts.
     pub category: BlockedCategory,
+    /// The human-readable explanation for the current blocked condition.
     pub reason: String,
+    /// Whether the blocked condition is safe to retry without prerequisite changes.
     pub retryable: bool,
 }
 
 impl BlockedReason {
-    pub fn new(category: BlockedCategory, reason: impl Into<String>, retryable: bool) -> Self {
+    pub(super) fn new(
+        category: BlockedCategory,
+        reason: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
         Self {
             category,
             reason: reason.into(),
@@ -618,7 +632,7 @@ impl BlockedReason {
         }
     }
 
-    pub fn summary_headline(&self) -> String {
+    pub(super) fn summary_headline(&self) -> String {
         let reason = self.reason.trim();
         if reason.is_empty() {
             "Blocked".to_string()
@@ -627,15 +641,15 @@ impl BlockedReason {
         }
     }
 
-    pub fn stage_label(&self) -> &'static str {
+    pub(super) fn stage_label(&self) -> &'static str {
         self.category.stage_label()
     }
 
-    pub fn category_label(&self) -> &'static str {
+    pub(super) fn category_label(&self) -> &'static str {
         self.category.display_label()
     }
 
-    pub fn suggested_action(&self) -> &'static str {
+    pub(super) fn suggested_action(&self) -> &'static str {
         self.category.suggested_action(self.retryable)
     }
 }
