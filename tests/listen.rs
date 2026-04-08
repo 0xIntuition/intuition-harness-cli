@@ -103,6 +103,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
   count=0
+  exit_code=0
   if [ -f "$checks_file" ]; then
     count=$(cat "$checks_file")
   fi
@@ -115,16 +116,19 @@ if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
     fail-once)
       if [ "$count" -eq 1 ]; then
         printf '%s' '[{{"name":"ci / quality","state":"FAILURE","bucket":"fail","description":"quality gate failed","link":"https://github.com/example/repo/actions/runs/1"}}]'
+        exit_code=1
       else
         printf '%s' '[]'
       fi
       ;;
     fail-always)
       printf '%s' '[{{"name":"ci / quality","state":"FAILURE","bucket":"fail","description":"quality gate failed","link":"https://github.com/example/repo/actions/runs/1"}}]'
+      exit_code=1
       ;;
     pending-then-pass)
       if [ "$count" -eq 1 ]; then
         printf '%s' '[{{"name":"ci / quality","state":"IN_PROGRESS","bucket":"pending","description":"quality gate still running","link":"https://github.com/example/repo/actions/runs/1"}}]'
+        exit_code=8
       else
         printf '%s' '[{{"name":"ci / quality","state":"SUCCESS","bucket":"pass","description":"quality gate passed","link":"https://github.com/example/repo/actions/runs/1"}}]'
       fi
@@ -132,20 +136,23 @@ if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
     pending-then-fail)
       if [ "$count" -eq 1 ]; then
         printf '%s' '[{{"name":"ci / quality","state":"IN_PROGRESS","bucket":"pending","description":"quality gate still running","link":"https://github.com/example/repo/actions/runs/1"}}]'
+        exit_code=8
       elif [ "$count" -eq 2 ]; then
         printf '%s' '[{{"name":"ci / quality","state":"FAILURE","bucket":"fail","description":"quality gate failed","link":"https://github.com/example/repo/actions/runs/1"}}]'
+        exit_code=1
       else
         printf '%s' '[]'
       fi
       ;;
     pending-always)
       printf '%s' '[{{"name":"ci / quality","state":"IN_PROGRESS","bucket":"pending","description":"quality gate still running","link":"https://github.com/example/repo/actions/runs/1"}}]'
+      exit_code=8
       ;;
     *)
       printf '%s' '[]'
       ;;
   esac
-  exit 0
+  exit "$exit_code"
 fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
   exit 0

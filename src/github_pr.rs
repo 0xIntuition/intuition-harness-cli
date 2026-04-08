@@ -521,21 +521,29 @@ impl GhCli {
         workspace_path: &Path,
         number: u64,
     ) -> Result<PullRequestChecksSnapshot> {
-        let checks = self
-            .run_json::<Vec<RawPullRequestCheck>>(
-                workspace_path,
-                &[
-                    "pr",
-                    "checks",
-                    &number.to_string(),
-                    "--json",
-                    "name,state,bucket,description,link",
-                ],
-            )?
-            .into_iter()
-            .map(PullRequestCheck::from)
-            .collect();
-        Ok(PullRequestChecksSnapshot::from_checks(checks))
+        let args = [
+            "pr",
+            "checks",
+            &number.to_string(),
+            "--json",
+            "name,state,bucket,description,link",
+        ];
+        let output = Command::new("gh")
+            .args(args)
+            .current_dir(workspace_path)
+            .output()
+            .with_context(|| format!("failed to run `gh {}`", args.join(" ")))?;
+        let exit_code = output
+            .status
+            .code()
+            .ok_or_else(|| anyhow!("gh {} terminated without an exit code", args.join(" ")))?;
+
+        decode_pull_request_checks_snapshot(
+            &args.join(" "),
+            exit_code,
+            &output.stdout,
+            &output.stderr,
+        )
     }
 
     fn find_open_branch_pull_request_raw(
@@ -563,6 +571,45 @@ impl GhCli {
     }
 }
 
+fn decode_pull_request_checks_snapshot(
+    command_display: &str,
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<PullRequestChecksSnapshot> {
+    let stderr_text = String::from_utf8_lossy(stderr).trim().to_string();
+    if stdout.is_empty() {
+        if stderr_text.is_empty() {
+            bail!("gh {command_display} returned no JSON output");
+        }
+        bail!("gh {command_display} failed: {stderr_text}");
+    }
+
+    let checks = serde_json::from_slice::<Vec<RawPullRequestCheck>>(stdout)
+        .with_context(|| format!("failed to decode JSON from `gh {command_display}`"))?
+        .into_iter()
+        .map(PullRequestCheck::from)
+        .collect();
+    let snapshot = PullRequestChecksSnapshot::from_checks(checks);
+
+    match exit_code {
+        0 => Ok(snapshot),
+        8 if snapshot.outcome == PullRequestChecksOutcome::Pending => Ok(snapshot),
+        code if code != 0 && snapshot.outcome == PullRequestChecksOutcome::Failed => Ok(snapshot),
+        code => {
+            let stderr_suffix = if stderr_text.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr_text}")
+            };
+            bail!(
+                "gh {command_display} returned exit code {code} for {:?}{stderr_suffix}",
+                snapshot.outcome
+            )
+        }
+    }
+}
+
 fn body_path_arg(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| anyhow!("invalid PR body path `{}`", path.display()))
@@ -573,6 +620,7 @@ mod tests {
     use super::{
         PullRequestCheck, PullRequestCheckClassification, PullRequestChecksOutcome,
         PullRequestChecksSnapshot, classify_pull_request_check,
+        decode_pull_request_checks_snapshot,
     };
 
     fn check(name: &str, state: &str, bucket: &str) -> PullRequestCheck {
@@ -646,6 +694,52 @@ mod tests {
         assert_eq!(
             classify_pull_request_check("MYSTERY_STATUS", "mystery_bucket"),
             PullRequestCheckClassification::Pending
+        );
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_accepts_pending_exit_code_eight_when_json_is_present() {
+        let snapshot = decode_pull_request_checks_snapshot(
+            "pr checks 321 --json name,state,bucket,description,link",
+            8,
+            br#"[{"name":"ci / quality","state":"IN_PROGRESS","bucket":"pending","description":"quality gate still running","link":"https://github.com/example/repo/actions/runs/1"}]"#,
+            b"",
+        )
+        .expect("pending exit code with JSON payload should decode");
+
+        assert_eq!(snapshot.outcome, PullRequestChecksOutcome::Pending);
+        assert_eq!(snapshot.total_count, 1);
+        assert_eq!(snapshot.settled_count, 0);
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_accepts_failed_non_zero_exit_when_json_is_present() {
+        let snapshot = decode_pull_request_checks_snapshot(
+            "pr checks 321 --json name,state,bucket,description,link",
+            1,
+            br#"[{"name":"ci / quality","state":"FAILURE","bucket":"fail","description":"quality gate failed","link":"https://github.com/example/repo/actions/runs/1"}]"#,
+            b"",
+        )
+        .expect("failed non-zero exit with JSON payload should decode");
+
+        assert_eq!(snapshot.outcome, PullRequestChecksOutcome::Failed);
+        assert_eq!(snapshot.failed_checks().len(), 1);
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_rejects_mismatched_pending_exit_code_and_green_payload() {
+        let error = decode_pull_request_checks_snapshot(
+            "pr checks 321 --json name,state,bucket,description,link",
+            8,
+            br#"[{"name":"ci / quality","state":"SUCCESS","bucket":"pass","description":"quality gate passed","link":"https://github.com/example/repo/actions/runs/1"}]"#,
+            b"",
+        )
+        .expect_err("pending exit code with green payload should fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("returned exit code 8 for Passed")
         );
     }
 }
