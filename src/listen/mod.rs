@@ -1375,11 +1375,13 @@ where
             })
             .map(PendingIssue::from)
             .collect::<Vec<_>>();
-        let sessions = state.sorted_sessions();
-        state.pending_issues = pending_issues.clone();
-        state.active_issues = active_issues.clone();
-        state.degraded = None;
-        self.store.save_state(&state)?;
+        let mut persisted_state = self.store.load_state()?;
+        persisted_state.sessions = merge_cycle_sessions(persisted_state.sessions, state.sessions);
+        persisted_state.pending_issues = pending_issues.clone();
+        persisted_state.active_issues = active_issues.clone();
+        persisted_state.degraded = None;
+        self.store.save_state(&persisted_state)?;
+        let sessions = persisted_state.sorted_sessions();
         let session_details = self
             .store
             .load_session_details(&sessions)?
@@ -2371,6 +2373,74 @@ where
             .context("failed to launch the hidden listen worker")?;
 
         Ok(child.id())
+    }
+}
+
+fn merge_cycle_sessions(
+    persisted_sessions: Vec<AgentSession>,
+    daemon_sessions: Vec<AgentSession>,
+) -> Vec<AgentSession> {
+    let mut merged = persisted_sessions;
+    for daemon_session in daemon_sessions {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|session| session.issue_matches(&daemon_session.issue_identifier))
+        {
+            if should_replace_persisted_session(existing, &daemon_session) {
+                *existing = daemon_session;
+            }
+        } else {
+            merged.push(daemon_session);
+        }
+    }
+    merged
+}
+
+fn should_replace_persisted_session(
+    persisted_session: &AgentSession,
+    daemon_session: &AgentSession,
+) -> bool {
+    match daemon_session
+        .updated_at_epoch_seconds
+        .cmp(&persisted_session.updated_at_epoch_seconds)
+    {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            session_progress_rank(daemon_session) > session_progress_rank(persisted_session)
+        }
+    }
+}
+
+fn session_progress_rank(session: &AgentSession) -> (u8, u32, u64, u8, u8, u8, u8, u8, u8, u8, u8) {
+    (
+        session_phase_rank(session.phase),
+        session.turns.unwrap_or_default(),
+        session.canonical.tokens.total().unwrap_or_default(),
+        u8::from(session.canonical.provider.is_some()),
+        u8::from(session.canonical.model.is_some()),
+        u8::from(session.canonical.reasoning.is_some()),
+        u8::from(session.latest_resume_handle.is_some()),
+        u8::from(session.session_id.is_some()),
+        u8::from(session.pending_linear_sync.is_some()),
+        u8::from(session.last_timeout.is_some()),
+        u8::from(session.blocked.is_some()),
+    )
+}
+
+fn session_phase_rank(phase: SessionPhase) -> u8 {
+    match phase {
+        SessionPhase::Claimed => 0,
+        SessionPhase::BriefReady => 1,
+        SessionPhase::Running => 2,
+        SessionPhase::Reviewing => 3,
+        SessionPhase::FinalReview => 4,
+        SessionPhase::Verifying => 5,
+        SessionPhase::Validating => 6,
+        SessionPhase::Publishing => 7,
+        SessionPhase::Paused => 8,
+        SessionPhase::Blocked => 9,
+        SessionPhase::Completed => 10,
     }
 }
 
@@ -5310,6 +5380,63 @@ suffix
             dashboard.runtime.agents,
             "1 active / 1 blocked / 1 completed / 1 queued"
         );
+    }
+
+    #[test]
+    fn merge_cycle_sessions_preserves_richer_worker_updates() {
+        let daemon_session = AgentSession {
+            issue_id: Some("issue-64".to_string()),
+            issue_identifier: "MET-64".to_string(),
+            issue_title: "Builtin Claude listen agent".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/64".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1_773_575_600,
+            pid: Some(42),
+            session_id: None,
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: None,
+            turns: Some(0),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            origin: SessionOrigin::Listen,
+        };
+        let mut worker_session = daemon_session.clone();
+        worker_session.turns = Some(1);
+        worker_session.canonical = CanonicalSessionData {
+            provider: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("high".to_string()),
+            tokens: TokenUsage {
+                input: Some(210),
+                output: Some(34),
+            },
+            repair: None,
+        };
+
+        let merged =
+            super::merge_cycle_sessions(vec![worker_session.clone()], vec![daemon_session]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].turns, Some(1));
+        assert_eq!(merged[0].canonical.provider.as_deref(), Some("claude"));
+        assert_eq!(merged[0].canonical.model.as_deref(), Some("sonnet"));
+        assert_eq!(merged[0].canonical.reasoning.as_deref(), Some("high"));
+        assert_eq!(merged[0].canonical.tokens.input, Some(210));
+        assert_eq!(merged[0].canonical.tokens.output, Some(34));
     }
 
     #[test]
