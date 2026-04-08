@@ -336,6 +336,23 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
 
         let turn_number = turns_completed + 1;
         let turn_plan = plan_execution_turn(&turn_context, &issue, &session_context, turn_number);
+        if let Err(seed_error) = seed_execution_turn_canonical_metadata(
+            &issue,
+            turn_number,
+            &turn_context,
+            turn_plan,
+            ExecutionTurnDelta {
+                previous_review: last_review.as_ref(),
+                verification_summary: session_context.verification_summary.as_ref(),
+            },
+            session_context.latest_resume_handle.as_ref(),
+            &mut session_context.canonical,
+        ) {
+            eprintln!(
+                "warning: failed to seed canonical listen metadata for {} turn {turn_number} before persisting running state: {seed_error:#}",
+                issue.identifier,
+            );
+        }
         let snapshot_before = capture_workspace_snapshot(&workspace_path, &args.issue)?;
         write_listen_session(
             &source_root,
