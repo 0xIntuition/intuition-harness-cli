@@ -2403,6 +2403,12 @@ fn merge_monotonic_session_fields(
     persisted_session: &AgentSession,
     mut daemon_session: AgentSession,
 ) -> AgentSession {
+    if session_phase_regressed(persisted_session, &daemon_session) {
+        daemon_session.phase = persisted_session.phase;
+        daemon_session.summary = persisted_session.summary.clone();
+        daemon_session.blocked = persisted_session.blocked.clone();
+    }
+
     if blocked_metadata_regressed(persisted_session, &daemon_session) {
         daemon_session.phase = persisted_session.phase;
         daemon_session.blocked = persisted_session.blocked.clone();
@@ -2434,6 +2440,13 @@ fn blocked_metadata_regressed(
     persisted_session.blocked.is_some()
         && persisted_session.blocked != daemon_session.blocked
         && session_phase_rank(daemon_session.phase) <= session_phase_rank(persisted_session.phase)
+}
+
+fn session_phase_regressed(
+    persisted_session: &AgentSession,
+    daemon_session: &AgentSession,
+) -> bool {
+    session_phase_rank(daemon_session.phase) < session_phase_rank(persisted_session.phase)
 }
 
 fn merge_monotonic_canonical(
@@ -5685,6 +5698,65 @@ suffix
             worker_session.latest_resume_handle
         );
         assert_eq!(merged[0].turn_history, worker_session.turn_history);
+        assert_eq!(merged[0].last_timeout, daemon_session.last_timeout);
+        assert_eq!(
+            merged[0].updated_at_epoch_seconds,
+            daemon_session.updated_at_epoch_seconds
+        );
+    }
+
+    #[test]
+    fn listen_state_merge_preserves_higher_worker_phase_while_adopting_newer_daemon_timeout() {
+        let daemon_session = AgentSession {
+            issue_id: Some("issue-65".to_string()),
+            issue_identifier: "MET-65".to_string(),
+            issue_title: "Listen verification handoff".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/65".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1_773_575_705,
+            pid: Some(42),
+            session_id: None,
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: Some(SessionTimeoutRecord {
+                turn: 3,
+                pid: 42,
+                elapsed_seconds: 1_805,
+                timeout_seconds: 1_800,
+                graceful_shutdown_seconds: 5,
+                termination: SessionTimeoutTermination::Sigterm,
+            }),
+            turns: Some(2),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            origin: SessionOrigin::Listen,
+        };
+        let mut worker_session = daemon_session.clone();
+        worker_session.phase = SessionPhase::Verifying;
+        worker_session.summary = "Verifying turn 3 via verify-stub".to_string();
+        worker_session.updated_at_epoch_seconds = 1_773_575_700;
+        worker_session.last_timeout = None;
+        worker_session.turns = Some(3);
+
+        let merged =
+            super::merge_cycle_sessions(vec![worker_session.clone()], vec![daemon_session.clone()]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].phase, SessionPhase::Verifying);
+        assert_eq!(merged[0].summary, worker_session.summary);
         assert_eq!(merged[0].last_timeout, daemon_session.last_timeout);
         assert_eq!(
             merged[0].updated_at_epoch_seconds,

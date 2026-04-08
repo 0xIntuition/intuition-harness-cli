@@ -52,17 +52,50 @@ struct BranchPullRequest {
     head_ref_oid: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PullRequestCheckClassification {
+    Pending,
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PullRequestChecksOutcome {
+    NoChecksConfigured,
+    Pending,
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PullRequestCheck {
     pub(crate) name: String,
-    #[serde(default)]
     pub(crate) state: String,
-    #[serde(default)]
     pub(crate) bucket: String,
-    #[serde(default)]
     pub(crate) description: Option<String>,
-    #[serde(default)]
     pub(crate) link: Option<String>,
+    pub(crate) classification: PullRequestCheckClassification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequestChecksSnapshot {
+    pub(crate) outcome: PullRequestChecksOutcome,
+    pub(crate) settled_count: usize,
+    pub(crate) total_count: usize,
+    pub(crate) checks: Vec<PullRequestCheck>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawPullRequestCheck {
+    name: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    bucket: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    link: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -77,6 +110,142 @@ pub(crate) struct WorkflowRun {
     pub(crate) url: Option<String>,
     #[serde(rename = "workflowName", default)]
     pub(crate) workflow_name: Option<String>,
+}
+
+impl PullRequestCheck {
+    fn is_pending(&self) -> bool {
+        self.classification == PullRequestCheckClassification::Pending
+    }
+
+    fn is_failed(&self) -> bool {
+        self.classification == PullRequestCheckClassification::Failed
+    }
+}
+
+impl From<RawPullRequestCheck> for PullRequestCheck {
+    fn from(value: RawPullRequestCheck) -> Self {
+        Self {
+            classification: classify_pull_request_check(&value.state, &value.bucket),
+            name: value.name,
+            state: value.state,
+            bucket: value.bucket,
+            description: value.description,
+            link: value.link,
+        }
+    }
+}
+
+impl PullRequestChecksSnapshot {
+    fn from_checks(checks: Vec<PullRequestCheck>) -> Self {
+        let total_count = checks.len();
+        let settled_count = checks.iter().filter(|check| !check.is_pending()).count();
+        let outcome = if checks.is_empty() {
+            PullRequestChecksOutcome::NoChecksConfigured
+        } else if checks.iter().any(PullRequestCheck::is_failed) {
+            PullRequestChecksOutcome::Failed
+        } else if settled_count < total_count {
+            PullRequestChecksOutcome::Pending
+        } else {
+            PullRequestChecksOutcome::Passed
+        };
+
+        Self {
+            outcome,
+            settled_count,
+            total_count,
+            checks,
+        }
+    }
+
+    /// Returns the failing checks in the current snapshot.
+    pub(crate) fn failed_checks(&self) -> Vec<PullRequestCheck> {
+        self.checks
+            .iter()
+            .filter(|check| check.is_failed())
+            .cloned()
+            .collect()
+    }
+}
+
+fn classify_pull_request_check(state: &str, bucket: &str) -> PullRequestCheckClassification {
+    classify_status_token(bucket)
+        .or_else(|| classify_status_token(state))
+        .unwrap_or(PullRequestCheckClassification::Pending)
+}
+
+fn classify_status_token(token: &str) -> Option<PullRequestCheckClassification> {
+    let normalized = normalize_status_token(token);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "fail"
+            | "failure"
+            | "failed"
+            | "cancel"
+            | "cancelled"
+            | "canceled"
+            | "timed_out"
+            | "timeout"
+            | "error"
+            | "startup_failure"
+            | "action_required"
+    ) {
+        return Some(PullRequestCheckClassification::Failed);
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "pending"
+            | "queued"
+            | "queue"
+            | "in_progress"
+            | "inprogress"
+            | "requested"
+            | "waiting"
+            | "waiting_on"
+    ) {
+        return Some(PullRequestCheckClassification::Pending);
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "pass"
+            | "passed"
+            | "success"
+            | "successful"
+            | "neutral"
+            | "skip"
+            | "skipped"
+            | "skipping"
+            | "complete"
+            | "completed"
+    ) {
+        return Some(PullRequestCheckClassification::Passed);
+    }
+
+    None
+}
+
+fn normalize_status_token(token: &str) -> String {
+    token
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 impl GhCli {
@@ -362,28 +531,37 @@ impl GhCli {
         )
     }
 
-    /// Returns failing CI or status checks for the provided pull request number.
+    /// Returns a structured snapshot of CI or status checks for the provided pull request number.
     ///
     /// Returns an error when `gh` cannot inspect the pull request checks.
-    pub(crate) fn failing_pull_request_checks(
+    pub(crate) fn pull_request_checks_snapshot(
         &self,
         workspace_path: &Path,
         number: u64,
-    ) -> Result<Vec<PullRequestCheck>> {
-        let checks = self.run_json::<Vec<PullRequestCheck>>(
-            workspace_path,
-            &[
-                "pr",
-                "checks",
-                &number.to_string(),
-                "--json",
-                "name,state,bucket,description,link",
-            ],
-        )?;
-        Ok(checks
-            .into_iter()
-            .filter(|check| check.bucket.eq_ignore_ascii_case("fail"))
-            .collect())
+    ) -> Result<PullRequestChecksSnapshot> {
+        let args = [
+            "pr",
+            "checks",
+            &number.to_string(),
+            "--json",
+            "name,state,bucket,description,link",
+        ];
+        let output = Command::new("gh")
+            .args(args)
+            .current_dir(workspace_path)
+            .output()
+            .with_context(|| format!("failed to run `gh {}`", args.join(" ")))?;
+        let exit_code = output
+            .status
+            .code()
+            .ok_or_else(|| anyhow!("gh {} terminated without an exit code", args.join(" ")))?;
+
+        decode_pull_request_checks_snapshot(
+            &args.join(" "),
+            exit_code,
+            &output.stdout,
+            &output.stderr,
+        )
     }
 
     /// Resolve the active open branch PR for the provided head/base pair.
@@ -450,6 +628,45 @@ impl GhCli {
     }
 }
 
+fn decode_pull_request_checks_snapshot(
+    command_display: &str,
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<PullRequestChecksSnapshot> {
+    let stderr_text = String::from_utf8_lossy(stderr).trim().to_string();
+    if stdout.is_empty() {
+        if stderr_text.is_empty() {
+            bail!("gh {command_display} returned no JSON output");
+        }
+        bail!("gh {command_display} failed: {stderr_text}");
+    }
+
+    let checks = serde_json::from_slice::<Vec<RawPullRequestCheck>>(stdout)
+        .with_context(|| format!("failed to decode JSON from `gh {command_display}`"))?
+        .into_iter()
+        .map(PullRequestCheck::from)
+        .collect();
+    let snapshot = PullRequestChecksSnapshot::from_checks(checks);
+
+    match exit_code {
+        0 => Ok(snapshot),
+        8 if snapshot.outcome == PullRequestChecksOutcome::Pending => Ok(snapshot),
+        code if code != 0 && snapshot.outcome == PullRequestChecksOutcome::Failed => Ok(snapshot),
+        code => {
+            let stderr_suffix = if stderr_text.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr_text}")
+            };
+            bail!(
+                "gh {command_display} returned exit code {code} for {:?}{stderr_suffix}",
+                snapshot.outcome
+            )
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedBranchPullRequest {
     pub(crate) number: u64,
@@ -474,4 +691,133 @@ impl From<BranchPullRequest> for ResolvedBranchPullRequest {
 fn body_path_arg(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| anyhow!("invalid PR body path `{}`", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PullRequestCheck, PullRequestCheckClassification, PullRequestChecksOutcome,
+        PullRequestChecksSnapshot, classify_pull_request_check,
+        decode_pull_request_checks_snapshot,
+    };
+
+    fn check(name: &str, state: &str, bucket: &str) -> PullRequestCheck {
+        PullRequestCheck {
+            name: name.to_string(),
+            state: state.to_string(),
+            bucket: bucket.to_string(),
+            description: None,
+            link: None,
+            classification: classify_pull_request_check(state, bucket),
+        }
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_reports_no_checks_when_empty() {
+        let snapshot = PullRequestChecksSnapshot::from_checks(Vec::new());
+
+        assert_eq!(
+            snapshot.outcome,
+            PullRequestChecksOutcome::NoChecksConfigured
+        );
+        assert_eq!(snapshot.total_count, 0);
+        assert_eq!(snapshot.settled_count, 0);
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_reports_pending_when_any_check_is_unsettled() {
+        let snapshot = PullRequestChecksSnapshot::from_checks(vec![
+            check("ci / quality", "IN_PROGRESS", "pending"),
+            check("ci / docs", "SUCCESS", "pass"),
+        ]);
+
+        assert_eq!(snapshot.outcome, PullRequestChecksOutcome::Pending);
+        assert_eq!(snapshot.total_count, 2);
+        assert_eq!(snapshot.settled_count, 1);
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_reports_failed_for_cancelled_or_timed_out_checks() {
+        let cancelled = check("ci / cancelled", "CANCELLED", "");
+        let timed_out = check("ci / timeout", "TIMED_OUT", "");
+
+        assert_eq!(
+            cancelled.classification,
+            PullRequestCheckClassification::Failed
+        );
+        assert_eq!(
+            timed_out.classification,
+            PullRequestCheckClassification::Failed
+        );
+
+        let snapshot = PullRequestChecksSnapshot::from_checks(vec![cancelled, timed_out]);
+        assert_eq!(snapshot.outcome, PullRequestChecksOutcome::Failed);
+        assert_eq!(snapshot.failed_checks().len(), 2);
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_reports_passed_when_all_checks_settle_green() {
+        let snapshot = PullRequestChecksSnapshot::from_checks(vec![
+            check("ci / quality", "SUCCESS", "pass"),
+            check("ci / docs", "SKIPPED", "skipping"),
+        ]);
+
+        assert_eq!(snapshot.outcome, PullRequestChecksOutcome::Passed);
+        assert_eq!(snapshot.total_count, 2);
+        assert_eq!(snapshot.settled_count, 2);
+    }
+
+    #[test]
+    fn unknown_check_tokens_fail_closed_as_pending() {
+        assert_eq!(
+            classify_pull_request_check("MYSTERY_STATUS", "mystery_bucket"),
+            PullRequestCheckClassification::Pending
+        );
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_accepts_pending_exit_code_eight_when_json_is_present() {
+        let snapshot = decode_pull_request_checks_snapshot(
+            "pr checks 321 --json name,state,bucket,description,link",
+            8,
+            br#"[{"name":"ci / quality","state":"IN_PROGRESS","bucket":"pending","description":"quality gate still running","link":"https://github.com/example/repo/actions/runs/1"}]"#,
+            b"",
+        )
+        .expect("pending exit code with JSON payload should decode");
+
+        assert_eq!(snapshot.outcome, PullRequestChecksOutcome::Pending);
+        assert_eq!(snapshot.total_count, 1);
+        assert_eq!(snapshot.settled_count, 0);
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_accepts_failed_non_zero_exit_when_json_is_present() {
+        let snapshot = decode_pull_request_checks_snapshot(
+            "pr checks 321 --json name,state,bucket,description,link",
+            1,
+            br#"[{"name":"ci / quality","state":"FAILURE","bucket":"fail","description":"quality gate failed","link":"https://github.com/example/repo/actions/runs/1"}]"#,
+            b"",
+        )
+        .expect("failed non-zero exit with JSON payload should decode");
+
+        assert_eq!(snapshot.outcome, PullRequestChecksOutcome::Failed);
+        assert_eq!(snapshot.failed_checks().len(), 1);
+    }
+
+    #[test]
+    fn pull_request_checks_snapshot_rejects_mismatched_pending_exit_code_and_green_payload() {
+        let error = decode_pull_request_checks_snapshot(
+            "pr checks 321 --json name,state,bucket,description,link",
+            8,
+            br#"[{"name":"ci / quality","state":"SUCCESS","bucket":"pass","description":"quality gate passed","link":"https://github.com/example/repo/actions/runs/1"}]"#,
+            b"",
+        )
+        .expect_err("pending exit code with green payload should fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("returned exit code 8 for Passed")
+        );
+    }
 }

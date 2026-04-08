@@ -29,8 +29,8 @@ use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resol
 use crate::fs::sibling_workspace_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
-    GhCli, PullRequestCheck, PullRequestLifecycleResult, PullRequestPublishMode,
-    PullRequestPublishRequest, ResolvedBranchPullRequest, WorkflowRun,
+    GhCli, PullRequestCheck, PullRequestChecksOutcome, PullRequestLifecycleResult,
+    PullRequestPublishMode, PullRequestPublishRequest, ResolvedBranchPullRequest, WorkflowRun,
 };
 use crate::linear::{
     AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
@@ -199,6 +199,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
         canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
         pull_request: load_existing_pull_request(&source_root, project_selector, &args.issue)?,
+        github_ci_summary: None,
         verification_summary: load_existing_verification_summary(
             &source_root,
             project_selector,
@@ -1041,61 +1042,31 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     return Ok(());
                 }
                 if let Some(number) = session_context.pull_request.number {
-                    let failing_checks =
-                        GhCli.failing_pull_request_checks(&workspace_path, number)?;
-                    if !failing_checks.is_empty() {
-                        let budget_exhausted = remaining_validation_repair_turns == 0;
-                        let remaining_after_failure =
-                            remaining_validation_repair_turns.saturating_sub(1);
-                        let follow_up_review = review_for_ci_failure(
-                            Some(&review),
-                            number,
-                            &failing_checks,
-                            remaining_after_failure,
-                        );
-                        sync_review_tracking(
-                            &service,
-                            &issue,
-                            &turn_context,
-                            &app_config,
-                            &mut session_context,
-                            &log_path,
-                            &follow_up_review,
-                        )
-                        .await?;
-                        last_review = Some(follow_up_review);
-                        append_worker_log(
-                            &log_path,
-                            "pull request checks",
-                            &render_check_failure_lines(number, &failing_checks),
-                        )?;
-                        if budget_exhausted {
-                            let blocked = blocked_reason(
-                                BlockedCategory::Gate,
-                                "CI repair budget exhausted",
-                                false,
-                            );
-                            write_listen_session(
-                                &source_root,
-                                project_selector,
-                                build_worker_blocked_session(
-                                    &issue,
-                                    blocked.clone(),
-                                    compact_blocked_summary(
-                                        &blocked,
-                                        issue.description.as_deref(),
-                                        &log_path,
-                                    ),
-                                    &session_context,
-                                    turns_completed,
-                                    provider_session_id.as_deref(),
-                                    &session_context.canonical,
-                                ),
-                            )?;
-                            return Ok(());
+                    let gate_context = PostPublicationCiGateContext {
+                        issue: &issue,
+                        workspace_path: &workspace_path,
+                        review: &review,
+                        summary_prefix: "Publishing review-ready handoff",
+                        turn_context: &turn_context,
+                        turns_completed,
+                        provider_session_id: provider_session_id.as_deref(),
+                        log_path: &log_path,
+                        service: &service,
+                    };
+                    match run_post_publication_ci_settle_gate(
+                        number,
+                        &gate_context,
+                        &mut session_context,
+                        &mut remaining_validation_repair_turns,
+                    )
+                    .await?
+                    {
+                        PostPublicationCiGateOutcome::Passed => {}
+                        PostPublicationCiGateOutcome::Retry(follow_up_review) => {
+                            last_review = Some(follow_up_review);
+                            continue;
                         }
-                        remaining_validation_repair_turns -= 1;
-                        continue;
+                        PostPublicationCiGateOutcome::Blocked => return Ok(()),
                     }
                 }
                 let transitioned_issue =
@@ -1164,11 +1135,18 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 );
 
                 if review_transition_applied {
-                    let summary = compact_completed_summary(
-                        refreshed_issue.description.as_deref(),
-                        turns_completed,
-                        &issue_state_label(&refreshed_issue),
-                    );
+                    let summary = compact_session_summary([
+                        Some("Complete".to_string()),
+                        Some(super::ticket_progress_summary(
+                            refreshed_issue.description.as_deref(),
+                        )),
+                        Some(format!("{turns_completed} turn(s)")),
+                        Some(format!(
+                            "moved to `{}`",
+                            issue_state_label(&refreshed_issue)
+                        )),
+                        session_context.github_ci_summary.clone(),
+                    ]);
                     write_listen_session(
                         &source_root,
                         project_selector,
@@ -1321,61 +1299,31 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                             )?;
                         }
                         if let Some(number) = session_context.pull_request.number {
-                            let failing_checks =
-                                GhCli.failing_pull_request_checks(&workspace_path, number)?;
-                            if !failing_checks.is_empty() {
-                                let budget_exhausted = remaining_validation_repair_turns == 0;
-                                let remaining_after_failure =
-                                    remaining_validation_repair_turns.saturating_sub(1);
-                                let follow_up_review = review_for_ci_failure(
-                                    Some(&review),
-                                    number,
-                                    &failing_checks,
-                                    remaining_after_failure,
-                                );
-                                sync_review_tracking(
-                                    &service,
-                                    &issue,
-                                    &turn_context,
-                                    &app_config,
-                                    &mut session_context,
-                                    &log_path,
-                                    &follow_up_review,
-                                )
-                                .await?;
-                                last_review = Some(follow_up_review);
-                                append_worker_log(
-                                    &log_path,
-                                    "pull request checks",
-                                    &render_check_failure_lines(number, &failing_checks),
-                                )?;
-                                if budget_exhausted {
-                                    let blocked = blocked_reason(
-                                        BlockedCategory::Gate,
-                                        "CI repair budget exhausted",
-                                        false,
-                                    );
-                                    write_listen_session(
-                                        &source_root,
-                                        project_selector,
-                                        build_worker_blocked_session(
-                                            &issue,
-                                            blocked.clone(),
-                                            compact_blocked_summary(
-                                                &blocked,
-                                                issue.description.as_deref(),
-                                                &log_path,
-                                            ),
-                                            &session_context,
-                                            turns_completed,
-                                            provider_session_id.as_deref(),
-                                            &session_context.canonical,
-                                        ),
-                                    )?;
-                                    return Ok(());
+                            let gate_context = PostPublicationCiGateContext {
+                                issue: &issue,
+                                workspace_path: &workspace_path,
+                                review: &review,
+                                summary_prefix: "Publishing draft PR",
+                                turn_context: &turn_context,
+                                turns_completed,
+                                provider_session_id: provider_session_id.as_deref(),
+                                log_path: &log_path,
+                                service: &service,
+                            };
+                            match run_post_publication_ci_settle_gate(
+                                number,
+                                &gate_context,
+                                &mut session_context,
+                                &mut remaining_validation_repair_turns,
+                            )
+                            .await?
+                            {
+                                PostPublicationCiGateOutcome::Passed => {}
+                                PostPublicationCiGateOutcome::Retry(follow_up_review) => {
+                                    last_review = Some(follow_up_review);
+                                    continue;
                                 }
-                                remaining_validation_repair_turns -= 1;
-                                continue;
+                                PostPublicationCiGateOutcome::Blocked => return Ok(()),
                             }
                         }
                     }
@@ -1524,6 +1472,7 @@ struct WorkerSessionContext<'a> {
     turn_history: Vec<TurnTokenSnapshot>,
     canonical: CanonicalSessionData,
     pull_request: PullRequestSummary,
+    github_ci_summary: Option<String>,
     verification_summary: Option<VerificationSummary>,
     origin: super::state::SessionOrigin,
 }
@@ -2761,6 +2710,272 @@ fn render_check_failure_lines(number: u64, checks: &[PullRequestCheck]) -> Vec<S
         lines.push(line);
     }
     lines
+}
+
+enum PostPublicationCiGateOutcome {
+    Passed,
+    Retry(ReviewReport),
+    Blocked,
+}
+
+struct PostPublicationCiGateContext<'a, 'ctx> {
+    issue: &'a IssueSummary,
+    workspace_path: &'a Path,
+    review: &'a ReviewReport,
+    summary_prefix: &'a str,
+    turn_context: &'a ListenTurnContext<'ctx>,
+    turns_completed: u32,
+    provider_session_id: Option<&'a str>,
+    log_path: &'a Path,
+    service: &'a LinearService<ReqwestLinearClient>,
+}
+
+async fn run_post_publication_ci_settle_gate(
+    pull_request_number: u64,
+    gate_context: &PostPublicationCiGateContext<'_, '_>,
+    session_context: &mut WorkerSessionContext<'_>,
+    remaining_validation_repair_turns: &mut usize,
+) -> Result<PostPublicationCiGateOutcome> {
+    let ci_poll_interval = gate_context
+        .turn_context
+        .app_config
+        .defaults
+        .listen
+        .ci_poll_interval_seconds();
+    let ci_poll_timeout = gate_context
+        .turn_context
+        .app_config
+        .defaults
+        .listen
+        .ci_poll_timeout_seconds();
+    let ci_timeout_behavior = gate_context
+        .turn_context
+        .app_config
+        .defaults
+        .listen
+        .ci_timeout_behavior();
+    let mut elapsed_seconds = 0u64;
+
+    loop {
+        let snapshot =
+            GhCli.pull_request_checks_snapshot(gate_context.workspace_path, pull_request_number)?;
+        match snapshot.outcome {
+            PullRequestChecksOutcome::NoChecksConfigured => {
+                let ci_summary = "no GitHub checks configured".to_string();
+                session_context.github_ci_summary = Some(ci_summary.clone());
+                write_listen_session(
+                    session_context.source_root,
+                    session_context.project_selector,
+                    build_worker_session(
+                        gate_context.issue,
+                        SessionPhase::Publishing,
+                        compact_session_summary([
+                            Some(gate_context.summary_prefix.to_string()),
+                            Some(ci_summary.clone()),
+                        ]),
+                        session_context,
+                        gate_context.turns_completed,
+                        gate_context.provider_session_id,
+                        &session_context.canonical,
+                    ),
+                )?;
+                append_worker_log(
+                    gate_context.log_path,
+                    "pull request checks",
+                    &[format!(
+                        "pull request #{pull_request_number} has no GitHub checks configured"
+                    )],
+                )?;
+                return Ok(PostPublicationCiGateOutcome::Passed);
+            }
+            PullRequestChecksOutcome::Passed => {
+                let ci_summary = format!(
+                    "GitHub CI passed {}/{}",
+                    snapshot.settled_count, snapshot.total_count
+                );
+                session_context.github_ci_summary = Some(ci_summary.clone());
+                write_listen_session(
+                    session_context.source_root,
+                    session_context.project_selector,
+                    build_worker_session(
+                        gate_context.issue,
+                        SessionPhase::Publishing,
+                        compact_session_summary([
+                            Some(gate_context.summary_prefix.to_string()),
+                            Some(ci_summary.clone()),
+                        ]),
+                        session_context,
+                        gate_context.turns_completed,
+                        gate_context.provider_session_id,
+                        &session_context.canonical,
+                    ),
+                )?;
+                append_worker_log(
+                    gate_context.log_path,
+                    "pull request checks",
+                    &[format!(
+                        "pull request #{pull_request_number} settled green ({}/{})",
+                        snapshot.settled_count, snapshot.total_count
+                    )],
+                )?;
+                return Ok(PostPublicationCiGateOutcome::Passed);
+            }
+            PullRequestChecksOutcome::Failed => {
+                session_context.github_ci_summary = None;
+                let failing_checks = snapshot.failed_checks();
+                let budget_exhausted = *remaining_validation_repair_turns == 0;
+                let remaining_after_failure =
+                    (*remaining_validation_repair_turns).saturating_sub(1);
+                let follow_up_review = review_for_ci_failure(
+                    Some(gate_context.review),
+                    pull_request_number,
+                    &failing_checks,
+                    remaining_after_failure,
+                );
+                sync_review_tracking(
+                    gate_context.service,
+                    gate_context.issue,
+                    gate_context.turn_context,
+                    gate_context.turn_context.app_config,
+                    session_context,
+                    gate_context.log_path,
+                    &follow_up_review,
+                )
+                .await?;
+                append_worker_log(
+                    gate_context.log_path,
+                    "pull request checks",
+                    &render_check_failure_lines(pull_request_number, &failing_checks),
+                )?;
+                if budget_exhausted {
+                    let blocked =
+                        blocked_reason(BlockedCategory::Gate, "CI repair budget exhausted", false);
+                    write_listen_session(
+                        session_context.source_root,
+                        session_context.project_selector,
+                        build_worker_blocked_session(
+                            gate_context.issue,
+                            blocked.clone(),
+                            compact_blocked_summary(
+                                &blocked,
+                                gate_context.issue.description.as_deref(),
+                                gate_context.log_path,
+                            ),
+                            session_context,
+                            gate_context.turns_completed,
+                            gate_context.provider_session_id,
+                            &session_context.canonical,
+                        ),
+                    )?;
+                    return Ok(PostPublicationCiGateOutcome::Blocked);
+                }
+                *remaining_validation_repair_turns -= 1;
+                return Ok(PostPublicationCiGateOutcome::Retry(follow_up_review));
+            }
+            PullRequestChecksOutcome::Pending => {
+                if elapsed_seconds >= ci_poll_timeout {
+                    let timeout_reason = format!(
+                        "GitHub CI settle timed out after {}s ({}/{}) settled",
+                        ci_poll_timeout, snapshot.settled_count, snapshot.total_count
+                    );
+                    append_worker_log(
+                        gate_context.log_path,
+                        "pull request checks",
+                        &[format!(
+                            "pull request #{pull_request_number} {timeout_reason}"
+                        )],
+                    )?;
+                    match ci_timeout_behavior {
+                        crate::config::ListenCiTimeoutBehavior::Block => {
+                            session_context.github_ci_summary = None;
+                            let blocked =
+                                blocked_reason(BlockedCategory::Gate, timeout_reason, true);
+                            write_listen_session(
+                                session_context.source_root,
+                                session_context.project_selector,
+                                build_worker_blocked_session(
+                                    gate_context.issue,
+                                    blocked.clone(),
+                                    compact_blocked_summary(
+                                        &blocked,
+                                        gate_context.issue.description.as_deref(),
+                                        gate_context.log_path,
+                                    ),
+                                    session_context,
+                                    gate_context.turns_completed,
+                                    gate_context.provider_session_id,
+                                    &session_context.canonical,
+                                ),
+                            )?;
+                            return Ok(PostPublicationCiGateOutcome::Blocked);
+                        }
+                        crate::config::ListenCiTimeoutBehavior::WarnAndProceed => {
+                            let ci_summary = format!(
+                                "GitHub CI timeout warning after {}s ({}/{}) settled",
+                                ci_poll_timeout, snapshot.settled_count, snapshot.total_count
+                            );
+                            session_context.github_ci_summary = Some(ci_summary.clone());
+                            write_listen_session(
+                                session_context.source_root,
+                                session_context.project_selector,
+                                build_worker_session(
+                                    gate_context.issue,
+                                    SessionPhase::Publishing,
+                                    compact_session_summary([
+                                        Some(gate_context.summary_prefix.to_string()),
+                                        Some(ci_summary.clone()),
+                                    ]),
+                                    session_context,
+                                    gate_context.turns_completed,
+                                    gate_context.provider_session_id,
+                                    &session_context.canonical,
+                                ),
+                            )?;
+                            return Ok(PostPublicationCiGateOutcome::Passed);
+                        }
+                    }
+                }
+
+                let remaining_seconds = ci_poll_timeout.saturating_sub(elapsed_seconds);
+                write_listen_session(
+                    session_context.source_root,
+                    session_context.project_selector,
+                    build_worker_session(
+                        gate_context.issue,
+                        SessionPhase::Publishing,
+                        compact_session_summary([
+                            Some(gate_context.summary_prefix.to_string()),
+                            Some(format!(
+                                "waiting for GitHub CI {}/{} settled",
+                                snapshot.settled_count, snapshot.total_count
+                            )),
+                            Some(format!("{remaining_seconds}s remaining")),
+                        ]),
+                        session_context,
+                        gate_context.turns_completed,
+                        gate_context.provider_session_id,
+                        &session_context.canonical,
+                    ),
+                )?;
+                append_worker_log(
+                    gate_context.log_path,
+                    "pull request checks",
+                    &[format!(
+                        "pull request #{pull_request_number} waiting for GitHub CI {}/{} settled ({}s remaining)",
+                        snapshot.settled_count, snapshot.total_count, remaining_seconds
+                    )],
+                )?;
+
+                let sleep_seconds =
+                    ci_poll_interval.min(ci_poll_timeout.saturating_sub(elapsed_seconds));
+                if sleep_seconds == 0 {
+                    continue;
+                }
+                sleep(Duration::from_secs(sleep_seconds)).await;
+                elapsed_seconds = elapsed_seconds.saturating_add(sleep_seconds);
+            }
+        }
+    }
 }
 
 fn build_listen_run_args(
@@ -4620,6 +4835,28 @@ fn exact_sha_quality_gate(workspace_path: &Path) -> ExactShaQualityGate {
             );
         }
     };
+    let local_head_sha = match super::git_stdout(workspace_path, &["rev-parse", "HEAD"]) {
+        Ok(head_sha) if !head_sha.trim().is_empty() => head_sha.trim().to_string(),
+        Ok(_) => {
+            return failed_exact_sha_quality_gate(
+                "Could not resolve the local workspace HEAD before checking `quality`.".to_string(),
+                "Repair the workspace Git metadata, then rerun verification.".to_string(),
+                vec![
+                    "GitHub quality gate blocked: local HEAD lookup returned an empty SHA."
+                        .to_string(),
+                ],
+            );
+        }
+        Err(error) => {
+            return failed_exact_sha_quality_gate(
+                "Could not resolve the local workspace HEAD before checking `quality`.".to_string(),
+                "Repair the workspace Git metadata, then rerun verification.".to_string(),
+                vec![format!(
+                    "GitHub quality gate blocked: local HEAD lookup failed: {error}"
+                )],
+            );
+        }
+    };
 
     let pull_request = match GhCli.find_open_branch_pull_request(
         workspace_path,
@@ -4676,6 +4913,23 @@ fn exact_sha_quality_gate(workspace_path: &Path) -> ExactShaQualityGate {
             )],
         );
     };
+
+    if !local_head_sha.eq_ignore_ascii_case(&head_sha) {
+        return failed_exact_sha_quality_gate(
+            format!(
+                "Local workspace HEAD `{local_head_sha}` does not match active PR #{} head `{head_sha}`.",
+                pull_request.number
+            ),
+            format!(
+                "Push branch `{branch}` so PR #{} updates to local HEAD `{local_head_sha}`, then rerun verification.",
+                pull_request.number
+            ),
+            vec![format!(
+                "GitHub quality gate blocked: local HEAD `{local_head_sha}` did not match PR #{} head `{head_sha}`.",
+                pull_request.number
+            )],
+        );
+    }
 
     let workflow_runs = match GhCli.list_workflow_runs_for_commit(
         workspace_path,
@@ -6205,6 +6459,7 @@ mod tests {
             turn_history: Vec::new(),
             canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
+            github_ci_summary: None,
             verification_summary: None,
             origin: SessionOrigin::Listen,
         };

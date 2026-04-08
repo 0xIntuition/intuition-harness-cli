@@ -289,6 +289,7 @@ meta runtime config --default-assignee viewer --default-state Backlog --default-
 meta runtime config --velocity-project "MetaStack CLI" --velocity-state Backlog --velocity-auto-assign viewer
 meta runtime config --vim-mode enabled
 meta runtime config --listen-retry-initial-backoff 3 --listen-retry-max-backoff 45
+meta runtime config --listen-ci-poll-interval 30 --listen-ci-poll-timeout 900 --listen-ci-timeout-behavior block
 meta runtime config --merge-validation-repair-attempts 8
 meta runtime config --merge-validation-transient-retry-attempts 2
 meta runtime config --merge-publication-retry-attempts 6
@@ -312,7 +313,7 @@ The persisted config can store:
 - install-scoped backlog ticket defaults under `[backlog]`, including `default_assignee`, `default_state` (the default Linear workflow status for new standalone issues), `default_priority`, additive `default_labels`, and zero-prompt `velocity_defaults`
 - install-scoped onboarding completion state
 - install-scoped Linear API key/default team/default project values
-- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, listen retry backoff, listen agent turn timeout, listen graceful shutdown window, plan follow-up limit, and plan/technical issue labels
+- install-scoped global defaults for listen label, listen assignment scope, listen refresh policy, listen poll interval, listen retry backoff, listen agent turn timeout, listen graceful shutdown window, post-publication GitHub CI settle polling, plan follow-up limit, and plan/technical issue labels
 - install-scoped UI defaults under `[defaults.ui]`, including `vim_mode = true|false` for safe `h/j/k/l` navigation aliases
 - named global Linear profiles under `[linear.profiles.<name>]`
 - an optional global `linear.default_profile`
@@ -361,6 +362,12 @@ Listen retry backoff lives under `[defaults.listen.retry]` with
 policy defaults to `2s` initial and `60s` max. Both values must stay within `1..=3600`, and the
 max backoff must be greater than or equal to the initial backoff. `meta runtime config --json`
 also renders the effective resolved values under `effective.listen_retry`.
+
+Post-publication GitHub CI settle polling lives under `[defaults.listen]` as
+`ci_poll_interval_seconds`, `ci_poll_timeout_seconds`, and `ci_timeout_behavior`. When unset, the
+effective shared policy defaults to `30s`, `900s`, and `block`. The timeout must be greater than
+or equal to the poll interval. `meta runtime config --json` renders the resolved values under
+`effective.listen_ci_settle`.
 
 Supported route families:
 
@@ -1276,7 +1283,7 @@ Run the unattended agent daemon. The listener watches Todo issues, applies repo-
 
 Built-in `codex` and `claude` listen turns no longer depend on stdout EOF to make progress. Each turn runs under one shared process-group supervisor with install-scoped defaults from `meta runtime config --listen-agent-turn-timeout <SECONDS> --listen-agent-graceful-shutdown <SECONDS>` or `[defaults.listen]`. Unset values fall back to `1800s` per turn and `5s` of graceful shutdown before escalation. A timed-out subprocess is reported separately from a stalled turn: timeout reporting records the turn number, elapsed time, timeout limit, terminated PID, and whether the worker stopped at `SIGTERM` or escalated to `SIGKILL`, while stall reporting still refers only to repeated completed turns that made no meaningful progress.
 
-The verifying phase resolves a dedicated `agents.listen.verification` route through the same precedence and diagnostics helpers used by other agent-backed commands. Install-scoped `[verification]` settings control code-review verification, route-scoped E2E execution, battle-test sampling, and additive quality criteria. Before verification can report success, the worker also resolves the active branch PR, its exact current `headRefOid`, and the GitHub Actions workflow named `quality`; missing PR metadata, stale runs from older SHAs, pending runs, and failed runs all fail verification closed with remediation. E2E recipe steps run with bounded stdout/stderr capture plus a per-step timeout so a hung verification command cannot stall the worker indefinitely. Recipe steps accept an optional `timeout_seconds`; omitted values default to `300`, and timeout failures are reported as timed-out verification steps instead of as generic stalls. Each verification pass persists JSON and markdown reports in the listen store, then mirrors the latest compact summary into inspect output, dashboard detail, PR rendering, and workpad updates.
+The verifying phase resolves a dedicated `agents.listen.verification` route through the same precedence and diagnostics helpers used by other agent-backed commands. Install-scoped `[verification]` settings control code-review verification, route-scoped E2E execution, battle-test sampling, and additive quality criteria. Before verification can report success, the worker also resolves the active branch PR, confirms the local workspace `HEAD` matches that PR's exact current `headRefOid`, and checks the GitHub Actions workflow named `quality` for that same SHA; missing PR metadata, local/remote SHA mismatches, stale runs from older SHAs, pending runs, and failed runs all fail verification closed with remediation. E2E recipe steps run with bounded stdout/stderr capture plus a per-step timeout so a hung verification command cannot stall the worker indefinitely. Recipe steps accept an optional `timeout_seconds`; omitted values default to `300`, and timeout failures are reported as timed-out verification steps instead of as generic stalls. Each verification pass persists JSON and markdown reports in the listen store, then mirrors the latest compact summary into inspect output, dashboard detail, PR rendering, and workpad updates.
 
 Listen and merge now share the same validation-profile resolver. Validation selection follows `CLI override > repo-scoped .metastack/meta.json validation.commands > built-in repo heuristics`, and the resolved profile can include an optional repo-scoped label for diagnostics. `meta agents listen --check --root .` prints the active validation profile plus the resolved verification route, provider, model, reasoning, and effective verification settings so operators can confirm the deterministic gate before starting the daemon.
 
@@ -1304,7 +1311,7 @@ Repo-scoped listen validation defaults live in `.metastack/meta.json`:
 }
 ```
 
-`repair_attempts` seeds two bounded repair loops: one budget for verification retries before PR mutation, and a separate budget for pre-PR local validation failures plus post-publication GitHub CI failures. When verification fails, the draft PR stays in place and the next execution turn receives concrete remediation. When local validation fails, the worker captures stdout/stderr excerpts, rewrites the continuation delta with concise repair context, decrements the validation/CI repair budget, and blocks PR mutation when that budget is exhausted. When GitHub checks fail on the active branch PR, the worker re-engages the same branch PR instead of creating a duplicate, reruns local validation before the next PR mutation, and preserves the `metastack` label.
+`repair_attempts` seeds two bounded repair loops: one budget for verification retries before PR mutation, and a separate budget for pre-PR local validation failures plus post-publication GitHub CI failures. When verification fails, the draft PR stays in place and the next execution turn receives concrete remediation. When local validation fails, the worker captures stdout/stderr excerpts, rewrites the continuation delta with concise repair context, decrements the validation/CI repair budget, and blocks PR mutation when that budget is exhausted. After draft publication and again before ready handoff, the worker polls the active branch PR until GitHub CI passes, fails, reports no configured checks, or times out. Pending checks surface explicit waiting progress in session summaries, inspect output, and dashboard detail. Failed checks keep the same PR in place instead of creating a duplicate, rerun local validation before the next PR mutation, and preserve the `metastack` label. Timeouts honor the install-scoped `ci_timeout_behavior`: `block` stops review handoff, while `warn_and_proceed` records a warning and continues.
 
 Install-scoped verification defaults live in `meta runtime config`:
 

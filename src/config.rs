@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::branding;
-use crate::cli::{ListenRefreshPolicyArg, PromptTransportArg};
+use crate::cli::{ListenCiTimeoutBehaviorArg, ListenRefreshPolicyArg, PromptTransportArg};
 #[allow(unused_imports)]
 pub(crate) use crate::config_resolution::data_root_from_config_path;
 #[allow(unused_imports)]
@@ -24,6 +24,7 @@ pub use crate::config_resolution::{
     validate_interactive_plan_follow_up_question_limit,
     validate_interactive_technical_follow_up_question_limit,
     validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
+    validate_listen_ci_poll_interval_seconds, validate_listen_ci_poll_timeout_seconds,
     validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
     validate_listen_retry_max_backoff_seconds, validate_supported_agent,
     validate_technical_refinement_round_limit,
@@ -62,6 +63,8 @@ pub const DEFAULT_LISTEN_RETRY_INITIAL_BACKOFF_SECONDS: u64 = 2;
 pub const DEFAULT_LISTEN_RETRY_MAX_BACKOFF_SECONDS: u64 = 60;
 pub const DEFAULT_LISTEN_AGENT_TURN_TIMEOUT_SECONDS: u64 = 1_800;
 pub const DEFAULT_LISTEN_AGENT_GRACEFUL_SHUTDOWN_SECONDS: u64 = 5;
+pub const DEFAULT_LISTEN_CI_POLL_INTERVAL_SECONDS: u64 = 30;
+pub const DEFAULT_LISTEN_CI_POLL_TIMEOUT_SECONDS: u64 = 900;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
 pub const AGENT_ROUTE_BACKLOG_IMPROVE: &str = "backlog.improve";
 pub const AGENT_ROUTE_BACKLOG_SPLIT: &str = "backlog.split";
@@ -147,6 +150,9 @@ pub struct InstallListenSettings {
     pub poll_interval_seconds: Option<u64>,
     pub agent_turn_timeout_seconds: Option<u64>,
     pub agent_graceful_shutdown_seconds: Option<u64>,
+    pub ci_poll_interval_seconds: Option<u64>,
+    pub ci_poll_timeout_seconds: Option<u64>,
+    pub ci_timeout_behavior: Option<ListenCiTimeoutBehavior>,
     #[serde(default)]
     pub retry: ListenRetrySettings,
 }
@@ -430,6 +436,14 @@ pub enum ListenRefreshPolicy {
     #[default]
     ReuseAndRefresh,
     RecreateFromOriginMain,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenCiTimeoutBehavior {
+    #[default]
+    Block,
+    WarnAndProceed,
 }
 
 #[derive(Debug, Default)]
@@ -993,6 +1007,23 @@ impl InstallListenSettings {
         self.agent_graceful_shutdown_seconds
             .unwrap_or(DEFAULT_LISTEN_AGENT_GRACEFUL_SHUTDOWN_SECONDS)
     }
+
+    /// Returns the configured GitHub CI settle poll interval in seconds.
+    pub fn ci_poll_interval_seconds(&self) -> u64 {
+        self.ci_poll_interval_seconds
+            .unwrap_or(DEFAULT_LISTEN_CI_POLL_INTERVAL_SECONDS)
+    }
+
+    /// Returns the configured GitHub CI settle timeout in seconds.
+    pub fn ci_poll_timeout_seconds(&self) -> u64 {
+        self.ci_poll_timeout_seconds
+            .unwrap_or(DEFAULT_LISTEN_CI_POLL_TIMEOUT_SECONDS)
+    }
+
+    /// Returns the configured GitHub CI settle timeout behavior.
+    pub fn ci_timeout_behavior(&self) -> ListenCiTimeoutBehavior {
+        self.ci_timeout_behavior.unwrap_or_default()
+    }
 }
 
 impl PlanningValidationSettings {
@@ -1052,6 +1083,21 @@ impl InstallDefaults {
         }
         if let Some(timeout) = self.listen.agent_graceful_shutdown_seconds {
             validate_listen_agent_graceful_shutdown_seconds(timeout)?;
+        }
+        if let Some(interval) = self.listen.ci_poll_interval_seconds {
+            validate_listen_ci_poll_interval_seconds(interval)?;
+        }
+        if let Some(timeout) = self.listen.ci_poll_timeout_seconds {
+            validate_listen_ci_poll_timeout_seconds(timeout)?;
+        }
+        let ci_poll_interval = self.listen.ci_poll_interval_seconds();
+        let ci_poll_timeout = self.listen.ci_poll_timeout_seconds();
+        if ci_poll_timeout < ci_poll_interval {
+            return Err(anyhow!(
+                "listen GitHub CI settle timeout must be at least the poll interval; got timeout {}s < interval {}s",
+                ci_poll_timeout,
+                ci_poll_interval
+            ));
         }
         self.listen.retry.validate()?;
         if let Some(limit) = self.plan.interactive_follow_up_questions {
@@ -1287,6 +1333,15 @@ impl From<ListenRefreshPolicyArg> for ListenRefreshPolicy {
     }
 }
 
+impl From<ListenCiTimeoutBehaviorArg> for ListenCiTimeoutBehavior {
+    fn from(value: ListenCiTimeoutBehaviorArg) -> Self {
+        match value {
+            ListenCiTimeoutBehaviorArg::Block => Self::Block,
+            ListenCiTimeoutBehaviorArg::WarnAndProceed => Self::WarnAndProceed,
+        }
+    }
+}
+
 fn normalize_required_labels<I, S>(values: I) -> Option<Vec<String>>
 where
     I: IntoIterator<Item = S>,
@@ -1513,6 +1568,9 @@ mod tests {
                     poll_interval_seconds: Some(42),
                     agent_turn_timeout_seconds: None,
                     agent_graceful_shutdown_seconds: None,
+                    ci_poll_interval_seconds: None,
+                    ci_poll_timeout_seconds: None,
+                    ci_timeout_behavior: None,
                     retry: super::ListenRetrySettings::default(),
                 },
                 plan: InstallPlanSettings {
@@ -1681,6 +1739,9 @@ mod tests {
                     poll_interval_seconds: Some(42),
                     agent_turn_timeout_seconds: None,
                     agent_graceful_shutdown_seconds: None,
+                    ci_poll_interval_seconds: None,
+                    ci_poll_timeout_seconds: None,
+                    ci_timeout_behavior: None,
                     retry: super::ListenRetrySettings::default(),
                 },
                 plan: InstallPlanSettings {

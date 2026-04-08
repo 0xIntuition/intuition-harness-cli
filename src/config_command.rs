@@ -25,14 +25,16 @@ use crate::branding;
 use crate::cli::{ConfigArgs, VimModeArg};
 use crate::config::{
     AgentConfigSource, AgentRouteConfig, AgentRouteScope, AppConfig, ListenAssignmentScope,
-    ListenRefreshPolicy, PlanDefaultMode, VelocityAutoAssign, detect_supported_agents,
-    normalize_agent_name, normalize_agent_route_key, resolve_agent_route, supported_agent_models,
-    supported_agent_names, supported_agent_route_definitions, supported_agent_route_families,
-    supported_reasoning_options, validate_agent_model, validate_agent_name,
-    validate_agent_reasoning, validate_backlog_default_priority, validate_backlog_labels,
-    validate_fast_plan_question_limit, validate_interactive_plan_follow_up_question_limit,
+    ListenCiTimeoutBehavior, ListenRefreshPolicy, PlanDefaultMode, VelocityAutoAssign,
+    detect_supported_agents, normalize_agent_name, normalize_agent_route_key, resolve_agent_route,
+    supported_agent_models, supported_agent_names, supported_agent_route_definitions,
+    supported_agent_route_families, supported_reasoning_options, validate_agent_model,
+    validate_agent_name, validate_agent_reasoning, validate_backlog_default_priority,
+    validate_backlog_labels, validate_fast_plan_question_limit,
+    validate_interactive_plan_follow_up_question_limit,
     validate_interactive_technical_follow_up_question_limit,
     validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
+    validate_listen_ci_poll_interval_seconds, validate_listen_ci_poll_timeout_seconds,
     validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
     validate_listen_retry_max_backoff_seconds, validate_technical_refinement_round_limit,
 };
@@ -75,6 +77,7 @@ struct SerializableConfigView<'a> {
 struct EffectiveConfigView {
     listen_retry: EffectiveListenRetryView,
     listen_timeouts: EffectiveListenTimeoutView,
+    listen_ci_settle: EffectiveListenCiSettleView,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +90,13 @@ struct EffectiveListenRetryView {
 struct EffectiveListenTimeoutView {
     agent_turn_timeout_seconds: u64,
     agent_graceful_shutdown_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct EffectiveListenCiSettleView {
+    ci_poll_interval_seconds: u64,
+    ci_poll_timeout_seconds: u64,
+    timeout_behavior: ListenCiTimeoutBehavior,
 }
 
 pub async fn run_config(args: &ConfigArgs) -> Result<ConfigCommandOutput> {
@@ -209,6 +219,15 @@ fn render_json(view: &ConfigViewData) -> Result<String> {
                     .listen
                     .agent_graceful_shutdown_seconds(),
             },
+            listen_ci_settle: EffectiveListenCiSettleView {
+                ci_poll_interval_seconds: view
+                    .app_config
+                    .defaults
+                    .listen
+                    .ci_poll_interval_seconds(),
+                ci_poll_timeout_seconds: view.app_config.defaults.listen.ci_poll_timeout_seconds(),
+                timeout_behavior: view.app_config.defaults.listen.ci_timeout_behavior(),
+            },
         },
     })?)
 }
@@ -268,6 +287,18 @@ fn render_summary(view: &ConfigViewData, include_path: bool) -> String {
             .poll_interval_seconds
             .map(|v| format!("{v}s"))
             .unwrap_or_else(|| "unset".to_string())
+    ));
+    lines.push(format!(
+        "Install GitHub CI settle poll interval: {}s",
+        view.app_config.defaults.listen.ci_poll_interval_seconds()
+    ));
+    lines.push(format!(
+        "Install GitHub CI settle timeout: {}s",
+        view.app_config.defaults.listen.ci_poll_timeout_seconds()
+    ));
+    lines.push(format!(
+        "Install GitHub CI timeout behavior: {}",
+        listen_ci_timeout_behavior_label(view.app_config.defaults.listen.ci_timeout_behavior())
     ));
     lines.push(format!(
         "Install agent turn timeout: {}s",
@@ -487,6 +518,13 @@ fn display_fast_single_ticket(value: Option<bool>) -> String {
     }
 }
 
+fn listen_ci_timeout_behavior_label(value: ListenCiTimeoutBehavior) -> &'static str {
+    match value {
+        ListenCiTimeoutBehavior::Block => "block",
+        ListenCiTimeoutBehavior::WarnAndProceed => "warn_and_proceed",
+    }
+}
+
 fn render_label_summary(labels: &[String]) -> String {
     if labels.is_empty() {
         "unset".to_string()
@@ -557,6 +595,9 @@ fn has_direct_updates(args: &ConfigArgs) -> bool {
         || args.assignee_scope.is_some()
         || args.refresh_policy.is_some()
         || args.poll_interval.is_some()
+        || args.listen_ci_poll_interval.is_some()
+        || args.listen_ci_poll_timeout.is_some()
+        || args.listen_ci_timeout_behavior.is_some()
         || args.listen_agent_turn_timeout.is_some()
         || args.listen_agent_graceful_shutdown.is_some()
         || args.listen_retry_initial_backoff.is_some()
@@ -623,6 +664,24 @@ fn apply_direct_updates(view: &mut ConfigViewData, args: &ConfigArgs) -> Result<
             "listen poll interval",
             validate_listen_poll_interval_seconds,
         )?;
+    }
+    if let Some(interval) = &args.listen_ci_poll_interval {
+        view.app_config.defaults.listen.ci_poll_interval_seconds = parse_optional_u64(
+            interval,
+            "listen GitHub CI settle poll interval",
+            validate_listen_ci_poll_interval_seconds,
+        )?;
+    }
+    if let Some(timeout) = &args.listen_ci_poll_timeout {
+        view.app_config.defaults.listen.ci_poll_timeout_seconds = parse_optional_u64(
+            timeout,
+            "listen GitHub CI settle timeout",
+            validate_listen_ci_poll_timeout_seconds,
+        )?;
+    }
+    if let Some(behavior) = args.listen_ci_timeout_behavior {
+        view.app_config.defaults.listen.ci_timeout_behavior =
+            Some(ListenCiTimeoutBehavior::from(behavior));
     }
     if let Some(timeout) = &args.listen_agent_turn_timeout {
         view.app_config.defaults.listen.agent_turn_timeout_seconds = parse_optional_u64(

@@ -1039,6 +1039,15 @@ pub struct ConfigArgs {
     /// Update the install-scoped listen poll interval (seconds).
     #[arg(long)]
     pub poll_interval: Option<String>,
+    /// Update the install-scoped GitHub CI settle poll interval (seconds).
+    #[arg(long)]
+    pub listen_ci_poll_interval: Option<String>,
+    /// Update the install-scoped GitHub CI settle timeout (seconds).
+    #[arg(long)]
+    pub listen_ci_poll_timeout: Option<String>,
+    /// Update how `meta listen` behaves when post-publication GitHub CI does not settle in time.
+    #[arg(long, value_enum)]
+    pub listen_ci_timeout_behavior: Option<ListenCiTimeoutBehaviorArg>,
     /// Update the install-scoped listen agent turn timeout (seconds).
     #[arg(long)]
     pub listen_agent_turn_timeout: Option<String>,
@@ -2248,6 +2257,12 @@ pub enum ListenAssigneeScopeArg {
 pub enum ListenRefreshPolicyArg {
     ReuseAndRefresh,
     RecreateFromOriginMain,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ListenCiTimeoutBehaviorArg {
+    Block,
+    WarnAndProceed,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
