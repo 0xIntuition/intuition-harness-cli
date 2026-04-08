@@ -96,6 +96,10 @@ Primary options:
 - install-scoped listen subprocess timeouts are configured through `meta runtime config
   --listen-agent-turn-timeout <SECONDS> --listen-agent-graceful-shutdown <SECONDS>`. Unset values
   fall back to `1800s` per agent turn and `5s` of graceful shutdown before escalation.
+- install-scoped post-publication GitHub CI settle polling is configured through `meta runtime
+  config --listen-ci-poll-interval <SECONDS> --listen-ci-poll-timeout <SECONDS>
+  --listen-ci-timeout-behavior <block|warn-and-proceed>`. Unset values fall back to `30s`,
+  `900s`, and `block`.
 - `listen sessions list|inspect|clear|resume`: inspect or reuse stored project sessions from the
   install-scoped listener store. Use `--project` with `inspect`, `clear`, or `resume` to target a
   non-default project from the same checkout, or `--project-key` when you already know the stored
