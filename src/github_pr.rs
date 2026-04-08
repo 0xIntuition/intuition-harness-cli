@@ -46,6 +46,10 @@ struct BranchPullRequest {
     url: String,
     #[serde(rename = "isDraft", default)]
     is_draft: bool,
+    #[serde(rename = "headRefName", default)]
+    head_ref_name: Option<String>,
+    #[serde(rename = "headRefOid", default)]
+    head_ref_oid: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +96,20 @@ struct RawPullRequestCheck {
     description: Option<String>,
     #[serde(default)]
     link: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct WorkflowRun {
+    #[serde(rename = "headSha", default)]
+    pub(crate) head_sha: String,
+    #[serde(default)]
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) conclusion: Option<String>,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+    #[serde(rename = "workflowName", default)]
+    pub(crate) workflow_name: Option<String>,
 }
 
 impl PullRequestCheck {
@@ -546,6 +564,45 @@ impl GhCli {
         )
     }
 
+    /// Resolve the active open branch PR for the provided head/base pair.
+    ///
+    /// Returns `Ok(None)` when no open PR matches the branch, and an error when `gh`
+    /// cannot inspect the repository pull requests.
+    pub(crate) fn find_open_branch_pull_request(
+        &self,
+        workspace_path: &Path,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<Option<ResolvedBranchPullRequest>> {
+        Ok(self
+            .find_open_branch_pull_request_raw(workspace_path, head_branch, base_branch)?
+            .map(ResolvedBranchPullRequest::from))
+    }
+
+    /// List workflow runs for an exact commit SHA and workflow name.
+    ///
+    /// Returns an error when `gh` cannot inspect workflow runs.
+    pub(crate) fn list_workflow_runs_for_commit(
+        &self,
+        workspace_path: &Path,
+        workflow_name: &str,
+        head_sha: &str,
+    ) -> Result<Vec<WorkflowRun>> {
+        self.run_json::<Vec<WorkflowRun>>(
+            workspace_path,
+            &[
+                "run",
+                "list",
+                "--commit",
+                head_sha,
+                "--workflow",
+                workflow_name,
+                "--json",
+                "headSha,status,conclusion,url,workflowName",
+            ],
+        )
+    }
+
     fn find_open_branch_pull_request_raw(
         &self,
         workspace_path: &Path,
@@ -564,7 +621,7 @@ impl GhCli {
                 "--base",
                 base_branch,
                 "--json",
-                "number,url,isDraft",
+                "number,url,isDraft,headRefName,headRefOid",
             ],
         )?;
         Ok(existing.into_iter().next())
@@ -606,6 +663,27 @@ fn decode_pull_request_checks_snapshot(
                 "gh {command_display} returned exit code {code} for {:?}{stderr_suffix}",
                 snapshot.outcome
             )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedBranchPullRequest {
+    pub(crate) number: u64,
+    pub(crate) url: String,
+    pub(crate) is_draft: bool,
+    pub(crate) head_ref_name: Option<String>,
+    pub(crate) head_ref_oid: Option<String>,
+}
+
+impl From<BranchPullRequest> for ResolvedBranchPullRequest {
+    fn from(value: BranchPullRequest) -> Self {
+        Self {
+            number: value.number,
+            url: value.url,
+            is_draft: value.is_draft,
+            head_ref_name: value.head_ref_name,
+            head_ref_oid: value.head_ref_oid,
         }
     }
 }

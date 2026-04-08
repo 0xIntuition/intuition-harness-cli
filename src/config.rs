@@ -1385,20 +1385,18 @@ mod tests {
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AGENT_ROUTE_BACKLOG_TECH,
         AgentConfigOverrides, AgentConfigSource, AgentRouteConfig, AgentRouteScope,
         AgentRoutingSettings, AgentSettings, AppConfig, BacklogSettings,
-        DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_CI_POLL_INTERVAL_SECONDS,
-        DEFAULT_LISTEN_CI_POLL_TIMEOUT_SECONDS, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
+        DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
         DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
         InstallListenSettings, InstallPlanSettings, InstallTechnicalSettings, InstallUiSettings,
-        ListenAssignmentScope, ListenCiTimeoutBehavior, METASTACK_CONFIG_ENV, MergeSettings,
-        NoAgentSelectedError, PlanningAgentSettings, PlanningIssueLabels, PlanningListenSettings,
-        PlanningMeta, PlanningPlanSettings, PlanningSyncSettings, PlanningTechnicalSettings,
+        ListenAssignmentScope, METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError,
+        PlanningAgentSettings, PlanningIssueLabels, PlanningListenSettings, PlanningMeta,
+        PlanningPlanSettings, PlanningSyncSettings, PlanningTechnicalSettings,
         PlanningValidationSettings, VelocityAutoAssign, VelocityDefaults,
         is_no_agent_selected_error, no_agent_selected_route_key, normalize_agent_route_key,
         parse_listen_required_labels_csv, resolve_agent_config, resolve_agent_route,
         validate_agent_reasoning, validate_interactive_plan_follow_up_question_limit,
-        validate_listen_ci_poll_interval_seconds, validate_listen_ci_poll_timeout_seconds,
         validate_listen_poll_interval_seconds,
     };
 
@@ -1615,12 +1613,6 @@ mod tests {
             planning_meta.effective_listen_poll_interval_seconds(&app_config),
             42
         );
-        assert_eq!(app_config.defaults.listen.ci_poll_interval_seconds(), 55);
-        assert_eq!(app_config.defaults.listen.ci_poll_timeout_seconds(), 777);
-        assert_eq!(
-            app_config.defaults.listen.ci_timeout_behavior(),
-            super::ListenCiTimeoutBehavior::WarnAndProceed
-        );
         assert_eq!(
             planning_meta.effective_interactive_follow_up_question_limit(&app_config),
             4
@@ -1657,9 +1649,6 @@ mod tests {
         assert_eq!(app_config.defaults.listen.assignment_scope, None);
         assert_eq!(app_config.defaults.listen.refresh_policy, None);
         assert_eq!(app_config.defaults.listen.poll_interval_seconds, None);
-        assert_eq!(app_config.defaults.listen.ci_poll_interval_seconds, None);
-        assert_eq!(app_config.defaults.listen.ci_poll_timeout_seconds, None);
-        assert_eq!(app_config.defaults.listen.ci_timeout_behavior, None);
         assert_eq!(
             app_config.defaults.plan.interactive_follow_up_questions,
             None
@@ -1860,64 +1849,6 @@ mod tests {
     fn listen_poll_interval_validation_accepts_positive_values() {
         assert!(validate_listen_poll_interval_seconds(1).is_ok());
         assert!(validate_listen_poll_interval_seconds(60).is_ok());
-    }
-
-    #[test]
-    fn listen_ci_poll_interval_validation_rejects_zero() {
-        assert_eq!(
-            validate_listen_ci_poll_interval_seconds(0)
-                .unwrap_err()
-                .to_string(),
-            "listen GitHub CI settle poll interval must be at least 1 second; got 0"
-        );
-    }
-
-    #[test]
-    fn listen_ci_poll_timeout_validation_rejects_zero() {
-        assert_eq!(
-            validate_listen_ci_poll_timeout_seconds(0)
-                .unwrap_err()
-                .to_string(),
-            "listen GitHub CI settle timeout must be at least 1 second; got 0"
-        );
-    }
-
-    #[test]
-    fn install_listen_ci_settle_defaults_fall_back_to_built_ins() {
-        let settings = InstallListenSettings::default();
-
-        assert_eq!(
-            settings.ci_poll_interval_seconds(),
-            DEFAULT_LISTEN_CI_POLL_INTERVAL_SECONDS
-        );
-        assert_eq!(
-            settings.ci_poll_timeout_seconds(),
-            DEFAULT_LISTEN_CI_POLL_TIMEOUT_SECONDS
-        );
-        assert_eq!(
-            settings.ci_timeout_behavior(),
-            ListenCiTimeoutBehavior::Block
-        );
-    }
-
-    #[test]
-    fn app_config_validation_rejects_ci_timeout_shorter_than_interval() {
-        let config = AppConfig {
-            defaults: InstallDefaults {
-                listen: InstallListenSettings {
-                    ci_poll_interval_seconds: Some(30),
-                    ci_poll_timeout_seconds: Some(5),
-                    ..InstallListenSettings::default()
-                },
-                ..InstallDefaults::default()
-            },
-            ..AppConfig::default()
-        };
-
-        assert_eq!(
-            config.validate().unwrap_err().to_string(),
-            "listen GitHub CI settle timeout must be at least the poll interval; got timeout 5s < interval 30s"
-        );
     }
 
     #[test]

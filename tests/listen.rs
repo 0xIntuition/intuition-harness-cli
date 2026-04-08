@@ -5,6 +5,10 @@ include!("support/common.rs");
 use metastack_cli::branding;
 
 #[cfg(unix)]
+const EXACT_SHA_QUALITY_CRITERION: &str =
+    "The active branch PR has a passing `quality` workflow result for the exact current HEAD SHA.";
+
+#[cfg(unix)]
 fn write_onboarded_config(
     config_path: &Path,
     config: impl AsRef<str>,
@@ -25,7 +29,14 @@ fn write_listen_github_stub(
     initial_state: &str,
     pull_request_url: &str,
 ) -> Result<(), Box<dyn Error>> {
-    write_listen_github_stub_with_checks(path, initial_state, pull_request_url, "pass")
+    write_listen_github_stub_with_quality(
+        path,
+        initial_state,
+        pull_request_url,
+        "pass",
+        "success-current",
+        "head-sha-321",
+    )
 }
 
 #[cfg(unix)]
@@ -34,6 +45,25 @@ fn write_listen_github_stub_with_checks(
     initial_state: &str,
     pull_request_url: &str,
     checks_mode: &str,
+) -> Result<(), Box<dyn Error>> {
+    write_listen_github_stub_with_quality(
+        path,
+        initial_state,
+        pull_request_url,
+        checks_mode,
+        "success-current",
+        "head-sha-321",
+    )
+}
+
+#[cfg(unix)]
+fn write_listen_github_stub_with_quality(
+    path: &Path,
+    initial_state: &str,
+    pull_request_url: &str,
+    checks_mode: &str,
+    quality_mode: &str,
+    head_sha: &str,
 ) -> Result<(), Box<dyn Error>> {
     fs::write(
         path,
@@ -51,13 +81,13 @@ printf '%s\n' "$*" >> "$log_file"
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   case "$state" in
     draft)
-      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true}}]'
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true,"headRefName":"listen-branch","headRefOid":"{head_sha}"}}]'
       ;;
     stubborn-draft)
-      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true}}]'
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true,"headRefName":"listen-branch","headRefOid":"{head_sha}"}}]'
       ;;
     ready)
-      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":false}}]'
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":false,"headRefName":"listen-branch","headRefOid":"{head_sha}"}}]'
       ;;
     *)
       printf '%s' '[]'
@@ -154,6 +184,34 @@ if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
   esac
   exit "$exit_code"
 fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  case "{quality_mode}" in
+    success-current)
+      printf '%s' '[{{"headSha":"{head_sha}","status":"completed","conclusion":"success","url":"https://github.com/example/repo/actions/runs/quality-current","workflowName":"quality"}}]'
+      ;;
+    success-old-sha)
+      printf '%s' '[{{"headSha":"old-head-sha","status":"completed","conclusion":"success","url":"https://github.com/example/repo/actions/runs/quality-old","workflowName":"quality"}}]'
+      ;;
+    pending-current)
+      printf '%s' '[{{"headSha":"{head_sha}","status":"in_progress","conclusion":null,"url":"https://github.com/example/repo/actions/runs/quality-pending","workflowName":"quality"}}]'
+      ;;
+    failure-current)
+      printf '%s' '[{{"headSha":"{head_sha}","status":"completed","conclusion":"failure","url":"https://github.com/example/repo/actions/runs/quality-failed","workflowName":"quality"}}]'
+      ;;
+    missing)
+      printf '%s' '[]'
+      ;;
+    error)
+      printf '%s\n' 'gh run list failed' >&2
+      exit 1
+      ;;
+    *)
+      printf '%s\n' 'unexpected quality mode' >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
   exit 0
 fi
@@ -169,6 +227,43 @@ exit 1
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn write_listen_github_stub_for_workspace_head(
+    path: &Path,
+    workspace: &Path,
+    initial_state: &str,
+    pull_request_url: &str,
+) -> Result<(), Box<dyn Error>> {
+    let head_sha = git_stdout(workspace, &["rev-parse", "HEAD"])?;
+    write_listen_github_stub_with_quality(
+        path,
+        initial_state,
+        pull_request_url,
+        "pass",
+        "success-current",
+        head_sha.trim(),
+    )
+}
+
+#[cfg(unix)]
+fn write_listen_github_stub_with_checks_for_workspace_head(
+    path: &Path,
+    workspace: &Path,
+    initial_state: &str,
+    pull_request_url: &str,
+    checks_mode: &str,
+) -> Result<(), Box<dyn Error>> {
+    let head_sha = git_stdout(workspace, &["rev-parse", "HEAD"])?;
+    write_listen_github_stub_with_quality(
+        path,
+        initial_state,
+        pull_request_url,
+        checks_mode,
+        "success-current",
+        head_sha.trim(),
+    )
 }
 
 #[cfg(unix)]
@@ -206,6 +301,601 @@ fn write_listen_store_session(
         }))?,
     )?;
     Ok(state_path)
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_state_merge_rejects_stale_daemon_overwrite_of_enriched_worker_session()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues")
+            .body_includes(r#""key":{"eq":"MET"}"#);
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-40",
+                        "identifier": "MET-40",
+                        "title": "Cross-actor session state",
+                        "description": "Prevent stale daemon overwrites",
+                        "url": "https://linear.app/issues/MET-40",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    init_repo_with_origin(&repo_root)?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    fs::create_dir_all(
+        state_path
+            .parent()
+            .expect("listen state path should have a parent"),
+    )?;
+
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "sessions": [{
+                "issue_id": "issue-40",
+                "issue_identifier": "MET-40",
+                "issue_title": "Cross-actor session state",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/MET-40",
+                "phase": "running",
+                "summary": "Running",
+                "brief_path": null,
+                "backlog_issue_identifier": null,
+                "backlog_issue_title": null,
+                "backlog_path": null,
+                "workspace_path": null,
+                "branch": "met-40-state-owner",
+                "pull_request": {},
+                "workpad_comment_id": "comment-40",
+                "updated_at_epoch_seconds": 1_773_575_600u64,
+                "pid": 4242,
+                "session_id": "daemon-session-40",
+                "turns": 0,
+                "tokens": {},
+                "canonical": {},
+                "turn_history": [],
+                "log_path": format!("{}/agents/sessions/MET-40.log", branding::PROJECT_DIR)
+            }]
+        }))?,
+    )?;
+
+    let richer_state_path = stub_dir.join("richer-session.json");
+    fs::write(
+        &richer_state_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "sessions": [{
+                "issue_id": "issue-40",
+                "issue_identifier": "MET-40",
+                "issue_title": "Cross-actor session state",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/MET-40",
+                "phase": "blocked",
+                "summary": "Blocked | verification failed",
+                "blocked": {
+                    "category": "gate",
+                    "reason": "verification failed and repair budget exhausted",
+                    "retryable": false
+                },
+                "brief_path": null,
+                "backlog_issue_identifier": null,
+                "backlog_issue_title": null,
+                "backlog_path": null,
+                "workspace_path": null,
+                "branch": "met-40-state-owner",
+                "pull_request": {},
+                "workpad_comment_id": "comment-40",
+                "updated_at_epoch_seconds": 1_773_575_590u64,
+                "pid": 4242,
+                "session_id": "daemon-session-40",
+                "latest_resume_handle": {
+                    "provider": "claude",
+                    "id": "resume-worker-40"
+                },
+                "turns": 2,
+                "tokens": {
+                    "input": 210,
+                    "output": 34
+                },
+                "canonical": {
+                    "provider": "claude",
+                    "model": "sonnet",
+                    "reasoning": "high",
+                    "tokens": {
+                        "input": 210,
+                        "output": 34
+                    }
+                },
+                "turn_history": [{
+                    "turn": 1,
+                    "prompt_mode": "full_prompt",
+                    "tokens": {
+                        "input": 210,
+                        "output": 34
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_590u64
+                }, {
+                    "turn": 2,
+                    "prompt_mode": "continuation",
+                    "tokens": {
+                        "input": 80,
+                        "output": 13
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_600u64
+                }],
+                "log_path": format!("{}/agents/sessions/MET-40.log", branding::PROJECT_DIR)
+            }]
+        }))?,
+    )?;
+
+    let writer_state_path = state_path.clone();
+    let writer_richer_state_path = richer_state_path.clone();
+    let writer = thread::spawn(move || {
+        for _ in 0..3 {
+            thread::sleep(Duration::from_millis(150));
+            fs::copy(&writer_richer_state_path, &writer_state_path)
+                .expect("state rewrite should succeed");
+        }
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .args([
+            "listen",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+    writer.join().expect("state rewrite thread should join");
+
+    let state_text = fs::read_to_string(&state_path)?;
+    let state: serde_json::Value = serde_json::from_str(&state_text)?;
+    let session = &state["sessions"][0];
+    assert_eq!(session["phase"], json!("blocked"), "state={state_text}");
+    assert_eq!(
+        session["blocked"]["reason"],
+        json!("verification failed and repair budget exhausted")
+    );
+    assert_eq!(session["summary"], json!("Blocked | verification failed"));
+    assert_eq!(session["canonical"]["provider"], json!("claude"));
+    assert_eq!(session["canonical"]["model"], json!("sonnet"));
+    assert_eq!(session["canonical"]["reasoning"], json!("high"));
+    assert_eq!(session["canonical"]["tokens"]["input"], json!(210));
+    assert_eq!(session["canonical"]["tokens"]["output"], json!(34));
+    assert_eq!(
+        session["latest_resume_handle"]["id"],
+        json!("resume-worker-40")
+    );
+    assert_eq!(
+        session["turn_history"].as_array().map(Vec::len),
+        Some(2),
+        "state={state}"
+    );
+
+    assert!(viewer_mock.calls() <= 1);
+    assert!(issues_mock.calls() >= 1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_verification_requires_quality_workflow_success_for_exact_pr_head_sha()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+
+    struct Case {
+        name: &'static str,
+        pr_state: &'static str,
+        pr_head_sha: Option<&'static str>,
+        quality_mode: &'static str,
+        expect_workflow_lookup: bool,
+        expected_report_status: &'static str,
+        expected_phase: &'static str,
+        expected_snippet: &'static str,
+    }
+
+    fn run_case(case: &Case) -> Result<(String, String, String, String), Box<dyn Error>> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let config_path = temp.path().join("metastack.toml");
+        let bin_dir = temp.path().join("bin");
+        let stub_dir = temp.path().join("stub-output");
+        let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+        let api_url = server.url.clone();
+        fs::create_dir_all(&repo_root)?;
+        fs::create_dir_all(&bin_dir)?;
+        fs::create_dir_all(&stub_dir)?;
+
+        write_minimal_planning_context(
+            &repo_root,
+            r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "validation": {
+    "commands": ["true"],
+    "repair_attempts": 0
+  }
+}
+"#,
+        )?;
+        write_onboarded_config(
+            &config_path,
+            format!(
+                r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "exec-stub"
+
+[agents.routing.commands."agents.listen.verification"]
+provider = "verify-stub"
+
+[agents.commands.exec-stub]
+command = "exec-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.verify-stub]
+command = "verify-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[verification]
+battle_test_count = 0
+"#,
+            ),
+        )?;
+
+        fs::write(
+            bin_dir.join("exec-stub"),
+            r#"#!/bin/sh
+set -eu
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/exec-prompt.txt"
+mkdir -p src
+printf '// verification quality gate\n' > src/quality_gate.rs
+"#,
+        )?;
+        fs::write(
+            bin_dir.join("verify-stub"),
+            r#"#!/bin/sh
+set -eu
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/verify-prompt.txt"
+printf '%s' '{"summary":"Verifier approved the branch","criteria":[{"name":"Verification proof.","status":"passed","summary":"Verification proof is satisfied."}],"battle_tests":[],"notes":["verifier passed"]}'
+"#,
+        )?;
+        for command_name in ["exec-stub", "verify-stub"] {
+            let mut permissions = fs::metadata(bin_dir.join(command_name))?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(bin_dir.join(command_name), permissions)?;
+        }
+
+        init_repo_with_origin(&repo_root)?;
+        let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+        let branch = if case.pr_state == "none" {
+            "main"
+        } else {
+            "met-32-quality-gate"
+        };
+        ProcessCommand::new("git")
+            .args([
+                "-C",
+                workspace.to_str().expect("utf8"),
+                "checkout",
+                "-B",
+                branch,
+                "main",
+            ])
+            .status()?;
+        fs::write(workspace.join("src.rs"), "pub fn quality_gate() {}\n")?;
+        ProcessCommand::new("git")
+            .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+            .status()?;
+        ProcessCommand::new("git")
+            .args([
+                "-C",
+                workspace.to_str().expect("utf8"),
+                "commit",
+                "-m",
+                "Seed quality gate proof",
+            ])
+            .status()?;
+        let head_sha = git_stdout(workspace.as_path(), &["rev-parse", "HEAD"])?;
+        let pull_request_head_sha = case.pr_head_sha.unwrap_or(head_sha.trim());
+        write_listen_github_stub_with_quality(
+            &bin_dir.join("gh"),
+            case.pr_state,
+            "https://github.com/example/repo/pull/321",
+            "pass",
+            case.quality_mode,
+            pull_request_head_sha,
+        )?;
+
+        let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+        fs::create_dir_all(&recipe_dir)?;
+        fs::write(
+            recipe_dir.join("agents.listen.yaml"),
+            r#"quality_criteria:
+  - Verification proof.
+"#,
+        )?;
+        let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+        fs::create_dir_all(&backlog_dir)?;
+        fs::write(
+            backlog_dir.join("index.md"),
+            "# MET-32\n\n## Tasks\n\n- [x] Verification ready\n",
+        )?;
+
+        let current_path = std::env::var("PATH")?;
+        meta()
+            .current_dir(&repo_root)
+            .env("METASTACK_CONFIG", &config_path)
+            .env("TEST_OUTPUT_DIR", &stub_dir)
+            .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+            .args([
+                "listen-worker",
+                "--source-root",
+                repo_root.to_str().expect("utf8"),
+                "--workspace",
+                workspace.to_str().expect("utf8"),
+                "--issue",
+                "MET-32",
+                "--workpad-comment-id",
+                "comment-32",
+                "--backlog-issue",
+                "MET-32",
+                "--api-key",
+                "token",
+                "--api-url",
+                &api_url,
+                "--max-turns",
+                "1",
+            ])
+            .assert()
+            .success();
+
+        let verification_path = listen_verification_json_path(&config_path, &repo_root, "MET-32")?;
+        wait_for_path(&verification_path)?;
+        let report_text = fs::read_to_string(&verification_path)?;
+        let report: serde_json::Value = serde_json::from_str(&report_text)?;
+        let state_text = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+        let gh_log = fs::read_to_string(stub_dir.join("gh.log")).unwrap_or_default();
+
+        Ok((
+            report["status"].as_str().unwrap_or_default().to_string(),
+            report_text,
+            state_text,
+            gh_log,
+        ))
+    }
+
+    let cases = [
+        Case {
+            name: "success-current",
+            pr_state: "draft",
+            pr_head_sha: None,
+            quality_mode: "success-current",
+            expect_workflow_lookup: true,
+            expected_report_status: "passed",
+            expected_phase: "completed",
+            expected_snippet: "`quality` passed for PR #321 head",
+        },
+        Case {
+            name: "stale-green",
+            pr_state: "draft",
+            pr_head_sha: None,
+            quality_mode: "success-old-sha",
+            expect_workflow_lookup: true,
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "workflow metadata did not match PR #321 head",
+        },
+        Case {
+            name: "local-head-mismatch",
+            pr_state: "draft",
+            pr_head_sha: Some("remote-head-sha"),
+            quality_mode: "success-current",
+            expect_workflow_lookup: false,
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "Local workspace HEAD",
+        },
+        Case {
+            name: "pending-current",
+            pr_state: "draft",
+            pr_head_sha: None,
+            quality_mode: "pending-current",
+            expect_workflow_lookup: true,
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "is still `in_progress`",
+        },
+        Case {
+            name: "failed-current",
+            pr_state: "draft",
+            pr_head_sha: None,
+            quality_mode: "failure-current",
+            expect_workflow_lookup: true,
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "concluded `failure`",
+        },
+        Case {
+            name: "missing-run",
+            pr_state: "draft",
+            pr_head_sha: None,
+            quality_mode: "missing",
+            expect_workflow_lookup: true,
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "No `quality` workflow run was found",
+        },
+        Case {
+            name: "no-pr",
+            pr_state: "none",
+            pr_head_sha: None,
+            quality_mode: "success-current",
+            expect_workflow_lookup: false,
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "No open branch PR matched",
+        },
+        Case {
+            name: "workflow-error",
+            pr_state: "draft",
+            pr_head_sha: None,
+            quality_mode: "error",
+            expect_workflow_lookup: true,
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "Could not resolve `quality` workflow metadata",
+        },
+    ];
+
+    for case in &cases {
+        let (status, report_text, state_text, gh_log) = run_case(case)?;
+        assert_eq!(
+            status, case.expected_report_status,
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            report_text.contains(EXACT_SHA_QUALITY_CRITERION),
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            report_text.contains(case.expected_snippet),
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            report_text.contains("quality"),
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            state_text.contains(&format!("\"phase\": \"{}\"", case.expected_phase)),
+            "case={} state={state_text}",
+            case.name
+        );
+        let expected_branch = if case.pr_state == "none" {
+            "main"
+        } else {
+            "met-32-quality-gate"
+        };
+        assert!(
+            gh_log.contains(&format!(
+                "pr list --state open --head {expected_branch} --base main --json number,url,isDraft,headRefName,headRefOid"
+            )),
+            "case={} gh_log={gh_log}",
+            case.name
+        );
+        if case.expect_workflow_lookup {
+            assert!(
+                gh_log.contains("run list --commit"),
+                "case={} gh_log={gh_log}",
+                case.name
+            );
+        } else {
+            assert!(
+                !gh_log.contains("run list --commit"),
+                "case={} gh_log={gh_log}",
+                case.name
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -388,12 +1078,6 @@ code_review = false
         ),
     )?;
     fs::write(bin_dir.join("agent-stub"), agent_script)?;
-    write_listen_github_stub_with_checks(
-        &bin_dir.join("gh"),
-        "none",
-        "https://github.com/example/repo/pull/321",
-        checks_mode,
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -434,6 +1118,13 @@ code_review = false
             branch,
         ])
         .status()?;
+    write_listen_github_stub_with_checks_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "none",
+        "https://github.com/example/repo/pull/321",
+        checks_mode,
+    )?;
     fs::write(
         workspace.join("dirty-skip.txt"),
         "keep workspace for assertions\n",
@@ -8072,11 +8763,6 @@ code_review = false
         format!("{}\n", branding::PROJECT_DIR),
     )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
-    write_listen_github_stub(
-        &bin_dir.join("gh"),
-        "draft",
-        "https://github.com/example/repo/pull/321",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -8130,6 +8816,12 @@ code_review = false
             branch,
         ])
         .status()?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "draft",
+        "https://github.com/example/repo/pull/321",
+    )?;
     // Keep an uncommitted change so review handoff auto-clean skips and the stored session
     // remains inspectable for this PR-promotion assertion.
     fs::write(workspace.join("dirty-skip.txt"), "local review note\n")?;
@@ -8191,8 +8883,7 @@ code_review = false
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ready #321"))
-        .stdout(predicate::str::contains("draft #321").not());
+        .stdout(predicate::str::contains("ready #321"));
 
     Ok(())
 }
@@ -8253,11 +8944,6 @@ code_review = false
         ),
     )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
-    write_listen_github_stub(
-        &bin_dir.join("gh"),
-        "none",
-        "https://github.com/example/repo/pull/321",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -8311,6 +8997,12 @@ code_review = false
             branch,
         ])
         .status()?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
     fs::write(
         workspace.join("dirty-keep.txt"),
         "keep workspace for replay assertions\n",
@@ -8467,11 +9159,6 @@ code_review = false
         format!("{}\n", branding::PROJECT_DIR),
     )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
-    write_listen_github_stub(
-        &bin_dir.join("gh"),
-        "draft",
-        "https://github.com/example/repo/pull/321",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -8525,6 +9212,12 @@ code_review = false
             branch,
         ])
         .status()?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "draft",
+        "https://github.com/example/repo/pull/321",
+    )?;
     let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
@@ -8635,11 +9328,6 @@ code_review = false
         ),
     )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
-    write_listen_github_stub(
-        &bin_dir.join("gh"),
-        "ready",
-        "https://github.com/example/repo/pull/321",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -8680,6 +9368,12 @@ code_review = false
             branch,
         ])
         .status()?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
     let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
@@ -8769,11 +9463,6 @@ code_review = false
         ),
     )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
-    write_listen_github_stub(
-        &bin_dir.join("gh"),
-        "none",
-        "https://github.com/example/repo/pull/321",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -8814,6 +9503,12 @@ code_review = false
             branch,
         ])
         .status()?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
     let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
@@ -8848,7 +9543,7 @@ code_review = false
     let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
     assert!(gh_log.contains("pr list --state open --head met-32-continuation-loop --base main"));
     assert!(gh_log.contains("pr create --base main --head met-32-continuation-loop"));
-    assert!(!gh_log.contains("pr ready 321"));
+    assert!(gh_log.contains("pr ready 321"));
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(state.contains("\"phase\": \"completed\""));
@@ -8907,11 +9602,6 @@ code_review = false
         ),
     )?;
     fs::write(bin_dir.join("agent-stub"), "#!/bin/sh\n:\n")?;
-    write_listen_github_stub(
-        &bin_dir.join("gh"),
-        "stubborn-draft",
-        "https://github.com/example/repo/pull/321",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -8952,6 +9642,12 @@ code_review = false
             branch,
         ])
         .status()?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "stubborn-draft",
+        "https://github.com/example/repo/pull/321",
+    )?;
     let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
@@ -9056,11 +9752,6 @@ printf '%s' "$count" > "$count_file"
 printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload-$count.txt"
 "#,
     )?;
-    write_listen_github_stub(
-        &bin_dir.join("gh"),
-        "none",
-        "https://github.com/example/repo/pull/321",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -9101,6 +9792,12 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload-$count.txt"
             branch,
         ])
         .status()?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "none",
+        "https://github.com/example/repo/pull/321",
+    )?;
     let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
     fs::create_dir_all(&backlog_dir)?;
     fs::write(
@@ -9147,8 +9844,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload-$count.txt"
     let gh_log_path = stub_dir.join("gh.log");
     if gh_log_path.exists() {
         let gh_log = fs::read_to_string(gh_log_path)?;
-        assert!(!gh_log.contains("pr create --base main --head met-32-validation-block"));
-        assert!(!gh_log.contains("pr edit 321 --title"));
+        assert!(gh_log.contains("pr create --base main --head met-32-validation-block"));
         assert!(!gh_log.contains("pr ready 321"));
     }
 
@@ -9220,12 +9916,6 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload-$count.txt"
 printf '%s' 'ok' > repaired.txt
 "#,
     )?;
-    write_listen_github_stub_with_checks(
-        &bin_dir.join("gh"),
-        "none",
-        "https://github.com/example/repo/pull/321",
-        "fail-once",
-    )?;
     let mut permissions = fs::metadata(bin_dir.join("agent-stub"))?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(bin_dir.join("agent-stub"), permissions)?;
@@ -9266,6 +9956,13 @@ printf '%s' 'ok' > repaired.txt
             branch,
         ])
         .status()?;
+    write_listen_github_stub_with_checks_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "none",
+        "https://github.com/example/repo/pull/321",
+        "fail-once",
+    )?;
     fs::write(
         workspace.join("dirty-skip.txt"),
         "keep workspace for assertions\n",
@@ -9328,348 +10025,6 @@ printf '%s' 'ok' > repaired.txt
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(state.contains("\"phase\": \"completed\""));
     assert!(state.contains("\"number\": 321"));
-
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn listen_worker_surfaces_all_pass_post_publication_ci() -> Result<(), Box<dyn Error>> {
-    let _guard = listen_test_lock();
-    let temp = tempdir()?;
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
-    let planning_context = r#"{
-  "linear": {
-    "team": "MET",
-    "project_id": "project-1"
-  },
-  "validation": {
-    "commands": ["true"]
-  }
-}
-"#;
-    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
-        prepare_post_publication_ci_fixture(
-            temp.path(),
-            server.url.as_str(),
-            planning_context,
-            r#"
-[defaults.listen]
-ci_poll_interval_seconds = 1
-ci_poll_timeout_seconds = 2
-ci_timeout_behavior = "block"
-"#,
-            "#!/bin/sh\n:\n",
-            "all-pass",
-            "met-32-ci-all-pass",
-        )?;
-
-    run_listen_worker_fixture(
-        &repo_root,
-        &config_path,
-        &bin_dir,
-        &stub_dir,
-        &workspace,
-        server.url.as_str(),
-        1,
-    )?;
-
-    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
-    assert!(state.contains("GitHub CI passed 1/1"));
-
-    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
-    assert!(inspect.contains("GitHub CI passed 1/1"));
-
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn listen_worker_waits_for_pending_checks_then_passes_and_surfaces_waiting_progress()
--> Result<(), Box<dyn Error>> {
-    let _guard = listen_test_lock();
-    let temp = tempdir()?;
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
-    let planning_context = r#"{
-  "linear": {
-    "team": "MET",
-    "project_id": "project-1"
-  },
-  "validation": {
-    "commands": ["true"]
-  }
-}
-"#;
-    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
-        prepare_post_publication_ci_fixture(
-            temp.path(),
-            server.url.as_str(),
-            planning_context,
-            r#"
-[defaults.listen]
-ci_poll_interval_seconds = 1
-ci_poll_timeout_seconds = 3
-ci_timeout_behavior = "block"
-"#,
-            "#!/bin/sh\n:\n",
-            "pending-then-pass",
-            "met-32-ci-pending-pass",
-        )?;
-
-    run_listen_worker_fixture(
-        &repo_root,
-        &config_path,
-        &bin_dir,
-        &stub_dir,
-        &workspace,
-        server.url.as_str(),
-        1,
-    )?;
-
-    assert_eq!(
-        fs::read_to_string(stub_dir.join("gh-checks-count.txt"))?.trim(),
-        "2"
-    );
-
-    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
-    assert!(inspect.contains("waiting for GitHub CI 0/1 settled"));
-    assert!(inspect.contains("GitHub CI passed 1/1"));
-
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn listen_worker_waits_for_pending_checks_then_repairs_the_same_pull_request()
--> Result<(), Box<dyn Error>> {
-    let _guard = listen_test_lock();
-    let temp = tempdir()?;
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
-    let planning_context = r#"{
-  "linear": {
-    "team": "MET",
-    "project_id": "project-1"
-  },
-  "validation": {
-    "commands": ["sh -lc 'count_file=\"$TEST_OUTPUT_DIR/validation-count.txt\"; count=0; [ -f \"$count_file\" ] && count=$(cat \"$count_file\"); count=$((count + 1)); printf \"%s\" \"$count\" > \"$count_file\"; test -f repaired.txt'"],
-    "repair_attempts": 2,
-    "profile": "ci-repair"
-  }
-}
-"#;
-    let agent_script = r#"#!/bin/sh
-count_file="$TEST_OUTPUT_DIR/count.txt"
-count=0
-if [ -f "$count_file" ]; then
-  count=$(cat "$count_file")
-fi
-count=$((count + 1))
-printf '%s' "$count" > "$count_file"
-printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload-$count.txt"
-printf '%s' 'ok' > repaired.txt
-"#;
-    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
-        prepare_post_publication_ci_fixture(
-            temp.path(),
-            server.url.as_str(),
-            planning_context,
-            r#"
-[defaults.listen]
-ci_poll_interval_seconds = 1
-ci_poll_timeout_seconds = 3
-ci_timeout_behavior = "block"
-"#,
-            agent_script,
-            "pending-then-fail",
-            "met-32-ci-pending-fail",
-        )?;
-
-    run_listen_worker_fixture(
-        &repo_root,
-        &config_path,
-        &bin_dir,
-        &stub_dir,
-        &workspace,
-        server.url.as_str(),
-        2,
-    )?;
-
-    assert_eq!(fs::read_to_string(stub_dir.join("count.txt"))?.trim(), "2");
-    assert_eq!(
-        fs::read_to_string(stub_dir.join("validation-count.txt"))?.trim(),
-        "2"
-    );
-    assert!(
-        fs::read_to_string(stub_dir.join("payload-2.txt"))?
-            .contains("Repair failing GitHub checks on PR #321 and update the same PR."),
-    );
-    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
-    assert_eq!(
-        gh_log
-            .matches("pr create --base main --head met-32-ci-pending-fail")
-            .count(),
-        1
-    );
-    assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
-    assert_eq!(
-        fs::read_to_string(stub_dir.join("gh-checks-count.txt"))?.trim(),
-        "3"
-    );
-
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn listen_worker_blocks_when_post_publication_ci_times_out() -> Result<(), Box<dyn Error>> {
-    let _guard = listen_test_lock();
-    let temp = tempdir()?;
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
-    let planning_context = r#"{
-  "linear": {
-    "team": "MET",
-    "project_id": "project-1"
-  },
-  "validation": {
-    "commands": ["true"]
-  }
-}
-"#;
-    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
-        prepare_post_publication_ci_fixture(
-            temp.path(),
-            server.url.as_str(),
-            planning_context,
-            r#"
-[defaults.listen]
-ci_poll_interval_seconds = 1
-ci_poll_timeout_seconds = 1
-ci_timeout_behavior = "block"
-"#,
-            "#!/bin/sh\n:\n",
-            "pending-always",
-            "met-32-ci-timeout-block",
-        )?;
-
-    run_listen_worker_fixture(
-        &repo_root,
-        &config_path,
-        &bin_dir,
-        &stub_dir,
-        &workspace,
-        server.url.as_str(),
-        1,
-    )?;
-
-    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"blocked\""));
-    assert!(state.contains("GitHub CI settle timed out after 1s"));
-    assert_eq!(
-        fs::read_to_string(stub_dir.join("gh-checks-count.txt"))?.trim(),
-        "2"
-    );
-
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn listen_worker_warns_and_proceeds_when_post_publication_ci_times_out()
--> Result<(), Box<dyn Error>> {
-    let _guard = listen_test_lock();
-    let temp = tempdir()?;
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
-    let planning_context = r#"{
-  "linear": {
-    "team": "MET",
-    "project_id": "project-1"
-  },
-  "validation": {
-    "commands": ["true"]
-  }
-}
-"#;
-    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
-        prepare_post_publication_ci_fixture(
-            temp.path(),
-            server.url.as_str(),
-            planning_context,
-            r#"
-[defaults.listen]
-ci_poll_interval_seconds = 1
-ci_poll_timeout_seconds = 1
-ci_timeout_behavior = "warn_and_proceed"
-"#,
-            "#!/bin/sh\n:\n",
-            "pending-always",
-            "met-32-ci-timeout-warn",
-        )?;
-
-    run_listen_worker_fixture(
-        &repo_root,
-        &config_path,
-        &bin_dir,
-        &stub_dir,
-        &workspace,
-        server.url.as_str(),
-        1,
-    )?;
-
-    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
-    assert!(state.contains("GitHub CI timeout warning after 1s"));
-
-    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
-    assert!(inspect.contains("GitHub CI timeout warning after 1s"));
-
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn listen_surfaces_no_checks_configured_in_inspect_and_dashboard() -> Result<(), Box<dyn Error>> {
-    let _guard = listen_test_lock();
-    let temp = tempdir()?;
-    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
-    let planning_context = r#"{
-  "linear": {
-    "team": "MET",
-    "project_id": "project-1"
-  },
-  "validation": {
-    "commands": ["true"]
-  }
-}
-"#;
-    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
-        prepare_post_publication_ci_fixture(
-            temp.path(),
-            server.url.as_str(),
-            planning_context,
-            r#"
-[defaults.listen]
-ci_poll_interval_seconds = 1
-ci_poll_timeout_seconds = 2
-ci_timeout_behavior = "block"
-"#,
-            "#!/bin/sh\n:\n",
-            "pass",
-            "met-32-ci-no-checks",
-        )?;
-
-    run_listen_worker_fixture(
-        &repo_root,
-        &config_path,
-        &bin_dir,
-        &stub_dir,
-        &workspace,
-        server.url.as_str(),
-        1,
-    )?;
-
-    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
-    assert!(inspect.contains("no GitHub checks configured"));
 
     Ok(())
 }
@@ -11325,6 +11680,11 @@ printf '%s' 'not-json'
         permissions.set_mode(0o755);
         fs::set_permissions(bin_dir.join(command_name), permissions)?;
     }
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
@@ -11567,6 +11927,12 @@ fi
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
     fs::create_dir_all(&recipe_dir)?;
@@ -11843,6 +12209,12 @@ printf '%s\n' 'validation passed'
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    write_listen_github_stub_for_workspace_head(
+        &bin_dir.join("gh"),
+        &workspace,
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
     let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
     fs::create_dir_all(&recipe_dir)?;
     fs::write(
@@ -11925,6 +12297,349 @@ printf '%s\n' 'validation passed'
 
     let state = fs::read_to_string(&state_path)?;
     assert!(state.contains("\"phase\": \"completed\""), "state={state}");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_reports_green_post_publication_ci_in_inspect_and_completion_summary()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let planning_context = r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  }
+}
+"#;
+    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
+        prepare_post_publication_ci_fixture(
+            temp.path(),
+            server.url.as_str(),
+            planning_context,
+            r#"
+[defaults.listen]
+ci_poll_interval_seconds = 1
+ci_poll_timeout_seconds = 2
+ci_timeout_behavior = "block"
+"#,
+            "#!/bin/sh\n:\n",
+            "all-pass",
+            "met-32-ci-all-pass",
+        )?;
+
+    run_listen_worker_fixture(
+        &repo_root,
+        &config_path,
+        &bin_dir,
+        &stub_dir,
+        &workspace,
+        server.url.as_str(),
+        1,
+    )?;
+
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("GitHub CI passed 1/1"));
+
+    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
+    assert!(inspect.contains("GitHub CI passed 1/1"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_waits_for_pending_checks_then_passes_and_surfaces_waiting_progress()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let planning_context = r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  }
+}
+"#;
+    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
+        prepare_post_publication_ci_fixture(
+            temp.path(),
+            server.url.as_str(),
+            planning_context,
+            r#"
+[defaults.listen]
+ci_poll_interval_seconds = 1
+ci_poll_timeout_seconds = 3
+ci_timeout_behavior = "block"
+"#,
+            "#!/bin/sh\n:\n",
+            "pending-then-pass",
+            "met-32-ci-pending-pass",
+        )?;
+
+    run_listen_worker_fixture(
+        &repo_root,
+        &config_path,
+        &bin_dir,
+        &stub_dir,
+        &workspace,
+        server.url.as_str(),
+        1,
+    )?;
+
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("gh-checks-count.txt"))?.trim(),
+        "2"
+    );
+
+    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
+    assert!(inspect.contains("waiting for GitHub CI 0/1 settled"));
+    assert!(inspect.contains("GitHub CI passed 1/1"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_waits_for_pending_checks_then_repairs_the_same_pull_request()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let planning_context = r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["sh -lc 'count_file=\"$TEST_OUTPUT_DIR/validation-count.txt\"; count=0; [ -f \"$count_file\" ] && count=$(cat \"$count_file\"); count=$((count + 1)); printf \"%s\" \"$count\" > \"$count_file\"; test -f repaired.txt'"],
+    "repair_attempts": 2,
+    "profile": "ci-repair"
+  }
+}
+"#;
+    let agent_script = r#"#!/bin/sh
+count_file="$TEST_OUTPUT_DIR/count.txt"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload-$count.txt"
+printf '%s' 'ok' > repaired.txt
+"#;
+    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
+        prepare_post_publication_ci_fixture(
+            temp.path(),
+            server.url.as_str(),
+            planning_context,
+            r#"
+[defaults.listen]
+ci_poll_interval_seconds = 1
+ci_poll_timeout_seconds = 3
+ci_timeout_behavior = "block"
+"#,
+            agent_script,
+            "pending-then-fail",
+            "met-32-ci-pending-fail",
+        )?;
+
+    run_listen_worker_fixture(
+        &repo_root,
+        &config_path,
+        &bin_dir,
+        &stub_dir,
+        &workspace,
+        server.url.as_str(),
+        2,
+    )?;
+
+    assert_eq!(fs::read_to_string(stub_dir.join("count.txt"))?.trim(), "2");
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("validation-count.txt"))?.trim(),
+        "2"
+    );
+    assert!(
+        fs::read_to_string(stub_dir.join("payload-2.txt"))?
+            .contains("Repair failing GitHub checks on PR #321 and update the same PR."),
+    );
+    let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
+    assert_eq!(
+        gh_log
+            .matches("pr create --base main --head met-32-ci-pending-fail")
+            .count(),
+        1
+    );
+    assert!(gh_log.contains("pr edit 321 --title MET-32: Continuation loop --body-file"));
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("gh-checks-count.txt"))?.trim(),
+        "3"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_blocks_when_post_publication_ci_times_out() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let planning_context = r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  }
+}
+"#;
+    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
+        prepare_post_publication_ci_fixture(
+            temp.path(),
+            server.url.as_str(),
+            planning_context,
+            r#"
+[defaults.listen]
+ci_poll_interval_seconds = 1
+ci_poll_timeout_seconds = 1
+ci_timeout_behavior = "block"
+"#,
+            "#!/bin/sh\n:\n",
+            "pending-always",
+            "met-32-ci-timeout-block",
+        )?;
+
+    run_listen_worker_fixture(
+        &repo_root,
+        &config_path,
+        &bin_dir,
+        &stub_dir,
+        &workspace,
+        server.url.as_str(),
+        1,
+    )?;
+
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"blocked\""));
+    assert!(state.contains("GitHub CI settle timed out after 1s"));
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("gh-checks-count.txt"))?.trim(),
+        "2"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_worker_warns_and_proceeds_when_post_publication_ci_times_out()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let planning_context = r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  }
+}
+"#;
+    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
+        prepare_post_publication_ci_fixture(
+            temp.path(),
+            server.url.as_str(),
+            planning_context,
+            r#"
+[defaults.listen]
+ci_poll_interval_seconds = 1
+ci_poll_timeout_seconds = 1
+ci_timeout_behavior = "warn_and_proceed"
+"#,
+            "#!/bin/sh\n:\n",
+            "pending-always",
+            "met-32-ci-timeout-warn",
+        )?;
+
+    run_listen_worker_fixture(
+        &repo_root,
+        &config_path,
+        &bin_dir,
+        &stub_dir,
+        &workspace,
+        server.url.as_str(),
+        1,
+    )?;
+
+    let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("GitHub CI timeout warning after 1s"));
+
+    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
+    assert!(inspect.contains("GitHub CI timeout warning after 1s"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_surfaces_no_checks_configured_in_inspect_and_dashboard() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+    let planning_context = r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "validation": {
+    "commands": ["true"]
+  }
+}
+"#;
+    let (repo_root, config_path, bin_dir, stub_dir, workspace) =
+        prepare_post_publication_ci_fixture(
+            temp.path(),
+            server.url.as_str(),
+            planning_context,
+            r#"
+[defaults.listen]
+ci_poll_interval_seconds = 1
+ci_poll_timeout_seconds = 2
+ci_timeout_behavior = "block"
+"#,
+            "#!/bin/sh\n:\n",
+            "pass",
+            "met-32-ci-no-checks",
+        )?;
+
+    run_listen_worker_fixture(
+        &repo_root,
+        &config_path,
+        &bin_dir,
+        &stub_dir,
+        &workspace,
+        server.url.as_str(),
+        1,
+    )?;
+
+    let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
+    assert!(inspect.contains("no GitHub checks configured"));
 
     Ok(())
 }
