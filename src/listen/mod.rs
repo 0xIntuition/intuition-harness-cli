@@ -2420,6 +2420,10 @@ fn merge_monotonic_session_fields(
         daemon_session.latest_resume_handle = persisted_session.latest_resume_handle.clone();
     }
 
+    if turns_regressed(persisted_session, &daemon_session) {
+        daemon_session.turns = persisted_session.turns;
+    }
+
     daemon_session
 }
 
@@ -2489,13 +2493,16 @@ fn latest_resume_handle_regressed(
         && daemon_session.latest_resume_handle != persisted_session.latest_resume_handle
 }
 
+fn turns_regressed(persisted_session: &AgentSession, daemon_session: &AgentSession) -> bool {
+    daemon_session.turns.unwrap_or_default() < persisted_session.turns.unwrap_or_default()
+}
+
 fn should_replace_persisted_session(
     persisted_session: &AgentSession,
     daemon_session: &AgentSession,
 ) -> bool {
-    if protected_session_fields_regressed(persisted_session, daemon_session) {
-        return false;
-    }
+    let merged_candidate =
+        merge_monotonic_session_fields(persisted_session, daemon_session.clone());
 
     match daemon_session
         .updated_at_epoch_seconds
@@ -2504,27 +2511,9 @@ fn should_replace_persisted_session(
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Less => false,
         std::cmp::Ordering::Equal => {
-            session_progress_rank(daemon_session) > session_progress_rank(persisted_session)
+            session_progress_rank(&merged_candidate) > session_progress_rank(persisted_session)
         }
     }
-}
-
-fn protected_session_fields_regressed(
-    persisted_session: &AgentSession,
-    daemon_session: &AgentSession,
-) -> bool {
-    blocked_metadata_regressed(persisted_session, daemon_session)
-        || canonical_metadata_regressed(persisted_session, daemon_session)
-        || turn_history_regressed(persisted_session, daemon_session)
-        || latest_resume_handle_regressed(persisted_session, daemon_session)
-}
-
-fn canonical_metadata_regressed(
-    persisted_session: &AgentSession,
-    daemon_session: &AgentSession,
-) -> bool {
-    merge_monotonic_canonical(&persisted_session.canonical, &daemon_session.canonical)
-        != daemon_session.canonical
 }
 
 fn session_progress_rank(
@@ -4887,11 +4876,11 @@ mod tests {
     use super::{
         AgentDaemon, AgentSession, BlockedCategory, CanonicalSessionData, DashboardRuntimeContext,
         IN_PROGRESS_STATE, LatestResumeHandle, ListenCycleData, ListenState, PullRequestSummary,
-        ResumeProvider, SessionListCounts, SessionOrigin, SessionPhase, TODO_STATE, TokenUsage,
-        TurnPromptMode, TurnTokenSnapshot, blocked_reason, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number, listen_browser_action,
-        listen_scope_label, mark_running_session_stale, render_agent_prompt,
-        render_continuation_prompt, required_label_skip_reason,
+        ResumeProvider, SessionListCounts, SessionOrigin, SessionPhase, SessionTimeoutRecord,
+        SessionTimeoutTermination, TODO_STATE, TokenUsage, TurnPromptMode, TurnTokenSnapshot,
+        blocked_reason, capture_workspace_snapshot, compact_identifier, format_duration,
+        format_number, listen_browser_action, listen_scope_label, mark_running_session_stale,
+        render_agent_prompt, render_continuation_prompt, required_label_skip_reason,
     };
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
@@ -5595,6 +5584,112 @@ suffix
             worker_session.latest_resume_handle
         );
         assert_eq!(merged[0].turn_history, worker_session.turn_history);
+    }
+
+    #[test]
+    fn listen_state_merge_preserves_worker_owned_fields_while_adopting_newer_timeout_metadata() {
+        let daemon_session = AgentSession {
+            issue_id: Some("issue-64".to_string()),
+            issue_identifier: "MET-64".to_string(),
+            issue_title: "Builtin Claude listen agent".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/64".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1_773_575_605,
+            pid: Some(42),
+            session_id: None,
+            latest_resume_handle: None,
+            pending_linear_sync: None,
+            last_timeout: Some(SessionTimeoutRecord {
+                turn: 2,
+                pid: 42,
+                elapsed_seconds: 1_805,
+                timeout_seconds: 1_800,
+                graceful_shutdown_seconds: 5,
+                termination: SessionTimeoutTermination::Sigterm,
+            }),
+            turns: Some(0),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            origin: SessionOrigin::Listen,
+        };
+        let mut worker_session = daemon_session.clone();
+        worker_session.phase = SessionPhase::Blocked;
+        worker_session.summary = "Blocked | verification failed".to_string();
+        worker_session.blocked = Some(blocked_reason(
+            BlockedCategory::Gate,
+            "verification failed and repair budget exhausted",
+            false,
+        ));
+        worker_session.updated_at_epoch_seconds = 1_773_575_600;
+        worker_session.last_timeout = None;
+        worker_session.turns = Some(2);
+        worker_session.canonical = CanonicalSessionData {
+            provider: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            reasoning: Some("high".to_string()),
+            tokens: TokenUsage {
+                input: Some(210),
+                output: Some(34),
+            },
+            repair: None,
+        };
+        worker_session.latest_resume_handle = Some(LatestResumeHandle {
+            provider: ResumeProvider::Claude,
+            id: "resume-worker-64".to_string(),
+        });
+        worker_session.turn_history = vec![
+            TurnTokenSnapshot {
+                turn: 1,
+                prompt_mode: TurnPromptMode::FullPrompt,
+                tokens: TokenUsage {
+                    input: Some(210),
+                    output: Some(34),
+                },
+                captured_at_epoch_seconds: 1_773_575_590,
+            },
+            TurnTokenSnapshot {
+                turn: 2,
+                prompt_mode: TurnPromptMode::Continuation,
+                tokens: TokenUsage {
+                    input: Some(80),
+                    output: Some(13),
+                },
+                captured_at_epoch_seconds: 1_773_575_600,
+            },
+        ];
+
+        let merged =
+            super::merge_cycle_sessions(vec![worker_session.clone()], vec![daemon_session.clone()]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].phase, SessionPhase::Blocked);
+        assert_eq!(merged[0].summary, "Blocked | verification failed");
+        assert_eq!(merged[0].blocked, worker_session.blocked);
+        assert_eq!(merged[0].turns, worker_session.turns);
+        assert_eq!(merged[0].canonical, worker_session.canonical);
+        assert_eq!(
+            merged[0].latest_resume_handle,
+            worker_session.latest_resume_handle
+        );
+        assert_eq!(merged[0].turn_history, worker_session.turn_history);
+        assert_eq!(merged[0].last_timeout, daemon_session.last_timeout);
+        assert_eq!(
+            merged[0].updated_at_epoch_seconds,
+            daemon_session.updated_at_epoch_seconds
+        );
     }
 
     #[test]
