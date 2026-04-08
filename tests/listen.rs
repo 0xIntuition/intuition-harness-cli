@@ -5,6 +5,10 @@ include!("support/common.rs");
 use metastack_cli::branding;
 
 #[cfg(unix)]
+const EXACT_SHA_QUALITY_CRITERION: &str =
+    "The active branch PR has a passing `quality` workflow result for the exact current HEAD SHA.";
+
+#[cfg(unix)]
 fn write_onboarded_config(
     config_path: &Path,
     config: impl AsRef<str>,
@@ -25,7 +29,14 @@ fn write_listen_github_stub(
     initial_state: &str,
     pull_request_url: &str,
 ) -> Result<(), Box<dyn Error>> {
-    write_listen_github_stub_with_checks(path, initial_state, pull_request_url, "pass")
+    write_listen_github_stub_with_quality(
+        path,
+        initial_state,
+        pull_request_url,
+        "pass",
+        "success-current",
+        "head-sha-321",
+    )
 }
 
 #[cfg(unix)]
@@ -34,6 +45,25 @@ fn write_listen_github_stub_with_checks(
     initial_state: &str,
     pull_request_url: &str,
     checks_mode: &str,
+) -> Result<(), Box<dyn Error>> {
+    write_listen_github_stub_with_quality(
+        path,
+        initial_state,
+        pull_request_url,
+        checks_mode,
+        "success-current",
+        "head-sha-321",
+    )
+}
+
+#[cfg(unix)]
+fn write_listen_github_stub_with_quality(
+    path: &Path,
+    initial_state: &str,
+    pull_request_url: &str,
+    checks_mode: &str,
+    quality_mode: &str,
+    head_sha: &str,
 ) -> Result<(), Box<dyn Error>> {
     fs::write(
         path,
@@ -51,13 +81,13 @@ printf '%s\n' "$*" >> "$log_file"
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   case "$state" in
     draft)
-      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true}}]'
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true,"headRefName":"listen-branch","headRefOid":"{head_sha}"}}]'
       ;;
     stubborn-draft)
-      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true}}]'
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":true,"headRefName":"listen-branch","headRefOid":"{head_sha}"}}]'
       ;;
     ready)
-      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":false}}]'
+      printf '%s' '[{{"number":321,"url":"{pull_request_url}","isDraft":false,"headRefName":"listen-branch","headRefOid":"{head_sha}"}}]'
       ;;
     *)
       printf '%s' '[]'
@@ -125,6 +155,34 @@ if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
   esac
   exit 0
 fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  case "{quality_mode}" in
+    success-current)
+      printf '%s' '[{{"headSha":"{head_sha}","status":"completed","conclusion":"success","url":"https://github.com/example/repo/actions/runs/quality-current","workflowName":"quality"}}]'
+      ;;
+    success-old-sha)
+      printf '%s' '[{{"headSha":"old-head-sha","status":"completed","conclusion":"success","url":"https://github.com/example/repo/actions/runs/quality-old","workflowName":"quality"}}]'
+      ;;
+    pending-current)
+      printf '%s' '[{{"headSha":"{head_sha}","status":"in_progress","conclusion":null,"url":"https://github.com/example/repo/actions/runs/quality-pending","workflowName":"quality"}}]'
+      ;;
+    failure-current)
+      printf '%s' '[{{"headSha":"{head_sha}","status":"completed","conclusion":"failure","url":"https://github.com/example/repo/actions/runs/quality-failed","workflowName":"quality"}}]'
+      ;;
+    missing)
+      printf '%s' '[]'
+      ;;
+    error)
+      printf '%s\n' 'gh run list failed' >&2
+      exit 1
+      ;;
+    *)
+      printf '%s\n' 'unexpected quality mode' >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
   exit 0
 fi
@@ -177,6 +235,568 @@ fn write_listen_store_session(
         }))?,
     )?;
     Ok(state_path)
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_state_merge_rejects_stale_daemon_overwrite_of_enriched_worker_session()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+
+    let viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues")
+            .body_includes(r#""key":{"eq":"MET"}"#);
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-40",
+                        "identifier": "MET-40",
+                        "title": "Cross-actor session state",
+                        "description": "Prevent stale daemon overwrites",
+                        "url": "https://linear.app/issues/MET-40",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    init_repo_with_origin(&repo_root)?;
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    fs::create_dir_all(
+        state_path
+            .parent()
+            .expect("listen state path should have a parent"),
+    )?;
+
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "sessions": [{
+                "issue_id": "issue-40",
+                "issue_identifier": "MET-40",
+                "issue_title": "Cross-actor session state",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/MET-40",
+                "phase": "running",
+                "summary": "Running",
+                "brief_path": null,
+                "backlog_issue_identifier": null,
+                "backlog_issue_title": null,
+                "backlog_path": null,
+                "workspace_path": null,
+                "branch": "met-40-state-owner",
+                "pull_request": {},
+                "workpad_comment_id": "comment-40",
+                "updated_at_epoch_seconds": 1_773_575_600u64,
+                "pid": 4242,
+                "session_id": "daemon-session-40",
+                "turns": 0,
+                "tokens": {},
+                "canonical": {},
+                "turn_history": [],
+                "log_path": format!("{}/agents/sessions/MET-40.log", branding::PROJECT_DIR)
+            }]
+        }))?,
+    )?;
+
+    let richer_state_path = stub_dir.join("richer-session.json");
+    fs::write(
+        &richer_state_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "sessions": [{
+                "issue_id": "issue-40",
+                "issue_identifier": "MET-40",
+                "issue_title": "Cross-actor session state",
+                "project_name": "MetaStack CLI",
+                "team_key": "MET",
+                "issue_url": "https://linear.app/issues/MET-40",
+                "phase": "blocked",
+                "summary": "Blocked | verification failed",
+                "blocked": {
+                    "category": "gate",
+                    "reason": "verification failed and repair budget exhausted",
+                    "retryable": false
+                },
+                "brief_path": null,
+                "backlog_issue_identifier": null,
+                "backlog_issue_title": null,
+                "backlog_path": null,
+                "workspace_path": null,
+                "branch": "met-40-state-owner",
+                "pull_request": {},
+                "workpad_comment_id": "comment-40",
+                "updated_at_epoch_seconds": 1_773_575_590u64,
+                "pid": 4242,
+                "session_id": "daemon-session-40",
+                "latest_resume_handle": {
+                    "provider": "claude",
+                    "id": "resume-worker-40"
+                },
+                "turns": 2,
+                "tokens": {
+                    "input": 210,
+                    "output": 34
+                },
+                "canonical": {
+                    "provider": "claude",
+                    "model": "sonnet",
+                    "reasoning": "high",
+                    "tokens": {
+                        "input": 210,
+                        "output": 34
+                    }
+                },
+                "turn_history": [{
+                    "turn": 1,
+                    "prompt_mode": "full_prompt",
+                    "tokens": {
+                        "input": 210,
+                        "output": 34
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_590u64
+                }, {
+                    "turn": 2,
+                    "prompt_mode": "continuation",
+                    "tokens": {
+                        "input": 80,
+                        "output": 13
+                    },
+                    "captured_at_epoch_seconds": 1_773_575_600u64
+                }],
+                "log_path": format!("{}/agents/sessions/MET-40.log", branding::PROJECT_DIR)
+            }]
+        }))?,
+    )?;
+
+    let writer_state_path = state_path.clone();
+    let writer_richer_state_path = richer_state_path.clone();
+    let writer = thread::spawn(move || {
+        for _ in 0..3 {
+            thread::sleep(Duration::from_millis(150));
+            fs::copy(&writer_richer_state_path, &writer_state_path)
+                .expect("state rewrite should succeed");
+        }
+    });
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .args([
+            "listen",
+            "--render-once",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success();
+    writer.join().expect("state rewrite thread should join");
+
+    let state_text = fs::read_to_string(&state_path)?;
+    let state: serde_json::Value = serde_json::from_str(&state_text)?;
+    let session = &state["sessions"][0];
+    assert_eq!(session["phase"], json!("blocked"), "state={state_text}");
+    assert_eq!(
+        session["blocked"]["reason"],
+        json!("verification failed and repair budget exhausted")
+    );
+    assert_eq!(session["summary"], json!("Blocked | verification failed"));
+    assert_eq!(session["canonical"]["provider"], json!("claude"));
+    assert_eq!(session["canonical"]["model"], json!("sonnet"));
+    assert_eq!(session["canonical"]["reasoning"], json!("high"));
+    assert_eq!(session["canonical"]["tokens"]["input"], json!(210));
+    assert_eq!(session["canonical"]["tokens"]["output"], json!(34));
+    assert_eq!(
+        session["latest_resume_handle"]["id"],
+        json!("resume-worker-40")
+    );
+    assert_eq!(
+        session["turn_history"].as_array().map(Vec::len),
+        Some(2),
+        "state={state}"
+    );
+
+    assert!(viewer_mock.calls() <= 1);
+    assert!(issues_mock.calls() >= 1);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_verification_requires_quality_workflow_success_for_exact_pr_head_sha()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+
+    struct Case {
+        name: &'static str,
+        pr_state: &'static str,
+        quality_mode: &'static str,
+        expected_report_status: &'static str,
+        expected_phase: &'static str,
+        expected_snippet: &'static str,
+    }
+
+    fn run_case(case: &Case) -> Result<(String, String, String, String), Box<dyn Error>> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let config_path = temp.path().join("metastack.toml");
+        let bin_dir = temp.path().join("bin");
+        let stub_dir = temp.path().join("stub-output");
+        let server = DynamicLinearServer::start_with_completion_after_refreshes(1_000_000)?;
+        let api_url = server.url.clone();
+        fs::create_dir_all(&repo_root)?;
+        fs::create_dir_all(&bin_dir)?;
+        fs::create_dir_all(&stub_dir)?;
+
+        write_minimal_planning_context(
+            &repo_root,
+            r#"{
+  "linear": {
+    "team": "MET"
+  },
+  "validation": {
+    "commands": ["true"],
+    "repair_attempts": 0
+  }
+}
+"#,
+        )?;
+        write_onboarded_config(
+            &config_path,
+            format!(
+                r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "exec-stub"
+
+[agents.routing.commands."agents.listen.verification"]
+provider = "verify-stub"
+
+[agents.commands.exec-stub]
+command = "exec-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[agents.commands.verify-stub]
+command = "verify-stub"
+args = ["{{{{payload}}}}"]
+transport = "arg"
+
+[verification]
+battle_test_count = 0
+"#,
+            ),
+        )?;
+
+        fs::write(
+            bin_dir.join("exec-stub"),
+            r#"#!/bin/sh
+set -eu
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/exec-prompt.txt"
+mkdir -p src
+printf '// verification quality gate\n' > src/quality_gate.rs
+"#,
+        )?;
+        fs::write(
+            bin_dir.join("verify-stub"),
+            r#"#!/bin/sh
+set -eu
+printf '%s' "$1" > "$TEST_OUTPUT_DIR/verify-prompt.txt"
+printf '%s' '{"summary":"Verifier approved the branch","criteria":[{"name":"Verification proof.","status":"passed","summary":"Verification proof is satisfied."}],"battle_tests":[],"notes":["verifier passed"]}'
+"#,
+        )?;
+        for command_name in ["exec-stub", "verify-stub"] {
+            let mut permissions = fs::metadata(bin_dir.join(command_name))?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(bin_dir.join(command_name), permissions)?;
+        }
+
+        init_repo_with_origin(&repo_root)?;
+        let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+        let branch = if case.pr_state == "none" {
+            "main"
+        } else {
+            "met-32-quality-gate"
+        };
+        ProcessCommand::new("git")
+            .args([
+                "-C",
+                workspace.to_str().expect("utf8"),
+                "checkout",
+                "-B",
+                branch,
+                "main",
+            ])
+            .status()?;
+        fs::write(workspace.join("src.rs"), "pub fn quality_gate() {}\n")?;
+        ProcessCommand::new("git")
+            .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+            .status()?;
+        ProcessCommand::new("git")
+            .args([
+                "-C",
+                workspace.to_str().expect("utf8"),
+                "commit",
+                "-m",
+                "Seed quality gate proof",
+            ])
+            .status()?;
+        let head_sha = git_stdout(workspace.as_path(), &["rev-parse", "HEAD"])?;
+        write_listen_github_stub_with_quality(
+            &bin_dir.join("gh"),
+            case.pr_state,
+            "https://github.com/example/repo/pull/321",
+            "pass",
+            case.quality_mode,
+            head_sha.trim(),
+        )?;
+
+        let recipe_dir = workspace.join(format!("{}/verification/recipes", branding::PROJECT_DIR));
+        fs::create_dir_all(&recipe_dir)?;
+        fs::write(
+            recipe_dir.join("agents.listen.yaml"),
+            r#"quality_criteria:
+  - Verification proof.
+"#,
+        )?;
+        let backlog_dir = workspace.join(format!("{}/backlog/MET-32", branding::PROJECT_DIR));
+        fs::create_dir_all(&backlog_dir)?;
+        fs::write(
+            backlog_dir.join("index.md"),
+            "# MET-32\n\n## Tasks\n\n- [x] Verification ready\n",
+        )?;
+
+        let current_path = std::env::var("PATH")?;
+        meta()
+            .current_dir(&repo_root)
+            .env("METASTACK_CONFIG", &config_path)
+            .env("TEST_OUTPUT_DIR", &stub_dir)
+            .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+            .args([
+                "listen-worker",
+                "--source-root",
+                repo_root.to_str().expect("utf8"),
+                "--workspace",
+                workspace.to_str().expect("utf8"),
+                "--issue",
+                "MET-32",
+                "--workpad-comment-id",
+                "comment-32",
+                "--backlog-issue",
+                "MET-32",
+                "--api-key",
+                "token",
+                "--api-url",
+                &api_url,
+                "--max-turns",
+                "1",
+            ])
+            .assert()
+            .success();
+
+        let verification_path = listen_verification_json_path(&config_path, &repo_root, "MET-32")?;
+        wait_for_path(&verification_path)?;
+        let report_text = fs::read_to_string(&verification_path)?;
+        let report: serde_json::Value = serde_json::from_str(&report_text)?;
+        let state_text = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+        let gh_log = fs::read_to_string(stub_dir.join("gh.log")).unwrap_or_default();
+
+        Ok((
+            report["status"].as_str().unwrap_or_default().to_string(),
+            report_text,
+            state_text,
+            gh_log,
+        ))
+    }
+
+    let cases = [
+        Case {
+            name: "success-current",
+            pr_state: "draft",
+            quality_mode: "success-current",
+            expected_report_status: "passed",
+            expected_phase: "completed",
+            expected_snippet: "`quality` passed for PR #321 head",
+        },
+        Case {
+            name: "stale-green",
+            pr_state: "draft",
+            quality_mode: "success-old-sha",
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "workflow metadata did not match PR #321 head",
+        },
+        Case {
+            name: "pending-current",
+            pr_state: "draft",
+            quality_mode: "pending-current",
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "is still `in_progress`",
+        },
+        Case {
+            name: "failed-current",
+            pr_state: "draft",
+            quality_mode: "failure-current",
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "concluded `failure`",
+        },
+        Case {
+            name: "missing-run",
+            pr_state: "draft",
+            quality_mode: "missing",
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "No `quality` workflow run was found",
+        },
+        Case {
+            name: "no-pr",
+            pr_state: "none",
+            quality_mode: "success-current",
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "No open branch PR matched",
+        },
+        Case {
+            name: "workflow-error",
+            pr_state: "draft",
+            quality_mode: "error",
+            expected_report_status: "failed",
+            expected_phase: "blocked",
+            expected_snippet: "Could not resolve `quality` workflow metadata",
+        },
+    ];
+
+    for case in &cases {
+        let (status, report_text, state_text, gh_log) = run_case(case)?;
+        assert_eq!(
+            status, case.expected_report_status,
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            report_text.contains(EXACT_SHA_QUALITY_CRITERION),
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            report_text.contains(case.expected_snippet),
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            report_text.contains("quality"),
+            "case={} report={report_text}",
+            case.name
+        );
+        assert!(
+            state_text.contains(&format!("\"phase\": \"{}\"", case.expected_phase)),
+            "case={} state={state_text}",
+            case.name
+        );
+        let expected_branch = if case.pr_state == "none" {
+            "main"
+        } else {
+            "met-32-quality-gate"
+        };
+        assert!(
+            gh_log.contains(&format!(
+                "pr list --state open --head {expected_branch} --base main --json number,url,isDraft,headRefName,headRefOid"
+            )),
+            "case={} gh_log={gh_log}",
+            case.name
+        );
+        if case.pr_state != "none" {
+            assert!(
+                gh_log.contains("run list --commit"),
+                "case={} gh_log={gh_log}",
+                case.name
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -7967,8 +8587,7 @@ code_review = false
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ready #321"))
-        .stdout(predicate::str::contains("draft #321").not());
+        .stdout(predicate::str::contains("ready #321"));
 
     Ok(())
 }
@@ -8624,7 +9243,7 @@ code_review = false
     let gh_log = fs::read_to_string(stub_dir.join("gh.log"))?;
     assert!(gh_log.contains("pr list --state open --head met-32-continuation-loop --base main"));
     assert!(gh_log.contains("pr create --base main --head met-32-continuation-loop"));
-    assert!(!gh_log.contains("pr ready 321"));
+    assert!(gh_log.contains("pr ready 321"));
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
     assert!(state.contains("\"phase\": \"completed\""));
@@ -8923,8 +9542,7 @@ printf '%s' "$1" > "$TEST_OUTPUT_DIR/payload-$count.txt"
     let gh_log_path = stub_dir.join("gh.log");
     if gh_log_path.exists() {
         let gh_log = fs::read_to_string(gh_log_path)?;
-        assert!(!gh_log.contains("pr create --base main --head met-32-validation-block"));
-        assert!(!gh_log.contains("pr edit 321 --title"));
+        assert!(gh_log.contains("pr create --base main --head met-32-validation-block"));
         assert!(!gh_log.contains("pr ready 321"));
     }
 
@@ -10759,6 +11377,11 @@ printf '%s' 'not-json'
         permissions.set_mode(0o755);
         fs::set_permissions(bin_dir.join(command_name), permissions)?;
     }
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
@@ -10998,6 +11621,11 @@ fi
         permissions.set_mode(0o755);
         fs::set_permissions(bin_dir.join(command_name), permissions)?;
     }
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
@@ -11274,6 +11902,11 @@ printf '%s\n' 'validation passed'
         permissions.set_mode(0o755);
         fs::set_permissions(bin_dir.join(command_name), permissions)?;
     }
+    write_listen_github_stub(
+        &bin_dir.join("gh"),
+        "ready",
+        "https://github.com/example/repo/pull/321",
+    )?;
 
     init_repo_with_origin(&repo_root)?;
     let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;

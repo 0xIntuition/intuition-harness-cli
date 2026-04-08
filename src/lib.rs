@@ -635,6 +635,31 @@ fn command_label(cli: &Cli) -> String {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn listen_review_prompt_calls_out_cross_actor_state_ownership_risks() {
+    let (review_instructions, final_instructions, review_prompt, final_prompt) =
+        crate::listen::review_prompt_hardening_probe();
+
+    for rendered in [
+        review_instructions.as_str(),
+        final_instructions.as_str(),
+        review_prompt.as_str(),
+        final_prompt.as_str(),
+    ] {
+        assert!(rendered.contains("cross-actor state ownership"));
+        assert!(rendered.contains("spawn-before-persist"));
+        assert!(rendered.contains("whole-state rewrites"));
+        assert!(rendered.contains("blocked metadata"));
+        assert!(rendered.contains("canonical metadata"));
+        assert!(rendered.contains("`turn_history`"));
+        assert!(rendered.contains("`latest_resume_handle`"));
+        assert!(rendered.contains("src/listen/mod.rs"));
+        assert!(rendered.contains("src/listen/store.rs"));
+        assert!(rendered.contains("src/listen/worker.rs"));
+    }
+}
+
 fn config_render_once(cli: &Cli) -> bool {
     match &cli.command {
         Command::Config(args) => args.render_once,

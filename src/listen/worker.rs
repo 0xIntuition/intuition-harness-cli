@@ -30,7 +30,7 @@ use crate::fs::sibling_workspace_root;
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestCheck, PullRequestLifecycleResult, PullRequestPublishMode,
-    PullRequestPublishRequest,
+    PullRequestPublishRequest, ResolvedBranchPullRequest, WorkflowRun,
 };
 use crate::linear::{
     AttachmentCreateRequest, IssueListFilters, IssueSummary, LinearClient, LinearService,
@@ -75,6 +75,20 @@ const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
 const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
+const REQUIRED_VERIFICATION_WORKFLOW_NAME: &str = "quality";
+const EXACT_SHA_QUALITY_CRITERION: &str =
+    "The active branch PR has a passing `quality` workflow result for the exact current HEAD SHA.";
+const HIGH_RISK_LISTEN_MODULES: [&str; 3] = [
+    "src/listen/mod.rs",
+    "src/listen/store.rs",
+    "src/listen/worker.rs",
+];
+const CROSS_ACTOR_REVIEW_HEURISTICS: [&str; 4] = [
+    "Inspect cross-actor state ownership for blocked metadata, canonical metadata, `turn_history`, and `latest_resume_handle`.",
+    "Inspect spawn-before-persist flows after concurrent worker launch.",
+    "Inspect whole-state rewrites and stale snapshot overwrites of long-lived listen session state.",
+    "Inspect adjacent state-write paths outside the immediate diff in the high-risk listen modules.",
+];
 fn listen_preflight_failure_header(timestamp: &str) -> String {
     format!(
         "\n--- {} listen preflight failed @ {} ---\n",
@@ -755,6 +769,68 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             )
             .await?;
             if final_review.approved {
+                if let Some(branch) = branch.as_deref() {
+                    let pull_request = match publish_listener_pull_request(
+                        &issue,
+                        &workspace_path,
+                        branch,
+                        PullRequestPublishMode::Draft,
+                        Some(&review),
+                        session_context.verification_summary.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(pull_request) => pull_request,
+                        Err(error) => {
+                            let blocked = blocked_reason(
+                                BlockedCategory::Infra,
+                                "failed to prepare GitHub PR for verification",
+                                true,
+                            );
+                            write_listen_session(
+                                &source_root,
+                                project_selector,
+                                build_worker_blocked_session(
+                                    &issue,
+                                    blocked.clone(),
+                                    compact_blocked_summary(
+                                        &blocked,
+                                        issue.description.as_deref(),
+                                        &log_path,
+                                    ),
+                                    &session_context,
+                                    turns_completed,
+                                    provider_session_id.as_deref(),
+                                    &session_context.canonical,
+                                ),
+                            )?;
+                            return Err(error);
+                        }
+                    };
+                    if let Some(pull_request) = pull_request.as_ref() {
+                        session_context.pull_request =
+                            PullRequestSummary::from(pull_request.clone());
+                        if let Err(error) =
+                            ensure_listener_pull_request_attachment(&service, &issue, pull_request)
+                                .await
+                        {
+                            defer_pending_linear_sync_operation(
+                                &app_config,
+                                &mut session_context.pending_linear_sync,
+                                &error,
+                                "pull request attachment",
+                                &log_path,
+                                |pending| {
+                                    pending.pull_request_attachment =
+                                        Some(PendingPullRequestAttachment {
+                                            number: pull_request.number,
+                                            url: pull_request.url.clone(),
+                                        });
+                                },
+                            )?;
+                        }
+                    }
+                }
                 let verification = run_verification_phase(
                     &issue,
                     turn_number,
@@ -3600,14 +3676,14 @@ fn build_agent_instructions(
 
 fn build_review_instructions(_: &ListenTurnContext<'_>) -> String {
     format!(
-        "You are the review phase for `{}` listen. Review the current workspace against the Linear ticket and return JSON only.\n\nReturn an object with this exact shape:\n{{\n  \"summary\": \"short review summary\",\n  \"complete\": true,\n  \"completed_items\": [\"ticket requirement or deliverable completed\"],\n  \"remaining_items\": [\"specific remaining work item\"],\n  \"validation_completed\": [\"validation step completed\"],\n  \"validation_remaining\": [\"validation still required\"],\n  \"risks\": [\"risk or likely mistake\"],\n  \"notes\": [\"short operator note\"]\n}}\n\nUse the Linear ticket acceptance criteria and validation sections as the source of truth. Mark `complete` true only when the requested deliverables are done, validation is sufficient, and the branch is ready for final review.",
+        "You are the review phase for `{}` listen. Review the current workspace against the Linear ticket and return JSON only.\n\nReturn an object with this exact shape:\n{{\n  \"summary\": \"short review summary\",\n  \"complete\": true,\n  \"completed_items\": [\"ticket requirement or deliverable completed\"],\n  \"remaining_items\": [\"specific remaining work item\"],\n  \"validation_completed\": [\"validation step completed\"],\n  \"validation_remaining\": [\"validation still required\"],\n  \"risks\": [\"risk or likely mistake\"],\n  \"notes\": [\"short operator note\"]\n}}\n\nUse the Linear ticket acceptance criteria and validation sections as the source of truth. Treat cross-actor state ownership as a first-class risk: inspect blocked metadata, canonical metadata, `turn_history`, and `latest_resume_handle`; inspect spawn-before-persist flows and whole-state rewrites; and inspect adjacent state-write paths in `src/listen/mod.rs`, `src/listen/store.rs`, and `src/listen/worker.rs` even when they fall outside the immediate diff. Mark `complete` true only when the requested deliverables are done, validation is sufficient, and the branch is ready for final review.",
         crate::branding::COMMAND_NAME
     )
 }
 
 fn build_final_review_instructions(_: &ListenTurnContext<'_>) -> String {
     format!(
-        "You are the final review phase for `{}` listen. Perform a fast safety review of the current workspace and return JSON only.\n\nReturn an object with this exact shape:\n{{\n  \"approved\": true,\n  \"summary\": \"short final review summary\",\n  \"missing_items\": [\"anything still missing from the ticket\"],\n  \"validation_gaps\": [\"validation still missing\"],\n  \"risks\": [\"residual risk or likely mistake\"],\n  \"notes\": [\"short operator note\"]\n}}\n\nSet `approved` true only if the work matches the Linear ticket, acceptance criteria are satisfied, and no material validation gaps remain.",
+        "You are the final review phase for `{}` listen. Perform a fast safety review of the current workspace and return JSON only.\n\nReturn an object with this exact shape:\n{{\n  \"approved\": true,\n  \"summary\": \"short final review summary\",\n  \"missing_items\": [\"anything still missing from the ticket\"],\n  \"validation_gaps\": [\"validation still missing\"],\n  \"risks\": [\"residual risk or likely mistake\"],\n  \"notes\": [\"short operator note\"]\n}}\n\nRe-check cross-actor state ownership for blocked metadata, canonical metadata, `turn_history`, and `latest_resume_handle`; re-check spawn-before-persist flows and whole-state rewrites; and re-check the high-risk listen modules `src/listen/mod.rs`, `src/listen/store.rs`, and `src/listen/worker.rs`. Set `approved` true only if the work matches the Linear ticket, acceptance criteria are satisfied, and no material validation gaps remain.",
         crate::branding::COMMAND_NAME
     )
 }
@@ -3720,7 +3796,7 @@ fn render_review_prompt(
             .join("index.md")
     });
     format!(
-        "Review the current workspace for Linear ticket `{identifier}` after execution turn #{turn_number}.\n\nTicket title: {title}\nTicket URL: {url}\nWorkspace: {workspace}\nWorkpad comment ID: {workpad}\n{backlog}\n\nAcceptance criteria:\n{acceptance}\n\nValidation requirements:\n{validation}\n\nReview the current branch/workspace state against the ticket. Return JSON only.",
+        "Review the current workspace for Linear ticket `{identifier}` after execution turn #{turn_number}.\n\nTicket title: {title}\nTicket URL: {url}\nWorkspace: {workspace}\nWorkpad comment ID: {workpad}\n{backlog}\n\nAcceptance criteria:\n{acceptance}\n\nValidation requirements:\n{validation}\n\nCross-actor state-ownership heuristics:\n{heuristics}\n\nHigh-risk listen modules:\n{modules}\n\nReview the current branch/workspace state against the ticket. Return JSON only.",
         identifier = issue.identifier,
         turn_number = turn_number,
         title = issue.title,
@@ -3738,6 +3814,8 @@ fn render_review_prompt(
             &validation,
             "_No explicit validation section found in the ticket description._"
         ),
+        heuristics = render_string_list(&review_focus_items(), "_No extra heuristics._"),
+        modules = render_string_list(&high_risk_listen_modules(), "_No high-risk modules._"),
     )
 }
 
@@ -3748,7 +3826,7 @@ fn render_final_review_prompt(
     review: &ReviewReport,
 ) -> String {
     format!(
-        "Perform a final safety review for Linear ticket `{identifier}` after execution turn #{turn_number}.\n\nTicket title: {title}\nTicket URL: {url}\nWorkspace: {workspace}\n\nLatest review summary: {summary}\n\nCompleted items:\n{completed}\n\nRemaining items from latest review:\n{remaining}\n\nValidation completed:\n{validation_completed}\n\nValidation remaining:\n{validation_remaining}\n\nReturn JSON only.",
+        "Perform a final safety review for Linear ticket `{identifier}` after execution turn #{turn_number}.\n\nTicket title: {title}\nTicket URL: {url}\nWorkspace: {workspace}\n\nLatest review summary: {summary}\n\nCompleted items:\n{completed}\n\nRemaining items from latest review:\n{remaining}\n\nValidation completed:\n{validation_completed}\n\nValidation remaining:\n{validation_remaining}\n\nCross-actor state-ownership heuristics:\n{heuristics}\n\nHigh-risk listen modules:\n{modules}\n\nReturn JSON only.",
         identifier = issue.identifier,
         turn_number = turn_number,
         title = issue.title,
@@ -3759,6 +3837,89 @@ fn render_final_review_prompt(
         remaining = render_string_list(&review.remaining_items, "_None recorded._"),
         validation_completed = render_string_list(&review.validation_completed, "_None recorded._"),
         validation_remaining = render_string_list(&review.validation_remaining, "_None recorded._"),
+        heuristics = render_string_list(&review_focus_items(), "_No extra heuristics._"),
+        modules = render_string_list(&high_risk_listen_modules(), "_No high-risk modules._"),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn review_prompt_hardening_probe() -> (String, String, String, String) {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let workspace = temp.path();
+    let source_root = temp.path();
+    fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+
+    let app_config = AppConfig::default();
+    let planning_meta = PlanningMeta::default();
+    let args = ListenWorkerArgs {
+        source_root: source_root.to_path_buf(),
+        project: None,
+        workspace: workspace.to_path_buf(),
+        issue: "ENG-10749".to_string(),
+        workpad_comment_id: "comment-1".to_string(),
+        backlog_issue: None,
+        max_turns: 20,
+        api_key: None,
+        api_url: None,
+        profile: None,
+        team: None,
+        agent: None,
+        model: None,
+        reasoning: None,
+    };
+    let context = ListenTurnContext {
+        app_config: &app_config,
+        planning_meta: &planning_meta,
+        args: &args,
+        source_root,
+        project_selector: None,
+        workspace_path: workspace,
+        workpad_comment_id: "comment-1",
+        backlog_issue: None,
+        max_turns: 20,
+    };
+    let issue = IssueSummary {
+        id: "ENG-10749-id".to_string(),
+        identifier: "ENG-10749".to_string(),
+        title: "Technical: Harden listen verification and structured review against cross-actor state-ownership regressions".to_string(),
+        description: Some(
+            "## Acceptance Criteria\n- Preserve listen state.\n\n## Validation\n- cargo test\n"
+                .to_string(),
+        ),
+        url: "https://linear.app/issues/ENG-10749".to_string(),
+        priority: None,
+        estimate: None,
+        updated_at: "2026-03-19T00:00:00Z".to_string(),
+        team: crate::linear::TeamRef {
+            id: "team-1".to_string(),
+            key: "ENG".to_string(),
+            name: "Engineering".to_string(),
+        },
+        project: None,
+        assignee: None,
+        labels: Vec::new(),
+        comments: Vec::new(),
+        state: None,
+        attachments: Vec::new(),
+        parent: None,
+        children: Vec::new(),
+    };
+    let review = ReviewReport {
+        summary: "Review summary".to_string(),
+        complete: true,
+        completed_items: vec!["Preserved listen state.".to_string()],
+        remaining_items: Vec::new(),
+        validation_completed: vec!["cargo test".to_string()],
+        validation_remaining: Vec::new(),
+        risks: Vec::new(),
+        notes: Vec::new(),
+    };
+
+    (
+        build_review_instructions(&context),
+        build_final_review_instructions(&context),
+        render_review_prompt(&issue, 2, &context),
+        render_final_review_prompt(&issue, 2, &context, &review),
     )
 }
 
@@ -4252,6 +4413,16 @@ async fn run_verification_phase(
         "verification e2e",
         &render_verification_e2e_lines(&e2e),
     )?;
+    let quality_gate = exact_sha_quality_gate(context.workspace_path);
+    code_review = merge_exact_sha_quality_gate(code_review, &quality_gate);
+    append_worker_log(
+        phase_context.log_path,
+        "verification github quality gate",
+        &quality_gate.log_lines,
+    )?;
+    for line in &quality_gate.log_lines {
+        verifier_notes.push(line.clone());
+    }
 
     let status = aggregate_verification_status(code_review.status, e2e.status, battle_tests.status);
     let remediation = collect_verification_remediation(&code_review, &e2e, &battle_tests);
@@ -4383,6 +4554,289 @@ fn default_code_review_report(enabled: bool) -> VerificationCodeReviewReport {
             criteria: Vec::new(),
             notes: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExactShaQualityGate {
+    criterion: VerificationCriterionResult,
+    log_lines: Vec<String>,
+}
+
+fn review_focus_items() -> Vec<String> {
+    CROSS_ACTOR_REVIEW_HEURISTICS
+        .iter()
+        .map(|item| item.to_string())
+        .collect()
+}
+
+fn high_risk_listen_modules() -> Vec<String> {
+    HIGH_RISK_LISTEN_MODULES
+        .iter()
+        .map(|item| item.to_string())
+        .collect()
+}
+
+fn merge_exact_sha_quality_gate(
+    mut code_review: VerificationCodeReviewReport,
+    quality_gate: &ExactShaQualityGate,
+) -> VerificationCodeReviewReport {
+    code_review
+        .criteria
+        .retain(|criterion| criterion.name != EXACT_SHA_QUALITY_CRITERION);
+    code_review.criteria.push(quality_gate.criterion.clone());
+    let total = code_review.criteria.len();
+    let failures = code_review
+        .criteria
+        .iter()
+        .filter(|criterion| criterion.status == VerificationStatus::Failed)
+        .count();
+    code_review.status = if failures == 0 {
+        VerificationStatus::Passed
+    } else {
+        VerificationStatus::Failed
+    };
+    code_review.summary = if failures == 0 {
+        format!("Verification approved all {total} criterion/criteria.")
+    } else {
+        format!("Verification failed {failures} of {total} criterion/criteria.")
+    };
+    code_review
+}
+
+fn exact_sha_quality_gate(workspace_path: &Path) -> ExactShaQualityGate {
+    let branch = match super::current_workspace_branch(workspace_path) {
+        Ok(branch) => branch,
+        Err(error) => {
+            return failed_exact_sha_quality_gate(
+                format!(
+                    "Could not resolve the current workspace branch before checking `{}`.",
+                    REQUIRED_VERIFICATION_WORKFLOW_NAME
+                ),
+                "Repair the workspace Git metadata, then rerun verification.".to_string(),
+                vec![format!(
+                    "GitHub quality gate blocked: current branch lookup failed: {error}"
+                )],
+            );
+        }
+    };
+
+    let pull_request = match GhCli.find_open_branch_pull_request(
+        workspace_path,
+        &branch,
+        LISTEN_PULL_REQUEST_BASE_BRANCH,
+    ) {
+        Ok(Some(pull_request)) => pull_request,
+        Ok(None) => {
+            return failed_exact_sha_quality_gate(
+                format!(
+                    "No open branch PR matched `{branch}`; `{}` must pass on the active PR before verification can succeed.",
+                    REQUIRED_VERIFICATION_WORKFLOW_NAME
+                ),
+                format!(
+                    "Publish or refresh the branch PR for `{branch}`, wait for `{}` to run on the current head SHA, then rerun verification.",
+                    REQUIRED_VERIFICATION_WORKFLOW_NAME
+                ),
+                vec![format!(
+                    "GitHub quality gate blocked: no open PR matched branch `{branch}`."
+                )],
+            );
+        }
+        Err(error) => {
+            return failed_exact_sha_quality_gate(
+                format!(
+                    "Could not resolve the active branch PR for `{branch}` before checking `{}`.",
+                    REQUIRED_VERIFICATION_WORKFLOW_NAME
+                ),
+                "Repair GitHub CLI access for the workspace repository, then rerun verification."
+                    .to_string(),
+                vec![format!(
+                    "GitHub quality gate blocked: PR lookup failed: {error}"
+                )],
+            );
+        }
+    };
+
+    let Some(head_sha) = pull_request
+        .head_ref_oid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+    else {
+        return failed_exact_sha_quality_gate(
+            format!(
+                "PR #{} did not expose a current HEAD SHA for `{}` verification.",
+                pull_request.number, REQUIRED_VERIFICATION_WORKFLOW_NAME
+            ),
+            format!("Repair GitHub PR metadata for branch `{branch}`, then rerun verification."),
+            vec![format!(
+                "GitHub quality gate blocked: PR #{} headRefOid was missing.",
+                pull_request.number
+            )],
+        );
+    };
+
+    let workflow_runs = match GhCli.list_workflow_runs_for_commit(
+        workspace_path,
+        REQUIRED_VERIFICATION_WORKFLOW_NAME,
+        &head_sha,
+    ) {
+        Ok(workflow_runs) => workflow_runs,
+        Err(error) => {
+            return failed_exact_sha_quality_gate(
+                format!(
+                    "Could not resolve `{}` workflow metadata for PR #{} head `{head_sha}`.",
+                    REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+                ),
+                format!(
+                    "Repair GitHub Actions metadata access, then rerun verification for PR #{} head `{head_sha}`.",
+                    pull_request.number
+                ),
+                vec![format!(
+                    "GitHub quality gate blocked: workflow lookup failed: {error}"
+                )],
+            );
+        }
+    };
+
+    evaluate_quality_workflow_runs(&pull_request, &head_sha, workflow_runs)
+}
+
+fn evaluate_quality_workflow_runs(
+    pull_request: &ResolvedBranchPullRequest,
+    head_sha: &str,
+    workflow_runs: Vec<WorkflowRun>,
+) -> ExactShaQualityGate {
+    let Some(latest_run) = workflow_runs.into_iter().next() else {
+        return failed_exact_sha_quality_gate(
+            format!(
+                "No `{}` workflow run was found for PR #{} head `{head_sha}`.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            format!(
+                "Wait for the `{}` workflow to start for PR #{} head `{head_sha}`, then rerun verification.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            vec![format!(
+                "GitHub quality gate blocked: no `{}` runs were returned for PR #{} head `{head_sha}`.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            )],
+        );
+    };
+
+    let workflow_name = latest_run
+        .workflow_name
+        .as_deref()
+        .unwrap_or(REQUIRED_VERIFICATION_WORKFLOW_NAME);
+    let run_url = latest_run.url.as_deref().unwrap_or("unavailable");
+    if !latest_run.head_sha.eq_ignore_ascii_case(head_sha)
+        || !workflow_name.eq_ignore_ascii_case(REQUIRED_VERIFICATION_WORKFLOW_NAME)
+    {
+        return failed_exact_sha_quality_gate(
+            format!(
+                "`{}` workflow metadata did not match PR #{} head `{head_sha}`.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            format!(
+                "Rerun `{}` for PR #{} head `{head_sha}` and confirm the run is attached to the exact current commit.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            vec![format!(
+                "GitHub quality gate blocked: workflow `{workflow_name}` run for head `{}` did not match required head `{head_sha}` (url: {run_url}).",
+                latest_run.head_sha
+            )],
+        );
+    }
+
+    if !latest_run.status.eq_ignore_ascii_case("completed") {
+        return failed_exact_sha_quality_gate(
+            format!(
+                "`{}` for PR #{} head `{head_sha}` is still `{}`.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number, latest_run.status
+            ),
+            format!(
+                "Wait for `{}` to finish successfully on PR #{} head `{head_sha}`, then rerun verification.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            vec![format!(
+                "GitHub quality gate blocked: PR #{} head `{head_sha}` latest `{}` run is `{}` (url: {run_url}).",
+                pull_request.number, REQUIRED_VERIFICATION_WORKFLOW_NAME, latest_run.status
+            )],
+        );
+    }
+
+    match latest_run.conclusion.as_deref() {
+        Some(conclusion) if conclusion.eq_ignore_ascii_case("success") => {
+            passed_exact_sha_quality_gate(
+                format!(
+                    "`{}` passed for PR #{} head `{head_sha}`.",
+                    REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+                ),
+                vec![format!(
+                    "GitHub quality gate passed: PR #{} head `{head_sha}` latest `{}` run concluded success (url: {run_url}).",
+                    pull_request.number, REQUIRED_VERIFICATION_WORKFLOW_NAME
+                )],
+            )
+        }
+        Some(conclusion) => failed_exact_sha_quality_gate(
+            format!(
+                "`{}` for PR #{} head `{head_sha}` concluded `{conclusion}`.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            format!(
+                "Repair the failing `{}` workflow for PR #{} head `{head_sha}`, then rerun verification.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            vec![format!(
+                "GitHub quality gate blocked: PR #{} head `{head_sha}` latest `{}` run concluded `{conclusion}` (url: {run_url}).",
+                pull_request.number, REQUIRED_VERIFICATION_WORKFLOW_NAME
+            )],
+        ),
+        None => failed_exact_sha_quality_gate(
+            format!(
+                "`{}` for PR #{} head `{head_sha}` completed without a conclusion.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            format!(
+                "Rerun `{}` for PR #{} head `{head_sha}` and wait for a successful conclusion before rerunning verification.",
+                REQUIRED_VERIFICATION_WORKFLOW_NAME, pull_request.number
+            ),
+            vec![format!(
+                "GitHub quality gate blocked: PR #{} head `{head_sha}` latest `{}` run completed without a conclusion (url: {run_url}).",
+                pull_request.number, REQUIRED_VERIFICATION_WORKFLOW_NAME
+            )],
+        ),
+    }
+}
+
+fn passed_exact_sha_quality_gate(summary: String, log_lines: Vec<String>) -> ExactShaQualityGate {
+    ExactShaQualityGate {
+        criterion: VerificationCriterionResult {
+            name: EXACT_SHA_QUALITY_CRITERION.to_string(),
+            status: VerificationStatus::Passed,
+            summary,
+            findings: Vec::new(),
+            remediation: None,
+        },
+        log_lines,
+    }
+}
+
+fn failed_exact_sha_quality_gate(
+    summary: String,
+    remediation: String,
+    log_lines: Vec<String>,
+) -> ExactShaQualityGate {
+    ExactShaQualityGate {
+        criterion: VerificationCriterionResult {
+            name: EXACT_SHA_QUALITY_CRITERION.to_string(),
+            status: VerificationStatus::Failed,
+            summary,
+            findings: Vec::new(),
+            remediation: Some(remediation),
+        },
+        log_lines,
     }
 }
 
@@ -6175,6 +6629,82 @@ mod tests {
         assert!(instructions.contains("WORKFLOW.md"));
         assert!(!instructions.contains("refine the workpad plan and acceptance criteria"));
         assert!(!instructions.contains("plan/spec oriented"));
+    }
+
+    #[test]
+    fn listen_review_prompt_calls_out_cross_actor_state_ownership_risks() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        let source_root = temp.path();
+        fs::create_dir_all(workspace.join(".metastack")).expect("metastack dir should build");
+
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta::default();
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "ENG-10749".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+        };
+        let mut issue = test_issue("ENG-10749");
+        issue.description = Some(
+            "## Acceptance Criteria\n- Preserve listen state.\n\n## Validation\n- cargo test\n"
+                .to_string(),
+        );
+        let review = super::ReviewReport {
+            summary: "Review summary".to_string(),
+            complete: true,
+            completed_items: vec!["Preserved listen state.".to_string()],
+            remaining_items: Vec::new(),
+            validation_completed: vec!["cargo test".to_string()],
+            validation_remaining: Vec::new(),
+            risks: Vec::new(),
+            notes: Vec::new(),
+        };
+
+        let review_instructions = super::build_review_instructions(&context);
+        let final_instructions = super::build_final_review_instructions(&context);
+        let review_prompt = super::render_review_prompt(&issue, 2, &context);
+        let final_prompt = super::render_final_review_prompt(&issue, 2, &context, &review);
+
+        for rendered in [
+            review_instructions.as_str(),
+            final_instructions.as_str(),
+            review_prompt.as_str(),
+            final_prompt.as_str(),
+        ] {
+            assert!(rendered.contains("cross-actor state ownership"));
+            assert!(rendered.contains("spawn-before-persist"));
+            assert!(rendered.contains("whole-state rewrites"));
+            assert!(rendered.contains("blocked metadata"));
+            assert!(rendered.contains("canonical metadata"));
+            assert!(rendered.contains("`turn_history`"));
+            assert!(rendered.contains("`latest_resume_handle`"));
+            assert!(rendered.contains("src/listen/mod.rs"));
+            assert!(rendered.contains("src/listen/store.rs"));
+            assert!(rendered.contains("src/listen/worker.rs"));
+        }
     }
 
     #[test]
