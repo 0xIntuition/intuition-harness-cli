@@ -4308,6 +4308,120 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
 
 #[cfg(unix)]
 #[test]
+fn listen_recovers_corrupt_session_json_from_backup() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![listen_session_json(
+            "ENG-10163",
+            "blocked",
+            1_773_575_100,
+            None,
+        )],
+    )?;
+    let backup_path = state_path.with_file_name("session.json.bak");
+    fs::copy(&state_path, &backup_path)?;
+    fs::write(&state_path, "{ invalid session")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10163"));
+
+    let recovered: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(recovered["sessions"][0]["issue_identifier"], "ENG-10163");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_rejects_duplicate_listener_when_corrupt_primary_lock_recovers_live_backup()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, Some("MetaStack CLI"))?;
+    fs::create_dir_all(&project_dir)?;
+    let lock_path = project_dir.join("active-listener.lock.json");
+    let backup_path = project_dir.join("active-listener.lock.json.bak");
+    fs::write(&lock_path, "{ invalid lock")?;
+    fs::write(
+        &backup_path,
+        format!(
+            r#"{{
+  "pid": {},
+  "acquired_at_epoch_seconds": 1773575600,
+  "source_root": "{}",
+  "metastack_root": "{}"
+}}"#,
+            std::process::id(),
+            listen_source_root(&repo_root)?.display(),
+            listen_source_root(&repo_root)?
+                .join(branding::PROJECT_DIR)
+                .canonicalize()?
+                .display()
+        ),
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "MetaStack CLI",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already owns project"));
+
+    let restored: serde_json::Value = serde_json::from_slice(&fs::read(&lock_path)?)?;
+    assert_eq!(restored["pid"], serde_json::json!(std::process::id()));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_omitted_project_uses_repo_default_project_identity() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;

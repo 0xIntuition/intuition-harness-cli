@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tempfile::{Builder, NamedTempFile};
 
 /// Shared root layout for durable workflow state.
 #[derive(Debug, Clone)]
@@ -132,6 +134,7 @@ where
     }
 
     /// Load the marker payload, returning `None` when the file does not exist.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn load_optional(&self) -> Result<Option<T>> {
         read_optional_json(&self.path)
     }
@@ -140,31 +143,13 @@ where
     ///
     /// Returns `Ok(false)` when the file already exists.
     pub(crate) fn try_create_new(&self, value: &T) -> Result<bool> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create `{}`", parent.display()))?;
-        }
-
         let contents = serde_json::to_vec_pretty(value)
             .with_context(|| format!("failed to serialize `{}`", self.path.display()))?;
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.path)
-        {
-            Ok(mut file) => {
-                file.write_all(&contents)
-                    .with_context(|| format!("failed to write `{}`", self.path.display()))?;
-                Ok(true)
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
-            Err(error) => {
-                Err(error).with_context(|| format!("failed to create `{}`", self.path.display()))
-            }
-        }
+        persist_json_bytes(&self.path, &contents, JsonPersistMode::CreateNew)
     }
 
     /// Remove the marker when the stored payload matches the provided predicate.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remove_if<F>(&self, predicate: F) -> Result<bool>
     where
         F: FnOnce(&T) -> bool,
@@ -239,14 +224,10 @@ pub(crate) fn write_json<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize,
 {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create `{}`", parent.display()))?;
-    }
-
-    let contents = serde_json::to_string_pretty(value)
+    let contents = serde_json::to_vec_pretty(value)
         .with_context(|| format!("failed to serialize `{}`", path.display()))?;
-    fs::write(path, contents).with_context(|| format!("failed to write `{}`", path.display()))
+    persist_json_bytes(path, &contents, JsonPersistMode::Replace)?;
+    Ok(())
 }
 
 /// Read a required JSON file with contextual filesystem and decode errors.
@@ -323,10 +304,67 @@ where
     Ok(records)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonPersistMode {
+    Replace,
+    CreateNew,
+}
+
+fn persist_json_bytes(path: &Path, contents: &[u8], mode: JsonPersistMode) -> Result<bool> {
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(directory)
+        .with_context(|| format!("failed to create `{}`", directory.display()))?;
+
+    let mut temp = json_tempfile(path, directory)?;
+    temp.write_all(contents)
+        .with_context(|| format!("failed to write temporary file for `{}`", path.display()))?;
+    temp.as_file_mut()
+        .sync_all()
+        .with_context(|| format!("failed to sync temporary file for `{}`", path.display()))?;
+
+    match mode {
+        JsonPersistMode::Replace => {
+            temp.persist(path)
+                .map_err(|error| error.error)
+                .with_context(|| format!("failed to persist `{}`", path.display()))?;
+            Ok(true)
+        }
+        JsonPersistMode::CreateNew => match temp.persist_noclobber(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.error.kind() == ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => {
+                Err(error.error).with_context(|| format!("failed to create `{}`", path.display()))
+            }
+        },
+    }
+}
+
+fn json_tempfile(path: &Path, directory: &Path) -> Result<NamedTempFile> {
+    let prefix = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("{name}."))
+        .unwrap_or_else(|| "json.".to_string());
+    Builder::new()
+        .prefix(&prefix)
+        .suffix(".tmp")
+        .tempfile_in(directory)
+        .with_context(|| {
+            format!(
+                "failed to create temporary file for `{}` in `{}`",
+                path.display(),
+                directory.display()
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +432,55 @@ mod tests {
         assert_eq!(file.load_optional().unwrap(), Some(marker.clone()));
         assert!(file.remove_if(|existing| existing.value == "lock").unwrap());
         assert_eq!(file.load_optional().unwrap(), None);
+    }
+
+    #[test]
+    fn active_session_file_create_new_preserves_existing_contents() {
+        let dir = tempdir().unwrap();
+        let file = ActiveSessionFile::<TestMarker>::new(dir.path().join("active.json"));
+        let original = TestMarker {
+            value: "original".to_string(),
+        };
+        let replacement = TestMarker {
+            value: "replacement".to_string(),
+        };
+
+        file.store(&original).unwrap();
+        assert!(!file.try_create_new(&replacement).unwrap());
+        assert_eq!(file.load_optional().unwrap(), Some(original));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_json_keeps_existing_file_readable_when_tempfile_creation_fails() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let original = TestMarker {
+            value: "stable".to_string(),
+        };
+        let replacement = TestMarker {
+            value: "replacement".to_string(),
+        };
+
+        write_json(&path, &original).unwrap();
+
+        let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+        let mut read_only = fs::metadata(dir.path()).unwrap().permissions();
+        read_only.set_mode(0o555);
+        fs::set_permissions(dir.path(), read_only).unwrap();
+
+        let error = write_json(&path, &replacement).expect_err("temp-file write should fail");
+
+        let mut restored = fs::metadata(dir.path()).unwrap().permissions();
+        restored.set_mode(original_mode);
+        fs::set_permissions(dir.path(), restored).unwrap();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to create temporary file")
+        );
+        assert_eq!(read_json::<TestMarker>(&path).unwrap(), original);
     }
 
     #[test]

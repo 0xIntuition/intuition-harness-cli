@@ -287,6 +287,11 @@ This section is reporting output only. It must not decide ticket completion by i
 
 The install-scoped listen store also carries:
 
+- atomic same-directory temp-file persistence for startup-critical JSON so failed writes leave the
+  previously readable primary file intact
+- deterministic recovery for required `project.json`, `session.json`, and
+  `active-listener.lock.json` loads, preferring `.bak` artifacts before `.tmp` siblings and
+  rewriting the recovered primary file atomically
 - degraded Linear state, including failure kind, failure message, and retry timing
 - deferred worker-side `pending_linear_sync` metadata for replayable remote operations
 - optional blocked-session taxonomy metadata with category, reason, and retryable status so

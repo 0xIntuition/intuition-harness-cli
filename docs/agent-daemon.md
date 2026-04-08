@@ -32,6 +32,12 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
    legacy `--- meta ...` equivalents from those per-issue logs; preflight-failure blocks are valid
    persisted content, but they only delimit repair boundaries and do not themselves recover
    canonical provider/model/reasoning/tokens.
+   Startup-critical listener JSON (`project.json`, `session.json`, and
+   `active-listener.lock.json`) is written through same-directory temp-file persistence and loaded
+   through deterministic sibling recovery (`.bak` before `.tmp`) when the primary file is corrupt.
+   Successful recovery rewrites the primary file atomically, optional detail artifacts remain
+   best-effort, and stale or unreadable orphaned locks are removed with warnings while valid live
+   locks keep blocking duplicate listener runs.
 10. Session and workspace cleanup is two-tiered:
     - **Immediate auto-clean**: when a listener worker session completes (the ticket leaves active
       states), the worker attempts to remove the workspace clone and its ticket-scoped listen
