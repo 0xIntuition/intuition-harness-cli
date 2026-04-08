@@ -525,6 +525,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     },
                     captured_at_epoch_seconds: reference_now - 1_180,
                 }],
+                context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
                 canonical: CanonicalSessionData {
                     provider: Some("codex".to_string()),
                     model: Some("gpt-5.4".to_string()),
@@ -646,6 +647,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     },
                     captured_at_epoch_seconds: reference_now - 2_940,
                 }],
+                context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
                 canonical: CanonicalSessionData {
                     provider: Some("claude".to_string()),
                     model: Some("sonnet".to_string()),
@@ -1389,7 +1391,7 @@ where
         let sessions = persisted_state.sorted_sessions();
         let session_details = self
             .store
-            .load_session_details(&sessions)?
+            .load_session_details(&self.app_config, &sessions)?
             .into_iter()
             .map(|detail| (detail.issue_identifier.clone(), detail))
             .collect();
@@ -1456,7 +1458,7 @@ where
         let sessions = state.sorted_sessions();
         let session_details = self
             .store
-            .load_session_details(&sessions)?
+            .load_session_details(&self.app_config, &sessions)?
             .into_iter()
             .map(|detail| (detail.issue_identifier.clone(), detail))
             .collect();
@@ -3982,7 +3984,7 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
             let state = daemon.store.load_state()?;
             let session_details = daemon
                 .store
-                .load_session_details(&state.sorted_sessions())?
+                .load_session_details(&daemon.app_config, &state.sorted_sessions())?
                 .into_iter()
                 .map(|detail| (detail.issue_identifier.clone(), detail))
                 .collect();

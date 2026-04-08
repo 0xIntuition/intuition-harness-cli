@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent_provider::builtin_provider_adapter;
-use crate::config::resolve_data_root;
+use crate::config::{
+    AppConfig, DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS, PlanningMeta, resolve_data_root,
+};
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
 use crate::listen::compact_session_summary;
 use crate::session_runtime::{
@@ -30,6 +32,10 @@ const LISTEN_STORE_VERSION: u8 = 1;
 const LISTEN_SESSION_DETAIL_VERSION: u8 = 4;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
+
+fn default_context_budget_tokens() -> u64 {
+    DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS
+}
 
 #[cfg(test)]
 fn listen_turn_log_prefix() -> String {
@@ -177,6 +183,8 @@ pub(crate) struct ListenSessionDetail {
     #[serde(default)]
     pub turn_history: Vec<TurnTokenSnapshot>,
     #[serde(default)]
+    pub context_budget_tokens: Option<u64>,
+    #[serde(default)]
     pub canonical: CanonicalSessionData,
     #[serde(default)]
     pub pull_request: PullRequestSummary,
@@ -196,6 +204,13 @@ pub(crate) struct ListenSessionDetail {
     pub milestones: Vec<SessionMilestone>,
     #[serde(default)]
     pub log_excerpts: Vec<SessionLogExcerpt>,
+}
+
+impl ListenSessionDetail {
+    pub(crate) fn context_budget_tokens(&self) -> u64 {
+        self.context_budget_tokens
+            .unwrap_or_else(default_context_budget_tokens)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -550,11 +565,16 @@ impl ListenProjectStore {
 
     pub(super) fn load_session_details(
         &self,
+        app_config: &AppConfig,
         sessions: &[AgentSession],
     ) -> Result<Vec<ListenSessionDetail>> {
         let mut details = Vec::new();
         for session in sessions {
-            if let Some(detail) = self.load_session_detail(&session.issue_identifier)? {
+            if let Some(mut detail) = self.load_session_detail(&session.issue_identifier)? {
+                if detail.context_budget_tokens.is_none() {
+                    detail.context_budget_tokens =
+                        Some(resolve_session_context_budget_tokens(app_config, session));
+                }
                 details.push(detail);
             }
         }
@@ -789,6 +809,7 @@ impl ListenProjectStore {
                 turns: session.turns,
                 tokens: session.tokens.clone(),
                 turn_history: session.turn_history.clone(),
+                context_budget_tokens: None,
                 canonical: session.canonical.clone(),
                 pull_request: session.pull_request.clone(),
                 latest_resume_handle: session.latest_resume_handle.clone(),
@@ -918,6 +939,15 @@ impl ListenProjectStore {
     fn active_lock_file(&self) -> ActiveSessionFile<ActiveListenerLock> {
         self.paths.layout.active_session_file()
     }
+}
+
+fn resolve_session_context_budget_tokens(app_config: &AppConfig, session: &AgentSession) -> u64 {
+    session
+        .workspace_path
+        .as_deref()
+        .and_then(|workspace_path| PlanningMeta::load(Path::new(workspace_path)).ok())
+        .map(|planning_meta| planning_meta.effective_listen_context_budget_tokens(app_config))
+        .unwrap_or_else(|| app_config.defaults.listen.context_budget_tokens())
 }
 
 impl Drop for ListenerLockGuard {
@@ -1507,7 +1537,9 @@ mod tests {
     use anyhow::{Context, Result};
     use tempfile::tempdir;
 
-    use crate::config::data_root_from_config_path;
+    use crate::config::{
+        AppConfig, PlanningListenSettings, PlanningMeta, data_root_from_config_path,
+    };
     use crate::listen::{
         CanonicalSessionData, LatestResumeHandle, ListenSessionDetail, PullRequestSummary,
         ResumeProvider, SessionOrigin, TokenUsage,
@@ -1962,6 +1994,7 @@ mod tests {
                 turns: Some(1),
                 tokens: TokenUsage::default(),
                 turn_history: Vec::new(),
+                context_budget_tokens: None,
                 canonical: CanonicalSessionData::default(),
                 pull_request: PullRequestSummary::default(),
                 verification: None,
@@ -2026,6 +2059,35 @@ mod tests {
                 id: "thread-ENG-10163".to_string(),
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn load_session_details_resolves_repo_context_budget_for_workspace() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let workspace_root = temp.path().join("workspace");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        fs::create_dir_all(workspace_root.join(crate::branding::PROJECT_DIR))?;
+        PlanningMeta {
+            listen: PlanningListenSettings {
+                context_budget_tokens: Some(100_000),
+                ..PlanningListenSettings::default()
+            },
+            ..PlanningMeta::default()
+        }
+        .save(&workspace_root)?;
+
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let mut session = default_session("ENG-10782", SessionPhase::Running, 100);
+        session.workspace_path = Some(workspace_root.display().to_string());
+        store.save_state(&ListenState::from_sessions(vec![session.clone()]))?;
+
+        let details = store.load_session_details(&AppConfig::default(), &[session])?;
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].context_budget_tokens, Some(100_000));
         Ok(())
     }
 
