@@ -841,6 +841,9 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
                     "provider": "codex",
                     "id": "019d0763-afc9-70d1-8022-51624918cf76"
                 },
+                "canonical": {
+                    "provider": "claude"
+                },
                 "turns": 2,
                 "tokens": {
                     "input": 210,
@@ -878,7 +881,7 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .success()
         .stdout(predicate::str::contains("PROVIDER"))
         .stdout(predicate::str::contains("RESUME ID"))
-        .stdout(predicate::str::contains("codex"))
+        .stdout(predicate::str::contains("claude"))
         .stdout(predicate::str::contains(
             "019d0763-afc9-70d1-8022-51624918cf76",
         ));
@@ -897,6 +900,7 @@ fn listen_sessions_list_and_inspect_surface_resume_and_token_metadata() -> Resul
         .success()
         .stdout(predicate::str::contains("Latest session:"))
         .stdout(predicate::str::contains("Detail file:"))
+        .stdout(predicate::str::contains("Provider: claude"))
         .stdout(predicate::str::contains("  - Tokens: in 210 | out 34 | total 244"))
         .stdout(predicate::str::contains("Resume provider: codex"))
         .stdout(predicate::str::contains(

@@ -2924,7 +2924,10 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         if let Some(reasoning) = session.canonical.reasoning.as_deref() {
             lines.push(format!("  - Reasoning: {reasoning}"));
         }
-        lines.push(format!("  - Resume provider: {}", session.provider_label()));
+        lines.push(format!(
+            "  - Resume provider: {}",
+            explicit_resume_provider_label(session.latest_resume_handle.as_ref())
+        ));
         lines.push(format!(
             "  - Resume ID: {}",
             explicit_resume_id_label(session.latest_resume_handle.as_ref())
