@@ -66,7 +66,10 @@ pub use state::{
     SessionOrigin, SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage,
     TurnPromptMode, TurnTokenSnapshot,
 };
-use state::{COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label};
+use state::{
+    COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
+    explicit_resume_provider_label,
+};
 use store::{
     ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
     pid_is_running, resolve_source_project_root,
