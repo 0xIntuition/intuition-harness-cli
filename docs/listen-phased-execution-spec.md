@@ -176,13 +176,35 @@ When final review approves the work:
 The same validation gate also runs before draft PR publication or draft PR refreshes on
 continuation turns.
 
-After draft or ready publication, the listener inspects the active branch PR for failing GitHub
-checks or commit statuses. If CI is red:
+After draft publication and again before ready promotion, the listener runs a bounded
+post-publication settle poll against the active branch PR using `gh pr checks --json
+name,state,bucket,description,link`. The poll classifies checks as pending, passed, failed, or
+absent (`no checks configured`) and records the current settle state in session summaries and
+milestones.
+
+If CI is still pending:
+
+- the session stays in `Publishing`
+- the summary, inspect output, and dashboard detail show explicit waiting progress plus remaining
+  timeout budget
+- polling sleeps for the configured install-scoped interval before checking again
+
+If CI is red:
 
 - the same PR is kept in place instead of creating a duplicate
 - concise failing-check details are added to the next continuation delta
 - the worker re-enters `execute`
 - local validation runs again before the next PR mutation
+
+If no checks are configured:
+
+- the worker records that state explicitly
+- ready handoff proceeds without inventing a synthetic pass/fail result
+
+If the settle timeout is reached:
+
+- `ci_timeout_behavior = "block"` blocks review handoff with a gate error
+- `ci_timeout_behavior = "warn_and_proceed"` records a warning summary and continues
 - the same repair-turn budget gates additional retries
 
 ## Linear Failure Recovery

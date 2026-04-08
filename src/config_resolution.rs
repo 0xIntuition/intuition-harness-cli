@@ -1052,6 +1052,28 @@ pub fn validate_listen_poll_interval_seconds(interval: u64) -> Result<()> {
     }
 }
 
+/// Validates the GitHub CI settle polling interval in seconds.
+pub fn validate_listen_ci_poll_interval_seconds(interval: u64) -> Result<()> {
+    if interval >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen GitHub CI settle poll interval must be at least 1 second; got {interval}"
+        ))
+    }
+}
+
+/// Validates the GitHub CI settle timeout in seconds.
+pub fn validate_listen_ci_poll_timeout_seconds(timeout: u64) -> Result<()> {
+    if timeout >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen GitHub CI settle timeout must be at least 1 second; got {timeout}"
+        ))
+    }
+}
+
 /// Validates the listen agent-turn timeout in seconds.
 pub fn validate_listen_agent_turn_timeout_seconds(timeout: u64) -> Result<()> {
     if timeout >= 1 {

@@ -1534,9 +1534,10 @@ mod tests {
         linear_status_color, render_active_issue_detail_text, render_dashboard,
         render_dashboard_with_state, render_dashboard_with_view, render_session_detail_text,
     };
+    use crate::listen::store::SessionMilestone;
     use crate::listen::{
-        BlockedCategory, BlockedReason, DashboardRuntimeContext, ListenCycleData, SessionListView,
-        SessionPhase, build_dashboard_data,
+        BlockedCategory, BlockedReason, DashboardRuntimeContext, ListenCycleData,
+        PullRequestStatus, SessionListView, SessionPhase, build_dashboard_data,
     };
     use crate::tui::scroll::clamp_offset;
 
@@ -2478,5 +2479,43 @@ mod tests {
         assert!(rendered.contains("PR: none"));
         assert!(!rendered.contains("Description"));
         assert!(!rendered.contains("Project:"));
+    }
+
+    #[test]
+    fn session_detail_renders_ci_waiting_and_no_checks_milestones() {
+        let mut cycle = demo_cycle();
+        cycle.sessions[0].summary = "Complete | no GitHub checks configured".to_string();
+        let detail = cycle
+            .session_details
+            .get_mut("MET-13")
+            .expect("demo detail should exist");
+        detail.summary = "Complete | no GitHub checks configured".to_string();
+        detail.milestones.push(SessionMilestone {
+            at_epoch_seconds: 1_773_575_620,
+            phase: SessionPhase::Publishing,
+            summary: "Publishing draft PR | waiting for GitHub CI 0/1 settled | 1s remaining"
+                .to_string(),
+            turns: Some(1),
+            pull_request_status: PullRequestStatus::Draft,
+            pull_request_number: Some(321),
+        });
+        detail.milestones.push(SessionMilestone {
+            at_epoch_seconds: 1_773_575_621,
+            phase: SessionPhase::Publishing,
+            summary: "Publishing review-ready handoff | no GitHub checks configured".to_string(),
+            turns: Some(1),
+            pull_request_status: PullRequestStatus::Ready,
+            pull_request_number: Some(321),
+        });
+
+        let rendered = render_session_detail_text(&cycle.sessions[0], detail)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("waiting for GitHub CI 0/1 settled"));
+        assert!(rendered.contains("no GitHub checks configured"));
     }
 }
