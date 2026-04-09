@@ -35,9 +35,11 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
    Startup-critical listener JSON (`project.json`, `session.json`, and
    `active-listener.lock.json`) is written through same-directory temp-file persistence and loaded
    through deterministic sibling recovery (`.bak` before `.tmp`) when the primary file is corrupt.
-   Successful recovery rewrites the primary file atomically, optional detail artifacts remain
-   best-effort, and stale or unreadable orphaned locks are removed with warnings while valid live
-   locks keep blocking duplicate listener runs.
+   Successful recovery rewrites the primary file atomically, best-effort removes the consumed
+   recovery artifact, optional detail artifacts remain best-effort, and stale or unreadable
+   orphaned locks are removed with warnings while valid live locks keep blocking duplicate listener
+   runs. Replacement-safe lock cleanup uses Unix file identity where available and falls back to
+   best-effort path deletion on non-Unix hosts.
 10. Session and workspace cleanup is two-tiered:
     - **Immediate auto-clean**: when a listener worker session completes (the ticket leaves active
       states), the worker attempts to remove the workspace clone and its ticket-scoped listen
