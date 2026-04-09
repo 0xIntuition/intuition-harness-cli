@@ -4308,6 +4308,120 @@ fn listen_recovers_stale_active_listener_lock() -> Result<(), Box<dyn Error>> {
 
 #[cfg(unix)]
 #[test]
+fn listen_recovers_corrupt_session_json_from_backup() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let state_path = write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![listen_session_json(
+            "ENG-10163",
+            "blocked",
+            1_773_575_100,
+            None,
+        )],
+    )?;
+    let backup_path = state_path.with_file_name("session.json.bak");
+    fs::copy(&state_path, &backup_path)?;
+    fs::write(&state_path, "{ invalid session")?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args(["listen", "sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ENG-10163"));
+
+    let recovered: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(recovered["sessions"][0]["issue_identifier"], "ENG-10163");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_rejects_duplicate_listener_when_corrupt_primary_lock_recovers_live_backup()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let project_dir = listen_project_store_dir(&config_path, &repo_root, Some("MetaStack CLI"))?;
+    fs::create_dir_all(&project_dir)?;
+    let lock_path = project_dir.join("active-listener.lock.json");
+    let backup_path = project_dir.join("active-listener.lock.json.bak");
+    fs::write(&lock_path, "{ invalid lock")?;
+    fs::write(
+        &backup_path,
+        format!(
+            r#"{{
+  "pid": {},
+  "acquired_at_epoch_seconds": 1773575600,
+  "source_root": "{}",
+  "metastack_root": "{}"
+}}"#,
+            std::process::id(),
+            listen_source_root(&repo_root)?.display(),
+            listen_source_root(&repo_root)?
+                .join(branding::PROJECT_DIR)
+                .canonicalize()?
+                .display()
+        ),
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "--demo",
+            "--once",
+            "--project",
+            "MetaStack CLI",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already owns project"));
+
+    let restored: serde_json::Value = serde_json::from_slice(&fs::read(&lock_path)?)?;
+    assert_eq!(restored["pid"], serde_json::json!(std::process::id()));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn listen_omitted_project_uses_repo_default_project_identity() -> Result<(), Box<dyn Error>> {
     let _guard = listen_test_lock();
     let temp = tempdir()?;
@@ -6938,6 +7052,413 @@ exit 99
     );
 
     let detail: serde_json::Value = serde_json::from_str(&fs::read_to_string(detail_path)?)?;
+    assert_eq!(
+        detail.pointer("/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(detail.pointer("/canonical/model"), Some(&json!("sonnet")));
+    assert_eq!(detail.pointer("/canonical/reasoning"), Some(&json!("high")));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_once_persists_repo_selected_builtin_claude_canonical_metadata_after_turn_failure()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let stub_dir = temp.path().join("stub-output");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&stub_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  },
+  "agent": {
+    "provider": "claude",
+    "model": "sonnet",
+    "reasoning": "high"
+  },
+  "listen": {
+    "required_label": "agent",
+    "assignment_scope": "viewer"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+
+[agents]
+default_agent = "codex"
+default_model = "gpt-5.4"
+default_reasoning = "low"
+"#,
+        ),
+    )?;
+
+    let claude_path = bin_dir.join("claude");
+    fs::write(
+        &claude_path,
+        r#"#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-p, --print
+--model <model>
+--effort <level>
+--verbose
+--output-format <format>
+--permission-mode <mode>
+EOF
+  exit 0
+fi
+payload=$(cat)
+printf '%s\n' "$@" > "$TEST_OUTPUT_DIR/claude-args.txt"
+printf '%s' "$payload" > "$TEST_OUTPUT_DIR/prompt.txt"
+printf '%s' "$METASTACK_AGENT_NAME" > "$TEST_OUTPUT_DIR/agent.txt"
+printf '%s' "$METASTACK_AGENT_MODEL" > "$TEST_OUTPUT_DIR/model.txt"
+printf '%s' "$METASTACK_AGENT_REASONING" > "$TEST_OUTPUT_DIR/reasoning.txt"
+printf '%s' "$METASTACK_AGENT_PROVIDER_SOURCE" > "$TEST_OUTPUT_DIR/provider-source.txt"
+printf '%s' "$METASTACK_AGENT_ROUTE_KEY" > "$TEST_OUTPUT_DIR/route-key.txt"
+printf '%s\n' '{"type":"message_start","message":{"usage":{"input_tokens":210}}}'
+printf '%s\n' '{"type":"message_delta","usage":{"output_tokens":34}}'
+printf '%s\n' 'claude listen failed intentionally' >&2
+exit 23
+"#,
+    )?;
+    let mut permissions = fs::metadata(&claude_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&claude_path, permissions)?;
+
+    let codex_path = bin_dir.join("codex");
+    fs::write(
+        &codex_path,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+-a, --ask-for-approval <APPROVAL_POLICY>
+-s, --sandbox <SANDBOX_MODE>
+-C, --cd <DIR>
+    --add-dir <DIR>
+    --dangerously-bypass-approvals-and-sandbox
+EOF
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  cat <<'EOF'
+-m, --model <MODEL>
+-c, --config <key=value>
+    --json
+EOF
+  exit 0
+fi
+printf 'codex fallback invoked' > "$TEST_OUTPUT_DIR/codex.txt"
+exit 99
+"#,
+    )?;
+    let mut permissions = fs::metadata(&codex_path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex_path, permissions)?;
+
+    init_repo_with_origin(&repo_root)?;
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-65",
+                        "identifier": "MET-65",
+                        "title": "Builtin Claude listen failure path",
+                        "description": "Verify failed builtin provider turns still persist canonical metadata",
+                        "url": "https://linear.app/issues/65",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-1",
+                            "name": "Todo",
+                            "type": "unstarted"
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Teams");
+        then.status(200).json_body(json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "MET",
+                        "name": "Metastack",
+                        "states": {
+                            "nodes": [
+                                {
+                                    "id": "state-1",
+                                    "name": "Todo",
+                                    "type": "unstarted"
+                                },
+                                {
+                                    "id": "state-2",
+                                    "name": "In Progress",
+                                    "type": "started"
+                                }
+                            ]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "MetaStack CLI",
+                        "description": null,
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.5,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "MET",
+                                "name": "Metastack"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-65\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": listen_issue_detail_node(
+                    "issue-65",
+                    "MET-65",
+                    "Builtin Claude listen failure path",
+                    "Verify failed builtin provider turns still persist canonical metadata",
+                    "state-2",
+                    "In Progress",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation UpdateIssue");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueUpdate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-65",
+                        "identifier": "MET-65",
+                        "title": "Builtin Claude listen failure path",
+                        "description": "Verify failed builtin provider turns still persist canonical metadata",
+                        "url": "https://linear.app/issues/65",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:05:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-2",
+                            "name": "In Progress",
+                            "type": "started"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateIssue");
+        then.status(500);
+    });
+
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("mutation CreateComment")
+            .body_includes("## Codex Workpad");
+        then.status(200).json_body(json!({
+            "data": {
+                "commentCreate": {
+                    "success": true,
+                    "comment": {
+                        "id": "comment-65",
+                        "body": "## Codex Workpad",
+                        "resolvedAt": null
+                    }
+                }
+            }
+        }));
+    });
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("TEST_OUTPUT_DIR", &stub_dir)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MET-65"));
+
+    wait_for_path(&stub_dir.join("claude-args.txt"))?;
+    wait_for_path(&stub_dir.join("prompt.txt"))?;
+    wait_for_path(&stub_dir.join("provider-source.txt"))?;
+    assert!(!stub_dir.join("codex.txt").exists());
+
+    let args = fs::read_to_string(stub_dir.join("claude-args.txt"))?;
+    assert!(args.contains("--permission-mode=bypassPermissions"));
+    assert!(args.contains("--verbose"));
+    assert!(args.contains("--output-format=stream-json"));
+    assert!(args.contains("-p"));
+    assert!(args.contains("--model=sonnet"));
+    assert!(args.contains("--effort=high"));
+    assert!(!args.contains("--reasoning="));
+    assert_eq!(fs::read_to_string(stub_dir.join("agent.txt"))?, "claude");
+    assert_eq!(fs::read_to_string(stub_dir.join("model.txt"))?, "sonnet");
+    assert_eq!(fs::read_to_string(stub_dir.join("reasoning.txt"))?, "high");
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("provider-source.txt"))?,
+        "repo_default"
+    );
+    assert_eq!(
+        fs::read_to_string(stub_dir.join("route-key.txt"))?,
+        "agents.listen"
+    );
+
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    let detail_path = listen_detail_path(&config_path, &repo_root, "MET-65")?;
+    wait_for_json_pointer_value(&state_path, "/sessions/0/phase", &json!("blocked"))?;
+    wait_for_json_pointer_value(&detail_path, "/phase", &json!("blocked"))?;
+    wait_for_json_pointer_value(
+        &state_path,
+        "/sessions/0/canonical/provider",
+        &json!("claude"),
+    )?;
+    wait_for_json_pointer_value(&state_path, "/sessions/0/canonical/model", &json!("sonnet"))?;
+    wait_for_json_pointer_value(
+        &state_path,
+        "/sessions/0/canonical/reasoning",
+        &json!("high"),
+    )?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/provider", &json!("claude"))?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/model", &json!("sonnet"))?;
+    wait_for_json_pointer_value(&detail_path, "/canonical/reasoning", &json!("high"))?;
+
+    let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(state_path)?)?;
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/provider"),
+        Some(&json!("claude"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/model"),
+        Some(&json!("sonnet"))
+    );
+    assert_eq!(
+        state.pointer("/sessions/0/canonical/reasoning"),
+        Some(&json!("high"))
+    );
+    assert_eq!(state.pointer("/sessions/0/phase"), Some(&json!("blocked")));
+
+    let detail: serde_json::Value = serde_json::from_str(&fs::read_to_string(detail_path)?)?;
+    assert_eq!(detail.pointer("/phase"), Some(&json!("blocked")));
     assert_eq!(
         detail.pointer("/canonical/provider"),
         Some(&json!("claude"))

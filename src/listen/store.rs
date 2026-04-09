@@ -33,10 +33,12 @@ const LISTEN_SESSION_DETAIL_VERSION: u8 = 4;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 fn default_context_budget_tokens() -> u64 {
     DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS
 }
-
 #[cfg(test)]
 fn listen_turn_log_prefix() -> String {
     format!("--- {} listen turn ", crate::branding::COMMAND_NAME)
@@ -253,7 +255,39 @@ pub(super) struct SessionClearOutcome {
 #[derive(Debug)]
 pub(super) struct ListenerLockGuard {
     lock_path: PathBuf,
-    pid: u32,
+    project_label: String,
+    identity: Option<FileIdentity>,
+}
+
+#[derive(Debug)]
+enum ActiveLockInspection {
+    Missing,
+    Present(LockSnapshot),
+    Invalid {
+        identity: Option<FileIdentity>,
+        error: anyhow::Error,
+    },
+}
+
+#[derive(Debug)]
+struct LockSnapshot {
+    lock: ActiveListenerLock,
+    identity: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConditionalRemoveOutcome {
+    Removed,
+    Missing,
+    Replaced,
 }
 
 impl ListenProjectStore {
@@ -294,7 +328,11 @@ impl ListenProjectStore {
         let data_root = resolve_data_root()?;
         let project_dir = data_root.join("listen").join("projects").join(project_key);
         let metadata_path = project_dir.join("project.json");
-        let metadata = read_json::<ListenProjectMetadata>(&metadata_path)?;
+        let metadata = read_required_json_with_recovery::<ListenProjectMetadata>(
+            &metadata_path,
+            project_key,
+            "listen project metadata",
+        )?;
         let source_label = if metadata.source_label.trim().is_empty() {
             Path::new(&metadata.source_root)
                 .file_name()
@@ -586,21 +624,57 @@ impl ListenProjectStore {
         let active_lock_file = self.active_lock_file();
 
         loop {
-            if let Some(existing) = self.load_active_lock()? {
-                if pid_is_running(existing.pid) {
-                    bail!(
-                        "another `{} listen` instance already owns project `{}` (pid {}); active lock: {}",
-                        crate::branding::COMMAND_NAME,
-                        self.identity.project_label,
-                        existing.pid,
-                        self.paths.lock_path.display()
-                    );
-                }
+            match self.inspect_active_lock()? {
+                ActiveLockInspection::Missing => {}
+                ActiveLockInspection::Present(existing) => {
+                    if pid_is_running(existing.lock.pid) {
+                        bail!(
+                            "another `{} listen` instance already owns project `{}` (pid {}); active lock: {}",
+                            crate::branding::COMMAND_NAME,
+                            self.identity.project_label,
+                            existing.lock.pid,
+                            self.paths.lock_path.display()
+                        );
+                    }
 
-                if active_lock_file.remove_if(|lock| lock.pid == existing.pid)? {
+                    eprintln!(
+                        "warning: removing stale active listener lock for project `{}` at {} (pid {} is not running)",
+                        self.identity.project_label,
+                        self.paths.lock_path.display(),
+                        existing.lock.pid
+                    );
+                    let _ = remove_file_if_identity_matches(
+                        &self.paths.lock_path,
+                        existing.identity.as_ref(),
+                    )?;
                     continue;
                 }
-                continue;
+                ActiveLockInspection::Invalid { identity, error } => {
+                    if let Some((recovered, _candidate)) =
+                        first_valid_recovery_candidate::<ActiveListenerLock>(
+                            &recovery_candidate_paths(&self.paths.lock_path)?,
+                        )
+                    {
+                        if pid_is_running(recovered.pid) {
+                            bail!(
+                                "another `{} listen` instance already owns project `{}` (pid {}); active lock: {}",
+                                crate::branding::COMMAND_NAME,
+                                self.identity.project_label,
+                                recovered.pid,
+                                self.paths.lock_path.display()
+                            );
+                        }
+                    }
+
+                    eprintln!(
+                        "warning: removing unreadable active listener lock for project `{}` at {}: {error:#}",
+                        self.identity.project_label,
+                        self.paths.lock_path.display()
+                    );
+                    let _ =
+                        remove_file_if_identity_matches(&self.paths.lock_path, identity.as_ref())?;
+                    continue;
+                }
             }
 
             let lock = ActiveListenerLock {
@@ -613,7 +687,17 @@ impl ListenProjectStore {
                 true => {
                     return Ok(ListenerLockGuard {
                         lock_path: self.paths.lock_path.clone(),
-                        pid,
+                        project_label: self.identity.project_label.clone(),
+                        identity: read_file_identity(&self.paths.lock_path).unwrap_or_else(
+                            |error| {
+                                eprintln!(
+                                    "warning: failed to capture active listener lock identity for project `{}` at {}: {error:#}",
+                                    self.identity.project_label,
+                                    self.paths.lock_path.display()
+                                );
+                                None
+                            },
+                        ),
                     });
                 }
                 false => continue,
@@ -622,7 +706,38 @@ impl ListenProjectStore {
     }
 
     pub(super) fn load_active_lock(&self) -> Result<Option<ActiveListenerLock>> {
-        self.active_lock_file().load_optional()
+        match self.inspect_active_lock()? {
+            ActiveLockInspection::Missing => Ok(None),
+            ActiveLockInspection::Present(existing) => Ok(Some(existing.lock)),
+            ActiveLockInspection::Invalid { error, .. } => Err(error),
+        }
+    }
+
+    fn inspect_active_lock(&self) -> Result<ActiveLockInspection> {
+        let identity = match read_file_identity(&self.paths.lock_path) {
+            Ok(identity) => identity,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(ActiveLockInspection::Missing);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect `{}`", self.paths.lock_path.display())
+                });
+            }
+        };
+
+        match read_required_json_with_recovery::<ActiveListenerLock>(
+            &self.paths.lock_path,
+            &self.identity.project_label,
+            "active listener lock",
+        ) {
+            Ok(lock) => Ok(ActiveLockInspection::Present(LockSnapshot {
+                lock,
+                identity: read_file_identity(&self.paths.lock_path).unwrap_or(identity),
+            })),
+            Err(error) if is_not_found_error(&error) => Ok(ActiveLockInspection::Missing),
+            Err(error) => Ok(ActiveLockInspection::Invalid { identity, error }),
+        }
     }
 
     /// Removes the stored session entry, structured detail artifact, and per-ticket log file for
@@ -719,9 +834,22 @@ impl ListenProjectStore {
             let lock_path = project_dir.join("active-listener.lock.json");
             let logs_dir = project_dir.join("logs");
             let details_dir = project_dir.join("session-details");
-            let metadata = match read_json::<ListenProjectMetadata>(&metadata_path) {
+            let metadata = match read_required_json_with_recovery::<ListenProjectMetadata>(
+                &metadata_path,
+                project_dir
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or("project"),
+                "listen project metadata",
+            ) {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "warning: skipping unreadable listen project metadata at {}: {error:#}",
+                        metadata_path.display()
+                    );
+                    continue;
+                }
             };
             let store = Self {
                 identity: ListenProjectIdentity {
@@ -786,7 +914,11 @@ impl ListenProjectStore {
     }
 
     fn load_state_from_disk(&self) -> Result<(ListenState, bool)> {
-        match read_json(&self.paths.state_path) {
+        match read_required_json_with_recovery::<ListenState>(
+            &self.paths.state_path,
+            &self.identity.project_label,
+            "listen state",
+        ) {
             Ok(state) => Ok((state, true)),
             Err(error) if is_not_found_error(&error) => Ok((ListenState::default(), false)),
             Err(error) => Err(error),
@@ -961,15 +1093,196 @@ fn resolve_session_context_budget_tokens(app_config: &AppConfig, session: &Agent
 
 impl Drop for ListenerLockGuard {
     fn drop(&mut self) {
-        let Ok(contents) = fs::read_to_string(&self.lock_path) else {
-            return;
-        };
-        let Ok(lock) = serde_json::from_str::<ActiveListenerLock>(&contents) else {
-            return;
-        };
-        if lock.pid == self.pid {
-            let _ = fs::remove_file(&self.lock_path);
+        match remove_file_if_identity_matches(&self.lock_path, self.identity.as_ref()) {
+            Ok(ConditionalRemoveOutcome::Removed | ConditionalRemoveOutcome::Missing) => {}
+            Ok(ConditionalRemoveOutcome::Replaced) => {
+                eprintln!(
+                    "warning: skipping active listener lock cleanup for project `{}` at {} because the lock file was replaced",
+                    self.project_label,
+                    self.lock_path.display()
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to clean up active listener lock for project `{}` at {}: {error:#}",
+                    self.project_label,
+                    self.lock_path.display()
+                );
+            }
         }
+    }
+}
+
+impl FileIdentity {
+    #[cfg(unix)]
+    fn from_metadata(metadata: &fs::Metadata) -> Option<Self> {
+        Some(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn from_metadata(_metadata: &fs::Metadata) -> Option<Self> {
+        None
+    }
+}
+
+fn read_required_json_with_recovery<T>(
+    path: &Path,
+    project_context: &str,
+    record_label: &str,
+) -> Result<T>
+where
+    T: Serialize + for<'de> Deserialize<'de>,
+{
+    match read_json(path) {
+        Ok(value) => Ok(value),
+        Err(error) if is_not_found_error(&error) || !is_json_decode_error(&error) => Err(error),
+        Err(primary_error) => {
+            recover_required_json(path, project_context, record_label, primary_error)
+        }
+    }
+}
+
+fn recover_required_json<T>(
+    path: &Path,
+    project_context: &str,
+    record_label: &str,
+    primary_error: anyhow::Error,
+) -> Result<T>
+where
+    T: Serialize + for<'de> Deserialize<'de>,
+{
+    let candidates = recovery_candidate_paths(path)?;
+    let mut attempted = Vec::with_capacity(candidates.len());
+    attempted.extend(
+        candidates
+            .iter()
+            .map(|candidate| candidate.display().to_string()),
+    );
+
+    if let Some((recovered, candidate)) = first_valid_recovery_candidate::<T>(&candidates) {
+        write_json(path, &recovered)
+            .with_context(|| format!("failed to rewrite recovered `{}`", path.display()))?;
+        eprintln!(
+            "warning: recovered {record_label} for project `{project_context}` at {} from {}",
+            path.display(),
+            candidate.display()
+        );
+        return Ok(recovered);
+    }
+
+    let attempted = if attempted.is_empty() {
+        "none".to_string()
+    } else {
+        attempted.join(", ")
+    };
+    bail!(
+        "failed to recover corrupted {record_label} for project `{project_context}` at `{}`; attempted recovery paths: {attempted}; primary error: {primary_error:#}",
+        path.display()
+    );
+}
+
+fn recovery_candidate_paths(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut temp_siblings = BTreeSet::new();
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("state.json");
+    let bak_path = sibling_recovery_path(path, "bak");
+    let tmp_path = sibling_recovery_path(path, "tmp");
+
+    match fs::read_dir(parent) {
+        Ok(entries) => {
+            let prefix = format!("{file_name}.");
+            for entry in entries {
+                let entry =
+                    entry.with_context(|| format!("failed to read `{}`", parent.display()))?;
+                let candidate_path = entry.path();
+                let Some(candidate_name) = candidate_path.file_name().and_then(OsStr::to_str)
+                else {
+                    continue;
+                };
+                if candidate_name.starts_with(&prefix) && candidate_name.ends_with(".tmp") {
+                    temp_siblings.insert(candidate_path);
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read `{}`", parent.display()));
+        }
+    }
+
+    temp_siblings.remove(&tmp_path);
+
+    let mut candidates = vec![bak_path, tmp_path];
+    candidates.extend(temp_siblings);
+    Ok(candidates)
+}
+
+fn first_valid_recovery_candidate<T>(candidates: &[PathBuf]) -> Option<(T, PathBuf)>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    for candidate in candidates {
+        let contents = match fs::read_to_string(candidate) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        };
+        let recovered = match serde_json::from_str::<T>(&contents) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        return Some((recovered, candidate.clone()));
+    }
+    None
+}
+
+fn sibling_recovery_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("state.json");
+    path.with_file_name(format!("{file_name}.{suffix}"))
+}
+
+fn is_json_decode_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<serde_json::Error>())
+}
+
+fn read_file_identity(path: &Path) -> std::io::Result<Option<FileIdentity>> {
+    fs::metadata(path).map(|metadata| FileIdentity::from_metadata(&metadata))
+}
+
+fn remove_file_if_identity_matches(
+    path: &Path,
+    expected_identity: Option<&FileIdentity>,
+) -> Result<ConditionalRemoveOutcome> {
+    if let Some(expected_identity) = expected_identity {
+        let actual_identity = match read_file_identity(path) {
+            Ok(Some(identity)) => Some(identity),
+            Ok(None) => None,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(ConditionalRemoveOutcome::Missing);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect `{}`", path.display()));
+            }
+        };
+        if actual_identity.as_ref() != Some(expected_identity) {
+            return Ok(ConditionalRemoveOutcome::Replaced);
+        }
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(ConditionalRemoveOutcome::Removed),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(ConditionalRemoveOutcome::Missing),
+        Err(error) => Err(error).with_context(|| format!("failed to remove `{}`", path.display())),
     }
 }
 
@@ -1540,6 +1853,8 @@ fn now_epoch_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
 
@@ -1556,9 +1871,10 @@ mod tests {
 
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
-        LISTEN_SESSION_DETAIL_VERSION, ListenProjectStore, ListenState, SessionDetailReferences,
-        SessionPhase, SessionSelector, project_key_for_metastack_root, resolve_source_root,
-        write_json,
+        LISTEN_SESSION_DETAIL_VERSION, ListenProjectPaths, ListenProjectStore, ListenState,
+        SessionDetailReferences, SessionPhase, SessionSelector, WorkflowRootLayout,
+        now_epoch_seconds, project_key_for_metastack_root, read_json, resolve_source_root,
+        sibling_recovery_path, write_json,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1801,6 +2117,245 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .context("failed to spawn sleep process for listen store test")
+    }
+
+    #[test]
+    fn load_state_prefers_backup_recovery_over_temp_candidate() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let backup_state = ListenState::from_sessions(vec![default_session(
+            "ENG-BACKUP",
+            SessionPhase::Blocked,
+            1,
+        )]);
+        let temp_state =
+            ListenState::from_sessions(vec![default_session("ENG-TMP", SessionPhase::Blocked, 2)]);
+        write_json(
+            &sibling_recovery_path(&store.paths().state_path, "bak"),
+            &backup_state,
+        )?;
+        write_json(
+            &sibling_recovery_path(&store.paths().state_path, "tmp"),
+            &temp_state,
+        )?;
+        fs::write(&store.paths().state_path, "{ not valid json")?;
+
+        let recovered = store.load_state()?;
+        let rewritten: ListenState = read_json(&store.paths().state_path)?;
+
+        assert_eq!(recovered.sessions.len(), 1);
+        assert_eq!(recovered.sessions[0].issue_identifier, "ENG-BACKUP");
+        assert_eq!(rewritten.sessions[0].issue_identifier, "ENG-BACKUP");
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_reports_attempted_recovery_paths_when_unrecoverable() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let backup_path = sibling_recovery_path(&store.paths().state_path, "bak");
+        let temp_path = sibling_recovery_path(&store.paths().state_path, "tmp");
+        fs::write(&store.paths().state_path, "{ invalid state")?;
+        fs::write(&backup_path, "{ invalid backup")?;
+
+        let error = store
+            .load_state()
+            .expect_err("corrupt primary state without a valid recovery artifact should fail");
+        let message = format!("{error:#}");
+
+        assert!(message.contains(store.paths().state_path.to_string_lossy().as_ref()));
+        assert!(message.contains(backup_path.to_string_lossy().as_ref()));
+        assert!(message.contains(temp_path.to_string_lossy().as_ref()));
+        Ok(())
+    }
+
+    #[test]
+    fn list_projects_recovers_corrupt_project_metadata_from_backup() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store =
+            ListenProjectStore::resolve_with_data_root(&repo_root, data_root.clone(), None)?;
+        store.ensure_layout()?;
+
+        let backup_path = sibling_recovery_path(&store.paths().project_metadata_path, "bak");
+        fs::copy(&store.paths().project_metadata_path, &backup_path)?;
+        fs::write(&store.paths().project_metadata_path, "{ invalid metadata")?;
+
+        let projects = ListenProjectStore::list_projects_with_data_root(data_root)?;
+        let rewritten: super::ListenProjectMetadata =
+            read_json(&store.paths().project_metadata_path)?;
+
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.metadata.project_key == store.identity().project_key)
+        );
+        assert_eq!(rewritten.project_key, store.identity().project_key);
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_listener_lock_removes_corrupt_orphaned_lock() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+        fs::write(&store.paths().lock_path, "{ invalid lock")?;
+
+        {
+            let _guard = store.acquire_listener_lock(std::process::id())?;
+            let persisted: ActiveListenerLock = read_json(&store.paths().lock_path)?;
+            assert_eq!(persisted.pid, std::process::id());
+        }
+
+        assert!(!store.paths().lock_path.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_listener_lock_recovers_live_lock_from_backup_before_blocking() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+        let mut child = spawn_sleep_process()?;
+        let live_lock = ActiveListenerLock {
+            pid: child.id(),
+            acquired_at_epoch_seconds: now_epoch_seconds(),
+            source_root: repo_root.display().to_string(),
+            metastack_root: repo_root
+                .join(crate::branding::PROJECT_DIR)
+                .display()
+                .to_string(),
+        };
+        write_json(
+            &sibling_recovery_path(&store.paths().lock_path, "bak"),
+            &live_lock,
+        )?;
+        fs::write(&store.paths().lock_path, "{ invalid lock")?;
+
+        let error = store
+            .acquire_listener_lock(std::process::id())
+            .expect_err("recovered live lock should still block duplicate listeners");
+        let recovered: ActiveListenerLock = read_json(&store.paths().lock_path)?;
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(error.to_string().contains("already owns project"));
+        assert_eq!(recovered.pid, live_lock.pid);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_listener_lock_blocks_on_live_backup_when_rewrite_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let resolved_store =
+            ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        resolved_store.ensure_layout()?;
+        let lock_root = temp.path().join("lock-root");
+        fs::create_dir_all(&lock_root)?;
+        let lock_layout =
+            WorkflowRootLayout::install_scoped(lock_root.clone(), "active-listener.lock.json");
+        let store = ListenProjectStore {
+            identity: resolved_store.identity.clone(),
+            paths: ListenProjectPaths {
+                layout: lock_layout.clone(),
+                projects_root: resolved_store.paths.projects_root.clone(),
+                project_dir: resolved_store.paths.project_dir.clone(),
+                project_metadata_path: resolved_store.paths.project_metadata_path.clone(),
+                state_path: resolved_store.paths.state_path.clone(),
+                lock_path: lock_layout.active_session_path().to_path_buf(),
+                logs_dir: resolved_store.paths.logs_dir.clone(),
+                details_dir: resolved_store.paths.details_dir.clone(),
+                verification_dir: resolved_store.paths.verification_dir.clone(),
+            },
+        };
+        let mut child = spawn_sleep_process()?;
+        let live_lock = ActiveListenerLock {
+            pid: child.id(),
+            acquired_at_epoch_seconds: now_epoch_seconds(),
+            source_root: repo_root.display().to_string(),
+            metastack_root: repo_root
+                .join(crate::branding::PROJECT_DIR)
+                .display()
+                .to_string(),
+        };
+        write_json(
+            &sibling_recovery_path(&store.paths().lock_path, "bak"),
+            &live_lock,
+        )?;
+        fs::write(&store.paths().lock_path, "{ invalid lock")?;
+
+        let original_mode = fs::metadata(&lock_root)?.permissions().mode();
+        let mut read_only = fs::metadata(&lock_root)?.permissions();
+        read_only.set_mode(0o555);
+        fs::set_permissions(&lock_root, read_only)?;
+
+        let error = store
+            .acquire_listener_lock(std::process::id())
+            .expect_err("live backup should still block when rewriting the recovered lock fails");
+
+        let mut restored = fs::metadata(&lock_root)?.permissions();
+        restored.set_mode(original_mode);
+        fs::set_permissions(&lock_root, restored)?;
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(format!("{error:#}").contains("already owns project"));
+        assert_eq!(
+            fs::read_to_string(&store.paths().lock_path)?,
+            "{ invalid lock"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn listener_lock_guard_does_not_delete_replaced_lock_file() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let guard = store.acquire_listener_lock(std::process::id())?;
+        let replacement = ActiveListenerLock {
+            pid: 999_999,
+            acquired_at_epoch_seconds: now_epoch_seconds(),
+            source_root: repo_root.display().to_string(),
+            metastack_root: repo_root
+                .join(crate::branding::PROJECT_DIR)
+                .display()
+                .to_string(),
+        };
+        write_json(&store.paths().lock_path, &replacement)?;
+        drop(guard);
+
+        let persisted: ActiveListenerLock = read_json(&store.paths().lock_path)?;
+        assert_eq!(persisted.pid, replacement.pid);
+        Ok(())
     }
 
     #[test]

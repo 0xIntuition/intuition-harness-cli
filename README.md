@@ -1420,6 +1420,14 @@ the existing config path rules, for example `~/.config/metastack/data/`. Each pr
 `session-details/<ISSUE>.json`, and per-issue logs. `session.json` stays compact and list-oriented;
 the per-session detail files hold session milestones, workspace/backlog/workpad references,
 prompt-context references, PR publication state, and short log excerpts for the drill-down pane.
+Writes for `project.json`, `session.json`, `session-details/*.json`, verification JSON, and
+`active-listener.lock.json` now use same-directory temp-file persistence so failed writes leave the
+previous readable primary file intact. Startup-critical loads for `project.json`, `session.json`,
+and `active-listener.lock.json` use deterministic sibling recovery (`.bak` before `.tmp`) and
+rewrite the recovered snapshot back into the primary path; optional detail artifacts remain
+best-effort companion state. Unreadable or stale orphaned active locks are removed with warnings,
+while a valid recovered live PID still blocks duplicate listener runs with the existing failure
+behavior.
 Missing or malformed detail files are treated as temporarily unavailable detail, not as a fatal
 dashboard or reload error; the next successful listener refresh rewrites them. Historical repair
 continues to read both branded `intu` and legacy `meta` turn/preflight listen headers from the
