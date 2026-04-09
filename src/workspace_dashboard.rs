@@ -31,6 +31,7 @@ use crate::tui::theme::{
 #[derive(Debug, Clone)]
 pub struct WorkspaceDashboardData {
     pub workspace_root: String,
+    pub pressure_lines: Vec<String>,
     pub entries: Vec<WorkspaceDashboardEntry>,
     pub github_note: Option<String>,
 }
@@ -525,6 +526,9 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &WorkspaceDashboardApp)
     if let Some(status) = app.copy.status_text() {
         sections.push(status.to_string());
     }
+    if !app.data.pressure_lines.is_empty() {
+        sections.push(app.data.pressure_lines.join("\n"));
+    }
     sections.push(base);
     if let Some(ref note) = app.data.github_note {
         sections.push(note.clone());
@@ -960,6 +964,10 @@ mod tests {
     fn demo_data() -> WorkspaceDashboardData {
         WorkspaceDashboardData {
             workspace_root: "/tmp/workspaces".to_string(),
+            pressure_lines: vec![
+                "Workspace pressure: warning.".to_string(),
+                "Managed workspace footprint: 12.00 GiB across 1 managed clone under `/tmp/workspaces`.".to_string(),
+            ],
             github_note: None,
             entries: vec![WorkspaceDashboardEntry {
                 ticket: "ENG-10259".to_string(),
@@ -1008,5 +1016,6 @@ mod tests {
         };
 
         assert!(snapshot.contains("mouse wheel"));
+        assert!(snapshot.contains("Workspace pressure: warning."));
     }
 }

@@ -283,6 +283,42 @@ fn workspace_list_reports_linear_and_pr_enrichment() -> Result<(), Box<dyn Error
 
 #[cfg(unix)]
 #[test]
+fn workspace_list_reports_shared_pressure_summary_when_no_clones_exist()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
+    write_minimal_planning_context(&repo_root, r#"{ "linear": { "team": "ENG" } }"#)?;
+    init_repo_with_origin(&repo_root)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("METASTACK_TEST_MODE", "1")
+        .env(
+            "METASTACK_TEST_WORKSPACE_PRESSURE_FIXTURE",
+            "warning-memory",
+        )
+        .args([
+            "workspace",
+            "list",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Workspace pressure: warning."))
+        .stdout(predicate::str::contains("Managed workspace footprint:"))
+        .stdout(predicate::str::contains("Memory: warning"))
+        .stdout(predicate::str::contains("No workspace clones found under"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn workspace_list_marks_github_data_unavailable_when_gh_fails() -> Result<(), Box<dyn Error>> {
     let temp = tempdir()?;
     let repo_root = temp.path().join("repo");
@@ -693,6 +729,40 @@ fn workspace_prune_dry_run_previews_actions_and_skips_open_or_ahead_clones()
     assert!(removable.exists());
     assert!(open_pr.exists());
     assert!(ahead.exists());
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_prune_reports_shared_pressure_summary_when_no_clones_exist()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path)?;
+    write_minimal_planning_context(&repo_root, r#"{ "linear": { "team": "ENG" } }"#)?;
+    init_repo_with_origin(&repo_root)?;
+
+    cli()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("METASTACK_TEST_MODE", "1")
+        .env("METASTACK_TEST_WORKSPACE_PRESSURE_FIXTURE", "warning-disk")
+        .args([
+            "workspace",
+            "prune",
+            "--dry-run",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Workspace pressure: warning."))
+        .stdout(predicate::str::contains("Managed workspace footprint:"))
+        .stdout(predicate::str::contains("Disk: warning"))
+        .stdout(predicate::str::contains("Removed 0 clones, freed"));
 
     Ok(())
 }

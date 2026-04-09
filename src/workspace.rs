@@ -14,6 +14,7 @@ use crate::cli::{WorkspaceCleanArgs, WorkspaceListArgs, WorkspacePruneArgs};
 use crate::fs::{canonicalize_existing_dir, ensure_workspace_path_is_safe, sibling_workspace_root};
 use crate::linear::{IssueListFilters, load_linear_command_context};
 use crate::listen::store::{ListenProjectStore, resolve_source_project_root};
+use crate::workspace_pressure;
 
 // ---------------------------------------------------------------------------
 // Shared cleanup contract types
@@ -379,12 +380,17 @@ enum PruneAction {
 /// resolved.
 pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<String> {
     let context = resolve_workspace_context(&args.client.root)?;
+    let pressure_lines =
+        workspace_pressure::assess_workspace_pressure(&args.client.root)?.summary_lines();
     let entries = discover_workspace_entries(&context)?;
     if entries.is_empty() {
-        return Ok(format!(
+        let mut lines = pressure_lines.clone();
+        lines.push(String::new());
+        lines.push(format!(
             "No workspace clones found under `{}`.",
             context.workspace_root.display()
         ));
+        return Ok(lines.join("\n"));
     }
 
     let is_interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
@@ -398,6 +404,7 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
         // Build initial dashboard data from local-only info
         let initial_data = entries_to_initial_dashboard_data(
             &context.workspace_root.display().to_string(),
+            pressure_lines.clone(),
             &entries,
         );
 
@@ -428,8 +435,12 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
                                 }
                                 _ => None,
                             };
-                            let dashboard_data =
-                                records_to_dashboard_data("", &records, github_note.clone());
+                            let dashboard_data = records_to_dashboard_data(
+                                "",
+                                pressure_lines.clone(),
+                                &records,
+                                github_note.clone(),
+                            );
                             let _ = tx.send(WorkspaceEnrichmentUpdate {
                                 entries: dashboard_data.entries,
                                 github_note,
@@ -515,6 +526,8 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
         };
 
         let mut lines = vec![
+            pressure_lines.join("\n"),
+            String::new(),
             format!("Workspace root: {}", context.workspace_root.display()),
             "TICKET  BRANCH  SIZE  MODIFIED  GIT  LINEAR  PR  SAFE".to_string(),
         ];
@@ -548,10 +561,12 @@ pub(crate) async fn run_workspace_list(args: &WorkspaceListArgs) -> Result<Strin
 
 fn entries_to_initial_dashboard_data(
     workspace_root: &str,
+    pressure_lines: Vec<String>,
     entries: &[WorkspaceEntry],
 ) -> crate::workspace_dashboard::WorkspaceDashboardData {
     crate::workspace_dashboard::WorkspaceDashboardData {
         workspace_root: workspace_root.to_string(),
+        pressure_lines,
         entries: entries
             .iter()
             .map(
@@ -579,11 +594,13 @@ fn entries_to_initial_dashboard_data(
 
 fn records_to_dashboard_data(
     workspace_root: &str,
+    pressure_lines: Vec<String>,
     records: &[WorkspaceListRecord],
     github_note: Option<String>,
 ) -> crate::workspace_dashboard::WorkspaceDashboardData {
     crate::workspace_dashboard::WorkspaceDashboardData {
         workspace_root: workspace_root.to_string(),
+        pressure_lines,
         entries: records
             .iter()
             .map(
@@ -642,6 +659,8 @@ pub(crate) fn run_workspace_clean(args: &WorkspaceCleanArgs) -> Result<String> {
 /// repository or Linear metadata cannot be resolved.
 pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<String> {
     let context = resolve_workspace_context(&args.client.root)?;
+    let pressure_lines =
+        workspace_pressure::assess_workspace_pressure(&args.client.root)?.summary_lines();
     let entries = discover_workspace_entries(&context)?;
     let improve_workspaces = discover_improve_workspaces(&context.workspace_root)?;
     let review_workspaces = discover_review_workspaces(&context.workspace_root)?;
@@ -650,11 +669,14 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
         !entries.is_empty() || !improve_workspaces.is_empty() || !review_workspaces.is_empty();
 
     if !has_any {
-        return Ok(format!(
+        let mut lines = pressure_lines.clone();
+        lines.push(String::new());
+        lines.push(format!(
             "Removed 0 clones, freed {}. Kept 0 clones.\nWorkspace root: {}",
             format_bytes(0),
             context.workspace_root.display()
         ));
+        return Ok(lines.join("\n"));
     }
 
     let linear = load_linear_command_context(&args.client, None)?;
@@ -674,10 +696,12 @@ pub(crate) async fn run_workspace_prune(args: &WorkspacePruneArgs) -> Result<Str
     let mut removed = 0usize;
     let mut kept = 0usize;
     let mut freed_bytes = 0u64;
-    let mut lines = vec![format!(
+    let mut lines = pressure_lines;
+    lines.push(String::new());
+    lines.push(format!(
         "{} workspace prune preview:",
         if args.dry_run { "Dry-run" } else { "Active" }
-    )];
+    ));
 
     for decision in &decisions {
         let action = match decision.action {
