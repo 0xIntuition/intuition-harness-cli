@@ -13294,6 +13294,8 @@ ci_timeout_behavior = "block"
         1,
     )?;
 
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    wait_for_file_substring(&state_path, "no GitHub checks configured")?;
     let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
     assert!(inspect.contains("no GitHub checks configured"));
 
