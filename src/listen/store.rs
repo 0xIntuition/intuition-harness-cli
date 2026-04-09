@@ -23,13 +23,13 @@ use crate::session_runtime::{
 use super::state::{
     AgentSession, BlockedReason, COMPLETED_SESSION_TTL_SECONDS, CanonicalRepairRecord,
     CanonicalRepairStatus, CanonicalSessionData, LatestResumeHandle, ListenState,
-    PendingLinearSync, PullRequestStatus, PullRequestSummary, SessionPhase, TokenUsage,
-    TurnTokenSnapshot,
+    PendingLinearSync, PullRequestStatus, PullRequestSummary, SessionPhase, StaleWorkerFailure,
+    TokenUsage, TurnTokenSnapshot,
 };
 use super::verification::{VerificationReport, VerificationSummary};
 
 const LISTEN_STORE_VERSION: u8 = 1;
-const LISTEN_SESSION_DETAIL_VERSION: u8 = 4;
+const LISTEN_SESSION_DETAIL_VERSION: u8 = 5;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
 
@@ -172,6 +172,8 @@ pub(crate) struct ListenSessionDetail {
     pub(super) version: u8,
     pub(super) issue_identifier: String,
     pub(super) issue_title: String,
+    #[serde(default)]
+    pub started_at_epoch_seconds: u64,
     pub(super) updated_at_epoch_seconds: u64,
     pub(super) session_updated_at_epoch_seconds: u64,
     pub(super) phase: SessionPhase,
@@ -196,6 +198,10 @@ pub(crate) struct ListenSessionDetail {
     pub verification: Option<VerificationSummary>,
     #[serde(default)]
     pub pending_linear_sync: Option<PendingLinearSync>,
+    #[serde(default)]
+    pub stale_worker_recovery_attempt_count: u32,
+    #[serde(default)]
+    pub latest_stale_worker_failure: Option<StaleWorkerFailure>,
     #[serde(default)]
     pub last_timeout: Option<super::SessionTimeoutRecord>,
     #[serde(default)]
@@ -440,6 +446,11 @@ impl ListenProjectStore {
         session.phase = SessionPhase::BriefReady;
         session.blocked = None;
         session.pid = None;
+        if session.latest_stale_worker_failure.is_some() {
+            session.started_at_epoch_seconds = now_epoch_seconds();
+            session.stale_worker_recovery_attempt_count = 0;
+            session.latest_stale_worker_failure = None;
+        }
         session.summary = "Retrying from previous workspace state".to_string();
         session.updated_at_epoch_seconds = now_epoch_seconds();
         self.save_state(&state)?;
@@ -927,12 +938,16 @@ impl ListenProjectStore {
 
     fn refresh_session_detail(&self, session: &AgentSession) -> Result<()> {
         let path = self.detail_path(&session.issue_identifier);
+        if let Some(parent) = path.parent() {
+            ensure_dir(parent)?;
+        }
         let mut detail = self
             .load_session_detail(&session.issue_identifier)?
             .unwrap_or_else(|| ListenSessionDetail {
                 version: LISTEN_SESSION_DETAIL_VERSION,
                 issue_identifier: session.issue_identifier.clone(),
                 issue_title: session.issue_title.clone(),
+                started_at_epoch_seconds: session.started_at_epoch_seconds,
                 updated_at_epoch_seconds: session.updated_at_epoch_seconds,
                 session_updated_at_epoch_seconds: session.updated_at_epoch_seconds,
                 phase: session.phase,
@@ -947,6 +962,8 @@ impl ListenProjectStore {
                 latest_resume_handle: session.latest_resume_handle.clone(),
                 verification: None,
                 pending_linear_sync: session.pending_linear_sync.clone(),
+                stale_worker_recovery_attempt_count: session.stale_worker_recovery_attempt_count,
+                latest_stale_worker_failure: session.latest_stale_worker_failure.clone(),
                 last_timeout: session.last_timeout.clone(),
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
@@ -957,6 +974,7 @@ impl ListenProjectStore {
         detail.version = LISTEN_SESSION_DETAIL_VERSION;
         detail.issue_identifier = session.issue_identifier.clone();
         detail.issue_title = session.issue_title.clone();
+        detail.started_at_epoch_seconds = session.started_at_epoch_seconds;
         detail.updated_at_epoch_seconds = now_epoch_seconds();
         detail.session_updated_at_epoch_seconds = session.updated_at_epoch_seconds;
         detail.phase = session.phase;
@@ -975,6 +993,8 @@ impl ListenProjectStore {
             .load_verification_report(&session.issue_identifier)?
             .map(|report| report.summary_snapshot());
         detail.pending_linear_sync = session.pending_linear_sync.clone();
+        detail.stale_worker_recovery_attempt_count = session.stale_worker_recovery_attempt_count;
+        detail.latest_stale_worker_failure = session.latest_stale_worker_failure.clone();
         detail.last_timeout = session.last_timeout.clone();
         detail.references = SessionDetailReferences {
             workspace_path: session.workspace_path.clone(),
@@ -1480,6 +1500,9 @@ fn repair_session(
     session: &mut AgentSession,
     detail: Option<&ListenSessionDetail>,
 ) -> Result<bool> {
+    let original_started_at = session.started_at_epoch_seconds;
+    let original_recovery_attempt_count = session.stale_worker_recovery_attempt_count;
+    let original_latest_stale_worker_failure = session.latest_stale_worker_failure.clone();
     let original_tokens = session.tokens.clone();
     let original_turn_history = session.turn_history.clone();
     let original_canonical = session.canonical.clone();
@@ -1500,6 +1523,28 @@ fn repair_session(
             .filter(|turn_history| !turn_history.is_empty())
     {
         session.turn_history = turn_history;
+    }
+
+    if session.started_at_epoch_seconds == 0 {
+        session.started_at_epoch_seconds = detail
+            .map(|value| value.started_at_epoch_seconds)
+            .filter(|started_at| *started_at > 0)
+            .unwrap_or(session.updated_at_epoch_seconds);
+    }
+
+    if session.stale_worker_recovery_attempt_count == 0
+        && let Some(recovery_attempt_count) = detail
+            .map(|value| value.stale_worker_recovery_attempt_count)
+            .filter(|count| *count > 0)
+    {
+        session.stale_worker_recovery_attempt_count = recovery_attempt_count;
+    }
+
+    if session.latest_stale_worker_failure.is_none()
+        && let Some(latest_failure) =
+            detail.and_then(|value| value.latest_stale_worker_failure.clone())
+    {
+        session.latest_stale_worker_failure = Some(latest_failure);
     }
 
     if session.canonical.provider.is_none() {
@@ -1591,7 +1636,10 @@ fn repair_session(
         });
     }
 
-    Ok(session.tokens != original_tokens
+    Ok(session.started_at_epoch_seconds != original_started_at
+        || session.stale_worker_recovery_attempt_count != original_recovery_attempt_count
+        || session.latest_stale_worker_failure != original_latest_stale_worker_failure
+        || session.tokens != original_tokens
         || session.turn_history != original_turn_history
         || session.canonical != original_canonical)
 }
@@ -1891,7 +1939,7 @@ mod tests {
     };
     use crate::listen::{
         CanonicalSessionData, LatestResumeHandle, ListenSessionDetail, PullRequestSummary,
-        ResumeProvider, SessionOrigin, TokenUsage,
+        ResumeProvider, SessionOrigin, StaleWorkerFailure, TokenUsage,
     };
 
     use super::{
@@ -2111,6 +2159,7 @@ mod tests {
             branch: Some(format!("branch-{issue_identifier}")),
             pull_request: Default::default(),
             workpad_comment_id: Some(format!("workpad-{issue_identifier}")),
+            started_at_epoch_seconds: updated_at,
             updated_at_epoch_seconds: updated_at,
             pid: None,
             session_id: Some(format!("session-{issue_identifier}")),
@@ -2118,6 +2167,8 @@ mod tests {
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
@@ -2602,6 +2653,7 @@ mod tests {
                 version: LISTEN_SESSION_DETAIL_VERSION,
                 issue_identifier: issue_identifier.to_string(),
                 issue_title: "orphan detail".to_string(),
+                started_at_epoch_seconds: 100,
                 updated_at_epoch_seconds: 100,
                 session_updated_at_epoch_seconds: 100,
                 phase: SessionPhase::Completed,
@@ -2616,6 +2668,8 @@ mod tests {
                 verification: None,
                 latest_resume_handle: None,
                 pending_linear_sync: None,
+                stale_worker_recovery_attempt_count: 0,
+                latest_stale_worker_failure: None,
                 last_timeout: None,
                 references: SessionDetailReferences::default(),
                 prompt_context: Vec::new(),
@@ -2875,6 +2929,135 @@ mod tests {
             .find(|s| s.issue_identifier == "ENG-200")
             .expect("other session should be untouched");
         assert_eq!(other.phase, SessionPhase::Running);
+
+        Ok(())
+    }
+
+    #[test]
+    fn retry_blocked_session_resets_stale_worker_recovery_window() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let now = super::now_epoch_seconds();
+
+        let mut session = default_session("ENG-777", SessionPhase::Blocked, now);
+        session.started_at_epoch_seconds = now.saturating_sub(600);
+        session.stale_worker_recovery_attempt_count = 2;
+        session.latest_stale_worker_failure = Some(StaleWorkerFailure {
+            pid: 9_001,
+            observed_at_epoch_seconds: now.saturating_sub(60),
+            last_persisted_phase: SessionPhase::Running,
+            summary: "worker pid 9001 disappeared while the session was running".to_string(),
+            classification: super::super::blocked_reason(
+                super::super::BlockedCategory::Infra,
+                "stale worker retry budget exhausted",
+                false,
+            ),
+        });
+        seed_state(&store, vec![session])?;
+
+        assert!(store.retry_blocked_session("ENG-777")?);
+
+        let state = store.load_state()?;
+        let retried = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_identifier == "ENG-777")
+            .expect("session should exist");
+        assert_eq!(retried.phase, SessionPhase::BriefReady);
+        assert_eq!(retried.stale_worker_recovery_attempt_count, 0);
+        assert!(retried.latest_stale_worker_failure.is_none());
+        assert!(retried.started_at_epoch_seconds >= now);
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_backfills_stale_worker_fields_from_old_payloads() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let issue_identifier = "ENG-778";
+        fs::write(
+            &store.paths().state_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 1,
+                "sessions": [{
+                    "issue_id": format!("{issue_identifier}-id"),
+                    "issue_identifier": issue_identifier,
+                    "issue_title": "Legacy stale worker state",
+                    "project_name": "MetaStack CLI",
+                    "team_key": "ENG",
+                    "issue_url": format!("https://linear.app/metastack/{issue_identifier}"),
+                    "phase": "blocked",
+                    "summary": "Blocked | worker died",
+                    "updated_at_epoch_seconds": 1_773_575_100u64
+                }]
+            }))?,
+        )?;
+        fs::write(
+            store.detail_path(issue_identifier),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 4,
+                "issue_identifier": issue_identifier,
+                "issue_title": "Legacy stale worker state",
+                "updated_at_epoch_seconds": 1_773_575_180u64,
+                "session_updated_at_epoch_seconds": 1_773_575_100u64,
+                "phase": "blocked",
+                "summary": "Blocked | worker died",
+                "stale_worker_recovery_attempt_count": 1,
+                "latest_stale_worker_failure": {
+                    "pid": 42424,
+                    "observed_at_epoch_seconds": 1_773_575_150u64,
+                    "last_persisted_phase": "running",
+                    "summary": "worker pid 42424 disappeared while the session was running",
+                    "classification": {
+                        "category": "infra",
+                        "reason": "worker died",
+                        "retryable": true
+                    }
+                },
+                "references": {},
+                "milestones": [],
+                "log_excerpts": []
+            }))?,
+        )?;
+
+        let state = store.load_state()?;
+        let session = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_identifier == issue_identifier)
+            .expect("session should exist");
+        assert_eq!(session.started_at_epoch_seconds, 1_773_575_100);
+        assert_eq!(session.stale_worker_recovery_attempt_count, 1);
+        assert_eq!(
+            session
+                .latest_stale_worker_failure
+                .as_ref()
+                .map(|failure| failure.pid),
+            Some(42_424)
+        );
+
+        let detail = store
+            .load_session_detail(issue_identifier)?
+            .expect("detail should exist");
+        assert_eq!(detail.version, LISTEN_SESSION_DETAIL_VERSION);
+        assert_eq!(detail.started_at_epoch_seconds, 1_773_575_100);
+        assert_eq!(detail.stale_worker_recovery_attempt_count, 1);
+        assert_eq!(
+            detail
+                .latest_stale_worker_failure
+                .as_ref()
+                .map(|failure| failure.pid),
+            Some(42_424)
+        );
 
         Ok(())
     }

@@ -2727,6 +2727,141 @@ fn listen_sessions_inspect_surfaces_detail_pr_ref_without_url() -> Result<(), Bo
     Ok(())
 }
 
+#[test]
+fn listen_sessions_inspect_renders_stale_worker_recovery_metadata() -> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    write_onboarded_config(&config_path, "")?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET"
+  }
+}
+"#,
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let issue_identifier = "ENG-10744";
+    write_listen_store_session(
+        &config_path,
+        &repo_root,
+        vec![json!({
+            "issue_id": format!("{issue_identifier}-id"),
+            "issue_identifier": issue_identifier,
+            "issue_title": "Recover stale listen workers",
+            "project_name": "MetaStack CLI",
+            "team_key": "ENG",
+            "issue_url": "https://linear.app/metastack-labs/issue/ENG-10744",
+            "phase": "running",
+            "summary": "Recovered stale worker | pid 51515 | recovery attempts 1/2",
+            "brief_path": format!("{}/agents/briefs/{issue_identifier}.md", branding::PROJECT_DIR),
+            "backlog_issue_identifier": "TECH-10744",
+            "workspace_path": format!("/tmp/{issue_identifier}"),
+            "workpad_comment_id": format!("comment-{issue_identifier}"),
+            "started_at_epoch_seconds": 1_773_575_000u64,
+            "updated_at_epoch_seconds": 1_773_575_100u64,
+            "session_id": "codex-session-10744",
+            "stale_worker_recovery_attempt_count": 1,
+            "latest_stale_worker_failure": {
+                "pid": 42424,
+                "observed_at_epoch_seconds": 1_773_575_050u64,
+                "last_persisted_phase": "running",
+                "summary": "worker pid 42424 disappeared while the session was running",
+                "classification": {
+                    "category": "infra",
+                    "reason": "worker died",
+                    "retryable": true
+                }
+            },
+            "turns": 2,
+            "tokens": {
+                "input": 55,
+                "output": 13
+            },
+            "pull_request": {
+                "number": 482,
+                "status": "draft"
+            },
+            "log_path": format!("logs/{issue_identifier}.log")
+        })],
+    )?;
+
+    let detail_path = listen_detail_path(&config_path, &repo_root, issue_identifier)?;
+    fs::create_dir_all(
+        detail_path
+            .parent()
+            .expect("detail path should have a parent"),
+    )?;
+    fs::write(
+        &detail_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 5,
+            "issue_identifier": issue_identifier,
+            "issue_title": "Recover stale listen workers",
+            "started_at_epoch_seconds": 1_773_575_000u64,
+            "updated_at_epoch_seconds": 1_773_575_180u64,
+            "session_updated_at_epoch_seconds": 1_773_575_100u64,
+            "phase": "running",
+            "summary": "Recovered stale worker | pid 51515 | recovery attempts 1/2",
+            "stale_worker_recovery_attempt_count": 1,
+            "latest_stale_worker_failure": {
+                "pid": 42424,
+                "observed_at_epoch_seconds": 1_773_575_050u64,
+                "last_persisted_phase": "running",
+                "summary": "worker pid 42424 disappeared while the session was running",
+                "classification": {
+                    "category": "infra",
+                    "reason": "worker died",
+                    "retryable": true
+                }
+            },
+            "turns": 2,
+            "tokens": {
+                "input": 55,
+                "output": 13
+            },
+            "pull_request": {
+                "number": 482,
+                "status": "draft"
+            },
+            "references": {
+                "branch": "eng-10744-stale-recovery"
+            },
+            "milestones": [],
+            "log_excerpts": []
+        }))?,
+    )?;
+
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "listen",
+            "sessions",
+            "inspect",
+            "--root",
+            repo_root.to_str().expect("temp path should be utf-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Recovery attempts: 1/2"))
+        .stdout(predicate::str::contains(
+            "Latest stale worker failure: pid 42424",
+        ))
+        .stdout(predicate::str::contains("Elapsed since start:"))
+        .stdout(predicate::str::contains("Detail recovery attempts: 1/2"))
+        .stdout(predicate::str::contains(
+            "Detail latest stale worker failure: pid 42424",
+        ));
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn listen_sessions_inspect_shows_execute_origin_label() -> Result<(), Box<dyn Error>> {
@@ -13159,6 +13294,8 @@ ci_timeout_behavior = "block"
         1,
     )?;
 
+    let state_path = listen_state_path(&config_path, &repo_root)?;
+    wait_for_file_substring(&state_path, "no GitHub checks configured")?;
     let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
     assert!(inspect.contains("no GitHub checks configured"));
 
