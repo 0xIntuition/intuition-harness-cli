@@ -809,7 +809,7 @@ impl ListenProjectStore {
                 turns: session.turns,
                 tokens: session.tokens.clone(),
                 turn_history: session.turn_history.clone(),
-                context_budget_tokens: None,
+                context_budget_tokens: session.context_budget_tokens,
                 canonical: session.canonical.clone(),
                 pull_request: session.pull_request.clone(),
                 latest_resume_handle: session.latest_resume_handle.clone(),
@@ -833,6 +833,9 @@ impl ListenProjectStore {
         detail.turns = session.turns;
         detail.tokens = session.tokens.clone();
         detail.turn_history = session.turn_history.clone();
+        detail.context_budget_tokens = session
+            .context_budget_tokens
+            .or(detail.context_budget_tokens);
         detail.canonical = session.canonical.clone();
         detail.pull_request = session.pull_request.clone();
         detail.latest_resume_handle = session.latest_resume_handle.clone();
@@ -943,10 +946,16 @@ impl ListenProjectStore {
 
 fn resolve_session_context_budget_tokens(app_config: &AppConfig, session: &AgentSession) -> u64 {
     session
-        .workspace_path
-        .as_deref()
-        .and_then(|workspace_path| PlanningMeta::load(Path::new(workspace_path)).ok())
-        .map(|planning_meta| planning_meta.effective_listen_context_budget_tokens(app_config))
+        .context_budget_tokens
+        .or_else(|| {
+            session
+                .workspace_path
+                .as_deref()
+                .and_then(|workspace_path| PlanningMeta::load(Path::new(workspace_path)).ok())
+                .map(|planning_meta| {
+                    planning_meta.effective_listen_context_budget_tokens(app_config)
+                })
+        })
         .unwrap_or_else(|| app_config.defaults.listen.context_budget_tokens())
 }
 
@@ -1766,6 +1775,7 @@ mod tests {
             session_id: Some(format!("session-{issue_identifier}")),
             turn_history: Vec::new(),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(1),
@@ -2088,6 +2098,36 @@ mod tests {
 
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].context_budget_tokens, Some(100_000));
+        Ok(())
+    }
+
+    #[test]
+    fn load_session_details_prefers_persisted_session_context_budget() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let workspace_root = temp.path().join("workspace");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        fs::create_dir_all(workspace_root.join(crate::branding::PROJECT_DIR))?;
+        PlanningMeta {
+            listen: PlanningListenSettings {
+                context_budget_tokens: Some(100_000),
+                ..PlanningListenSettings::default()
+            },
+            ..PlanningMeta::default()
+        }
+        .save(&workspace_root)?;
+
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        let mut session = default_session("ENG-10782", SessionPhase::Running, 100);
+        session.workspace_path = Some(workspace_root.display().to_string());
+        session.context_budget_tokens = Some(90_000);
+        store.save_state(&ListenState::from_sessions(vec![session.clone()]))?;
+
+        let details = store.load_session_details(&AppConfig::default(), &[session])?;
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].context_budget_tokens, Some(90_000));
         Ok(())
     }
 

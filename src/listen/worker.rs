@@ -200,6 +200,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
             project_selector,
             &args.issue,
         )?,
+        context_budget_tokens: args.context_budget_tokens,
         pending_linear_sync,
         last_timeout: load_existing_last_timeout(&source_root, project_selector, &args.issue)?,
         turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
@@ -1572,6 +1573,7 @@ struct WorkerSessionContext<'a> {
     backlog_issue: Option<&'a IssueSummary>,
     pid: Option<u32>,
     latest_resume_handle: Option<LatestResumeHandle>,
+    context_budget_tokens: u64,
     pending_linear_sync: Option<PendingLinearSync>,
     last_timeout: Option<SessionTimeoutRecord>,
     turn_history: Vec<TurnTokenSnapshot>,
@@ -1711,7 +1713,7 @@ fn build_context_checkpoint(
         "#### Context Checkpoint".to_string(),
         String::new(),
         format!("- Captured at: {}", now_timestamp()),
-        format!("- Turn: {turn_number}"),
+        format!("- Turns completed: {turn_number}"),
         format!("- Session phase: {}", SessionPhase::Running.display_label()),
         format!("- Context pressure: {}", plan.pressure.label()),
         format!(
@@ -1723,6 +1725,14 @@ fn build_context_checkpoint(
             "- Branch: {}",
             session_context.branch.unwrap_or("unavailable")
         ),
+        format!(
+            "- Git status: {}",
+            if workspace_status_entries.is_empty() {
+                "clean working tree"
+            } else {
+                "modified files listed below"
+            }
+        ),
         String::new(),
         "##### Completed".to_string(),
         String::new(),
@@ -1732,9 +1742,13 @@ fn build_context_checkpoint(
     push_checkpoint_section(&mut lines, remaining);
     lines.extend([String::new(), "##### Validation".to_string(), String::new()]);
     push_checkpoint_section(&mut lines, validation);
-    lines.extend([String::new(), "##### Workspace".to_string(), String::new()]);
+    lines.extend([
+        String::new(),
+        "##### Modified Files".to_string(),
+        String::new(),
+    ]);
     if workspace_status_entries.is_empty() {
-        lines.push("- clean working tree".to_string());
+        lines.push("- none".to_string());
     } else {
         for entry in workspace_status_entries {
             lines.push(format!("- {entry}"));
@@ -4163,7 +4177,7 @@ fn build_agent_instructions(
 
     if plan.checkpoint_turn {
         sections.push(
-            "This is a dedicated context-checkpoint turn. Consolidate the current state, capture review progress clearly, and avoid starting broad new implementation work unless it is required to land the checkpoint safely."
+            "This is a dedicated context-checkpoint turn. Update `### Review Notes` -> `#### Context Checkpoint` with decisions made, failed approaches, blockers, exact remaining work, and checklist status, and avoid starting broad new implementation work unless it is required to land the checkpoint safely."
                 .to_string(),
         );
     }
@@ -4276,7 +4290,7 @@ fn context_pressure_guidance(
                 super::format_number(context.context_budget_tokens)
             ));
             lines.push(
-                "- Use this turn to create a durable context checkpoint: summarize completed work, capture exact remaining work, and refresh validation status."
+                "- Use this turn to create a durable context checkpoint in `### Review Notes` -> `#### Context Checkpoint`: capture decisions made, failed approaches, blockers, exact remaining work, and checklist/validation status."
                     .to_string(),
             );
             lines.push(
@@ -6605,6 +6619,7 @@ fn build_worker_session(
         pid,
         session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
+        context_budget_tokens: Some(context.context_budget_tokens),
         pending_linear_sync: context.pending_linear_sync.clone(),
         last_timeout: context.last_timeout.clone(),
         turns: Some(turns),
@@ -6956,6 +6971,7 @@ mod tests {
             backlog_issue: None,
             pid: None,
             latest_resume_handle: None,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             pending_linear_sync: None,
             last_timeout: None,
             turn_history,
@@ -6997,6 +7013,7 @@ mod tests {
             pending_linear_sync: None,
             last_timeout: None,
             turn_history: Vec::new(),
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
             github_ci_summary: None,

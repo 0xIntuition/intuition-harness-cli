@@ -391,6 +391,7 @@ impl ListenCycleData {
                         )
                             .to_string(),
                     }),
+                    context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
                     pending_linear_sync: None,
                     last_timeout: None,
                     turns: Some(1),
@@ -441,6 +442,7 @@ impl ListenCycleData {
                         )
                             .to_string(),
                     }),
+                    context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
                     pending_linear_sync: None,
                     last_timeout: None,
                     turns: Some(1),
@@ -2251,6 +2253,7 @@ where
             pid: artifacts.pid.filter(|pid| *pid > 0),
             session_id: None,
             latest_resume_handle: None,
+            context_budget_tokens: Some(self.worker_context_budget_tokens),
             pending_linear_sync: None,
             last_timeout: None,
             turns: artifacts.turns.or(Some(0)),
@@ -2408,6 +2411,10 @@ fn merge_monotonic_session_fields(
 
     if latest_resume_handle_regressed(persisted_session, &daemon_session) {
         daemon_session.latest_resume_handle = persisted_session.latest_resume_handle.clone();
+    }
+
+    if persisted_session.context_budget_tokens.is_some() {
+        daemon_session.context_budget_tokens = persisted_session.context_budget_tokens;
     }
 
     if turns_regressed(persisted_session, &daemon_session) {
@@ -3625,6 +3632,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         pid: Some(pid),
         session_id: Some(detailed_issue.id.clone()),
         latest_resume_handle: None,
+        context_budget_tokens: Some(context_budget_tokens),
         pending_linear_sync: None,
         last_timeout: None,
         turns: Some(0),
@@ -5129,6 +5137,7 @@ suffix
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
+                context_budget_tokens: None,
                 pending_linear_sync: None,
                 last_timeout: None,
                 turns: None,
@@ -5163,6 +5172,7 @@ suffix
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
+                context_budget_tokens: None,
                 pending_linear_sync: None,
                 last_timeout: None,
                 turns: None,
@@ -5207,6 +5217,7 @@ suffix
             pid: None,
             session_id: None,
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: None,
@@ -5257,6 +5268,7 @@ suffix
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
+                    context_budget_tokens: None,
                     pending_linear_sync: None,
                     last_timeout: None,
                     turns: None,
@@ -5297,6 +5309,7 @@ suffix
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
+                    context_budget_tokens: None,
                     pending_linear_sync: None,
                     last_timeout: None,
                     turns: None,
@@ -5337,6 +5350,7 @@ suffix
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
+                    context_budget_tokens: None,
                     pending_linear_sync: None,
                     last_timeout: None,
                     turns: None,
@@ -5400,6 +5414,7 @@ suffix
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
+                context_budget_tokens: None,
                 pending_linear_sync: None,
                 last_timeout: None,
                 turns: None,
@@ -5497,6 +5512,7 @@ suffix
             pid: None,
             session_id: None,
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(1),
@@ -5561,6 +5577,7 @@ suffix
             pid: Some(42),
             session_id: None,
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(0),
@@ -5657,6 +5674,7 @@ suffix
             pid: Some(42),
             session_id: None,
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: Some(SessionTimeoutRecord {
                 turn: 2,
@@ -5763,6 +5781,7 @@ suffix
             pid: Some(42),
             session_id: None,
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: Some(SessionTimeoutRecord {
                 turn: 3,
@@ -5792,6 +5811,55 @@ suffix
         assert_eq!(merged[0].phase, SessionPhase::Verifying);
         assert_eq!(merged[0].summary, worker_session.summary);
         assert_eq!(merged[0].last_timeout, daemon_session.last_timeout);
+        assert_eq!(
+            merged[0].updated_at_epoch_seconds,
+            daemon_session.updated_at_epoch_seconds
+        );
+    }
+
+    #[test]
+    fn listen_state_merge_preserves_persisted_context_budget_tokens() {
+        let daemon_session = AgentSession {
+            issue_id: Some("issue-66".to_string()),
+            issue_identifier: "MET-66".to_string(),
+            issue_title: "Context pressure persistence".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/66".to_string(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: None,
+            branch: None,
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            updated_at_epoch_seconds: 1_773_575_805,
+            pid: Some(42),
+            session_id: None,
+            latest_resume_handle: None,
+            context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
+            pending_linear_sync: None,
+            last_timeout: None,
+            turns: Some(2),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            origin: SessionOrigin::Listen,
+        };
+        let mut worker_session = daemon_session.clone();
+        worker_session.updated_at_epoch_seconds = 1_773_575_800;
+        worker_session.context_budget_tokens = Some(90_000);
+
+        let merged =
+            super::merge_cycle_sessions(vec![worker_session.clone()], vec![daemon_session.clone()]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].context_budget_tokens, Some(90_000));
         assert_eq!(
             merged[0].updated_at_epoch_seconds,
             daemon_session.updated_at_epoch_seconds
@@ -5854,6 +5922,7 @@ suffix
             pid: None,
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: None,
@@ -5909,6 +5978,7 @@ suffix
             pid: None,
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: None,
@@ -6076,6 +6146,7 @@ suffix
             pid: Some(42_424),
             session_id: Some("session-1".to_string()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(2),
@@ -6756,6 +6827,7 @@ suffix
             pid: None,
             session_id: Some(issue.id.clone()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(1),
@@ -6869,6 +6941,7 @@ suffix
             pid: None,
             session_id: Some(issue.id.clone()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(1),
@@ -6965,6 +7038,7 @@ suffix
             pid: None,
             session_id: Some(issue.id.clone()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(1),

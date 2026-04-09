@@ -576,6 +576,8 @@ pub struct AgentSession {
     #[serde(default)]
     pub latest_resume_handle: Option<LatestResumeHandle>,
     #[serde(default)]
+    pub context_budget_tokens: Option<u64>,
+    #[serde(default)]
     pub pending_linear_sync: Option<PendingLinearSync>,
     #[serde(default)]
     pub last_timeout: Option<SessionTimeoutRecord>,
@@ -1022,6 +1024,7 @@ mod tests {
             pid: None,
             session_id: Some("issue-1".to_string()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(1),
