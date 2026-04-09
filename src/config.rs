@@ -25,9 +25,9 @@ pub use crate::config_resolution::{
     validate_interactive_technical_follow_up_question_limit,
     validate_listen_agent_graceful_shutdown_seconds, validate_listen_agent_turn_timeout_seconds,
     validate_listen_ci_poll_interval_seconds, validate_listen_ci_poll_timeout_seconds,
-    validate_listen_poll_interval_seconds, validate_listen_retry_initial_backoff_seconds,
-    validate_listen_retry_max_backoff_seconds, validate_supported_agent,
-    validate_technical_refinement_round_limit,
+    validate_listen_context_budget_tokens, validate_listen_poll_interval_seconds,
+    validate_listen_retry_initial_backoff_seconds, validate_listen_retry_max_backoff_seconds,
+    validate_supported_agent, validate_technical_refinement_round_limit,
 };
 use crate::config_resolution::{
     config_path_from_env_or_home, default_linear_api_url, normalize_optional_ref,
@@ -63,6 +63,7 @@ pub const DEFAULT_LISTEN_RETRY_INITIAL_BACKOFF_SECONDS: u64 = 2;
 pub const DEFAULT_LISTEN_RETRY_MAX_BACKOFF_SECONDS: u64 = 60;
 pub const DEFAULT_LISTEN_AGENT_TURN_TIMEOUT_SECONDS: u64 = 1_800;
 pub const DEFAULT_LISTEN_AGENT_GRACEFUL_SHUTDOWN_SECONDS: u64 = 5;
+pub const DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS: u64 = 180_000;
 pub const DEFAULT_LISTEN_CI_POLL_INTERVAL_SECONDS: u64 = 30;
 pub const DEFAULT_LISTEN_CI_POLL_TIMEOUT_SECONDS: u64 = 900;
 pub const AGENT_ROUTE_BACKLOG_PLAN: &str = "backlog.plan";
@@ -148,6 +149,7 @@ pub struct InstallListenSettings {
     pub assignment_scope: Option<ListenAssignmentScope>,
     pub refresh_policy: Option<ListenRefreshPolicy>,
     pub poll_interval_seconds: Option<u64>,
+    pub context_budget_tokens: Option<u64>,
     pub agent_turn_timeout_seconds: Option<u64>,
     pub agent_graceful_shutdown_seconds: Option<u64>,
     pub ci_poll_interval_seconds: Option<u64>,
@@ -258,6 +260,7 @@ pub struct PlanningListenSettings {
     pub refresh_policy: Option<ListenRefreshPolicy>,
     pub instructions_path: Option<String>,
     pub poll_interval_seconds: Option<u64>,
+    pub context_budget_tokens: Option<u64>,
     /// Show or hide the In Progress Issues pane in the interactive dashboard.
     #[serde(default)]
     pub dashboard_active_issues: Option<bool>,
@@ -466,6 +469,7 @@ struct PlanningListenSettingsWire {
     refresh_policy: Option<ListenRefreshPolicy>,
     instructions_path: Option<String>,
     poll_interval_seconds: Option<u64>,
+    context_budget_tokens: Option<u64>,
     #[serde(default)]
     dashboard_active_issues: Option<bool>,
     #[serde(default)]
@@ -518,6 +522,7 @@ impl<'de> Deserialize<'de> for PlanningListenSettings {
             refresh_policy: wire.refresh_policy,
             instructions_path: wire.instructions_path,
             poll_interval_seconds: wire.poll_interval_seconds,
+            context_budget_tokens: wire.context_budget_tokens,
             dashboard_active_issues: wire.dashboard_active_issues,
             dashboard_preview: wire.dashboard_preview,
         })
@@ -826,6 +831,13 @@ impl PlanningMeta {
             .unwrap_or_else(|| self.listen.poll_interval_seconds())
     }
 
+    /// Resolves the effective listen context budget using repo defaults before install defaults.
+    pub fn effective_listen_context_budget_tokens(&self, app_config: &AppConfig) -> u64 {
+        self.listen
+            .context_budget_tokens
+            .unwrap_or_else(|| app_config.defaults.listen.context_budget_tokens())
+    }
+
     /// Resolves the effective interactive follow-up limit using repo defaults before install defaults.
     pub fn effective_interactive_follow_up_question_limit(&self, app_config: &AppConfig) -> usize {
         self.plan
@@ -943,6 +955,9 @@ impl PlanningMeta {
         if let Some(interval) = self.listen.poll_interval_seconds {
             validate_listen_poll_interval_seconds(interval)?;
         }
+        if let Some(tokens) = self.listen.context_budget_tokens {
+            validate_listen_context_budget_tokens(tokens)?;
+        }
         if let Some(limit) = self.plan.interactive_follow_up_questions {
             validate_interactive_plan_follow_up_question_limit(limit)?;
         }
@@ -996,6 +1011,12 @@ impl PlanningListenSettings {
 }
 
 impl InstallListenSettings {
+    /// Returns the configured listen context budget in tokens.
+    pub fn context_budget_tokens(&self) -> u64 {
+        self.context_budget_tokens
+            .unwrap_or(DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS)
+    }
+
     /// Returns the configured listen turn timeout in seconds.
     pub fn agent_turn_timeout_seconds(&self) -> u64 {
         self.agent_turn_timeout_seconds
@@ -1077,6 +1098,9 @@ impl InstallDefaults {
     pub fn validate(&self) -> Result<()> {
         if let Some(interval) = self.listen.poll_interval_seconds {
             validate_listen_poll_interval_seconds(interval)?;
+        }
+        if let Some(tokens) = self.listen.context_budget_tokens {
+            validate_listen_context_budget_tokens(tokens)?;
         }
         if let Some(timeout) = self.listen.agent_turn_timeout_seconds {
             validate_listen_agent_turn_timeout_seconds(timeout)?;
@@ -1385,9 +1409,9 @@ mod tests {
         AGENT_ROUTE_BACKLOG_PLAN, AGENT_ROUTE_BACKLOG_SPLIT, AGENT_ROUTE_BACKLOG_TECH,
         AgentConfigOverrides, AgentConfigSource, AgentRouteConfig, AgentRouteScope,
         AgentRoutingSettings, AgentSettings, AppConfig, BacklogSettings,
-        DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_POLL_INTERVAL_SECONDS,
-        DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS, DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS,
-        DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
+        DEFAULT_INTERACTIVE_PLAN_FOLLOW_UP_QUESTION_LIMIT, DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+        DEFAULT_LISTEN_POLL_INTERVAL_SECONDS, DEFAULT_LISTEN_VALIDATION_REPAIR_ATTEMPTS,
+        DEFAULT_MERGE_PUBLICATION_RETRY_ATTEMPTS, DEFAULT_MERGE_VALIDATION_REPAIR_ATTEMPTS,
         DEFAULT_MERGE_VALIDATION_TRANSIENT_RETRY_ATTEMPTS, InstallDefaults, InstallLinearDefaults,
         InstallListenSettings, InstallPlanSettings, InstallTechnicalSettings, InstallUiSettings,
         ListenAssignmentScope, METASTACK_CONFIG_ENV, MergeSettings, NoAgentSelectedError,
@@ -1566,6 +1590,7 @@ mod tests {
                     assignment_scope: Some(super::ListenAssignmentScope::ViewerOrUnassigned),
                     refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
                     poll_interval_seconds: Some(42),
+                    context_budget_tokens: None,
                     agent_turn_timeout_seconds: None,
                     agent_graceful_shutdown_seconds: None,
                     ci_poll_interval_seconds: Some(55),
@@ -1726,6 +1751,29 @@ mod tests {
     }
 
     #[test]
+    fn effective_listen_context_budget_tokens_follow_repo_install_default_precedence() {
+        let mut app_config = AppConfig::default();
+        let mut planning_meta = PlanningMeta::default();
+
+        assert_eq!(
+            planning_meta.effective_listen_context_budget_tokens(&app_config),
+            DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS
+        );
+
+        app_config.defaults.listen.context_budget_tokens = Some(222_000);
+        assert_eq!(
+            planning_meta.effective_listen_context_budget_tokens(&app_config),
+            222_000
+        );
+
+        planning_meta.listen.context_budget_tokens = Some(111_000);
+        assert_eq!(
+            planning_meta.effective_listen_context_budget_tokens(&app_config),
+            111_000
+        );
+    }
+
+    #[test]
     fn repo_defaults_override_install_defaults() {
         let app_config = AppConfig {
             defaults: InstallDefaults {
@@ -1737,6 +1785,7 @@ mod tests {
                     assignment_scope: Some(super::ListenAssignmentScope::ViewerOrUnassigned),
                     refresh_policy: Some(super::ListenRefreshPolicy::RecreateFromOriginMain),
                     poll_interval_seconds: Some(42),
+                    context_budget_tokens: None,
                     agent_turn_timeout_seconds: None,
                     agent_graceful_shutdown_seconds: None,
                     ci_poll_interval_seconds: Some(55),

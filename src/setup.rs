@@ -32,8 +32,8 @@ use crate::config::{
     validate_agent_model, validate_agent_name, validate_agent_reasoning,
     validate_backlog_default_priority, validate_backlog_labels, validate_fast_plan_question_limit,
     validate_interactive_plan_follow_up_question_limit,
-    validate_interactive_technical_follow_up_question_limit, validate_listen_poll_interval_seconds,
-    validate_technical_refinement_round_limit,
+    validate_interactive_technical_follow_up_question_limit, validate_listen_context_budget_tokens,
+    validate_listen_poll_interval_seconds, validate_technical_refinement_round_limit,
 };
 use crate::fs::{PlanningPaths, canonicalize_existing_dir};
 use crate::linear::{LinearService, ReqwestLinearClient};
@@ -530,6 +530,10 @@ fn render_summary(view: &SetupViewData, include_paths: bool) -> String {
         display_poll_interval(view.planning_meta.listen.poll_interval_seconds)
     ));
     lines.push(format!(
+        "Listen context budget: {}",
+        display_context_budget(view.planning_meta.listen.context_budget_tokens)
+    ));
+    lines.push(format!(
         "Interactive plan limit: {}",
         display_plan_limit(view.planning_meta.plan.interactive_follow_up_questions)
     ));
@@ -645,6 +649,7 @@ fn has_direct_updates(args: &SetupArgs) -> bool {
         || args.refresh_policy.is_some()
         || args.instructions_path.is_some()
         || args.listen_poll_interval.is_some()
+        || args.listen_context_budget_tokens.is_some()
         || args.interactive_plan_follow_up_question_limit.is_some()
         || args.technical_follow_up_question_limit.is_some()
         || args.plan_default_mode.is_some()
@@ -761,6 +766,9 @@ async fn apply_direct_updates(view: &mut SetupViewData, args: &SetupArgs) -> Res
     }
     if let Some(interval) = &args.listen_poll_interval {
         view.planning_meta.listen.poll_interval_seconds = parse_poll_interval(interval)?;
+    }
+    if let Some(tokens) = &args.listen_context_budget_tokens {
+        view.planning_meta.listen.context_budget_tokens = parse_context_budget_tokens(tokens)?;
     }
     if let Some(limit) = &args.interactive_plan_follow_up_question_limit {
         view.planning_meta.plan.interactive_follow_up_questions = parse_plan_limit(limit)?;
@@ -2221,6 +2229,12 @@ fn display_poll_interval(interval: Option<u64>) -> String {
     }
 }
 
+fn display_context_budget(tokens: Option<u64>) -> String {
+    tokens
+        .map(|value| format!("{value} tokens"))
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn display_plan_limit(limit: Option<usize>) -> String {
     match limit {
         Some(limit) => limit.to_string(),
@@ -2322,6 +2336,17 @@ fn parse_poll_interval(value: &str) -> Result<Option<u64>> {
         .map_err(|_| anyhow!("listen poll interval must be a whole number of seconds"))?;
     validate_listen_poll_interval_seconds(interval)?;
     Ok(Some(interval))
+}
+
+fn parse_context_budget_tokens(value: &str) -> Result<Option<u64>> {
+    let Some(value) = normalize_optional(value) else {
+        return Ok(None);
+    };
+    let tokens = value
+        .parse::<u64>()
+        .map_err(|_| anyhow!("listen context budget must be a whole number of tokens"))?;
+    validate_listen_context_budget_tokens(tokens)?;
+    Ok(Some(tokens))
 }
 
 fn parse_plan_limit(value: &str) -> Result<Option<usize>> {

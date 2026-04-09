@@ -1,6 +1,10 @@
 use crate::linear::IssueSummary;
 
+use super::PendingLinearSync;
 use super::workspace::{TicketWorkspace, TicketWorkspaceProvisioning};
+
+const REVIEW_NOTES_HEADING: &str = "### Review Notes";
+const CONTEXT_CHECKPOINT_HEADING: &str = "#### Context Checkpoint";
 
 pub fn render_bootstrap_workpad(
     issue: &IssueSummary,
@@ -193,4 +197,192 @@ fn local_hostname() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "localhost".to_string())
+}
+
+pub(crate) fn effective_workpad_body(
+    issue: &IssueSummary,
+    pending_linear_sync: Option<&PendingLinearSync>,
+    workpad_comment_id: &str,
+) -> Option<String> {
+    pending_linear_sync
+        .and_then(|pending| pending.workpad_body.clone())
+        .or_else(|| {
+            issue
+                .comments
+                .iter()
+                .find(|comment| comment.id == workpad_comment_id)
+                .map(|comment| comment.body.clone())
+        })
+        .or_else(|| {
+            issue.comments.iter().find_map(|comment| {
+                (comment.resolved_at.is_none() && comment.body.contains("## Codex Workpad"))
+                    .then(|| comment.body.clone())
+            })
+        })
+}
+
+pub(crate) fn context_checkpoint_present(body: &str) -> bool {
+    extract_context_checkpoint(body).is_some()
+}
+
+pub(crate) fn extract_context_checkpoint(body: &str) -> Option<String> {
+    let review_notes = extract_top_level_section_lines(body, REVIEW_NOTES_HEADING)?;
+    let start = review_notes
+        .iter()
+        .position(|line| line.trim() == CONTEXT_CHECKPOINT_HEADING)?;
+    let end = review_notes
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| {
+            let trimmed = line.trim();
+            trimmed.starts_with("#### ") || trimmed.starts_with("### ")
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(review_notes.len());
+    join_trimmed_lines(&review_notes[start..end])
+}
+
+pub(crate) fn extract_unmanaged_review_notes(body: &str) -> Vec<String> {
+    let Some(review_notes) = extract_top_level_section_lines(body, REVIEW_NOTES_HEADING) else {
+        return Vec::new();
+    };
+    let mut unmanaged = Vec::new();
+    let mut in_checkpoint = false;
+    for line in review_notes {
+        let trimmed = line.trim();
+        if trimmed == CONTEXT_CHECKPOINT_HEADING {
+            in_checkpoint = true;
+            continue;
+        }
+        if in_checkpoint && (trimmed.starts_with("#### ") || trimmed.starts_with("### ")) {
+            in_checkpoint = false;
+        }
+        if in_checkpoint || is_managed_review_note_line(trimmed) {
+            continue;
+        }
+        unmanaged.push(line);
+    }
+    trim_blank_lines_owned(unmanaged)
+}
+
+pub(crate) fn extract_workpad_section_lines(body: &str, heading: &str) -> Vec<String> {
+    extract_top_level_section_lines(body, heading).unwrap_or_default()
+}
+
+fn extract_top_level_section_lines(body: &str, heading: &str) -> Option<Vec<String>> {
+    let lines = body.lines().map(str::to_string).collect::<Vec<_>>();
+    let start = lines.iter().position(|line| line.trim() == heading)?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| line.trim().starts_with("### "))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    Some(trim_blank_lines_owned(lines[start + 1..end].to_vec()))
+}
+
+fn is_managed_review_note_line(line: &str) -> bool {
+    line.starts_with("- Risk:") || line.starts_with("- Note:")
+}
+
+fn join_trimmed_lines(lines: &[String]) -> Option<String> {
+    let trimmed = trim_blank_lines(lines);
+    (!trimmed.is_empty()).then(|| trimmed.join("\n"))
+}
+
+fn trim_blank_lines(lines: &[String]) -> &[String] {
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|index| index + 1)
+        .unwrap_or(start);
+    &lines[start..end]
+}
+
+fn trim_blank_lines_owned(lines: Vec<String>) -> Vec<String> {
+    trim_blank_lines(&lines).to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::linear::{IssueComment, IssueSummary, TeamRef};
+
+    use super::{
+        CONTEXT_CHECKPOINT_HEADING, context_checkpoint_present, effective_workpad_body,
+        extract_context_checkpoint, extract_unmanaged_review_notes, extract_workpad_section_lines,
+    };
+    use crate::listen::PendingLinearSync;
+
+    fn issue_with_comments(body: &str) -> IssueSummary {
+        IssueSummary {
+            id: "issue-1".to_string(),
+            identifier: "ENG-10782".to_string(),
+            title: "Context pressure".to_string(),
+            description: None,
+            url: "https://linear.app/issues/ENG-10782".to_string(),
+            priority: None,
+            estimate: None,
+            updated_at: "2026-04-08T00:00:00Z".to_string(),
+            team: TeamRef {
+                id: "team-1".to_string(),
+                key: "ENG".to_string(),
+                name: "Engineering".to_string(),
+            },
+            project: None,
+            assignee: None,
+            labels: Vec::new(),
+            comments: vec![IssueComment {
+                id: "comment-1".to_string(),
+                body: body.to_string(),
+                created_at: None,
+                user_name: None,
+                resolved_at: None,
+            }],
+            state: None,
+            attachments: Vec::new(),
+            parent: None,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn effective_workpad_body_prefers_pending_sync_body() {
+        let issue = issue_with_comments("## Codex Workpad\n\nstored");
+        let pending = PendingLinearSync {
+            workpad_body: Some("## Codex Workpad\n\npending".to_string()),
+            ..PendingLinearSync::default()
+        };
+
+        assert_eq!(
+            effective_workpad_body(&issue, Some(&pending), "comment-1").as_deref(),
+            Some("## Codex Workpad\n\npending")
+        );
+    }
+
+    #[test]
+    fn context_checkpoint_helpers_use_review_notes_section() {
+        let body = format!(
+            "## Codex Workpad\n\n### Completed\n\n- [x] done\n\n### Review Notes\n\n- Risk: generated note\n- Keep this manual note\n\n{CONTEXT_CHECKPOINT_HEADING}\n\n- Pressure: high\n\n### Validation\n\n- [ ] cargo test\n"
+        );
+
+        assert!(context_checkpoint_present(&body));
+        assert_eq!(
+            extract_context_checkpoint(&body).as_deref(),
+            Some("#### Context Checkpoint\n\n- Pressure: high")
+        );
+        assert_eq!(
+            extract_unmanaged_review_notes(&body),
+            vec!["- Keep this manual note".to_string()]
+        );
+        assert_eq!(
+            extract_workpad_section_lines(&body, "### Completed"),
+            vec!["- [x] done".to_string()]
+        );
+    }
 }

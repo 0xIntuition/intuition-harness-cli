@@ -1052,6 +1052,17 @@ pub fn validate_listen_poll_interval_seconds(interval: u64) -> Result<()> {
     }
 }
 
+/// Validates the listen context budget in tokens.
+pub fn validate_listen_context_budget_tokens(tokens: u64) -> Result<()> {
+    if tokens >= 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "listen context budget must be at least 1 token; got {tokens}"
+        ))
+    }
+}
+
 /// Validates the GitHub CI settle polling interval in seconds.
 pub fn validate_listen_ci_poll_interval_seconds(interval: u64) -> Result<()> {
     if interval >= 1 {

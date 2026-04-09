@@ -348,6 +348,57 @@ impl TurnTokenSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextPressure {
+    Normal,
+    Elevated,
+    High,
+    Critical,
+}
+
+impl ContextPressure {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Elevated => "elevated",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    pub(crate) fn from_turn_history(
+        turn_history: &[TurnTokenSnapshot],
+        context_budget_tokens: u64,
+    ) -> Self {
+        let known_input_tokens = completed_turn_known_input_tokens(turn_history);
+        if known_input_tokens == 0 || context_budget_tokens == 0 {
+            return Self::Normal;
+        }
+
+        let usage_percent = known_input_tokens.saturating_mul(100);
+        let critical_threshold = context_budget_tokens.saturating_mul(95);
+        let high_threshold = context_budget_tokens.saturating_mul(85);
+        let elevated_threshold = context_budget_tokens.saturating_mul(70);
+
+        if usage_percent >= critical_threshold {
+            Self::Critical
+        } else if usage_percent >= high_threshold {
+            Self::High
+        } else if usage_percent >= elevated_threshold {
+            Self::Elevated
+        } else {
+            Self::Normal
+        }
+    }
+}
+
+pub(crate) fn completed_turn_known_input_tokens(turn_history: &[TurnTokenSnapshot]) -> u64 {
+    turn_history
+        .iter()
+        .map(|snapshot| snapshot.tokens.input.unwrap_or(0))
+        .sum()
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalSessionData {
     #[serde(default)]
@@ -524,6 +575,8 @@ pub struct AgentSession {
     pub session_id: Option<String>,
     #[serde(default)]
     pub latest_resume_handle: Option<LatestResumeHandle>,
+    #[serde(default)]
+    pub context_budget_tokens: Option<u64>,
     #[serde(default)]
     pub pending_linear_sync: Option<PendingLinearSync>,
     #[serde(default)]
@@ -942,8 +995,9 @@ impl ListenState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSession, CanonicalSessionData, LatestResumeHandle, PullRequestStatus,
+        AgentSession, CanonicalSessionData, ContextPressure, LatestResumeHandle, PullRequestStatus,
         PullRequestSummary, ResumeProvider, SessionOrigin, SessionPhase, TokenUsage,
+        TurnPromptMode, TurnTokenSnapshot, completed_turn_known_input_tokens,
         explicit_resume_id_label, explicit_resume_provider_label,
     };
 
@@ -970,6 +1024,7 @@ mod tests {
             pid: None,
             session_id: Some("issue-1".to_string()),
             latest_resume_handle: None,
+            context_budget_tokens: None,
             pending_linear_sync: None,
             last_timeout: None,
             turns: Some(1),
@@ -978,6 +1033,18 @@ mod tests {
             canonical: CanonicalSessionData::default(),
             log_path: None,
             origin: SessionOrigin::Listen,
+        }
+    }
+
+    fn turn_snapshot(turn: u32, input_tokens: Option<u64>) -> TurnTokenSnapshot {
+        TurnTokenSnapshot {
+            turn,
+            prompt_mode: TurnPromptMode::FullPrompt,
+            tokens: TokenUsage {
+                input: input_tokens,
+                output: None,
+            },
+            captured_at_epoch_seconds: 1,
         }
     }
 
@@ -1255,5 +1322,61 @@ mod tests {
 
         active.has_open_pr = false;
         assert_eq!(active.pr_label(), "-");
+    }
+
+    #[test]
+    fn context_pressure_thresholds_are_exact() {
+        let budget = 100;
+
+        assert_eq!(
+            ContextPressure::from_turn_history(&[turn_snapshot(1, Some(69))], budget),
+            ContextPressure::Normal
+        );
+        assert_eq!(
+            ContextPressure::from_turn_history(&[turn_snapshot(1, Some(70))], budget),
+            ContextPressure::Elevated
+        );
+        assert_eq!(
+            ContextPressure::from_turn_history(&[turn_snapshot(1, Some(84))], budget),
+            ContextPressure::Elevated
+        );
+        assert_eq!(
+            ContextPressure::from_turn_history(&[turn_snapshot(1, Some(85))], budget),
+            ContextPressure::High
+        );
+        assert_eq!(
+            ContextPressure::from_turn_history(&[turn_snapshot(1, Some(94))], budget),
+            ContextPressure::High
+        );
+        assert_eq!(
+            ContextPressure::from_turn_history(&[turn_snapshot(1, Some(95))], budget),
+            ContextPressure::Critical
+        );
+    }
+
+    #[test]
+    fn context_pressure_counts_only_known_completed_turn_input_tokens() {
+        let turn_history = vec![
+            turn_snapshot(1, Some(40)),
+            turn_snapshot(2, None),
+            turn_snapshot(3, Some(45)),
+        ];
+
+        assert_eq!(completed_turn_known_input_tokens(&turn_history), 85);
+        assert_eq!(
+            ContextPressure::from_turn_history(&turn_history, 100),
+            ContextPressure::High
+        );
+    }
+
+    #[test]
+    fn context_pressure_stays_normal_when_all_input_telemetry_is_missing() {
+        let turn_history = vec![turn_snapshot(1, None), turn_snapshot(2, None)];
+
+        assert_eq!(completed_turn_known_input_tokens(&turn_history), 0);
+        assert_eq!(
+            ContextPressure::from_turn_history(&turn_history, 100),
+            ContextPressure::Normal
+        );
     }
 }
