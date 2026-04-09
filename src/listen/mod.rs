@@ -1861,8 +1861,9 @@ where
 
             if matches!(
                 session.phase,
-                SessionPhase::Completed | SessionPhase::Blocked | SessionPhase::Paused
-            ) {
+                SessionPhase::Completed | SessionPhase::Blocked
+            ) || (session.phase == SessionPhase::Paused && session.pid.is_none())
+            {
                 if normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo" {
                     notes.push(format!(
                         "{} returned to Todo; retaining the previous `{}` session to avoid automatic re-pickup churn.",
@@ -7590,6 +7591,121 @@ suffix
                 .iter()
                 .any(|note| note.contains("restored it to `In Progress`")),
             "expected Todo recovery note, got {notes:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconcile_sessions_blocks_paused_session_with_dead_worker_pid() -> Result<()> {
+        let temp = tempdir()?;
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve(repo, None)?;
+        let issue = in_progress_issue();
+        let client = ReassignmentClient {
+            issue: issue.clone(),
+        };
+        let service = LinearService::new(client, Some("MET".to_string()));
+        let daemon = AgentDaemon {
+            root: repo.to_path_buf(),
+            store,
+            filters: IssueListFilters {
+                state: Some(TODO_STATE.to_string()),
+                limit: 25,
+                ..IssueListFilters::default()
+            },
+            max_pickups: 1,
+            linear_config: LinearConfig {
+                api_key: "token".to_string(),
+                api_url: "https://linear.example/graphql".to_string(),
+                default_team: Some("MET".to_string()),
+            },
+            app_config: AppConfig::default(),
+            planning_meta: PlanningMeta::default(),
+            worker_agent: None,
+            worker_model: None,
+            worker_reasoning: None,
+            worker_context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+            listen_settings: PlanningListenSettings {
+                required_labels: None,
+                assignment_scope: Some(ListenAssignmentScope::Any),
+                refresh_policy: Some(ListenRefreshPolicy::ReuseAndRefresh),
+                instructions_path: None,
+                poll_interval_seconds: None,
+                context_budget_tokens: None,
+                dashboard_active_issues: None,
+                dashboard_preview: None,
+            },
+            viewer: None,
+            service,
+        };
+        let workspace = repo.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let dead_pid = 999_999;
+        let mut state = ListenState::from_sessions(vec![super::AgentSession {
+            issue_id: Some(issue.id.clone()),
+            issue_identifier: issue.identifier.clone(),
+            issue_title: issue.title.clone(),
+            project_name: issue.project.as_ref().map(|project| project.name.clone()),
+            team_key: issue.team.key.clone(),
+            issue_url: issue.url.clone(),
+            phase: SessionPhase::Paused,
+            summary: "Paused by operator".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: Some(workspace.display().to_string()),
+            branch: Some("met-90-paused".to_string()),
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: Some("comment-90".to_string()),
+            started_at_epoch_seconds: 1_773_575_000,
+            updated_at_epoch_seconds: 1_773_575_100,
+            pid: Some(dead_pid),
+            session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
+            context_budget_tokens: None,
+            pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
+            last_timeout: None,
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: Some("logs/MET-90.log".to_string()),
+            origin: SessionOrigin::Listen,
+        }]);
+        let mut notes = Vec::new();
+
+        daemon
+            .reconcile_sessions(&mut state, &mut notes, None)
+            .await?;
+
+        assert_eq!(state.sessions.len(), 1);
+        let session = &state.sessions[0];
+        assert_eq!(session.phase, SessionPhase::Blocked);
+        assert_eq!(session.pid, Some(dead_pid));
+        assert_eq!(
+            session
+                .blocked
+                .as_ref()
+                .map(|blocked| blocked.reason.as_str()),
+            Some("paused worker died")
+        );
+        assert_eq!(
+            session
+                .latest_stale_worker_failure
+                .as_ref()
+                .map(|failure| failure.classification.reason.as_str()),
+            Some("paused worker died")
+        );
+        assert_eq!(session.stale_worker_recovery_attempt_count, 0);
+        assert!(
+            notes.iter().any(|note| note.contains("parked as blocked")),
+            "expected stale-worker reconciliation note, got {notes:?}"
         );
 
         Ok(())
