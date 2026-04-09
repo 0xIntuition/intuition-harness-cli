@@ -5552,6 +5552,7 @@ fn fetch_pr_metadata(gh: &GhCli, root: &Path, pr_number: u64) -> Result<GhPrMeta
 
 fn resolve_linear_identifier(pr: &GhPrMetadata) -> Result<String> {
     for identifiers in [
+        collect_linear_identifiers_from_body_markers(pr.body.as_deref().unwrap_or("")),
         collect_linear_identifiers_from_labels(&pr.labels),
         collect_linear_identifiers_from_single_source(&pr.title),
         collect_linear_identifiers_from_single_source(&pr.head_ref_name),
@@ -5576,6 +5577,22 @@ fn resolve_linear_identifier(pr: &GhPrMetadata) -> Result<String> {
          Expected a pattern like `MET-42` or `ENG-1234`.",
         pr.number
     )
+}
+
+fn collect_linear_identifiers_from_body_markers(text: &str) -> Vec<String> {
+    const MARKER_PREFIX: &str = "<!-- metastack-linear-id:";
+
+    let mut identifiers = BTreeSet::new();
+    for segment in text.split(MARKER_PREFIX).skip(1) {
+        let Some(raw_identifier) = segment.split("-->").next() else {
+            continue;
+        };
+        let identifier = raw_identifier.trim();
+        if is_linear_identifier(identifier) {
+            identifiers.insert(identifier.to_uppercase());
+        }
+    }
+    identifiers.into_iter().collect()
 }
 
 fn collect_linear_identifiers_from_labels(labels: &[GhPrLabel]) -> Vec<String> {
@@ -7127,11 +7144,40 @@ mod tests {
     }
 
     #[test]
-    fn resolve_linear_identifier_prefers_linear_id_label() {
+    fn resolve_linear_identifier_prefers_hidden_body_marker() {
         let pr = GhPrMetadata {
             number: 17,
             title: "Technical: Promote listen-managed PRs and dashboard state".to_string(),
             url: "https://example.test/pull/17".to_string(),
+            body: Some(
+                "<!-- metastack-linear-id: MET-53 -->\nParent MET-48\nChild MET-99".to_string(),
+            ),
+            author: GhPrAuthor {
+                login: "metasudo".to_string(),
+            },
+            head_ref_name: "technical-review-flow".to_string(),
+            base_ref_name: "main".to_string(),
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            state: "OPEN".to_string(),
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            review_decision: None,
+        };
+
+        assert_eq!(
+            resolve_linear_identifier(&pr).expect("body marker should win"),
+            "MET-53".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_linear_identifier_supports_legacy_linear_id_label() {
+        let pr = GhPrMetadata {
+            number: 18,
+            title: "Technical: Promote listen-managed PRs and dashboard state".to_string(),
+            url: "https://example.test/pull/18".to_string(),
             body: Some("Parent MET-48\nChild MET-53".to_string()),
             author: GhPrAuthor {
                 login: "metasudo".to_string(),
@@ -7150,7 +7196,7 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_linear_identifier(&pr).expect("label identifier should win"),
+            resolve_linear_identifier(&pr).expect("legacy label identifier should still work"),
             "MET-53".to_string()
         );
     }

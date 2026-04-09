@@ -78,7 +78,6 @@ const REQUIRED_LISTEN_PR_LABEL: &str = "metastack";
 const LEGACY_LISTEN_PR_LABEL: &str = "symphony";
 const REQUIRED_LISTEN_PR_LABEL_COLOR: &str = "0e8a16";
 const REQUIRED_LISTEN_PR_LABEL_DESCRIPTION: &str = "MetaStack automation";
-const LINEAR_IDENTIFIER_PR_LABEL_COLOR: &str = "1d76db";
 const LISTEN_PULL_REQUEST_BASE_BRANCH: &str = "main";
 const REQUIRED_VERIFICATION_WORKFLOW_NAME: &str = "quality";
 const EXACT_SHA_QUALITY_CRITERION: &str =
@@ -2280,8 +2279,8 @@ fn listener_pull_request_title(issue: &IssueSummary) -> String {
     format!("{}: {}", issue.identifier, issue.title)
 }
 
-fn listener_linear_identifier_pr_label(issue: &IssueSummary) -> String {
-    format!("id-{}", issue.identifier)
+fn listener_pull_request_linear_identifier_marker(issue: &IssueSummary) -> String {
+    format!("<!-- metastack-linear-id: {} -->", issue.identifier)
 }
 
 fn listener_pull_request_body(
@@ -2290,10 +2289,10 @@ fn listener_pull_request_body(
     verification: Option<&VerificationSummary>,
 ) -> String {
     let mut lines = vec![
+        listener_pull_request_linear_identifier_marker(issue),
         format!("# {}", listener_pull_request_title(issue)),
         String::new(),
         "## Summary".to_string(),
-        format!("- Linear issue: {}", issue.url),
         format!(
             "- Published automatically by `{} agents listen` for `{}`",
             crate::branding::COMMAND_NAME,
@@ -2523,7 +2522,6 @@ fn write_listener_pull_request_body(
 fn ensure_listener_pull_request_label(
     gh: &GhCli,
     workspace_path: &Path,
-    issue: &IssueSummary,
     pull_request: &PullRequestLifecycleResult,
 ) -> Result<()> {
     gh.ensure_label_exists(
@@ -2536,19 +2534,6 @@ fn ensure_listener_pull_request_label(
         workspace_path,
         pull_request.number,
         REQUIRED_LISTEN_PR_LABEL,
-    )?;
-
-    let linear_identifier_label = listener_linear_identifier_pr_label(issue);
-    gh.ensure_label_exists(
-        workspace_path,
-        &linear_identifier_label,
-        LINEAR_IDENTIFIER_PR_LABEL_COLOR,
-        &format!("Linear issue {}", issue.identifier),
-    )?;
-    gh.add_label_to_pull_request(
-        workspace_path,
-        pull_request.number,
-        &linear_identifier_label,
     )
 }
 
@@ -2607,7 +2592,7 @@ async fn publish_listener_pull_request(
             mode,
         },
     )?;
-    ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
+    ensure_listener_pull_request_label(&gh, workspace_path, &pull_request)?;
     Ok(Some(pull_request))
 }
 
@@ -2660,7 +2645,7 @@ async fn prepare_listener_pull_request_for_review(
             issue.identifier
         );
     }
-    ensure_listener_pull_request_label(&gh, workspace_path, issue, &pull_request)?;
+    ensure_listener_pull_request_label(&gh, workspace_path, &pull_request)?;
     Ok(Some(pull_request))
 }
 
@@ -6915,9 +6900,9 @@ mod tests {
     use super::{
         ExecutionTurnPlan, LatestResumeHandle, ListenTurnContext, Path, ResumeProvider,
         ReviewReport, TurnExecutionResult, Value, WorkerSessionContext, build_worker_session,
-        continuation_id_for_invocation, parse_claude_resume_handle, parse_codex_resume_handle,
-        plan_execution_turn, query_codex_threads, read_codex_session_index, render_review_workpad,
-        update_resume_handle_after_turn,
+        continuation_id_for_invocation, listener_pull_request_body, parse_claude_resume_handle,
+        parse_codex_resume_handle, plan_execution_turn, query_codex_threads,
+        read_codex_session_index, render_review_workpad, update_resume_handle_after_turn,
     };
     use crate::config::{AppConfig, PlanningMeta};
     use crate::linear::{IssueComment, IssueSummary, TeamRef};
@@ -6985,6 +6970,16 @@ mod tests {
             parent: None,
             children: Vec::new(),
         }
+    }
+
+    #[test]
+    fn listener_pull_request_body_includes_hidden_identifier_marker_without_private_url() {
+        let issue = test_issue("ENG-10781");
+        let body = listener_pull_request_body(&issue, None, None);
+
+        assert!(body.contains("<!-- metastack-linear-id: ENG-10781 -->"));
+        assert!(body.contains("# ENG-10781: ENG-10781 title"));
+        assert!(!body.contains(&issue.url));
     }
 
     fn env_lock() -> &'static Mutex<()> {
