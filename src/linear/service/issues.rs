@@ -45,6 +45,9 @@ impl<C> LinearService<C>
 where
     C: LinearClient,
 {
+    /// List Linear issues matching the provided filters.
+    ///
+    /// Returns an error when the Linear client query fails.
     pub async fn list_issues(&self, filters: IssueListFilters) -> Result<Vec<IssueSummary>> {
         let selection = IssueListSelection::new(filters, self.default_team.clone());
         let mut issues = if selection.needs_full_scan() {
@@ -123,19 +126,48 @@ where
         Ok(issues)
     }
 
+    /// Resolve one Linear issue by identifier.
+    ///
+    /// Returns `Ok(None)` when no matching issue can be found. Returns an error when the Linear
+    /// client query fails.
     pub async fn find_issue_by_identifier(
         &self,
         identifier: &str,
         filters: IssueListFilters,
     ) -> Result<Option<IssueSummary>> {
-        let mut filters = filters;
-        filters.limit = filters.limit.max(250);
-        let issues = self.list_issues(filters).await?;
+        let mut initial_filters = filters.clone();
+        initial_filters.limit = initial_filters.limit.max(250);
+        let issues = self.list_issues(initial_filters).await?;
+        if let Some(issue) = issues
+            .into_iter()
+            .find(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
+        {
+            return Ok(Some(issue));
+        }
+
+        let fallback_team = filters
+            .team
+            .clone()
+            .or_else(|| identifier_team(identifier).map(str::to_string));
+        let Some(team) = fallback_team else {
+            return Ok(None);
+        };
+
+        let fallback_filters = IssueListFilters {
+            team: Some(team),
+            assignee: IssueAssigneeFilter::Any,
+            limit: usize::MAX,
+            ..IssueListFilters::default()
+        };
+        let issues = self.list_issues(fallback_filters).await?;
         Ok(issues
             .into_iter()
             .find(|issue| issue.identifier.eq_ignore_ascii_case(identifier)))
     }
 
+    /// Load the edit context for one Linear issue.
+    ///
+    /// Returns an error when the issue cannot be resolved or when the Linear client query fails.
     pub async fn load_issue_edit_context(&self, identifier: &str) -> Result<IssueEditContext> {
         let issue = self
             .find_issue_by_identifier(
@@ -156,6 +188,9 @@ where
         Ok(IssueEditContext { issue, team })
     }
 
+    /// Load one Linear issue with full detail.
+    ///
+    /// Returns an error when the issue cannot be resolved or when the Linear client query fails.
     pub async fn load_issue(&self, identifier: &str) -> Result<IssueSummary> {
         let issue = self
             .find_issue_by_identifier(

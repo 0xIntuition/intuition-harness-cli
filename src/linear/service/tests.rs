@@ -186,6 +186,39 @@ async fn list_issues_keeps_viewer_assigned_and_unassigned_items_in_viewer_or_una
 }
 
 #[tokio::test]
+async fn load_issue_falls_back_to_full_team_scan_when_identifier_misses_initial_window() {
+    let mut all_issues = (1..=260)
+        .map(|number| issue_for_team(&format!("ENG-{number}"), "ENG", "Todo", None, "CLI Harness"))
+        .collect::<Vec<_>>();
+    all_issues.push(issue_for_team(
+        "ENG-10504",
+        "ENG",
+        "Todo",
+        None,
+        "CLI Harness",
+    ));
+    let expected = all_issues
+        .iter()
+        .find(|issue| issue.identifier == "ENG-10504")
+        .cloned()
+        .expect("expected issue should exist in the full team listing");
+    let client = FakeLinearClient {
+        all_issues,
+        issue_detail: Some(expected.clone()),
+        ..FakeLinearClient::default()
+    };
+    let service = LinearService::new(client.clone(), Some("ENG".to_string()));
+
+    let issue = service
+        .load_issue("ENG-10504")
+        .await
+        .expect("fallback team scan should resolve the issue");
+
+    assert_eq!(issue.identifier, "ENG-10504");
+    assert_eq!(client.list_filtered_issues_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn create_issue_resolves_team_state_and_project_for_team() {
     let client = FakeLinearClient {
         teams: vec![team(
