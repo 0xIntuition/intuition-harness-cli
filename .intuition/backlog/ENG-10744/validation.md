@@ -12,10 +12,10 @@ Last updated: 2026-04-09
 - [x] `cargo test listen::dashboard --lib`
 - [x] `cargo test listen::mod --lib`
 - [x] `cargo test --test listen -- --test-threads=1`
-- [x] `cargo test listen_once_relaunches_agent_until_issue_leaves_active_states --test listen -- --exact`
+- [x] `cargo test listen_surfaces_no_checks_configured_in_inspect_and_dashboard --test listen -- --exact`
 - [x] `cargo run -- agents review --check --root .`
 - [x] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] `make quality`
+- [x] `make quality`
 
 ## Deterministic Behavior Proofs
 
@@ -59,9 +59,13 @@ Last updated: 2026-04-09
   case and the direct regression test that now covers it.
 - The safer intended behavior was already documented: dead paused sessions stay blocked and rely on
   the manual retry path. This turn only brought the code in line with that documentation.
-- GitHub Actions `quality` had already passed for earlier PR #101 heads during this ticket, but
-  the branch advanced again to `bee2babd4608d5ef4ddf7497c979d5e1c76111ff` during this final
-  checkpoint turn.
+- GitHub Actions `quality` passed for the exact current PR #101 head
+  `bee2babd4608d5ef4ddf7497c979d5e1c76111ff` in run `24173386494` at
+  `2026-04-09T05:09:57Z`.
+- Direct Linear GraphQL lookups with the injected `LINEAR_API_KEY` could not resolve issue
+  `14038435-d47c-4a74-8951-1e2312456bef` or workpad comment
+  `120f9183-00f1-4b0b-af69-a4850e6543cd`; both returned `Entity not found`, so remote workpad
+  mutation is unavailable from this session.
 - The validation set stayed deterministic and local; no live Linear mutation was required to prove
   stale-worker reconciliation behavior.
 - Ticket-local evidence lives here and reviewer-facing evidence lives in
@@ -86,15 +90,13 @@ Last updated: 2026-04-09
   - the earlier retention branch returned all `Paused` sessions before stale-worker classification,
     so helper-level stale-worker tests alone were not enough to catch the gap
 - Blockers:
-  - local code and validation are complete, but the exact-head GitHub verification gate is still
-    pending for PR #101 head `bee2babd4608d5ef4ddf7497c979d5e1c76111ff`
+  - no local code, validation, or current-head GitHub verification blocker remains
+  - remote workpad sync is blocked because the configured Linear API cannot resolve issue
+    `14038435-d47c-4a74-8951-1e2312456bef` or workpad comment
+    `120f9183-00f1-4b0b-af69-a4850e6543cd`
 - Exact remaining work:
-  - wait for GitHub `quality` run `24173386494` on PR #101 head
-    `bee2babd4608d5ef4ddf7497c979d5e1c76111ff` to finish
-  - rerun the dedicated verification gate if shared automation does not do it automatically after
-    the exact-head `quality` result settles
-  - refresh remote-only PR/workpad metadata when an automation or metadata-capable path is
-    available
+  - refresh remote-only PR/workpad metadata from an auth/profile path that can resolve the issue
+    and workpad ids above
 - Checklist and validation status:
   - `cargo test reconcile_sessions_blocks_paused_session_with_dead_worker_pid --lib` passed
   - `cargo test stale_running_session_relaunches_with_existing_context_and_fresh_pid --lib` passed
@@ -105,6 +107,8 @@ Last updated: 2026-04-09
   - `cargo test listen::dashboard --lib` passed
   - `cargo test listen::mod --lib` passed
   - `cargo test --test listen -- --test-threads=1` passed
+  - `cargo test listen_surfaces_no_checks_configured_in_inspect_and_dashboard --test listen -- --exact`
+    passed
   - `cargo run -- agents review --check --root .` passed
   - `cargo clippy --all-targets --all-features -- -D warnings` passed
   - `make quality` passed locally
@@ -115,8 +119,9 @@ Last updated: 2026-04-09
   - `gh pr view 101 --repo 0xIntuition/intuition-harness-cli --json reviews` returned no review
     summaries
   - `gh pr view 101 --repo 0xIntuition/intuition-harness-cli --json headRefOid,statusCheckRollup,updatedAt,url`
-    showed PR #101 head `bee2babd4608d5ef4ddf7497c979d5e1c76111ff` with `quality` still
-    `IN_PROGRESS`
-  - `gh run view 24173386494 --repo 0xIntuition/intuition-harness-cli --json status,conclusion,headSha,url,workflowName,jobs,updatedAt`
-    showed the active exact-head `quality` workflow still in progress with the `Run root quality gate`
-    step active as of `2026-04-09T05:08Z`
+    showed PR #101 head `bee2babd4608d5ef4ddf7497c979d5e1c76111ff` with `quality`
+    `COMPLETED` and `SUCCESS`
+  - `gh run view 24173386494 --repo 0xIntuition/intuition-harness-cli --json status,conclusion,headSha,url,workflowName,updatedAt`
+    showed the exact-head `quality` workflow completed with `success`
+  - direct Linear GraphQL `query Issue($id)` and `query Comment($id)` calls against the injected
+    `LINEAR_API_URL` both returned `Entity not found` for the current ticket/workpad ids

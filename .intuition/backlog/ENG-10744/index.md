@@ -14,10 +14,10 @@
 
 Repo evidence:
 
-* [`../../../src/listen/mod.rs`](<../../../src/listen/mod.rs>) currently calls `mark_running_session_stale(...)` for a dead stored worker PID and rewrites the session to `Blocked | worker died` with no recovery budget or failure metadata.
-* [`../../../src/listen/store.rs`](<../../../src/listen/store.rs>) already rewrites malformed detail artifacts, mirrors session fields into detail JSON, and exposes the existing manual `retry_blocked_session(...)` affordance.
-* [`../../../src/listen/worker.rs`](<../../../src/listen/worker.rs>) rewrites the active session repeatedly throughout execution, so any recovery metadata must survive ongoing worker session writes.
-* [`../../../src/listen/dashboard.rs`](<../../../src/listen/dashboard.rs>) and `meta listen sessions inspect` already have structured detail output that can carry recovery count, latest failure, and elapsed time without a new pane.
+* [`../../../src/listen/mod.rs`](<../../../src/listen/mod.rs>) now routes dead worker detection through centralized stale-worker classification and bounded retry logic.
+* [`../../../src/listen/store.rs`](<../../../src/listen/store.rs>) rewrites malformed detail artifacts, mirrors session fields into detail JSON, and exposes the existing manual `retry_blocked_session(...)` affordance.
+* [`../../../src/listen/worker.rs`](<../../../src/listen/worker.rs>) rewrites the active session repeatedly throughout execution, so recovery metadata must survive ongoing worker session writes.
+* [`../../../src/listen/dashboard.rs`](<../../../src/listen/dashboard.rs>) and `meta listen sessions inspect` carry the stale-worker recovery detail without adding a new pane.
 
 ## Proposed Approach
 
@@ -25,7 +25,7 @@ Repo evidence:
 2. Replace the stale-PID path in reconciliation with one classify-then-recover helper that uses the `ENG-10736` blocked taxonomy to decide retryable versus terminal stale-worker outcomes.
 3. Auto-restart only listen-origin `running` sessions that still have the required workspace and workpad context, using the existing `spawn_listen_worker_from_context(...)` path so backlog linkage, workspace path, and workpad comment id are preserved.
 4. Cap automatic stale-worker recovery at `2` attempts per operator-started run. When the cap is exhausted or classification says non-retryable, keep the session blocked with a structured terminal reason and leave the existing manual retry path intact.
-5. Extend inspect and selected-session detail rendering with started time, elapsed time since original start, recovery attempt count, and latest stale-worker failure, then update docs to match the shipped behavior.
+5. Extend inspect and selected-session detail rendering with started time, elapsed time since original start, recovery attempt count, and latest stale-worker failure.
 
 ## Risks
 
@@ -40,11 +40,14 @@ Repo evidence:
 - [x] `cargo test stale_running_session_budget_exhaustion_blocks_without_relaunch --lib`
 - [x] `cargo test stale_worker_recovery_persists_metadata_before_replacement_worker_write --lib`
 - [x] `cargo test --test listen -- --test-threads=1`
-- [x] `cargo test listen_once_relaunches_agent_until_issue_leaves_active_states --test listen -- --exact`
+- [x] `cargo test listen_surfaces_no_checks_configured_in_inspect_and_dashboard --test listen -- --exact`
 - [x] `cargo test listen::store --lib`
 - [x] `cargo test listen::dashboard --lib`
-- [x] `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] `cargo test listen::mod --lib`
 - [x] `cargo run -- agents review --check --root .`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] `cargo test 'managed_child::tests::timeout_callback_failure_still_reaps_captured_process_group' --lib -- --exact`
+- [ ] `cargo test 'managed_child::tests::timeout_kills_process_group_and_reaps_children' --lib -- --exact`
 - [ ] `make quality`
 - [x] Focused compatibility proof that old `session.json` and `session-details/<ISSUE>.json` payloads load and rewrite with the new fields while preserving existing data
 - [x] Focused recovery proof that a dead listen-origin `running` worker is relaunched with the same workspace path, workpad comment id, backlog linkage, and a fresh PID
@@ -65,22 +68,27 @@ Repo evidence:
 ### Completed
 
 - [x] Changed `artifacts/validation/ENG-10744.md`
+- [x] Changed `tests/listen.rs`
+- [x] Changed `.intuition/backlog/ENG-10744/index.md`
+- [x] Changed `.intuition/backlog/ENG-10744/validation.md`
 
 ### Remaining
 
-- [ ] Refresh remote-only metadata copies of the checkpoint if shared automation opens an update path.
-- [ ] Repair the local validation failure and rerun the validation gate before draft PR publication.
+- [ ] Resolve the deterministic `managed_child` timeout-reaping test failures in the local gate.
+- [ ] Rerun `make quality`.
+- [ ] If the local gate turns green on a follow-up pass, rerun exact-SHA GitHub verification for the published head.
+- [ ] Refresh remote-only PR/workpad metadata if a metadata-capable automation path becomes available.
 
 ### Validation
 
-- [ ] [ ] `cargo test --test listen -- --test-threads=1`
-- [ ] [ ] `cargo test listen::store --lib`
-- [ ] [ ] `cargo test listen::dashboard --lib`
-- [ ] [ ] `cargo test listen::mod --lib`
-- [ ] [ ] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] [ ] Focused compatibility proof that old `session.json` and `session-details/<ISSUE>.json` payloads load and rewrite with the new fields while preserving existing data
-- [ ] [ ] Focused recovery proof that a dead listen-origin `running` worker is relaunched with the same workspace path, workpad comment id, backlog linkage, and a fresh PID
-- [ ] [ ] Focused exhaustion proof that retry-budget exhaustion parks the session as blocked with a structured reason and does not auto-relaunch again
-- [ ] [ ] Focused inspect and dashboard proof that recovery count, latest stale failure, and elapsed-since-start render in operator output
-- [ ] Local validation profile `heuristic` must pass: make quality
+- [x] `cargo test --test listen -- --test-threads=1`
+- [x] `cargo test listen_surfaces_no_checks_configured_in_inspect_and_dashboard --test listen -- --exact`
+- [x] `cargo test listen::store --lib`
+- [x] `cargo test listen::dashboard --lib`
+- [x] `cargo test listen::mod --lib`
+- [x] `cargo run -- agents review --check --root .`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] `cargo test 'managed_child::tests::timeout_callback_failure_still_reaps_captured_process_group' --lib -- --exact`
+- [ ] `cargo test 'managed_child::tests::timeout_kills_process_group_and_reaps_children' --lib -- --exact`
+- [ ] Local validation profile `heuristic` must pass: `make quality`
 <!-- metastack-listen-progress:end -->
