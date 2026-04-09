@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use crossterm::cursor::{Hide, Show};
@@ -376,10 +376,6 @@ impl ImprovementTerminalSession {
         let exit_result = write_improvement_terminal_exit(&mut stdout, self.options);
 
         if self.options.raw_mode {
-            if exit_result.is_ok() && (self.options.mouse_capture || self.options.bracketed_paste) {
-                drain_pending_improvement_terminal_input(Duration::from_millis(50));
-            }
-
             let raw_mode_result = disable_raw_mode()
                 .context("failed to disable raw mode for backlog improve terminal session");
             exit_result?;
@@ -447,37 +443,6 @@ fn write_improvement_terminal_exit<W: Write>(
         .flush()
         .context("failed to flush backlog improve terminal exit commands")?;
     Ok(())
-}
-
-fn drain_pending_improvement_terminal_input(timeout: Duration) {
-    drain_pending_improvement_terminal_input_with(
-        timeout,
-        |poll_timeout| event::poll(poll_timeout).unwrap_or(false),
-        || event::read().is_ok(),
-    );
-}
-
-fn drain_pending_improvement_terminal_input_with<P, R>(timeout: Duration, mut poll: P, mut read: R)
-where
-    P: FnMut(Duration) -> bool,
-    R: FnMut() -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-
-        let poll_timeout = (deadline - now).min(Duration::from_millis(10));
-        let has_event = poll(poll_timeout);
-        if !has_event {
-            break;
-        }
-        if !read() {
-            break;
-        }
-    }
 }
 
 /// Returns the shared backlog-improve interactive terminal enter/exit byte sequence.
@@ -4542,56 +4507,6 @@ mod tests {
             !output[summary_start..].contains(&0x1b),
             "summary output should not contain trailing terminal escape bytes"
         );
-    }
-
-    #[test]
-    fn improvement_terminal_cleanup_drain_consumes_pending_events_until_empty() {
-        use std::cell::Cell;
-
-        let pending_events = Cell::new(3usize);
-        let mut poll_count = 0usize;
-        let mut read_count = 0usize;
-
-        drain_pending_improvement_terminal_input_with(
-            Duration::from_millis(25),
-            |_| {
-                poll_count += 1;
-                pending_events.get() > 0
-            },
-            || {
-                read_count += 1;
-                if pending_events.get() == 0 {
-                    return false;
-                }
-                pending_events.set(pending_events.get() - 1);
-                true
-            },
-        );
-
-        assert_eq!(pending_events.get(), 0);
-        assert_eq!(read_count, 3);
-        assert!(poll_count >= read_count);
-    }
-
-    #[test]
-    fn improvement_terminal_cleanup_drain_stops_after_read_failure() {
-        let mut poll_count = 0usize;
-        let mut read_count = 0usize;
-
-        drain_pending_improvement_terminal_input_with(
-            Duration::from_millis(25),
-            |_| {
-                poll_count += 1;
-                true
-            },
-            || {
-                read_count += 1;
-                false
-            },
-        );
-
-        assert_eq!(read_count, 1);
-        assert_eq!(poll_count, 1);
     }
 
     #[test]
