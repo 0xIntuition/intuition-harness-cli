@@ -28,6 +28,25 @@ const TEST_MODE_ENV: &str = "METASTACK_TEST_MODE";
 const TEST_FIXTURE_ENV: &str = "METASTACK_TEST_WORKSPACE_PRESSURE_FIXTURE";
 const METASTACK_SOURCE_ROOT_ENV: &str = "METASTACK_SOURCE_ROOT";
 
+#[cfg(unix)]
+trait StatvfsWordExt {
+    fn into_u64(self) -> u64;
+}
+
+#[cfg(unix)]
+impl StatvfsWordExt for u64 {
+    fn into_u64(self) -> u64 {
+        self
+    }
+}
+
+#[cfg(unix)]
+impl StatvfsWordExt for u32 {
+    fn into_u64(self) -> u64 {
+        u64::from(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum WorkspacePressureLevel {
     Healthy,
@@ -485,9 +504,10 @@ fn probe_disk_usage_sample(root: &Path) -> Option<ResourceUsageSample> {
             stats.f_frsize
         } else {
             stats.f_bsize
-        };
-        let total_blocks = u64::from(stats.f_blocks);
-        let available_blocks = u64::from(stats.f_bavail);
+        }
+        .into_u64();
+        let total_blocks = stats.f_blocks.into_u64();
+        let available_blocks = stats.f_bavail.into_u64();
         return Some(ResourceUsageSample {
             available_bytes: available_blocks.saturating_mul(block_size),
             total_bytes: total_blocks.saturating_mul(block_size),
