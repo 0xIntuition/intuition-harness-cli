@@ -1253,7 +1253,7 @@ fn reconcile_stale_worker_session<F>(
     spawn_worker: F,
 ) -> String
 where
-    F: FnOnce(&Path, &str, Option<&str>) -> Result<u32>,
+    F: FnOnce(&AgentSession, &Path, &str, Option<&str>) -> Result<u32>,
 {
     let Some(workspace_path) = session.workspace_path.as_deref() else {
         let blocked = blocked_reason(
@@ -1357,8 +1357,22 @@ where
     if session.started_at_epoch_seconds == 0 {
         session.started_at_epoch_seconds = session.updated_at_epoch_seconds.max(1);
     }
+    session.phase = SessionPhase::Running;
+    session.blocked = None;
+    session.pid = None;
+    session.summary = compact_session_summary([
+        Some("Recovering stale worker".to_string()),
+        Some(format!("stale pid {pid}")),
+        stale_worker_attempts_summary(session.stale_worker_recovery_attempt_count),
+        session
+            .backlog_issue_identifier
+            .as_ref()
+            .map(|identifier| format!("backlog {identifier}")),
+    ]);
+    session.updated_at_epoch_seconds = now_epoch_seconds();
 
     match spawn_worker(
+        session,
         &workspace_path,
         workpad_comment_id,
         session.backlog_issue_identifier.as_deref(),
@@ -1871,7 +1885,11 @@ where
                     &mut session,
                     &issue,
                     &fallback_log_path,
-                    |workspace_path, workpad_comment_id, backlog_issue_identifier| {
+                    |recovery_session,
+                     workspace_path,
+                     workpad_comment_id,
+                     backlog_issue_identifier| {
+                        self.store.upsert_session(recovery_session.clone())?;
                         self.spawn_listen_worker_from_context(
                             &issue,
                             workspace_path,
@@ -6551,7 +6569,7 @@ suffix
             &mut session,
             &issue,
             Path::new("logs/ENG-90.log"),
-            |workspace_path, workpad_comment_id, backlog_issue_identifier| {
+            |_recovery_session, workspace_path, workpad_comment_id, backlog_issue_identifier| {
                 assert_eq!(workspace_path, workspace.as_path());
                 assert_eq!(workpad_comment_id, "comment-90");
                 assert_eq!(backlog_issue_identifier, Some("TECH-90"));
@@ -6627,7 +6645,7 @@ suffix
             &mut session,
             &issue,
             Path::new("logs/ENG-90.log"),
-            |_workspace_path, _workpad_comment_id, _backlog_issue_identifier| {
+            |_recovery_session, _workspace_path, _workpad_comment_id, _backlog_issue_identifier| {
                 panic!("retry-budget exhaustion must not relaunch a worker")
             },
         );
@@ -6649,6 +6667,121 @@ suffix
             Some("stale worker retry budget exhausted")
         );
         assert!(note.contains("parked as blocked"));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_worker_recovery_persists_metadata_before_replacement_worker_write() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let workspace = root.join("workspace");
+        fs::create_dir_all(root.join(crate::branding::PROJECT_DIR))?;
+        fs::write(
+            root.join(format!("{}/meta.json", crate::branding::PROJECT_DIR)),
+            "{}\n",
+        )?;
+        fs::create_dir_all(&workspace)?;
+        let issue = in_progress_issue();
+        let store = ListenProjectStore::resolve(root, None)?;
+
+        let initial_session = AgentSession {
+            issue_id: Some(issue.id.clone()),
+            issue_identifier: issue.identifier.clone(),
+            issue_title: issue.title.clone(),
+            project_name: issue.project.as_ref().map(|project| project.name.clone()),
+            team_key: issue.team.key.clone(),
+            issue_url: issue.url.clone(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: Some("TECH-90".to_string()),
+            backlog_issue_title: Some("Backlog".to_string()),
+            backlog_path: Some("/tmp/backlog/TECH-90".to_string()),
+            workspace_path: Some(workspace.display().to_string()),
+            branch: Some("met-90-recovery".to_string()),
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: Some("comment-90".to_string()),
+            started_at_epoch_seconds: 1_773_575_000,
+            updated_at_epoch_seconds: 1_773_575_100,
+            pid: Some(42_424),
+            session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
+            context_budget_tokens: None,
+            pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
+            last_timeout: None,
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: Some("logs/ENG-90.log".to_string()),
+            origin: SessionOrigin::Listen,
+        };
+        store.upsert_session(initial_session.clone())?;
+
+        let mut session = initial_session;
+        let note = super::reconcile_stale_worker_session(
+            &mut session,
+            &issue,
+            Path::new("logs/ENG-90.log"),
+            |recovery_session, workspace_path, workpad_comment_id, backlog_issue_identifier| {
+                assert_eq!(workspace_path, workspace.as_path());
+                assert_eq!(workpad_comment_id, "comment-90");
+                assert_eq!(backlog_issue_identifier, Some("TECH-90"));
+
+                store.upsert_session(recovery_session.clone())?;
+
+                let persisted_recovery = store
+                    .load_state()?
+                    .sessions
+                    .into_iter()
+                    .find(|stored| stored.issue_matches(&issue.identifier))
+                    .expect("recovery snapshot should be persisted");
+                assert_eq!(persisted_recovery.pid, None);
+                assert_eq!(persisted_recovery.stale_worker_recovery_attempt_count, 1);
+                assert_eq!(
+                    persisted_recovery
+                        .latest_stale_worker_failure
+                        .as_ref()
+                        .map(|failure| failure.pid),
+                    Some(42_424)
+                );
+
+                let mut replacement_worker_session = persisted_recovery.clone();
+                replacement_worker_session.pid = Some(51_515);
+                replacement_worker_session.summary = "Replacement worker running".to_string();
+                replacement_worker_session.updated_at_epoch_seconds += 1;
+                store.upsert_session(replacement_worker_session)?;
+
+                Ok(51_515)
+            },
+        );
+
+        let persisted_after_worker_write = store
+            .load_state()?
+            .sessions
+            .into_iter()
+            .find(|stored| stored.issue_matches(&issue.identifier))
+            .expect("replacement worker write should persist a session");
+        assert_eq!(persisted_after_worker_write.pid, Some(51_515));
+        assert_eq!(
+            persisted_after_worker_write.stale_worker_recovery_attempt_count,
+            1
+        );
+        assert_eq!(
+            persisted_after_worker_write.started_at_epoch_seconds,
+            1_773_575_000
+        );
+        assert_eq!(
+            persisted_after_worker_write
+                .latest_stale_worker_failure
+                .as_ref()
+                .map(|failure| failure.pid),
+            Some(42_424)
+        );
+        assert!(note.contains("fresh pid 51515"));
         Ok(())
     }
 

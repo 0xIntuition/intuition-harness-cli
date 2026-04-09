@@ -938,6 +938,9 @@ impl ListenProjectStore {
 
     fn refresh_session_detail(&self, session: &AgentSession) -> Result<()> {
         let path = self.detail_path(&session.issue_identifier);
+        if let Some(parent) = path.parent() {
+            ensure_dir(parent)?;
+        }
         let mut detail = self
             .load_session_detail(&session.issue_identifier)?
             .unwrap_or_else(|| ListenSessionDetail {
