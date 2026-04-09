@@ -540,6 +540,31 @@ impl PullRequestSummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleWorkerFailure {
+    pub pid: u32,
+    pub observed_at_epoch_seconds: u64,
+    pub last_persisted_phase: SessionPhase,
+    pub summary: String,
+    pub classification: BlockedReason,
+}
+
+impl StaleWorkerFailure {
+    pub(super) fn operator_summary(&self) -> String {
+        format!(
+            "pid {} | {} | {} | retryable {}",
+            self.pid,
+            self.last_persisted_phase.display_label(),
+            self.summary,
+            if self.classification.retryable {
+                "yes"
+            } else {
+                "no"
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
     #[serde(default)]
@@ -568,6 +593,8 @@ pub struct AgentSession {
     pub pull_request: PullRequestSummary,
     #[serde(default)]
     pub workpad_comment_id: Option<String>,
+    #[serde(default)]
+    pub started_at_epoch_seconds: u64,
     pub updated_at_epoch_seconds: u64,
     #[serde(default)]
     pub pid: Option<u32>,
@@ -579,6 +606,10 @@ pub struct AgentSession {
     pub context_budget_tokens: Option<u64>,
     #[serde(default)]
     pub pending_linear_sync: Option<PendingLinearSync>,
+    #[serde(default)]
+    pub stale_worker_recovery_attempt_count: u32,
+    #[serde(default)]
+    pub latest_stale_worker_failure: Option<StaleWorkerFailure>,
     #[serde(default)]
     pub last_timeout: Option<SessionTimeoutRecord>,
     #[serde(default)]
@@ -741,6 +772,10 @@ impl AgentSession {
 
     pub(super) fn age_label(&self, now_epoch_seconds: u64) -> String {
         format_duration(now_epoch_seconds.saturating_sub(self.updated_at_epoch_seconds))
+    }
+
+    pub(super) fn elapsed_since_start_label(&self, now_epoch_seconds: u64) -> String {
+        format_duration(now_epoch_seconds.saturating_sub(self.started_at_epoch_seconds))
     }
 
     pub(super) fn table_tokens_label(&self) -> String {
@@ -1020,12 +1055,15 @@ mod tests {
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1,
             updated_at_epoch_seconds: 1,
             pid: None,
             session_id: Some("issue-1".to_string()),
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),

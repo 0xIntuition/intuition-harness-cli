@@ -67,8 +67,8 @@ pub use state::{
     ActiveIssue, AgentSession, BlockedCategory, BlockedReason, CanonicalSessionData,
     LatestResumeHandle, LinearFailureSnapshot, PendingIssue, PendingLinearSync,
     PendingPullRequestAttachment, PullRequestStatus, PullRequestSummary, ResumeProvider,
-    SessionOrigin, SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage,
-    TurnPromptMode, TurnTokenSnapshot,
+    SessionOrigin, SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination,
+    StaleWorkerFailure, TokenUsage, TurnPromptMode, TurnTokenSnapshot,
 };
 use state::{
     COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
@@ -86,6 +86,7 @@ const IN_PROGRESS_STATE: &str = "In Progress";
 const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
+const MAX_STALE_WORKER_RECOVERY_ATTEMPTS: u32 = 2;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
@@ -381,6 +382,7 @@ impl ListenCycleData {
                         status: PullRequestStatus::Draft,
                     },
                     workpad_comment_id: Some("comment-met-13".to_string()),
+                    started_at_epoch_seconds: reference_now - 2_940,
                     updated_at_epoch_seconds: reference_now - 1_180,
                     pid: Some(95_388),
                     session_id: Some("019cedb422937651b0b4dfac4af6a640".to_string()),
@@ -393,6 +395,8 @@ impl ListenCycleData {
                     }),
                     context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
                     pending_linear_sync: None,
+                    stale_worker_recovery_attempt_count: 0,
+                    latest_stale_worker_failure: None,
                     last_timeout: None,
                     turns: Some(1),
                     tokens: TokenUsage {
@@ -432,6 +436,7 @@ impl ListenCycleData {
                     branch: Some("met-17-branch-pr-reconciliation".to_string()),
                     pull_request: PullRequestSummary::default(),
                     workpad_comment_id: None,
+                    started_at_epoch_seconds: reference_now - 2_940,
                     updated_at_epoch_seconds: reference_now - 2_940,
                     pid: Some(96_104),
                     session_id: Some("019ceda50a417ef1bf964f26683c1570".to_string()),
@@ -444,6 +449,8 @@ impl ListenCycleData {
                     }),
                     context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
                     pending_linear_sync: None,
+                    stale_worker_recovery_attempt_count: 0,
+                    latest_stale_worker_failure: None,
                     last_timeout: None,
                     turns: Some(1),
                     tokens: TokenUsage {
@@ -508,6 +515,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 version: 1,
                 issue_identifier: "MET-13".to_string(),
                 issue_title: "Agent Daemon".to_string(),
+                started_at_epoch_seconds: reference_now - 2_940,
                 updated_at_epoch_seconds: reference_now - 120,
                 session_updated_at_epoch_seconds: reference_now - 1_180,
                 phase: SessionPhase::BriefReady,
@@ -559,6 +567,8 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                         .to_string(),
                 }),
                 pending_linear_sync: None,
+                stale_worker_recovery_attempt_count: 0,
+                latest_stale_worker_failure: None,
                 last_timeout: None,
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-13".to_string()),
@@ -630,6 +640,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 version: 1,
                 issue_identifier: "MET-17".to_string(),
                 issue_title: "Branch PR reconciliation".to_string(),
+                started_at_epoch_seconds: reference_now - 2_940,
                 updated_at_epoch_seconds: reference_now - 120,
                 session_updated_at_epoch_seconds: reference_now - 2_940,
                 phase: SessionPhase::Claimed,
@@ -668,6 +679,8 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                         .to_string(),
                 }),
                 pending_linear_sync: None,
+                stale_worker_recovery_attempt_count: 0,
+                latest_stale_worker_failure: None,
                 last_timeout: None,
                 references: store::SessionDetailReferences {
                     workspace_path: Some("/tmp/metastack-cli-workspace/MET-17".to_string()),
@@ -1160,30 +1173,238 @@ fn blocked_reason(
     BlockedReason::new(category, reason, retryable)
 }
 
-fn mark_running_session_stale(
+fn stale_worker_failure(
+    session: &AgentSession,
+    pid: u32,
+    classification: BlockedReason,
+) -> StaleWorkerFailure {
+    StaleWorkerFailure {
+        pid,
+        observed_at_epoch_seconds: now_epoch_seconds(),
+        last_persisted_phase: session.phase,
+        summary: format!(
+            "worker pid {pid} disappeared while the session was {}",
+            session.phase.label()
+        ),
+        classification,
+    }
+}
+
+fn stale_worker_attempts_summary(attempts: u32) -> Option<String> {
+    (attempts > 0)
+        .then(|| format!("recovery attempts {attempts}/{MAX_STALE_WORKER_RECOVERY_ATTEMPTS}"))
+}
+
+fn block_stale_worker_session(
     session: &mut AgentSession,
     issue_identifier: &str,
     fallback_log_path: &Path,
-    pid: u32,
+    failure: StaleWorkerFailure,
+    blocked: BlockedReason,
 ) {
     let log_path = session
         .log_path
         .clone()
         .unwrap_or_else(|| fallback_log_path.display().to_string());
     session.phase = SessionPhase::Blocked;
-    session.blocked = Some(blocked_reason(BlockedCategory::Infra, "worker died", true));
+    session.blocked = Some(blocked);
+    session.latest_stale_worker_failure = Some(failure.clone());
     session.log_path = Some(log_path.clone());
+    if session.started_at_epoch_seconds == 0 {
+        session.started_at_epoch_seconds = session.updated_at_epoch_seconds.max(1);
+    }
     session.summary = compact_session_summary([
         session
             .blocked
             .as_ref()
             .map(BlockedReason::summary_headline),
-        Some(format!("stale pid {pid}")),
+        Some(format!("stale pid {}", failure.pid)),
+        stale_worker_attempts_summary(session.stale_worker_recovery_attempt_count),
         Some(log_reference_summary(Path::new(&log_path))),
     ]);
     session.updated_at_epoch_seconds = now_epoch_seconds();
     if session.issue_identifier.is_empty() {
         session.issue_identifier = issue_identifier.to_string();
+    }
+}
+
+#[cfg(test)]
+fn mark_running_session_stale(
+    session: &mut AgentSession,
+    issue_identifier: &str,
+    fallback_log_path: &Path,
+    pid: u32,
+) {
+    let blocked = blocked_reason(BlockedCategory::Infra, "worker died", true);
+    let failure = stale_worker_failure(session, pid, blocked.clone());
+    block_stale_worker_session(
+        session,
+        issue_identifier,
+        fallback_log_path,
+        failure,
+        blocked,
+    );
+}
+
+fn reconcile_stale_worker_session<F>(
+    session: &mut AgentSession,
+    issue: &IssueSummary,
+    fallback_log_path: &Path,
+    spawn_worker: F,
+) -> String
+where
+    F: FnOnce(&Path, &str, Option<&str>) -> Result<u32>,
+{
+    let Some(workspace_path) = session.workspace_path.as_deref() else {
+        let blocked = blocked_reason(
+            BlockedCategory::Setup,
+            "missing workspace or workpad context",
+            false,
+        );
+        let failure =
+            stale_worker_failure(session, session.pid.unwrap_or_default(), blocked.clone());
+        block_stale_worker_session(
+            session,
+            &issue.identifier,
+            fallback_log_path,
+            failure,
+            blocked,
+        );
+        return format!(
+            "{} worker pid {} was no longer running; missing workspace context prevented automatic stale-worker recovery.",
+            session.issue_identifier,
+            session.pid.unwrap_or_default()
+        );
+    };
+    let Some(workpad_comment_id) = session.workpad_comment_id.as_deref() else {
+        let blocked = blocked_reason(
+            BlockedCategory::Setup,
+            "missing workspace or workpad context",
+            false,
+        );
+        let failure =
+            stale_worker_failure(session, session.pid.unwrap_or_default(), blocked.clone());
+        block_stale_worker_session(
+            session,
+            &issue.identifier,
+            fallback_log_path,
+            failure,
+            blocked,
+        );
+        return format!(
+            "{} worker pid {} was no longer running; missing workpad context prevented automatic stale-worker recovery.",
+            session.issue_identifier,
+            session.pid.unwrap_or_default()
+        );
+    };
+    let workspace_path = PathBuf::from(workspace_path);
+    let pid = session.pid.unwrap_or_default();
+    if !workspace_path.is_dir() {
+        let blocked = blocked_reason(BlockedCategory::Setup, "workspace missing", false);
+        let failure = stale_worker_failure(session, pid, blocked.clone());
+        block_stale_worker_session(
+            session,
+            &issue.identifier,
+            fallback_log_path,
+            failure,
+            blocked,
+        );
+        return format!(
+            "{} worker pid {} was no longer running; workspace `{}` was missing, so stale-worker recovery was blocked.",
+            session.issue_identifier,
+            pid,
+            workspace_path.display()
+        );
+    }
+
+    let blocked = if session.origin.is_execute() {
+        blocked_reason(
+            BlockedCategory::Other,
+            "execute-origin awaiting manual takeover",
+            false,
+        )
+    } else if session.phase != SessionPhase::Running {
+        blocked_reason(BlockedCategory::Infra, "paused worker died", false)
+    } else if session.stale_worker_recovery_attempt_count >= MAX_STALE_WORKER_RECOVERY_ATTEMPTS {
+        blocked_reason(
+            BlockedCategory::Infra,
+            "stale worker retry budget exhausted",
+            false,
+        )
+    } else {
+        blocked_reason(BlockedCategory::Infra, "worker died", true)
+    };
+    let failure = stale_worker_failure(session, pid, blocked.clone());
+
+    if !blocked.retryable {
+        block_stale_worker_session(
+            session,
+            &issue.identifier,
+            fallback_log_path,
+            failure,
+            blocked,
+        );
+        return format!(
+            "{} worker pid {} was no longer running; session was parked as blocked after stale-worker classification.",
+            session.issue_identifier, pid
+        );
+    }
+
+    session.latest_stale_worker_failure = Some(failure.clone());
+    session.stale_worker_recovery_attempt_count = session
+        .stale_worker_recovery_attempt_count
+        .saturating_add(1);
+    if session.started_at_epoch_seconds == 0 {
+        session.started_at_epoch_seconds = session.updated_at_epoch_seconds.max(1);
+    }
+
+    match spawn_worker(
+        &workspace_path,
+        workpad_comment_id,
+        session.backlog_issue_identifier.as_deref(),
+    ) {
+        Ok(new_pid) => {
+            session.phase = SessionPhase::Running;
+            session.blocked = None;
+            session.pid = Some(new_pid);
+            session.summary = compact_session_summary([
+                Some("Recovered stale worker".to_string()),
+                Some(format!("pid {new_pid}")),
+                stale_worker_attempts_summary(session.stale_worker_recovery_attempt_count),
+                session
+                    .backlog_issue_identifier
+                    .as_ref()
+                    .map(|identifier| format!("backlog {identifier}")),
+            ]);
+            session.updated_at_epoch_seconds = now_epoch_seconds();
+            session.log_path = Some(fallback_log_path.display().to_string());
+            format!(
+                "Recovered stale {} worker pid {} with fresh pid {} (attempt {}/{}).",
+                issue.identifier,
+                pid,
+                new_pid,
+                session.stale_worker_recovery_attempt_count,
+                MAX_STALE_WORKER_RECOVERY_ATTEMPTS
+            )
+        }
+        Err(error) => {
+            let blocked = blocked_reason(
+                BlockedCategory::Infra,
+                "stale worker recovery failed",
+                false,
+            );
+            block_stale_worker_session(
+                session,
+                &issue.identifier,
+                fallback_log_path,
+                failure,
+                blocked,
+            );
+            format!(
+                "{} worker pid {} was stale, but automatic recovery failed: {error:#}.",
+                session.issue_identifier, pid
+            )
+        }
     }
 }
 
@@ -1643,17 +1864,21 @@ where
             }
 
             if matches!(session.phase, SessionPhase::Running | SessionPhase::Paused)
-                && let Some(pid) = session.pid
+                && let Some(_pid) = session.pid
             {
-                mark_running_session_stale(
+                let fallback_log_path = self.agent_log_path(&issue.identifier);
+                notes.push(reconcile_stale_worker_session(
                     &mut session,
-                    &issue.identifier,
-                    &self.agent_log_path(&issue.identifier),
-                    pid,
-                );
-                notes.push(format!(
-                    "{} worker pid {} was no longer running; marked the stored session blocked instead of auto-resuming it.",
-                    session.issue_identifier, pid
+                    &issue,
+                    &fallback_log_path,
+                    |workspace_path, workpad_comment_id, backlog_issue_identifier| {
+                        self.spawn_listen_worker_from_context(
+                            &issue,
+                            workspace_path,
+                            workpad_comment_id,
+                            backlog_issue_identifier,
+                        )
+                    },
                 ));
                 reconciled.push(session);
                 continue;
@@ -2249,12 +2474,15 @@ where
             branch: artifacts.workspace.map(|entry| entry.branch.clone()),
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: artifacts.workpad_comment.map(|comment| comment.id.clone()),
+            started_at_epoch_seconds: updated_at_epoch_seconds,
             updated_at_epoch_seconds,
             pid: artifacts.pid.filter(|pid| *pid > 0),
             session_id: None,
             latest_resume_handle: None,
             context_budget_tokens: Some(self.worker_context_budget_tokens),
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: artifacts.turns.or(Some(0)),
             tokens: TokenUsage::default(),
@@ -2390,6 +2618,24 @@ fn merge_monotonic_session_fields(
     persisted_session: &AgentSession,
     mut daemon_session: AgentSession,
 ) -> AgentSession {
+    if daemon_session.started_at_epoch_seconds == 0 {
+        daemon_session.started_at_epoch_seconds = persisted_session.started_at_epoch_seconds;
+    }
+
+    if daemon_session.stale_worker_recovery_attempt_count
+        < persisted_session.stale_worker_recovery_attempt_count
+    {
+        daemon_session.stale_worker_recovery_attempt_count =
+            persisted_session.stale_worker_recovery_attempt_count;
+    }
+
+    if daemon_session.latest_stale_worker_failure.is_none()
+        && persisted_session.latest_stale_worker_failure.is_some()
+    {
+        daemon_session.latest_stale_worker_failure =
+            persisted_session.latest_stale_worker_failure.clone();
+    }
+
     if session_phase_regressed(persisted_session, &daemon_session) {
         daemon_session.phase = persisted_session.phase;
         daemon_session.summary = persisted_session.summary.clone();
@@ -3098,6 +3344,18 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
             session.canonical_tokens().display_compact()
         ));
         lines.push(format!(
+            "  - Started: {}",
+            now_timestamp_for_epoch(session.started_at_epoch_seconds)
+        ));
+        lines.push(format!(
+            "  - Elapsed since start: {}",
+            session.elapsed_since_start_label(now_epoch_seconds())
+        ));
+        lines.push(format!(
+            "  - Recovery attempts: {}/{}",
+            session.stale_worker_recovery_attempt_count, MAX_STALE_WORKER_RECOVERY_ATTEMPTS
+        ));
+        lines.push(format!(
             "  - Updated: {}",
             now_timestamp_for_epoch(session.updated_at_epoch_seconds)
         ));
@@ -3118,6 +3376,16 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         ));
         if let Some(pending_sync) = session.pending_linear_sync_label() {
             lines.push(format!("  - Pending Linear sync: {pending_sync}"));
+        }
+        if let Some(failure) = session.latest_stale_worker_failure.as_ref() {
+            lines.push(format!(
+                "  - Latest stale worker failure: {}",
+                failure.operator_summary()
+            ));
+            lines.push(format!(
+                "  - Latest stale worker observed: {}",
+                now_timestamp_for_epoch(failure.observed_at_epoch_seconds)
+            ));
         }
         if let Some(timeout) = session.last_timeout_label() {
             lines.push(format!("  - Last timeout: {timeout}"));
@@ -3190,6 +3458,18 @@ fn append_session_inspect_detail_lines(
         "  - Detail tokens: {}",
         detail_tokens(detail).display_compact()
     ));
+    lines.push(format!(
+        "  - Detail started: {}",
+        now_timestamp_for_epoch(detail.started_at_epoch_seconds)
+    ));
+    lines.push(format!(
+        "  - Detail elapsed since start: {}",
+        format_duration(now_epoch_seconds().saturating_sub(detail.started_at_epoch_seconds))
+    ));
+    lines.push(format!(
+        "  - Detail recovery attempts: {}/{}",
+        detail.stale_worker_recovery_attempt_count, MAX_STALE_WORKER_RECOVERY_ATTEMPTS
+    ));
     if let Some(blocked) = detail.blocked.as_ref() {
         lines.push(format!(
             "  - Detail blocked category: {}",
@@ -3226,6 +3506,16 @@ fn append_session_inspect_detail_lines(
         lines.push(format!(
             "  - Detail last timeout: {}",
             timeout.summary_label()
+        ));
+    }
+    if let Some(failure) = detail.latest_stale_worker_failure.as_ref() {
+        lines.push(format!(
+            "  - Detail latest stale worker failure: {}",
+            failure.operator_summary()
+        ));
+        lines.push(format!(
+            "  - Detail latest stale worker observed: {}",
+            now_timestamp_for_epoch(failure.observed_at_epoch_seconds)
         ));
     }
 
@@ -3628,12 +3918,15 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         branch: Some(workspace.branch.clone()),
         pull_request: PullRequestSummary::default(),
         workpad_comment_id: Some(workpad_comment.id.clone()),
+        started_at_epoch_seconds: updated_at_epoch_seconds,
         updated_at_epoch_seconds,
         pid: Some(pid),
         session_id: Some(detailed_issue.id.clone()),
         latest_resume_handle: None,
         context_budget_tokens: Some(context_budget_tokens),
         pending_linear_sync: None,
+        stale_worker_recovery_attempt_count: 0,
+        latest_stale_worker_failure: None,
         last_timeout: None,
         turns: Some(0),
         tokens: TokenUsage::default(),
@@ -5133,12 +5426,15 @@ suffix
                 branch: None,
                 pull_request: PullRequestSummary::default(),
                 workpad_comment_id: None,
+                started_at_epoch_seconds: 1,
                 updated_at_epoch_seconds: 1,
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
                 context_budget_tokens: None,
                 pending_linear_sync: None,
+                stale_worker_recovery_attempt_count: 0,
+                latest_stale_worker_failure: None,
                 last_timeout: None,
                 turns: None,
                 tokens: TokenUsage {
@@ -5168,12 +5464,15 @@ suffix
                 branch: None,
                 pull_request: PullRequestSummary::default(),
                 workpad_comment_id: None,
+                started_at_epoch_seconds: 2,
                 updated_at_epoch_seconds: 2,
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
                 context_budget_tokens: None,
                 pending_linear_sync: None,
+                stale_worker_recovery_attempt_count: 0,
+                latest_stale_worker_failure: None,
                 last_timeout: None,
                 turns: None,
                 tokens: TokenUsage {
@@ -5213,12 +5512,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1,
             updated_at_epoch_seconds: 1,
             pid: None,
             session_id: None,
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: None,
             tokens: TokenUsage {
@@ -5264,12 +5566,15 @@ suffix
                     branch: None,
                     pull_request: PullRequestSummary::default(),
                     workpad_comment_id: None,
+                    started_at_epoch_seconds: 1,
                     updated_at_epoch_seconds: 1,
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
                     context_budget_tokens: None,
                     pending_linear_sync: None,
+                    stale_worker_recovery_attempt_count: 0,
+                    latest_stale_worker_failure: None,
                     last_timeout: None,
                     turns: None,
                     tokens: TokenUsage::default(),
@@ -5305,12 +5610,15 @@ suffix
                     branch: None,
                     pull_request: PullRequestSummary::default(),
                     workpad_comment_id: None,
+                    started_at_epoch_seconds: 2,
                     updated_at_epoch_seconds: 2,
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
                     context_budget_tokens: None,
                     pending_linear_sync: None,
+                    stale_worker_recovery_attempt_count: 0,
+                    latest_stale_worker_failure: None,
                     last_timeout: None,
                     turns: None,
                     tokens: TokenUsage::default(),
@@ -5346,12 +5654,15 @@ suffix
                     branch: None,
                     pull_request: PullRequestSummary::default(),
                     workpad_comment_id: None,
+                    started_at_epoch_seconds: 3,
                     updated_at_epoch_seconds: 3,
                     pid: None,
                     session_id: None,
                     latest_resume_handle: None,
                     context_budget_tokens: None,
                     pending_linear_sync: None,
+                    stale_worker_recovery_attempt_count: 0,
+                    latest_stale_worker_failure: None,
                     last_timeout: None,
                     turns: None,
                     tokens: TokenUsage::default(),
@@ -5410,12 +5721,15 @@ suffix
                 branch: None,
                 pull_request: PullRequestSummary::default(),
                 workpad_comment_id: None,
+                started_at_epoch_seconds: 1,
                 updated_at_epoch_seconds: 1,
                 pid: None,
                 session_id: None,
                 latest_resume_handle: None,
                 context_budget_tokens: None,
                 pending_linear_sync: None,
+                stale_worker_recovery_attempt_count: 0,
+                latest_stale_worker_failure: None,
                 last_timeout: None,
                 turns: None,
                 tokens: TokenUsage {
@@ -5508,12 +5822,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1_773_575_540,
             updated_at_epoch_seconds: 1_773_575_540,
             pid: None,
             session_id: None,
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
@@ -5573,12 +5890,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1_773_575_600,
             updated_at_epoch_seconds: 1_773_575_600,
             pid: Some(42),
             session_id: None,
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(0),
             tokens: TokenUsage::default(),
@@ -5670,12 +5990,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1_773_575_605,
             updated_at_epoch_seconds: 1_773_575_605,
             pid: Some(42),
             session_id: None,
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: Some(SessionTimeoutRecord {
                 turn: 2,
                 pid: 42,
@@ -5777,12 +6100,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1_773_575_705,
             updated_at_epoch_seconds: 1_773_575_705,
             pid: Some(42),
             session_id: None,
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: Some(SessionTimeoutRecord {
                 turn: 3,
                 pid: 42,
@@ -5837,12 +6163,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1_773_575_805,
             updated_at_epoch_seconds: 1_773_575_805,
             pid: Some(42),
             session_id: None,
             latest_resume_handle: None,
             context_budget_tokens: Some(crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS),
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
@@ -5918,12 +6247,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1,
             updated_at_epoch_seconds: 1,
             pid: None,
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: None,
             tokens: TokenUsage::default(),
@@ -5974,12 +6306,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1,
             updated_at_epoch_seconds: 1,
             pid: None,
             session_id: Some("legacy-session-1".to_string()),
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: None,
             tokens: TokenUsage::default(),
@@ -6142,12 +6477,15 @@ suffix
             branch: Some("eng-10163".to_string()),
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: Some("comment-1".to_string()),
+            started_at_epoch_seconds: 1,
             updated_at_epoch_seconds: 1,
             pid: Some(42_424),
             session_id: Some("session-1".to_string()),
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(2),
             tokens: TokenUsage::default(),
@@ -6165,6 +6503,153 @@ suffix
         assert!(session.summary.contains("Blocked | worker died"));
         assert!(session.summary.contains("stale pid 42424"));
         assert!(session.summary.contains("see logs/ENG-10163.log"));
+    }
+
+    #[test]
+    fn stale_running_session_relaunches_with_existing_context_and_fresh_pid() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let issue = in_progress_issue();
+        let mut session = AgentSession {
+            issue_id: Some(issue.id.clone()),
+            issue_identifier: issue.identifier.clone(),
+            issue_title: issue.title.clone(),
+            project_name: issue.project.as_ref().map(|project| project.name.clone()),
+            team_key: issue.team.key.clone(),
+            issue_url: issue.url.clone(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: Some("TECH-90".to_string()),
+            backlog_issue_title: Some("Backlog".to_string()),
+            backlog_path: Some("/tmp/backlog/TECH-90".to_string()),
+            workspace_path: Some(workspace.display().to_string()),
+            branch: Some("met-90-recovery".to_string()),
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: Some("comment-90".to_string()),
+            started_at_epoch_seconds: 1_773_575_000,
+            updated_at_epoch_seconds: 1_773_575_100,
+            pid: Some(42_424),
+            session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
+            context_budget_tokens: None,
+            pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
+            last_timeout: None,
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: Some("logs/ENG-90.log".to_string()),
+            origin: SessionOrigin::Listen,
+        };
+
+        let note = super::reconcile_stale_worker_session(
+            &mut session,
+            &issue,
+            Path::new("logs/ENG-90.log"),
+            |workspace_path, workpad_comment_id, backlog_issue_identifier| {
+                assert_eq!(workspace_path, workspace.as_path());
+                assert_eq!(workpad_comment_id, "comment-90");
+                assert_eq!(backlog_issue_identifier, Some("TECH-90"));
+                Ok(51_515)
+            },
+        );
+
+        assert_eq!(session.phase, SessionPhase::Running);
+        assert_eq!(session.pid, Some(51_515));
+        assert_eq!(
+            session.workspace_path.as_deref(),
+            Some(workspace.to_str().unwrap())
+        );
+        assert_eq!(session.workpad_comment_id.as_deref(), Some("comment-90"));
+        assert_eq!(session.backlog_issue_identifier.as_deref(), Some("TECH-90"));
+        assert_eq!(session.stale_worker_recovery_attempt_count, 1);
+        assert_eq!(session.started_at_epoch_seconds, 1_773_575_000);
+        assert_eq!(
+            session
+                .latest_stale_worker_failure
+                .as_ref()
+                .map(|failure| failure.pid),
+            Some(42_424)
+        );
+        assert!(session.summary.contains("Recovered stale worker"));
+        assert!(note.contains("fresh pid 51515"));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_running_session_budget_exhaustion_blocks_without_relaunch() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let issue = in_progress_issue();
+        let mut session = AgentSession {
+            issue_id: Some(issue.id.clone()),
+            issue_identifier: issue.identifier.clone(),
+            issue_title: issue.title.clone(),
+            project_name: issue.project.as_ref().map(|project| project.name.clone()),
+            team_key: issue.team.key.clone(),
+            issue_url: issue.url.clone(),
+            phase: SessionPhase::Running,
+            summary: "Running".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: Some("TECH-90".to_string()),
+            backlog_issue_title: Some("Backlog".to_string()),
+            backlog_path: Some("/tmp/backlog/TECH-90".to_string()),
+            workspace_path: Some(workspace.display().to_string()),
+            branch: Some("met-90-recovery".to_string()),
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: Some("comment-90".to_string()),
+            started_at_epoch_seconds: 1_773_575_000,
+            updated_at_epoch_seconds: 1_773_575_100,
+            pid: Some(42_424),
+            session_id: Some(issue.id.clone()),
+            latest_resume_handle: None,
+            context_budget_tokens: None,
+            pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: super::MAX_STALE_WORKER_RECOVERY_ATTEMPTS,
+            latest_stale_worker_failure: None,
+            last_timeout: None,
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: Some("logs/ENG-90.log".to_string()),
+            origin: SessionOrigin::Listen,
+        };
+
+        let note = super::reconcile_stale_worker_session(
+            &mut session,
+            &issue,
+            Path::new("logs/ENG-90.log"),
+            |_workspace_path, _workpad_comment_id, _backlog_issue_identifier| {
+                panic!("retry-budget exhaustion must not relaunch a worker")
+            },
+        );
+
+        assert_eq!(session.phase, SessionPhase::Blocked);
+        assert_eq!(session.pid, Some(42_424));
+        assert_eq!(
+            session
+                .blocked
+                .as_ref()
+                .map(|blocked| blocked.reason.as_str()),
+            Some("stale worker retry budget exhausted")
+        );
+        assert_eq!(
+            session
+                .latest_stale_worker_failure
+                .as_ref()
+                .map(|failure| failure.classification.reason.as_str()),
+            Some("stale worker retry budget exhausted")
+        );
+        assert!(note.contains("parked as blocked"));
+        Ok(())
     }
 
     #[test]
@@ -6823,12 +7308,15 @@ suffix
             branch: Some("met-88-reassigned".to_string()),
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: Some("comment-88".to_string()),
+            started_at_epoch_seconds: 1_773_575_000,
             updated_at_epoch_seconds: 1_773_575_000,
             pid: None,
             session_id: Some(issue.id.clone()),
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
@@ -6937,12 +7425,15 @@ suffix
             branch: Some("met-89-recovery".to_string()),
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: Some("comment-89".to_string()),
+            started_at_epoch_seconds: 1_773_575_000,
             updated_at_epoch_seconds: 1_773_575_000,
             pid: None,
             session_id: Some(issue.id.clone()),
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),
@@ -7034,12 +7525,15 @@ suffix
             branch: None,
             pull_request: PullRequestSummary::default(),
             workpad_comment_id: None,
+            started_at_epoch_seconds: 1_773_575_000,
             updated_at_epoch_seconds: 1_773_575_000,
             pid: None,
             session_id: Some(issue.id.clone()),
             latest_resume_handle: None,
             context_budget_tokens: None,
             pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turns: Some(1),
             tokens: TokenUsage::default(),

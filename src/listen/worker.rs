@@ -202,6 +202,21 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         )?,
         context_budget_tokens: args.context_budget_tokens,
         pending_linear_sync,
+        started_at_epoch_seconds: load_existing_started_at_epoch_seconds(
+            &source_root,
+            project_selector,
+            &args.issue,
+        )?,
+        stale_worker_recovery_attempt_count: load_existing_stale_worker_recovery_attempt_count(
+            &source_root,
+            project_selector,
+            &args.issue,
+        )?,
+        latest_stale_worker_failure: load_existing_latest_stale_worker_failure(
+            &source_root,
+            project_selector,
+            &args.issue,
+        )?,
         last_timeout: load_existing_last_timeout(&source_root, project_selector, &args.issue)?,
         turn_history: load_existing_turn_history(&source_root, project_selector, &args.issue)?,
         canonical: load_existing_session_canonical(&source_root, project_selector, &args.issue)?,
@@ -1626,6 +1641,9 @@ struct WorkerSessionContext<'a> {
     latest_resume_handle: Option<LatestResumeHandle>,
     context_budget_tokens: u64,
     pending_linear_sync: Option<PendingLinearSync>,
+    started_at_epoch_seconds: u64,
+    stale_worker_recovery_attempt_count: u32,
+    latest_stale_worker_failure: Option<super::StaleWorkerFailure>,
     last_timeout: Option<SessionTimeoutRecord>,
     turn_history: Vec<TurnTokenSnapshot>,
     canonical: CanonicalSessionData,
@@ -6707,12 +6725,15 @@ fn build_worker_session(
         branch: context.branch.map(str::to_string),
         pull_request: context.pull_request.clone(),
         workpad_comment_id: Some(context.workpad_comment_id.to_string()),
+        started_at_epoch_seconds: context.started_at_epoch_seconds,
         updated_at_epoch_seconds: now_epoch_seconds(),
         pid,
         session_id: session_id.map(str::to_string),
         latest_resume_handle: context.latest_resume_handle.clone(),
         context_budget_tokens: Some(context.context_budget_tokens),
         pending_linear_sync: context.pending_linear_sync.clone(),
+        stale_worker_recovery_attempt_count: context.stale_worker_recovery_attempt_count,
+        latest_stale_worker_failure: context.latest_stale_worker_failure.clone(),
         last_timeout: context.last_timeout.clone(),
         turns: Some(turns),
         tokens: canonical.tokens.clone(),
@@ -6766,6 +6787,56 @@ fn load_existing_session_tokens(
         .find(|session| session.issue_matches(issue_identifier))
         .map(|session| session.tokens)
         .unwrap_or_default())
+}
+
+fn load_existing_started_at_epoch_seconds(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<u64> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| {
+            if session.started_at_epoch_seconds > 0 {
+                session.started_at_epoch_seconds
+            } else {
+                session.updated_at_epoch_seconds
+            }
+        })
+        .unwrap_or_else(now_epoch_seconds))
+}
+
+fn load_existing_stale_worker_recovery_attempt_count(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<u32> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .map(|session| session.stale_worker_recovery_attempt_count)
+        .unwrap_or(0))
+}
+
+fn load_existing_latest_stale_worker_failure(
+    root: &Path,
+    project_selector: Option<&str>,
+    issue_identifier: &str,
+) -> Result<Option<super::StaleWorkerFailure>> {
+    let store = super::store::ListenProjectStore::resolve(root, project_selector)?;
+    let state = store.load_state()?;
+    Ok(state
+        .sessions
+        .into_iter()
+        .find(|session| session.issue_matches(issue_identifier))
+        .and_then(|session| session.latest_stale_worker_failure))
 }
 
 fn load_existing_turn_history(
@@ -7065,6 +7136,9 @@ mod tests {
             latest_resume_handle: None,
             context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             pending_linear_sync: None,
+            started_at_epoch_seconds: 1,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turn_history,
             canonical: CanonicalSessionData::default(),
@@ -7102,10 +7176,13 @@ mod tests {
             backlog_issue: None,
             pid: Some(1234),
             latest_resume_handle: None,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             pending_linear_sync: None,
+            started_at_epoch_seconds: 1,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
             last_timeout: None,
             turn_history: Vec::new(),
-            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
             canonical: CanonicalSessionData::default(),
             pull_request: PullRequestSummary::default(),
             github_ci_summary: None,

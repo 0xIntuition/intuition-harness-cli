@@ -299,8 +299,16 @@ The install-scoped listen store also carries:
 - deferred worker-side `pending_linear_sync` metadata for replayable remote operations
 - optional blocked-session taxonomy metadata with category, reason, and retryable status so
   blocked rows, textual inspect output, and selected-session detail all render from one contract
+- stale-worker recovery metadata: original `started_at_epoch_seconds`,
+  `stale_worker_recovery_attempt_count`, and `latest_stale_worker_failure`
 - the latest timeout snapshot for a timed-out worker turn, including turn number, elapsed time,
   timeout limit, PID, graceful-shutdown window, and final termination path
+
+Stale listen-origin `running` workers are recovered from that persisted contract. Reconciliation
+uses the shared blocked taxonomy to classify the dead PID, relaunches recoverable sessions through
+their existing workspace/workpad context, and stops after `2` automatic stale-worker recovery
+attempts per operator-started run. Terminal classifications, missing context, relaunch failures,
+paused sessions, and execute-origin sessions remain blocked and rely on the manual retry path.
 
 Context pressure itself is not persisted. The selected-session detail pane derives `Context
 Pressure` from the selected `AgentSession.turn_history` using the shared pressure mapping.

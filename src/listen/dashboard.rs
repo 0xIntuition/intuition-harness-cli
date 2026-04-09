@@ -15,6 +15,12 @@ use crate::tui::scroll::{clamp_offset, plain_text, wrapped_rows};
 use crate::tui::spaced_list::spaced_list_item;
 use crate::tui::theme::{Tone, badge, content_panel, empty_state, key_hints, panel, panel_title};
 
+fn epoch_label(epoch_seconds: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(epoch_seconds as i64, 0)
+        .map(|timestamp| timestamp.to_rfc3339())
+        .unwrap_or_else(|| epoch_seconds.to_string())
+}
+
 /// Which pane currently owns keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum FocusPane {
@@ -1095,6 +1101,16 @@ fn render_session_detail_text(
     if let Some(timeout) = detail.last_timeout.as_ref() {
         summary_fields.push(SummaryField::new("Last timeout", timeout.summary_label()));
     }
+    if let Some(failure) = detail.latest_stale_worker_failure.as_ref() {
+        summary_fields.push(SummaryField::new(
+            "Latest Stale Worker Failure",
+            failure.operator_summary(),
+        ));
+        summary_fields.push(SummaryField::new(
+            "Latest Stale Worker Observed",
+            epoch_label(failure.observed_at_epoch_seconds),
+        ));
+    }
     push_optional_summary_field(
         &mut summary_fields,
         "Branch",
@@ -1145,6 +1161,22 @@ fn render_session_detail_text(
         "Verification Markdown",
         detail.references.verification_markdown_path.clone(),
     );
+    summary_fields.push(SummaryField::new(
+        "Started",
+        epoch_label(detail.started_at_epoch_seconds),
+    ));
+    summary_fields.push(SummaryField::new(
+        "Elapsed Since Start",
+        session.elapsed_since_start_label(detail.updated_at_epoch_seconds),
+    ));
+    summary_fields.push(SummaryField::new(
+        "Recovery Attempts",
+        format!(
+            "{}/{}",
+            detail.stale_worker_recovery_attempt_count,
+            super::MAX_STALE_WORKER_RECOVERY_ATTEMPTS
+        ),
+    ));
 
     let mut lines = vec![
         Line::from(vec![
@@ -1544,8 +1576,8 @@ mod tests {
     use crate::listen::store::SessionMilestone;
     use crate::listen::{
         BlockedCategory, BlockedReason, DashboardRuntimeContext, ListenCycleData,
-        PullRequestStatus, SessionListView, SessionPhase, TokenUsage, TurnPromptMode,
-        TurnTokenSnapshot, build_dashboard_data,
+        PullRequestStatus, SessionListView, SessionPhase, StaleWorkerFailure, TokenUsage,
+        TurnPromptMode, TurnTokenSnapshot, build_dashboard_data,
     };
     use crate::tui::scroll::clamp_offset;
 
@@ -2589,5 +2621,46 @@ mod tests {
 
         assert!(rendered.contains("waiting for GitHub CI 0/1 settled"));
         assert!(rendered.contains("no GitHub checks configured"));
+    }
+
+    #[test]
+    fn session_detail_renders_stale_worker_recovery_metadata() {
+        let mut cycle = demo_cycle();
+        let session = cycle
+            .sessions
+            .first_mut()
+            .expect("demo data should include a session");
+        session.started_at_epoch_seconds = 1_773_568_000;
+
+        let detail = cycle
+            .session_details
+            .get_mut(&session.issue_identifier)
+            .expect("demo data should include detail for the selected session");
+        detail.started_at_epoch_seconds = 1_773_568_000;
+        detail.updated_at_epoch_seconds = 1_773_568_900;
+        detail.stale_worker_recovery_attempt_count = 1;
+        detail.latest_stale_worker_failure = Some(StaleWorkerFailure {
+            pid: 42_424,
+            observed_at_epoch_seconds: 1_773_568_450,
+            last_persisted_phase: SessionPhase::Running,
+            summary: "worker exited without a recorded completion".to_string(),
+            classification: BlockedReason {
+                category: BlockedCategory::Infra,
+                reason: "worker died".to_string(),
+                retryable: true,
+            },
+        });
+
+        let rendered = render_session_detail_text(session, detail)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Elapsed Since Start:"));
+        assert!(rendered.contains("Recovery Attempts: 1/2"));
+        assert!(rendered.contains("Latest Stale Worker Failure: pid 42424"));
+        assert!(rendered.contains("Latest Stale Worker Observed:"));
     }
 }
