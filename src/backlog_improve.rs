@@ -11,7 +11,7 @@ use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEventKind, KeyModifiers,
 };
-use crossterm::queue;
+use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -378,6 +378,10 @@ impl ImprovementTerminalSession {
         if self.options.raw_mode {
             let raw_mode_result = disable_raw_mode()
                 .context("failed to disable raw mode for backlog improve terminal session");
+            if exit_result.is_ok() && (self.options.mouse_capture || self.options.bracketed_paste) {
+                // Give the terminal a moment to apply mode changes before the parent shell redraws.
+                thread::sleep(Duration::from_millis(20));
+            }
             exit_result?;
             raw_mode_result?;
             return Ok(());
@@ -398,24 +402,21 @@ fn write_improvement_terminal_enter<W: Write>(
     options: ImprovementTerminalSessionOptions,
 ) -> Result<()> {
     if options.alternate_screen {
-        queue!(writer, EnterAlternateScreen)
+        execute!(writer, EnterAlternateScreen)
             .context("failed to enter alternate screen for backlog improve terminal session")?;
     }
     if options.cursor_hidden {
-        queue!(writer, Hide)
+        execute!(writer, Hide)
             .context("failed to hide the cursor for backlog improve terminal session")?;
     }
     if options.mouse_capture {
-        queue!(writer, EnableMouseCapture)
+        execute!(writer, EnableMouseCapture)
             .context("failed to enable mouse capture for backlog improve terminal session")?;
     }
     if options.bracketed_paste {
-        queue!(writer, EnableBracketedPaste)
+        execute!(writer, EnableBracketedPaste)
             .context("failed to enable bracketed paste for backlog improve terminal session")?;
     }
-    writer
-        .flush()
-        .context("failed to flush backlog improve terminal enter commands")?;
     Ok(())
 }
 
@@ -424,24 +425,21 @@ fn write_improvement_terminal_exit<W: Write>(
     options: ImprovementTerminalSessionOptions,
 ) -> Result<()> {
     if options.cursor_hidden {
-        queue!(writer, Show)
+        execute!(writer, Show)
             .context("failed to restore the cursor for backlog improve terminal session")?;
     }
     if options.bracketed_paste {
-        queue!(writer, DisableBracketedPaste)
+        execute!(writer, DisableBracketedPaste)
             .context("failed to disable bracketed paste for backlog improve terminal session")?;
     }
     if options.mouse_capture {
-        queue!(writer, DisableMouseCapture)
+        execute!(writer, DisableMouseCapture)
             .context("failed to disable mouse capture for backlog improve terminal session")?;
     }
     if options.alternate_screen {
-        queue!(writer, LeaveAlternateScreen)
+        execute!(writer, LeaveAlternateScreen)
             .context("failed to leave alternate screen for backlog improve terminal session")?;
     }
-    writer
-        .flush()
-        .context("failed to flush backlog improve terminal exit commands")?;
     Ok(())
 }
 
