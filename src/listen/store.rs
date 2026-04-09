@@ -650,6 +650,22 @@ impl ListenProjectStore {
                     continue;
                 }
                 ActiveLockInspection::Invalid { identity, error } => {
+                    if let Some((recovered, _candidate)) =
+                        first_valid_recovery_candidate::<ActiveListenerLock>(
+                            &recovery_candidate_paths(&self.paths.lock_path)?,
+                        )
+                    {
+                        if pid_is_running(recovered.pid) {
+                            bail!(
+                                "another `{} listen` instance already owns project `{}` (pid {}); active lock: {}",
+                                crate::branding::COMMAND_NAME,
+                                self.identity.project_label,
+                                recovered.pid,
+                                self.paths.lock_path.display()
+                            );
+                        }
+                    }
+
                     eprintln!(
                         "warning: removing unreadable active listener lock for project `{}` at {}: {error:#}",
                         self.identity.project_label,
@@ -1140,26 +1156,20 @@ where
 {
     let candidates = recovery_candidate_paths(path)?;
     let mut attempted = Vec::with_capacity(candidates.len());
+    attempted.extend(
+        candidates
+            .iter()
+            .map(|candidate| candidate.display().to_string()),
+    );
 
-    for candidate in candidates {
-        attempted.push(candidate.display().to_string());
-        let contents = match fs::read_to_string(&candidate) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(_) => continue,
-        };
-        let recovered = match serde_json::from_str::<T>(&contents) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-
+    if let Some((recovered, candidate)) = first_valid_recovery_candidate::<T>(&candidates) {
+        write_json(path, &recovered)
+            .with_context(|| format!("failed to rewrite recovered `{}`", path.display()))?;
         eprintln!(
             "warning: recovered {record_label} for project `{project_context}` at {} from {}",
             path.display(),
             candidate.display()
         );
-        write_json(path, &recovered)
-            .with_context(|| format!("failed to rewrite recovered `{}`", path.display()))?;
         return Ok(recovered);
     }
 
@@ -1211,6 +1221,25 @@ fn recovery_candidate_paths(path: &Path) -> Result<Vec<PathBuf>> {
     let mut candidates = vec![bak_path, tmp_path];
     candidates.extend(temp_siblings);
     Ok(candidates)
+}
+
+fn first_valid_recovery_candidate<T>(candidates: &[PathBuf]) -> Option<(T, PathBuf)>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    for candidate in candidates {
+        let contents = match fs::read_to_string(candidate) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        };
+        let recovered = match serde_json::from_str::<T>(&contents) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        return Some((recovered, candidate.clone()));
+    }
+    None
 }
 
 fn sibling_recovery_path(path: &Path, suffix: &str) -> PathBuf {
@@ -1824,6 +1853,8 @@ fn now_epoch_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
 
@@ -1840,9 +1871,10 @@ mod tests {
 
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
-        LISTEN_SESSION_DETAIL_VERSION, ListenProjectStore, ListenState, SessionDetailReferences,
-        SessionPhase, SessionSelector, now_epoch_seconds, project_key_for_metastack_root,
-        read_json, resolve_source_root, sibling_recovery_path, write_json,
+        LISTEN_SESSION_DETAIL_VERSION, ListenProjectPaths, ListenProjectStore, ListenState,
+        SessionDetailReferences, SessionPhase, SessionSelector, WorkflowRootLayout,
+        now_epoch_seconds, project_key_for_metastack_root, read_json, resolve_source_root,
+        sibling_recovery_path, write_json,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2229,6 +2261,73 @@ mod tests {
 
         assert!(error.to_string().contains("already owns project"));
         assert_eq!(recovered.pid, live_lock.pid);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_listener_lock_blocks_on_live_backup_when_rewrite_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let resolved_store =
+            ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        resolved_store.ensure_layout()?;
+        let lock_root = temp.path().join("lock-root");
+        fs::create_dir_all(&lock_root)?;
+        let lock_layout =
+            WorkflowRootLayout::install_scoped(lock_root.clone(), "active-listener.lock.json");
+        let store = ListenProjectStore {
+            identity: resolved_store.identity.clone(),
+            paths: ListenProjectPaths {
+                layout: lock_layout.clone(),
+                projects_root: resolved_store.paths.projects_root.clone(),
+                project_dir: resolved_store.paths.project_dir.clone(),
+                project_metadata_path: resolved_store.paths.project_metadata_path.clone(),
+                state_path: resolved_store.paths.state_path.clone(),
+                lock_path: lock_layout.active_session_path().to_path_buf(),
+                logs_dir: resolved_store.paths.logs_dir.clone(),
+                details_dir: resolved_store.paths.details_dir.clone(),
+                verification_dir: resolved_store.paths.verification_dir.clone(),
+            },
+        };
+        let mut child = spawn_sleep_process()?;
+        let live_lock = ActiveListenerLock {
+            pid: child.id(),
+            acquired_at_epoch_seconds: now_epoch_seconds(),
+            source_root: repo_root.display().to_string(),
+            metastack_root: repo_root
+                .join(crate::branding::PROJECT_DIR)
+                .display()
+                .to_string(),
+        };
+        write_json(
+            &sibling_recovery_path(&store.paths().lock_path, "bak"),
+            &live_lock,
+        )?;
+        fs::write(&store.paths().lock_path, "{ invalid lock")?;
+
+        let original_mode = fs::metadata(&lock_root)?.permissions().mode();
+        let mut read_only = fs::metadata(&lock_root)?.permissions();
+        read_only.set_mode(0o555);
+        fs::set_permissions(&lock_root, read_only)?;
+
+        let error = store
+            .acquire_listener_lock(std::process::id())
+            .expect_err("live backup should still block when rewriting the recovered lock fails");
+
+        let mut restored = fs::metadata(&lock_root)?.permissions();
+        restored.set_mode(original_mode);
+        fs::set_permissions(&lock_root, restored)?;
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(format!("{error:#}").contains("already owns project"));
+        assert_eq!(
+            fs::read_to_string(&store.paths().lock_path)?,
+            "{ invalid lock"
+        );
         Ok(())
     }
 
