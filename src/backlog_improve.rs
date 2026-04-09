@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -309,6 +309,153 @@ enum ImprovementLoadingOutcome<T> {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ImprovementTerminalSessionOptions {
+    raw_mode: bool,
+    alternate_screen: bool,
+    cursor_hidden: bool,
+    mouse_capture: bool,
+    bracketed_paste: bool,
+}
+
+impl ImprovementTerminalSessionOptions {
+    const fn loading() -> Self {
+        Self {
+            raw_mode: false,
+            alternate_screen: true,
+            cursor_hidden: true,
+            mouse_capture: false,
+            bracketed_paste: false,
+        }
+    }
+
+    const fn interactive() -> Self {
+        Self {
+            raw_mode: true,
+            alternate_screen: true,
+            cursor_hidden: true,
+            mouse_capture: true,
+            bracketed_paste: true,
+        }
+    }
+}
+
+struct ImprovementTerminalSession {
+    options: ImprovementTerminalSessionOptions,
+    active: bool,
+}
+
+impl ImprovementTerminalSession {
+    fn start(options: ImprovementTerminalSessionOptions) -> Result<Self> {
+        if options.raw_mode {
+            enable_raw_mode()
+                .context("failed to enable raw mode for backlog improve terminal session")?;
+        }
+
+        let mut stdout = io::stdout();
+        if let Err(error) = write_improvement_terminal_enter(&mut stdout, options) {
+            if options.raw_mode {
+                let _ = disable_raw_mode();
+            }
+            return Err(error);
+        }
+
+        Ok(Self {
+            options,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+
+        let mut stdout = io::stdout();
+        let exit_result = write_improvement_terminal_exit(&mut stdout, self.options);
+
+        if self.options.raw_mode {
+            let raw_mode_result = disable_raw_mode()
+                .context("failed to disable raw mode for backlog improve terminal session");
+            if exit_result.is_ok() && (self.options.mouse_capture || self.options.bracketed_paste) {
+                // Give the terminal a moment to apply mode changes before the parent shell redraws.
+                thread::sleep(Duration::from_millis(20));
+            }
+            exit_result?;
+            raw_mode_result?;
+            return Ok(());
+        }
+
+        exit_result
+    }
+}
+
+impl Drop for ImprovementTerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn write_improvement_terminal_enter<W: Write>(
+    writer: &mut W,
+    options: ImprovementTerminalSessionOptions,
+) -> Result<()> {
+    if options.alternate_screen {
+        execute!(writer, EnterAlternateScreen)
+            .context("failed to enter alternate screen for backlog improve terminal session")?;
+    }
+    if options.cursor_hidden {
+        execute!(writer, Hide)
+            .context("failed to hide the cursor for backlog improve terminal session")?;
+    }
+    if options.mouse_capture {
+        execute!(writer, EnableMouseCapture)
+            .context("failed to enable mouse capture for backlog improve terminal session")?;
+    }
+    if options.bracketed_paste {
+        execute!(writer, EnableBracketedPaste)
+            .context("failed to enable bracketed paste for backlog improve terminal session")?;
+    }
+    Ok(())
+}
+
+fn write_improvement_terminal_exit<W: Write>(
+    writer: &mut W,
+    options: ImprovementTerminalSessionOptions,
+) -> Result<()> {
+    if options.cursor_hidden {
+        execute!(writer, Show)
+            .context("failed to restore the cursor for backlog improve terminal session")?;
+    }
+    if options.bracketed_paste {
+        execute!(writer, DisableBracketedPaste)
+            .context("failed to disable bracketed paste for backlog improve terminal session")?;
+    }
+    if options.mouse_capture {
+        execute!(writer, DisableMouseCapture)
+            .context("failed to disable mouse capture for backlog improve terminal session")?;
+    }
+    if options.alternate_screen {
+        execute!(writer, LeaveAlternateScreen)
+            .context("failed to leave alternate screen for backlog improve terminal session")?;
+    }
+    Ok(())
+}
+
+/// Returns the shared backlog-improve interactive terminal enter/exit byte sequence.
+///
+/// This is used by deterministic regression tests to prove that cleanup completes before the
+/// final shell-facing summary is written back to the parent terminal session.
+#[doc(hidden)]
+pub fn backlog_improve_terminal_cleanup_bytes() -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let options = ImprovementTerminalSessionOptions::interactive();
+    write_improvement_terminal_enter(&mut output, options)?;
+    write_improvement_terminal_exit(&mut output, options)?;
+    Ok(output)
+}
+
 fn read_improvement_loading_event(timeout: Duration) -> Result<Option<Event>> {
     if !event::poll(timeout).context("failed to poll backlog improvement loading input")? {
         return Ok(None);
@@ -355,7 +502,10 @@ where
 }
 
 enum ImprovementLoadingDisplay {
-    Tui(Terminal<CrosstermBackend<io::Stdout>>),
+    Tui {
+        terminal: Terminal<CrosstermBackend<io::Stdout>>,
+        session: ImprovementTerminalSession,
+    },
     Text {
         last_message: Option<String>,
         last_detail: Option<String>,
@@ -365,10 +515,12 @@ enum ImprovementLoadingDisplay {
 impl ImprovementLoadingDisplay {
     fn start() -> Result<Self> {
         Ok(if io::stdout().is_terminal() {
-            let mut stdout = io::stdout();
-            execute!(stdout, EnterAlternateScreen, Hide)
-                .context("failed to enter the backlog improvement loading dashboard")?;
-            Self::Tui(Terminal::new(CrosstermBackend::new(stdout))?)
+            let session =
+                ImprovementTerminalSession::start(ImprovementTerminalSessionOptions::loading())?;
+            Self::Tui {
+                terminal: Terminal::new(CrosstermBackend::new(io::stdout()))?,
+                session,
+            }
         } else {
             Self::Text {
                 last_message: None,
@@ -379,7 +531,7 @@ impl ImprovementLoadingDisplay {
 
     fn render(&mut self, state: &ImprovementLoadingState) -> Result<()> {
         match self {
-            Self::Tui(terminal) => {
+            Self::Tui { terminal, .. } => {
                 terminal.draw(|frame| {
                     render_loading_panel(
                         frame,
@@ -414,11 +566,11 @@ impl ImprovementLoadingDisplay {
 
 impl Drop for ImprovementLoadingDisplay {
     fn drop(&mut self) {
-        let Self::Tui(terminal) = self else {
+        let Self::Tui { session, .. } = self else {
             return;
         };
 
-        let _ = execute!(terminal.backend_mut(), Show, LeaveAlternateScreen);
+        let _ = session.restore();
     }
 }
 
@@ -579,170 +731,166 @@ async fn run_interactive_improvement_session(
     related_backlog_issues: Vec<IssueSummary>,
     args: &BacklogImproveArgs,
 ) -> Result<String> {
-    let mut stdout = io::stdout();
-    enable_raw_mode().context("failed to enable raw mode for backlog improve review session")?;
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        Hide,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )
-    .context("failed to enter alternate screen for backlog improve review session")?;
-    let _cleanup = ImprovementReviewCleanup;
-
-    let backend = CrosstermBackend::new(stdout);
+    let mut session =
+        ImprovementTerminalSession::start(ImprovementTerminalSessionOptions::interactive())?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
-
-    let instructions = match run_instruction_prompt(&mut terminal, &issues)? {
-        InstructionPromptExit::Cancelled => {
-            return Ok(render_improvement_reports(root, &[]));
-        }
-        InstructionPromptExit::Continue(text) => text,
-    };
-
-    let mut reports = Vec::with_capacity(issues.len());
-
-    for (index, issue) in issues.iter().enumerate() {
-        let mut continuation = None;
-        let mut question_round = 0usize;
-        let Some(mut issue_run) = analyze_issue_with_loading(
-            &mut terminal,
-            root,
-            issue,
-            &related_backlog_issues,
-            args,
-            &mut continuation,
-            instructions.as_deref(),
-            ImprovementReviewProgress {
-                issue_position: index + 1,
-                issue_total: issues.len(),
-                question_round,
-            },
-        )?
-        else {
-            return Ok(render_improvement_reports(root, &reports));
+    let result = async {
+        let instructions = match run_instruction_prompt(&mut terminal, &issues)? {
+            InstructionPromptExit::Cancelled => {
+                return Ok(render_improvement_reports(root, &[]));
+            }
+            InstructionPromptExit::Continue(text) => text,
         };
 
-        loop {
-            match run_improvement_review_dashboard(
+        let mut reports = Vec::with_capacity(issues.len());
+
+        for (index, issue) in issues.iter().enumerate() {
+            let mut continuation = None;
+            let mut question_round = 0usize;
+            let Some(mut issue_run) = analyze_issue_with_loading(
                 &mut terminal,
-                index + 1,
-                issues.len(),
+                root,
                 issue,
-                &issue_run.output,
-                question_round,
-                issue_run.refinement_history.clone(),
-            )? {
-                ImprovementReviewExit::Cancelled => {
-                    return Ok(render_improvement_reports(root, &reports));
-                }
-                ImprovementReviewExit::Accepted {
-                    decision,
-                    apply_requested,
-                } => {
-                    let apply = if apply_requested {
-                        apply_improvement(root, service, &issue_run).await?
-                    } else {
-                        ImprovementApplyRecord {
-                            requested: false,
-                            local_updated: false,
-                            remote_updated: false,
-                            local_before_path: None,
-                            local_after_path: None,
-                            remote_before_path: None,
-                            remote_after_path: None,
-                            error: None,
-                            error_kind: None,
-                        }
-                    };
-                    let report = finalize_issue_run(
-                        root,
-                        &issue_run,
-                        apply,
-                        decision.clone(),
-                        match (apply_requested, decision.as_str()) {
-                            (true, _) => format!("{} applied", render_mode(args.mode)),
-                            (false, "accepted_no_update_needed") => {
-                                "accepted no-update recommendation".to_string()
-                            }
-                            (false, "accepted_needs_planning") => {
-                                "accepted planning/context recommendation".to_string()
-                            }
-                            (false, "accepted_needs_questions") => {
-                                "accepted follow-up-question recommendation".to_string()
-                            }
-                            (false, "skipped_no_update_needed")
-                            | (false, "skipped_ready_for_update")
-                            | (false, "skipped_needs_planning")
-                            | (false, "skipped_needs_questions") => {
-                                "skipped without changes".to_string()
-                            }
-                            (false, "rejected_no_update_needed")
-                            | (false, "rejected_ready_for_update")
-                            | (false, "rejected_needs_planning")
-                            | (false, "rejected_needs_questions") => {
-                                "rejected recommendation".to_string()
-                            }
-                            _ => "reviewed".to_string(),
-                        },
-                    )?;
-                    reports.push(report);
-                    break;
-                }
-                ImprovementReviewExit::FollowUp {
-                    answers,
-                    question_round: next_question_round,
-                } => {
-                    question_round = next_question_round;
-                    let Some(next_issue_run) = continue_issue_with_follow_up_loading(
-                        &mut terminal,
-                        root,
-                        issue_run,
-                        args,
-                        &answers,
-                        &mut continuation,
-                        instructions.as_deref(),
-                        ImprovementReviewProgress {
-                            issue_position: index + 1,
-                            issue_total: issues.len(),
-                            question_round: next_question_round,
-                        },
-                    )?
-                    else {
+                &related_backlog_issues,
+                args,
+                &mut continuation,
+                instructions.as_deref(),
+                ImprovementReviewProgress {
+                    issue_position: index + 1,
+                    issue_total: issues.len(),
+                    question_round,
+                },
+            )?
+            else {
+                return Ok(render_improvement_reports(root, &reports));
+            };
+
+            loop {
+                match run_improvement_review_dashboard(
+                    &mut terminal,
+                    index + 1,
+                    issues.len(),
+                    issue,
+                    &issue_run.output,
+                    question_round,
+                    issue_run.refinement_history.clone(),
+                )? {
+                    ImprovementReviewExit::Cancelled => {
                         return Ok(render_improvement_reports(root, &reports));
-                    };
-                    issue_run = next_issue_run;
-                }
-                ImprovementReviewExit::Refine {
-                    addendum,
-                    question_round: refine_question_round,
-                } => {
-                    question_round = refine_question_round;
-                    let Some(next_issue_run) = continue_issue_with_refinement_loading(
-                        &mut terminal,
-                        root,
-                        issue_run,
-                        args,
-                        &addendum,
-                        &mut continuation,
-                        instructions.as_deref(),
-                        ImprovementReviewProgress {
-                            issue_position: index + 1,
-                            issue_total: issues.len(),
-                            question_round: refine_question_round,
-                        },
-                    )?
-                    else {
-                        return Ok(render_improvement_reports(root, &reports));
-                    };
-                    issue_run = next_issue_run;
+                    }
+                    ImprovementReviewExit::Accepted {
+                        decision,
+                        apply_requested,
+                    } => {
+                        let apply = if apply_requested {
+                            apply_improvement(root, service, &issue_run).await?
+                        } else {
+                            ImprovementApplyRecord {
+                                requested: false,
+                                local_updated: false,
+                                remote_updated: false,
+                                local_before_path: None,
+                                local_after_path: None,
+                                remote_before_path: None,
+                                remote_after_path: None,
+                                error: None,
+                                error_kind: None,
+                            }
+                        };
+                        let report = finalize_issue_run(
+                            root,
+                            &issue_run,
+                            apply,
+                            decision.clone(),
+                            match (apply_requested, decision.as_str()) {
+                                (true, _) => format!("{} applied", render_mode(args.mode)),
+                                (false, "accepted_no_update_needed") => {
+                                    "accepted no-update recommendation".to_string()
+                                }
+                                (false, "accepted_needs_planning") => {
+                                    "accepted planning/context recommendation".to_string()
+                                }
+                                (false, "accepted_needs_questions") => {
+                                    "accepted follow-up-question recommendation".to_string()
+                                }
+                                (false, "skipped_no_update_needed")
+                                | (false, "skipped_ready_for_update")
+                                | (false, "skipped_needs_planning")
+                                | (false, "skipped_needs_questions") => {
+                                    "skipped without changes".to_string()
+                                }
+                                (false, "rejected_no_update_needed")
+                                | (false, "rejected_ready_for_update")
+                                | (false, "rejected_needs_planning")
+                                | (false, "rejected_needs_questions") => {
+                                    "rejected recommendation".to_string()
+                                }
+                                _ => "reviewed".to_string(),
+                            },
+                        )?;
+                        reports.push(report);
+                        break;
+                    }
+                    ImprovementReviewExit::FollowUp {
+                        answers,
+                        question_round: next_question_round,
+                    } => {
+                        question_round = next_question_round;
+                        let Some(next_issue_run) = continue_issue_with_follow_up_loading(
+                            &mut terminal,
+                            root,
+                            issue_run,
+                            args,
+                            &answers,
+                            &mut continuation,
+                            instructions.as_deref(),
+                            ImprovementReviewProgress {
+                                issue_position: index + 1,
+                                issue_total: issues.len(),
+                                question_round: next_question_round,
+                            },
+                        )?
+                        else {
+                            return Ok(render_improvement_reports(root, &reports));
+                        };
+                        issue_run = next_issue_run;
+                    }
+                    ImprovementReviewExit::Refine {
+                        addendum,
+                        question_round: refine_question_round,
+                    } => {
+                        question_round = refine_question_round;
+                        let Some(next_issue_run) = continue_issue_with_refinement_loading(
+                            &mut terminal,
+                            root,
+                            issue_run,
+                            args,
+                            &addendum,
+                            &mut continuation,
+                            instructions.as_deref(),
+                            ImprovementReviewProgress {
+                                issue_position: index + 1,
+                                issue_total: issues.len(),
+                                question_round: refine_question_round,
+                            },
+                        )?
+                        else {
+                            return Ok(render_improvement_reports(root, &reports));
+                        };
+                        issue_run = next_issue_run;
+                    }
                 }
             }
         }
-    }
 
-    Ok(render_improvement_reports(root, &reports))
+        Ok(render_improvement_reports(root, &reports))
+    }
+    .await;
+
+    drop(terminal);
+    session.restore()?;
+    result
 }
 
 async fn load_backlog_improve_issues_with_loading(
@@ -839,134 +987,135 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
         );
     }
 
-    let mut stdout = io::stdout();
-    enable_raw_mode().context("failed to enable raw mode for backlog improve dashboard")?;
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )
-    .context("failed to enter alternate screen for backlog improve dashboard")?;
-    let _cleanup = ImprovementDashboardCleanup;
-
-    let backend = CrosstermBackend::new(stdout);
+    let mut session =
+        ImprovementTerminalSession::start(ImprovementTerminalSessionOptions::interactive())?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = ImprovementDashboardApp::new(issues);
     let mut copy = CopyUiState::default();
     let mut preview_viewport = Rect::default();
+    let result = (|| -> Result<ImprovementDashboardExit> {
+        loop {
+            terminal.draw(|frame| {
+                preview_viewport = render_improvement_dashboard(frame, &app, copy.status_text());
+                copy.render_export_overlay(frame, frame.area());
+            })?;
 
-    loop {
-        terminal.draw(|frame| {
-            preview_viewport = render_improvement_dashboard(frame, &app, copy.status_text());
-            copy.render_export_overlay(frame, frame.area());
-        })?;
+            if !event::poll(Duration::from_millis(250))? {
+                continue;
+            }
 
-        if !event::poll(Duration::from_millis(250))? {
-            continue;
-        }
-
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if is_mouse_toggle_key(key) {
-                    copy.toggle_mouse_capture(terminal.backend_mut())?;
-                    continue;
-                }
-                if copy.export_active()
-                    && copy.handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
-                {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        return Ok(ImprovementDashboardExit::Cancelled);
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if is_mouse_toggle_key(key) {
+                        copy.toggle_mouse_capture(terminal.backend_mut())?;
+                        continue;
                     }
-                    KeyCode::Tab => {
-                        app.focus = match app.focus {
-                            ImprovementPickerFocus::List => ImprovementPickerFocus::Preview,
-                            ImprovementPickerFocus::Preview => ImprovementPickerFocus::List,
-                        };
-                    }
-                    KeyCode::Up => {
-                        if app.focus == ImprovementPickerFocus::Preview {
-                            let _ = app.preview_scroll.apply_key_code_in_viewport(
-                                KeyCode::Up,
-                                preview_viewport,
-                                app.preview_content_rows(preview_viewport.width.max(1)),
-                            );
-                        } else {
-                            app.move_up();
-                        }
-                    }
-                    KeyCode::Down => {
-                        if app.focus == ImprovementPickerFocus::Preview {
-                            let _ = app.preview_scroll.apply_key_code_in_viewport(
-                                KeyCode::Down,
-                                preview_viewport,
-                                app.preview_content_rows(preview_viewport.width.max(1)),
-                            );
-                        } else {
-                            app.move_down();
-                        }
-                    }
-                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
-                        if app.focus == ImprovementPickerFocus::Preview =>
+                    if copy.export_active()
+                        && copy
+                            .handle_export_key(key, copy_overlay_viewport(terminal.size()?.into()))
                     {
-                        let _ = app.preview_scroll.apply_key_in_viewport(
-                            key,
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => {
+                            return Ok(ImprovementDashboardExit::Cancelled);
+                        }
+                        KeyCode::Tab => {
+                            app.focus = match app.focus {
+                                ImprovementPickerFocus::List => ImprovementPickerFocus::Preview,
+                                ImprovementPickerFocus::Preview => ImprovementPickerFocus::List,
+                            };
+                        }
+                        KeyCode::Up => {
+                            if app.focus == ImprovementPickerFocus::Preview {
+                                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                                    KeyCode::Up,
+                                    preview_viewport,
+                                    app.preview_content_rows(preview_viewport.width.max(1)),
+                                );
+                            } else {
+                                app.move_up();
+                            }
+                        }
+                        KeyCode::Down => {
+                            if app.focus == ImprovementPickerFocus::Preview {
+                                let _ = app.preview_scroll.apply_key_code_in_viewport(
+                                    KeyCode::Down,
+                                    preview_viewport,
+                                    app.preview_content_rows(preview_viewport.width.max(1)),
+                                );
+                            } else {
+                                app.move_down();
+                            }
+                        }
+                        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                            if app.focus == ImprovementPickerFocus::Preview =>
+                        {
+                            let _ = app.preview_scroll.apply_key_in_viewport(
+                                key,
+                                preview_viewport,
+                                app.preview_content_rows(preview_viewport.width.max(1)),
+                            );
+                        }
+                        KeyCode::Char(' ') if app.focus == ImprovementPickerFocus::List => {
+                            app.toggle();
+                        }
+                        KeyCode::Enter => {
+                            let selection = app.select();
+                            return Ok(ImprovementDashboardExit::Selected(selection));
+                        }
+                        _ => {
+                            if is_copy_key(key) {
+                                match app.focus {
+                                    ImprovementPickerFocus::List => {
+                                        copy.copy_payload(
+                                            app.query.copy_payload("backlog improve search"),
+                                        );
+                                    }
+                                    ImprovementPickerFocus::Preview => {
+                                        copy.copy_payload(improvement_dashboard_preview_payload(
+                                            &app,
+                                        ));
+                                    }
+                                }
+                            } else if app.focus == ImprovementPickerFocus::List
+                                && app.query.handle_key(key)
+                            {
+                                app.cursor = 0;
+                                app.preview_scroll.reset();
+                            }
+                        }
+                    }
+                }
+                Event::Paste(text) => {
+                    if app.focus == ImprovementPickerFocus::List && app.query.paste(&text) {
+                        app.cursor = 0;
+                        app.preview_scroll.reset();
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    if copy.export_active() {
+                        let _ = copy.handle_export_mouse(
+                            mouse,
+                            copy_overlay_viewport(terminal.size()?.into()),
+                        );
+                    } else {
+                        let _ = app.preview_scroll.apply_mouse_in_viewport(
+                            mouse,
                             preview_viewport,
                             app.preview_content_rows(preview_viewport.width.max(1)),
                         );
                     }
-                    KeyCode::Char(' ') if app.focus == ImprovementPickerFocus::List => {
-                        app.toggle();
-                    }
-                    KeyCode::Enter => {
-                        let selection = app.select();
-                        return Ok(ImprovementDashboardExit::Selected(selection));
-                    }
-                    _ => {
-                        if is_copy_key(key) {
-                            match app.focus {
-                                ImprovementPickerFocus::List => {
-                                    copy.copy_payload(
-                                        app.query.copy_payload("backlog improve search"),
-                                    );
-                                }
-                                ImprovementPickerFocus::Preview => {
-                                    copy.copy_payload(improvement_dashboard_preview_payload(&app));
-                                }
-                            }
-                        } else if app.focus == ImprovementPickerFocus::List
-                            && app.query.handle_key(key)
-                        {
-                            app.cursor = 0;
-                            app.preview_scroll.reset();
-                        }
-                    }
                 }
+                _ => {}
             }
-            Event::Paste(text) => {
-                if app.focus == ImprovementPickerFocus::List && app.query.paste(&text) {
-                    app.cursor = 0;
-                    app.preview_scroll.reset();
-                }
-            }
-            Event::Mouse(mouse) => {
-                if copy.export_active() {
-                    let _ = copy
-                        .handle_export_mouse(mouse, copy_overlay_viewport(terminal.size()?.into()));
-                } else {
-                    let _ = app.preview_scroll.apply_mouse_in_viewport(
-                        mouse,
-                        preview_viewport,
-                        app.preview_content_rows(preview_viewport.width.max(1)),
-                    );
-                }
-            }
-            _ => {}
         }
-    }
+    })();
+
+    drop(terminal);
+    session.restore()?;
+    result
 }
 
 #[cfg(test)]
@@ -2373,35 +2522,6 @@ fn render_follow_up_prompt(
     )
 }
 
-struct ImprovementDashboardCleanup;
-
-impl Drop for ImprovementDashboardCleanup {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
-    }
-}
-
-struct ImprovementReviewCleanup;
-
-impl Drop for ImprovementReviewCleanup {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            Show,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
-    }
-}
-
 /// Collects optional free-form instructions before the improvement analysis begins.
 ///
 /// Renders a side-by-side layout with a multiline editor on the left and a ticket preview
@@ -3456,11 +3576,7 @@ fn normalize_improvement_output(
         bail!("backlog improvement proposed the issue as its own parent");
     }
 
-    let labels = output
-        .proposal
-        .labels
-        .map(normalize_string_list)
-        .filter(|labels| !labels.is_empty());
+    let labels = normalize_improvement_labels(issue, output.proposal.labels);
     let acceptance_criteria = normalize_string_list(output.proposal.acceptance_criteria);
     let title = normalize_optional_text(output.proposal.title);
     let description = normalize_optional_text(output.proposal.description);
@@ -3546,6 +3662,52 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
         normalized.push(trimmed.to_string());
     }
     normalized
+}
+
+fn normalize_improvement_labels(
+    issue: &IssueSummary,
+    proposal_labels: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let original = normalize_issue_labels(issue);
+    let proposed = proposal_labels.map(normalize_string_list)?;
+
+    let mut merged = original.clone();
+    for label in proposed {
+        if is_blocked_improvement_label(&label)
+            && !original
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&label))
+        {
+            continue;
+        }
+        if merged
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&label))
+        {
+            continue;
+        }
+        merged.push(label);
+    }
+
+    if merged.is_empty() || merged == original {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+fn normalize_issue_labels(issue: &IssueSummary) -> Vec<String> {
+    normalize_string_list(
+        issue
+            .labels
+            .iter()
+            .map(|label| label.name.clone())
+            .collect(),
+    )
+}
+
+fn is_blocked_improvement_label(label: &str) -> bool {
+    label.eq_ignore_ascii_case("tech") || label.eq_ignore_ascii_case("technical")
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -3721,12 +3883,13 @@ Instructions:\n\
 4. When you propose a parent issue, choose only from the provided related backlog issue catalog and only when the relationship is strong.\n\
 5. When you propose description changes, return the full Markdown description ready for `{project_dir}/backlog/<ISSUE>/index.md`.\n\
 6. In `basic` mode, prefer modest rewrites and safe metadata cleanup. In `advanced` mode, you may rewrite more substantially and use structure changes when justified.\n\
-7. First choose exactly one route:\n\
+7. When proposing labels, preserve the issue's existing labels and do not introduce `tech` or `technical` unless the issue already carries that label.\n\
+8. First choose exactly one route:\n\
 - `no_update_needed`: the issue is already strong enough. Do not propose changes.\n\
 - `ready_for_update`: you have enough context to recommend a concrete update now.\n\
 - `needs_planning`: the issue lacks planning or context that a human should gather before editing it.\n\
 - `needs_questions`: you need direct follow-up answers before you can responsibly recommend an update.\n\
-8. Return JSON only using this exact shape:\n\
+9. Return JSON only using this exact shape:\n\
 {{\n\
   \"summary\": \"One paragraph explaining the main improvement judgment\",\n\
   \"needs_improvement\": true,\n\
@@ -3746,7 +3909,7 @@ Instructions:\n\
     \"description\": \"Optional full Markdown rewrite\",\n\
     \"priority\": 2,\n\
     \"estimate\": 3,\n\
-    \"labels\": [\"plan\", \"technical\"],\n\
+    \"labels\": [\"plan\"],\n\
     \"parent_issue_identifier\": \"ENG-10001\",\n\
     \"acceptance_criteria\": [\"...\"]\n\
   }}\n\
@@ -4208,7 +4371,31 @@ mod tests {
     }
 
     #[test]
-    fn normalize_improvement_output_dedupes_labels_and_marks_changes() {
+    fn render_improvement_prompt_does_not_seed_technical_labels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        let paths = PlanningPaths::new(root);
+        write_text_file(&paths.scan_path(), "scan", true).expect("scan context");
+        write_text_file(&paths.architecture_path(), "architecture", true).expect("architecture");
+        write_text_file(&paths.conventions_path(), "conventions", true).expect("conventions");
+        write_text_file(&paths.stack_path(), "stack", true).expect("stack");
+        write_text_file(&paths.testing_path(), "testing", true).expect("testing");
+
+        let prompt = render_improvement_prompt(
+            root,
+            &demo_issue("ENG-10170", "Improve prompt labels"),
+            None,
+            &[],
+            BacklogImproveModeArg::Basic,
+        )
+        .expect("prompt");
+
+        assert!(prompt.contains("\"labels\": [\"plan\"]"));
+        assert!(!prompt.contains("\"technical\""));
+    }
+
+    #[test]
+    fn normalize_improvement_output_does_not_introduce_technical_labels_for_plan_tickets() {
         let issue = IssueSummary {
             id: "issue-1".to_string(),
             identifier: "ENG-10170".to_string(),
@@ -4248,6 +4435,7 @@ mod tests {
                         "plan".to_string(),
                         " Plan ".to_string(),
                         "technical".to_string(),
+                        "tech".to_string(),
                     ]),
                     acceptance_criteria: vec![" first ".to_string(), "first".to_string()],
                     ..ImprovementProposal::default()
@@ -4257,15 +4445,66 @@ mod tests {
         .expect("normalize");
 
         assert!(normalized.needs_improvement);
-        assert_eq!(
-            normalized.proposal.labels,
-            Some(vec!["plan".to_string(), "technical".to_string()])
-        );
+        assert_eq!(normalized.proposal.labels, Some(vec!["plan".to_string()]));
         assert_eq!(
             normalized.proposal.acceptance_criteria,
             vec!["first".to_string()]
         );
         assert_eq!(normalized.summary, "summary");
+    }
+
+    #[test]
+    fn normalize_improvement_output_dedupes_labels_and_preserves_existing_technical_labels() {
+        let mut issue = demo_issue("ENG-10170", "Improve");
+        issue.labels = vec![LabelRef {
+            id: "label-tech".to_string(),
+            name: "technical".to_string(),
+        }];
+
+        let normalized = normalize_improvement_output(
+            &issue,
+            ImprovementOutput {
+                summary: "  summary  ".to_string(),
+                needs_improvement: false,
+                route: None,
+                recommendation: None,
+                findings: ImprovementFindings::default(),
+                context_requirements: Vec::new(),
+                follow_up_questions: Vec::new(),
+                proposal: ImprovementProposal {
+                    labels: Some(vec![
+                        "plan".to_string(),
+                        " Plan ".to_string(),
+                        "technical".to_string(),
+                    ]),
+                    ..ImprovementProposal::default()
+                },
+            },
+        )
+        .expect("normalize");
+
+        assert_eq!(
+            normalized.proposal.labels,
+            Some(vec!["technical".to_string(), "plan".to_string()])
+        );
+    }
+
+    #[test]
+    fn improvement_terminal_cleanup_sequences_finish_before_summary_output() {
+        let mut output = Vec::new();
+        let options = ImprovementTerminalSessionOptions::interactive();
+
+        write_improvement_terminal_enter(&mut output, options).expect("enter commands");
+        write_improvement_terminal_exit(&mut output, options).expect("exit commands");
+
+        let summary = b"Improved 1 issue(s):\n- ENG-10170: accepted no-update recommendation\n";
+        let summary_start = output.len();
+        output.extend_from_slice(summary);
+
+        assert!(
+            !output[summary_start..].contains(&0x1b),
+            "summary output should not contain trailing terminal escape bytes"
+        );
     }
 
     #[test]

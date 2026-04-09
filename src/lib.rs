@@ -55,6 +55,8 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use clap::error::ErrorKind;
 
+#[doc(hidden)]
+pub use crate::backlog_improve::backlog_improve_terminal_cleanup_bytes;
 use crate::backlog_improve::run_backlog_improve;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::build::run_build;
