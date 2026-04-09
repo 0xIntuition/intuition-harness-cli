@@ -2293,7 +2293,6 @@ fn listener_pull_request_body(
         format!("# {}", listener_pull_request_title(issue)),
         String::new(),
         "## Summary".to_string(),
-        format!("- Linear issue: {}", issue.url),
         format!(
             "- Published automatically by `{} agents listen` for `{}`",
             crate::branding::COMMAND_NAME,
