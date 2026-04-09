@@ -1044,6 +1044,11 @@ impl ListenProjectStore {
                 continue;
             }
             let path = entry.path();
+            // Skip in-flight temp files created by the atomic write pattern
+            // (persist_json_bytes). Their names look like "ENG-XXXXX.json.XXXXXX.tmp".
+            if path.extension().and_then(OsStr::to_str) == Some("tmp") {
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
                 continue;
             };
