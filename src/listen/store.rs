@@ -2640,6 +2640,72 @@ mod tests {
     }
 
     #[test]
+    fn save_state_keeps_inflight_temp_detail_files_while_pruning_real_orphans() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let issue_identifier = "ENG-10781";
+        let orphan_identifier = "ENG-99999";
+        let mut session = default_session(issue_identifier, SessionPhase::Running, 100);
+        session.log_path = Some(store.log_path(issue_identifier).display().to_string());
+
+        let inflight_temp_path = store
+            .paths()
+            .details_dir
+            .join(format!("{issue_identifier}.json.ABC123.tmp"));
+        fs::write(
+            &inflight_temp_path,
+            "{\"status\":\"in-flight write that should survive orphan cleanup\"}\n",
+        )
+        .context("failed to seed in-flight temp detail artifact for listen store test")?;
+
+        let orphan_detail_path = store.detail_path(orphan_identifier);
+        fs::write(
+            &orphan_detail_path,
+            serde_json::to_vec_pretty(&ListenSessionDetail {
+                version: LISTEN_SESSION_DETAIL_VERSION,
+                issue_identifier: orphan_identifier.to_string(),
+                issue_title: "orphan detail".to_string(),
+                updated_at_epoch_seconds: 100,
+                session_updated_at_epoch_seconds: 100,
+                phase: SessionPhase::Completed,
+                summary: "detail without state".to_string(),
+                blocked: None,
+                turns: Some(1),
+                tokens: TokenUsage::default(),
+                turn_history: Vec::new(),
+                context_budget_tokens: None,
+                canonical: CanonicalSessionData::default(),
+                pull_request: PullRequestSummary::default(),
+                verification: None,
+                latest_resume_handle: None,
+                pending_linear_sync: None,
+                last_timeout: None,
+                references: SessionDetailReferences::default(),
+                prompt_context: Vec::new(),
+                milestones: Vec::new(),
+                log_excerpts: Vec::new(),
+            })?,
+        )
+        .context("failed to seed orphaned detail artifact for listen store test")?;
+
+        store.save_state(&ListenState::from_sessions(vec![session]))?;
+
+        assert!(inflight_temp_path.is_file());
+        assert!(!orphan_detail_path.exists());
+        let detail = store
+            .load_session_detail(issue_identifier)?
+            .context("expected canonical detail artifact to be written for active session")?;
+        assert_eq!(detail.issue_identifier, issue_identifier);
+        assert_eq!(detail.phase, SessionPhase::Running);
+        Ok(())
+    }
+
+    #[test]
     fn invalid_session_detail_is_treated_as_unavailable_and_rewritten() -> Result<()> {
         let temp = tempdir()?;
         let repo_root = temp.path().join("repo");
