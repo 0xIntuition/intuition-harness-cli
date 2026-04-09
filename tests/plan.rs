@@ -1249,7 +1249,7 @@ fn plan_reshape_missing_issue_fails_without_creating_new_ticket() -> Result<(), 
         "issue `ENG-10144` was not found in Linear"
     );
 
-    issues_mock.assert_calls(1);
+    issues_mock.assert_calls(2);
     create_issue_mock.assert_calls(0);
 
     Ok(())
