@@ -1165,6 +1165,7 @@ where
     if let Some((recovered, candidate)) = first_valid_recovery_candidate::<T>(&candidates) {
         write_json(path, &recovered)
             .with_context(|| format!("failed to rewrite recovered `{}`", path.display()))?;
+        cleanup_recovery_artifact(&candidate, path, project_context, record_label);
         eprintln!(
             "warning: recovered {record_label} for project `{project_context}` at {} from {}",
             path.display(),
@@ -1182,6 +1183,25 @@ where
         "failed to recover corrupted {record_label} for project `{project_context}` at `{}`; attempted recovery paths: {attempted}; primary error: {primary_error:#}",
         path.display()
     );
+}
+
+fn cleanup_recovery_artifact(
+    candidate: &Path,
+    path: &Path,
+    project_context: &str,
+    record_label: &str,
+) {
+    match fs::remove_file(candidate) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!(
+                "warning: recovered {record_label} for project `{project_context}` at {} from {} but failed to remove the consumed recovery artifact: {error:#}",
+                path.display(),
+                candidate.display()
+            );
+        }
+    }
 }
 
 fn recovery_candidate_paths(path: &Path) -> Result<Vec<PathBuf>> {
@@ -2128,6 +2148,8 @@ mod tests {
         let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
         store.ensure_layout()?;
 
+        let backup_path = sibling_recovery_path(&store.paths().state_path, "bak");
+        let temp_path = sibling_recovery_path(&store.paths().state_path, "tmp");
         let backup_state = ListenState::from_sessions(vec![default_session(
             "ENG-BACKUP",
             SessionPhase::Blocked,
@@ -2135,14 +2157,8 @@ mod tests {
         )]);
         let temp_state =
             ListenState::from_sessions(vec![default_session("ENG-TMP", SessionPhase::Blocked, 2)]);
-        write_json(
-            &sibling_recovery_path(&store.paths().state_path, "bak"),
-            &backup_state,
-        )?;
-        write_json(
-            &sibling_recovery_path(&store.paths().state_path, "tmp"),
-            &temp_state,
-        )?;
+        write_json(&backup_path, &backup_state)?;
+        write_json(&temp_path, &temp_state)?;
         fs::write(&store.paths().state_path, "{ not valid json")?;
 
         let recovered = store.load_state()?;
@@ -2151,6 +2167,36 @@ mod tests {
         assert_eq!(recovered.sessions.len(), 1);
         assert_eq!(recovered.sessions[0].issue_identifier, "ENG-BACKUP");
         assert_eq!(rewritten.sessions[0].issue_identifier, "ENG-BACKUP");
+        assert!(!backup_path.exists());
+        assert!(temp_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn load_state_removes_consumed_temp_recovery_artifact() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let backup_path = sibling_recovery_path(&store.paths().state_path, "bak");
+        let temp_path = sibling_recovery_path(&store.paths().state_path, "tmp");
+        let temp_state =
+            ListenState::from_sessions(vec![default_session("ENG-TMP", SessionPhase::Blocked, 2)]);
+        fs::write(&backup_path, "{ invalid backup")?;
+        write_json(&temp_path, &temp_state)?;
+        fs::write(&store.paths().state_path, "{ not valid json")?;
+
+        let recovered = store.load_state()?;
+        let rewritten: ListenState = read_json(&store.paths().state_path)?;
+
+        assert_eq!(recovered.sessions.len(), 1);
+        assert_eq!(recovered.sessions[0].issue_identifier, "ENG-TMP");
+        assert_eq!(rewritten.sessions[0].issue_identifier, "ENG-TMP");
+        assert!(backup_path.exists());
+        assert!(!temp_path.exists());
         Ok(())
     }
 
@@ -2203,6 +2249,7 @@ mod tests {
                 .any(|project| project.metadata.project_key == store.identity().project_key)
         );
         assert_eq!(rewritten.project_key, store.identity().project_key);
+        assert!(!backup_path.exists());
         Ok(())
     }
 
@@ -2245,10 +2292,8 @@ mod tests {
                 .display()
                 .to_string(),
         };
-        write_json(
-            &sibling_recovery_path(&store.paths().lock_path, "bak"),
-            &live_lock,
-        )?;
+        let backup_path = sibling_recovery_path(&store.paths().lock_path, "bak");
+        write_json(&backup_path, &live_lock)?;
         fs::write(&store.paths().lock_path, "{ invalid lock")?;
 
         let error = store
@@ -2261,6 +2306,7 @@ mod tests {
 
         assert!(error.to_string().contains("already owns project"));
         assert_eq!(recovered.pid, live_lock.pid);
+        assert!(!backup_path.exists());
         Ok(())
     }
 

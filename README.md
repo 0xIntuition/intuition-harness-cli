@@ -1423,11 +1423,13 @@ prompt-context references, PR publication state, and short log excerpts for the 
 Writes for `project.json`, `session.json`, `session-details/*.json`, verification JSON, and
 `active-listener.lock.json` now use same-directory temp-file persistence so failed writes leave the
 previous readable primary file intact. Startup-critical loads for `project.json`, `session.json`,
-and `active-listener.lock.json` use deterministic sibling recovery (`.bak` before `.tmp`) and
-rewrite the recovered snapshot back into the primary path; optional detail artifacts remain
-best-effort companion state. Unreadable or stale orphaned active locks are removed with warnings,
-while a valid recovered live PID still blocks duplicate listener runs with the existing failure
-behavior.
+and `active-listener.lock.json` use deterministic sibling recovery (`.bak` before `.tmp`),
+rewrite the recovered snapshot back into the primary path, and best-effort remove the consumed
+recovery artifact afterward; optional detail artifacts remain best-effort companion state. Active
+lock cleanup compares file identity before deleting on Unix hosts and falls back to best-effort
+path deletion on non-Unix hosts. Unreadable or stale orphaned active locks are removed with
+warnings, while a valid recovered live PID still blocks duplicate listener runs with the existing
+failure behavior.
 Missing or malformed detail files are treated as temporarily unavailable detail, not as a fatal
 dashboard or reload error; the next successful listener refresh rewrites them. Historical repair
 continues to read both branded `intu` and legacy `meta` turn/preflight listen headers from the
