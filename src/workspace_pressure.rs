@@ -124,10 +124,10 @@ impl WorkspacePressureSignal {
 
         let available_percent = sample.available_percent();
         let level = if sample.available_bytes <= critical_bytes
-            || available_percent <= CRITICAL_PERCENT
+            && available_percent <= CRITICAL_PERCENT
         {
             WorkspacePressureLevel::Critical
-        } else if sample.available_bytes <= warning_bytes || available_percent <= WARNING_PERCENT {
+        } else if sample.available_bytes <= warning_bytes && available_percent <= WARNING_PERCENT {
             WorkspacePressureLevel::Warning
         } else {
             WorkspacePressureLevel::Healthy
@@ -446,30 +446,30 @@ fn test_fixture_summary(
         "healthy" => (healthy_disk, healthy_memory),
         "warning-disk" => (
             Some(ResourceUsageSample {
-                available_bytes: 72 * GIB,
-                total_bytes: 512 * GIB,
+                available_bytes: 18 * GIB,
+                total_bytes: 120 * GIB,
             }),
             healthy_memory,
         ),
         "critical-disk" => (
             Some(ResourceUsageSample {
-                available_bytes: 6 * GIB,
-                total_bytes: 512 * GIB,
+                available_bytes: 8 * GIB,
+                total_bytes: 120 * GIB,
             }),
             healthy_memory,
         ),
         "warning-memory" => (
             healthy_disk,
             Some(ResourceUsageSample {
-                available_bytes: 7 * GIB,
-                total_bytes: 64 * GIB,
+                available_bytes: 3 * GIB,
+                total_bytes: 24 * GIB,
             }),
         ),
         "critical-memory" => (
             healthy_disk,
             Some(ResourceUsageSample {
                 available_bytes: GIB,
-                total_bytes: 64 * GIB,
+                total_bytes: 24 * GIB,
             }),
         ),
         "unavailable" => (None, None),
@@ -683,8 +683,8 @@ mod tests {
     fn workspace_pressure_reports_warning_for_low_disk() {
         let summary = summary(
             Some(ResourceUsageSample {
-                available_bytes: 72 * GIB,
-                total_bytes: 512 * GIB,
+                available_bytes: 18 * GIB,
+                total_bytes: 120 * GIB,
             }),
             Some(ResourceUsageSample {
                 available_bytes: 24 * GIB,
@@ -705,7 +705,7 @@ mod tests {
             }),
             Some(ResourceUsageSample {
                 available_bytes: GIB,
-                total_bytes: 64 * GIB,
+                total_bytes: 24 * GIB,
             }),
         );
 
@@ -716,6 +716,40 @@ mod tests {
                 .startup_block_message()
                 .contains("Critical workspace pressure")
         );
+    }
+
+    #[test]
+    fn workspace_pressure_keeps_large_disk_percent_only_case_healthy() {
+        let summary = summary(
+            Some(ResourceUsageSample {
+                available_bytes: 43 * GIB,
+                total_bytes: 926 * GIB,
+            }),
+            Some(ResourceUsageSample {
+                available_bytes: 24 * GIB,
+                total_bytes: 64 * GIB,
+            }),
+        );
+
+        assert_eq!(summary.overall, Some(WorkspacePressureLevel::Healthy));
+        assert!(!summary.should_block_unattended_startup());
+    }
+
+    #[test]
+    fn workspace_pressure_keeps_memory_bytes_only_case_healthy() {
+        let summary = summary(
+            Some(ResourceUsageSample {
+                available_bytes: 120 * GIB,
+                total_bytes: 512 * GIB,
+            }),
+            Some(ResourceUsageSample {
+                available_bytes: 3 * GIB,
+                total_bytes: 16 * GIB,
+            }),
+        );
+
+        assert_eq!(summary.overall, Some(WorkspacePressureLevel::Healthy));
+        assert!(!summary.should_block_unattended_startup());
     }
 
     #[test]
