@@ -4,6 +4,70 @@ include!("support/common.rs");
 use metastack_cli::branding;
 
 #[cfg(unix)]
+fn queued_bytes(command: impl crossterm::Command) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut output = Vec::new();
+    crossterm::queue!(&mut output, command)?;
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Result<usize, Box<dyn Error>> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .ok_or_else(|| format!("missing subsequence: {:?}", String::from_utf8_lossy(needle)).into())
+}
+
+#[cfg(unix)]
+fn assert_cleanup_sequence_before(output: &[u8], boundary: usize) -> Result<(), Box<dyn Error>> {
+    fn find_subsequence_from(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+        haystack
+            .get(start..)?
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .map(|offset| start + offset)
+    }
+
+    fn rfind_subsequence_before(haystack: &[u8], needle: &[u8], end: usize) -> Option<usize> {
+        haystack
+            .get(..end)?
+            .windows(needle.len())
+            .rposition(|window| window == needle)
+    }
+
+    let prefix = &output[..boundary];
+    let show = queued_bytes(crossterm::cursor::Show)?;
+    let disable_bracketed_paste = queued_bytes(crossterm::event::DisableBracketedPaste)?;
+    let disable_mouse_capture = queued_bytes(crossterm::event::DisableMouseCapture)?;
+    let leave_alternate_screen = queued_bytes(crossterm::terminal::LeaveAlternateScreen)?;
+
+    let disable_bracketed_paste_index = find_subsequence(prefix, &disable_bracketed_paste)?;
+    let show_index = rfind_subsequence_before(prefix, &show, disable_bracketed_paste_index)
+        .ok_or_else(|| "missing cursor-restore bytes before bracketed-paste cleanup".to_string())?;
+    let disable_mouse_capture_index = find_subsequence_from(
+        prefix,
+        &disable_mouse_capture,
+        disable_bracketed_paste_index + disable_bracketed_paste.len(),
+    )
+    .ok_or_else(|| "missing mouse-capture cleanup after bracketed-paste cleanup".to_string())?;
+    let leave_alternate_screen_index = find_subsequence_from(
+        prefix,
+        &leave_alternate_screen,
+        disable_mouse_capture_index + disable_mouse_capture.len(),
+    )
+    .ok_or_else(|| "missing alternate-screen cleanup after mouse-capture cleanup".to_string())?;
+
+    assert!(
+        show_index < disable_bracketed_paste_index
+            && disable_bracketed_paste_index < disable_mouse_capture_index
+            && disable_mouse_capture_index < leave_alternate_screen_index,
+        "cleanup bytes should restore cursor, then disable bracketed paste, mouse capture, and alternate screen before shell-facing output",
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn backlog_improve_scans_repo_backlog_and_writes_proposal_artifacts() -> Result<(), Box<dyn Error>>
 {
@@ -927,6 +991,7 @@ fn backlog_improve_interactive_cleanup_restores_terminal_state_before_return()
     let summary_start = output.len();
     output.extend_from_slice(summary.as_bytes());
 
+    assert_cleanup_sequence_before(&output, summary_start)?;
     assert!(
         output[..summary_start].contains(&0x1b),
         "cleanup proof should include terminal control bytes before the summary"
@@ -940,6 +1005,75 @@ fn backlog_improve_interactive_cleanup_restores_terminal_state_before_return()
     assert!(summary_tail.contains("MET-613: accepted no-update recommendation"));
     assert!(!summary_tail.to_ascii_lowercase().contains("parse error"));
     assert!(!summary_tail.to_ascii_lowercase().contains("zsh:"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn backlog_improve_issue_picker_cancel_cleans_up_terminal_before_cancel_message()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let stub_path = temp.path().join("backlog-improve-stub");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+
+    fs::create_dir_all(&repo_root)?;
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_backlog_improve_config(&config_path, &api_url, &stub_path)?;
+    write_backlog_improve_stub(&stub_path, "#!/bin/sh\nprintf '%s' '{}'\n")?;
+    mock_issue_list(
+        &server,
+        vec![issue_node(
+            "issue-999",
+            "MET-999",
+            "Cancel from issue picker",
+            "Current description",
+            "state-backlog",
+            "Backlog",
+        )],
+    );
+
+    let output = run_backlog_improve_in_pty(
+        &repo_root,
+        &config_path,
+        &[
+            "backlog",
+            "improve",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            "--limit",
+            "5",
+        ],
+        "\u{1b}",
+    )?;
+
+    assert!(
+        output.status.success(),
+        "cancel path should exit successfully"
+    );
+
+    let cancel_message = b"Backlog improvement cancelled.";
+    let cancel_index = find_subsequence(&output.stdout, cancel_message)?;
+
+    assert_cleanup_sequence_before(&output.stdout, cancel_index)?;
+    assert!(
+        !output.stdout[cancel_index..].contains(&0x1b),
+        "cancel message tail should not contain terminal escape bytes"
+    );
 
     Ok(())
 }
