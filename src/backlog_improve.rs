@@ -383,7 +383,10 @@ fn write_improvement_terminal_exit<W: Write>(
     Ok(())
 }
 
-fn start_interactive_improvement_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn start_interactive_improvement_terminal() -> Result<(
+    Terminal<CrosstermBackend<io::Stdout>>,
+    InteractiveTerminalCleanup,
+)> {
     enable_raw_mode().context("failed to enable raw mode for backlog improve terminal session")?;
 
     let options = ImprovementTerminalOptions::interactive();
@@ -393,16 +396,23 @@ fn start_interactive_improvement_terminal() -> Result<Terminal<CrosstermBackend<
         return Err(error);
     }
 
-    Terminal::new(CrosstermBackend::new(stdout))
-        .context("failed to initialize backlog improve interactive terminal")
+    let cleanup = InteractiveTerminalCleanup;
+    let terminal = Terminal::new(CrosstermBackend::new(stdout))
+        .context("failed to initialize backlog improve interactive terminal")?;
+    Ok((terminal, cleanup))
 }
 
-fn start_loading_improvement_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn start_loading_improvement_terminal() -> Result<(
+    Terminal<CrosstermBackend<io::Stdout>>,
+    LoadingTerminalCleanup,
+)> {
     let options = ImprovementTerminalOptions::loading();
     let mut stdout = io::stdout();
     write_improvement_terminal_enter(&mut stdout, options)?;
-    Terminal::new(CrosstermBackend::new(stdout))
-        .context("failed to initialize backlog improve loading terminal")
+    let cleanup = LoadingTerminalCleanup;
+    let terminal = Terminal::new(CrosstermBackend::new(stdout))
+        .context("failed to initialize backlog improve loading terminal")?;
+    Ok((terminal, cleanup))
 }
 
 struct InteractiveTerminalCleanup;
@@ -500,12 +510,8 @@ enum ImprovementLoadingDisplay {
 impl ImprovementLoadingDisplay {
     fn start() -> Result<(Self, Option<LoadingTerminalCleanup>)> {
         Ok(if io::stdout().is_terminal() {
-            (
-                Self::Tui {
-                    terminal: start_loading_improvement_terminal()?,
-                },
-                Some(LoadingTerminalCleanup),
-            )
+            let (terminal, cleanup) = start_loading_improvement_terminal()?;
+            (Self::Tui { terminal }, Some(cleanup))
         } else {
             (
                 Self::Text {
@@ -710,8 +716,7 @@ async fn run_interactive_improvement_session(
     related_backlog_issues: Vec<IssueSummary>,
     args: &BacklogImproveArgs,
 ) -> Result<String> {
-    let mut terminal = start_interactive_improvement_terminal()?;
-    let _cleanup = InteractiveTerminalCleanup;
+    let (mut terminal, _cleanup) = start_interactive_improvement_terminal()?;
     let result = async {
         let instructions = match run_instruction_prompt(&mut terminal, &issues)? {
             InstructionPromptExit::Cancelled => {
@@ -964,8 +969,7 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
         );
     }
 
-    let mut terminal = start_interactive_improvement_terminal()?;
-    let _cleanup = InteractiveTerminalCleanup;
+    let (mut terminal, _cleanup) = start_interactive_improvement_terminal()?;
     let mut app = ImprovementDashboardApp::new(issues);
     let mut copy = CopyUiState::default();
     let mut preview_viewport = Rect::default();
