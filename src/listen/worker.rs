@@ -4322,8 +4322,10 @@ fn repo_scoped_listen_instructions_note(context: &ListenTurnContext<'_>) -> Opti
             "Repo-scoped listen instructions are configured at `{display}`. Read that file directly from disk before acting on repo-specific rules."
         )
     } else {
+        let source_instructions_path = context.source_root.join(relative_path);
+        let source_display = display_path(&source_instructions_path, context.source_root);
         format!(
-            "Repo-scoped listen instructions are configured at `{display}`, but that file is missing in this workspace checkout. Fall back to the built-in workflow contract plus local repository evidence."
+            "Repo-scoped listen instructions are configured at `{display}`, but that file is missing in this workspace checkout. Fall back to local repository evidence plus `AGENTS.md` and legacy `WORKFLOW.md` on disk. If you need the configured file for read-only reference, consult the source-root copy at `{source_display}` without editing outside the workspace checkout."
         )
     })
 }
@@ -7873,6 +7875,73 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    #[test]
+    fn build_agent_instructions_uses_honest_fallback_when_workspace_instructions_are_missing() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path().join("workspace");
+        let source_root = temp.path().join("source");
+        fs::create_dir_all(workspace.join(".metastack/agents/briefs"))
+            .expect("brief dir should build");
+        fs::create_dir_all(source_root.join("instructions"))
+            .expect("source instructions dir should build");
+        fs::write(
+            source_root.join("instructions/listen.md"),
+            "# Listener Instructions\nKeep the workpad current.\n",
+        )
+        .expect("source instructions file should write");
+
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta {
+            listen: crate::config::PlanningListenSettings {
+                instructions_path: Some("instructions/listen.md".to_string()),
+                ..crate::config::PlanningListenSettings::default()
+            },
+            ..crate::config::PlanningMeta::default()
+        };
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.clone(),
+            project: None,
+            workspace: workspace.clone(),
+            issue: "ENG-10793".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let issue = test_issue("ENG-10793");
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root: &source_root,
+            project_selector: None,
+            workspace_path: &workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+        };
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 1, 20);
+
+        let instructions = super::build_agent_instructions(&issue, 1, &context, plan)
+            .expect("instructions should build");
+
+        assert!(instructions.contains(
+            "Repo-scoped listen instructions are configured at `instructions/listen.md`, but that file is missing in this workspace checkout."
+        ));
+        assert!(instructions.contains("Fall back to local repository evidence plus `AGENTS.md` and legacy `WORKFLOW.md` on disk."));
+        assert!(instructions.contains("consult the source-root copy at `instructions/listen.md`"));
+        assert!(!instructions.contains("built-in workflow contract"));
     }
 
     #[derive(Debug, Deserialize)]

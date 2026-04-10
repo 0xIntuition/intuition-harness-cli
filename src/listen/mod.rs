@@ -7793,6 +7793,7 @@ suffix
     struct TurnOneFixture {
         description: String,
         discussion: Option<String>,
+        attachment_manifest: Option<bool>,
         prompt_max: usize,
     }
 
@@ -7832,6 +7833,18 @@ suffix
                 )
                 .expect("discussion should write");
             }
+            if fixture.attachment_manifest.unwrap_or(false) {
+                let manifest_path =
+                    PlanningPaths::new(workspace).agent_issue_context_manifest_path("ENG-10793");
+                if let Some(parent) = manifest_path.parent() {
+                    fs::create_dir_all(parent).expect("attachment context dir should build");
+                }
+                fs::write(
+                    &manifest_path,
+                    "# Attachment Context\n\n## Read First\n\n- `files/01-validation.md`\n",
+                )
+                .expect("attachment manifest should write");
+            }
 
             let issue = IssueSummary {
                 identifier: "ENG-10793".to_string(),
@@ -7848,6 +7861,10 @@ suffix
                 fixture.prompt_max
             );
             assert!(prompt.contains("Description summary:"), "{fixture_name}");
+            if fixture.attachment_manifest.unwrap_or(false) {
+                assert!(prompt.contains("Attachment context:"), "{fixture_name}");
+                assert!(prompt.contains("Attachment manifest:"), "{fixture_name}");
+            }
         }
     }
 
