@@ -5546,16 +5546,10 @@ fn listen_once_bootstraps_workspace_clone_workpad_and_agent_session() -> Result<
   },
   "listen": {
     "required_label": "agent",
-    "assignment_scope": "viewer",
-    "instructions_path": "instructions/listen.md"
+    "assignment_scope": "viewer"
   }
 }
 "#,
-    )?;
-    fs::create_dir_all(repo_root.join("instructions"))?;
-    fs::write(
-        repo_root.join("instructions/listen.md"),
-        "# Listener Instructions\nKeep the workpad current.\n",
     )?;
     write_onboarded_config(
         &config_path,
@@ -6294,10 +6288,16 @@ fn listen_once_prefers_command_route_agent_over_global_default() -> Result<(), B
   },
   "listen": {
     "required_label": "agent",
-    "assignment_scope": "viewer"
+    "assignment_scope": "viewer",
+    "instructions_path": "instructions/listen.md"
   }
 }
 "#,
+    )?;
+    fs::create_dir_all(repo_root.join("instructions"))?;
+    fs::write(
+        repo_root.join("instructions/listen.md"),
+        "# Listener Instructions\nKeep the workpad current.\n",
     )?;
     write_onboarded_config(
         &config_path,
@@ -6615,10 +6615,16 @@ fn listen_once_downloads_issue_attachment_context_for_agent() -> Result<(), Box<
   },
   "listen": {
     "required_label": "agent",
-    "assignment_scope": "viewer"
+    "assignment_scope": "viewer",
+    "instructions_path": "instructions/listen.md"
   }
 }
 "#,
+    )?;
+    fs::create_dir_all(repo_root.join("instructions"))?;
+    fs::write(
+        repo_root.join("instructions/listen.md"),
+        "# Listener Instructions\nKeep the workpad current.\n",
     )?;
     write_onboarded_config(
         &config_path,
@@ -6873,7 +6879,23 @@ printf '%s' "$METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH" > "$TEST_OUTPUT_DIR/atta
     let instructions = fs::read_to_string(stub_dir.join("instructions.txt"))?;
     assert!(payload.contains("Attachment context:"));
     assert!(payload.contains("Attachment manifest:"));
+    assert_eq!(
+        instructions
+            .lines()
+            .filter(|line| line.starts_with("## "))
+            .collect::<Vec<_>>(),
+        vec![
+            "## Invariant Rules",
+            "## Execution Guidance",
+            "## Publication and Handoff",
+        ]
+    );
     assert!(instructions.contains("Additional Linear attachment context has been downloaded"));
+    assert!(
+        instructions.contains(
+            "Repo-scoped listen instructions are configured at `instructions/listen.md`."
+        )
+    );
     assert!(instructions.contains("## Invariant Rules"));
     assert!(instructions.contains("## Execution Guidance"));
     assert!(instructions.contains(

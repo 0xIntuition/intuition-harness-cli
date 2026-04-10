@@ -27,7 +27,7 @@ use crate::config::{
 };
 use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resolve_agent_config};
 use crate::fs::sibling_workspace_root;
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestCheck, PullRequestChecksOutcome, PullRequestLifecycleResult,
     PullRequestPublishMode, PullRequestPublishRequest, ResolvedBranchPullRequest, WorkflowRun,
@@ -4196,9 +4196,14 @@ fn build_agent_instructions(
     let brief_path = PlanningPaths::new(context.workspace_path)
         .agent_briefs_dir
         .join(format!("{}.md", issue.identifier));
-    let invariant_rules = vec![
+    let mut invariant_rules = vec![
         "Treat the CLI-resolved command root as the authoritative repository root for this run.".to_string(),
         "Use local repository evidence first. Consult `AGENTS.md` and legacy `WORKFLOW.md` on disk only when repo-specific rules need clarification.".to_string(),
+    ];
+    if let Some(repo_scoped_instructions) = repo_scoped_listen_instructions_note(context) {
+        invariant_rules.push(repo_scoped_instructions);
+    }
+    invariant_rules.extend([
         format!(
             "You are running inside `{}` listen, an unattended orchestration session.",
             crate::branding::COMMAND_NAME
@@ -4217,7 +4222,7 @@ fn build_agent_instructions(
             "Never overwrite the primary Linear issue description during `{}` listen. Put planning, progress, validation, and status updates in the workpad comment instead.",
             crate::branding::COMMAND_NAME
         ),
-    ];
+    ]);
 
     let mut execution_guidance = vec![
         "Treat the Linear ticket body and attachments as the primary work contract. Execute directly unless the ticket explicitly asks for more planning.".to_string(),
@@ -4299,6 +4304,28 @@ fn build_agent_instructions(
         render_instruction_block("Publication and Handoff", &publication_guidance),
     ]
     .join("\n\n"))
+}
+
+fn repo_scoped_listen_instructions_note(context: &ListenTurnContext<'_>) -> Option<String> {
+    let relative_path = context
+        .planning_meta
+        .listen
+        .instructions_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let instructions_path = context.workspace_path.join(relative_path);
+    let display = display_path(&instructions_path, context.workspace_path);
+
+    Some(if instructions_path.is_file() {
+        format!(
+            "Repo-scoped listen instructions are configured at `{display}`. Read that file directly from disk before acting on repo-specific rules."
+        )
+    } else {
+        format!(
+            "Repo-scoped listen instructions are configured at `{display}`, but that file is missing in this workspace checkout. Fall back to the built-in workflow contract plus local repository evidence."
+        )
+    })
 }
 
 fn render_instruction_block(title: &str, paragraphs: &[String]) -> String {
@@ -7776,6 +7803,76 @@ mod tests {
         assert!(instructions.contains("Shared automation keeps the `metastack` label attached"));
         assert!(!instructions.contains("refine the workpad plan and acceptance criteria"));
         assert!(!instructions.contains("plan/spec oriented"));
+    }
+
+    #[test]
+    fn build_agent_instructions_surfaces_repo_scoped_listen_instructions_path() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        let source_root = temp.path();
+        fs::create_dir_all(workspace.join(".metastack/agents/briefs"))
+            .expect("brief dir should build");
+        fs::create_dir_all(workspace.join("instructions")).expect("instructions dir should build");
+        fs::write(
+            workspace.join("instructions/listen.md"),
+            "# Listener Instructions\nKeep the workpad current.\n",
+        )
+        .expect("instructions file should write");
+
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta {
+            listen: crate::config::PlanningListenSettings {
+                instructions_path: Some("instructions/listen.md".to_string()),
+                ..crate::config::PlanningListenSettings::default()
+            },
+            ..crate::config::PlanningMeta::default()
+        };
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "ENG-10793".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let issue = test_issue("ENG-10793");
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+        };
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 1, 20);
+
+        let instructions = super::build_agent_instructions(&issue, 1, &context, plan)
+            .expect("instructions should build");
+
+        assert!(instructions.contains(
+            "Repo-scoped listen instructions are configured at `instructions/listen.md`."
+        ));
+        assert_eq!(
+            instructions
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .count(),
+            3
+        );
     }
 
     #[derive(Debug, Deserialize)]
