@@ -17,6 +17,7 @@ impl RepoTarget {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_workspace(repo_root: &Path, workspace_root: &Path) -> Self {
         Self {
             project_name: derive_project_name(repo_root),

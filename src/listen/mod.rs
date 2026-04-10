@@ -89,6 +89,9 @@ const ISSUE_ATTACHMENT_CONTEXT_FILES_DIR: &str = "files";
 const DEFAULT_LISTEN_MAX_TURNS: u32 = 20;
 const MAX_STALLED_TURNS: u32 = 2;
 const MAX_STALE_WORKER_RECOVERY_ATTEMPTS: u32 = 2;
+const TURN_ONE_DISCUSSION_MAX_EXCERPTS: usize = 3;
+const TURN_ONE_DISCUSSION_MAX_CHARS: usize = 1_200;
+const TURN_ONE_DESCRIPTION_SUMMARY_MAX_CHARS: usize = 1_800;
 const TERMINAL_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
@@ -3337,6 +3340,63 @@ fn is_placeholder_checklist_label(label: &str) -> bool {
         || normalized.eq_ignore_ascii_case("Criterion 3")
 }
 
+const TICKET_INLINE_SECTION_HEADINGS: &[&str] = &[
+    "Validation",
+    "Test Plan",
+    "Testing",
+    "Acceptance Criteria",
+    "Acceptance",
+    "Requirements",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TicketInlineSection {
+    pub(crate) heading: String,
+    pub(crate) body: String,
+}
+
+impl TicketInlineSection {
+    pub(crate) fn render(&self) -> String {
+        if self.body.is_empty() {
+            self.heading.clone()
+        } else {
+            format!("{}\n{}", self.heading, self.body)
+        }
+    }
+}
+
+pub(crate) fn extract_ticket_inline_sections(
+    description: Option<&str>,
+) -> Vec<TicketInlineSection> {
+    extract_markdown_sections(
+        description.unwrap_or_default(),
+        TICKET_INLINE_SECTION_HEADINGS,
+    )
+}
+
+pub(crate) fn strip_ticket_inline_sections(body: &str) -> String {
+    let normalized_headings = normalize_section_headings(TICKET_INLINE_SECTION_HEADINGS);
+    let mut lines = Vec::new();
+    let mut skipping = false;
+
+    for raw_line in body.lines() {
+        if let Some(normalized) = normalized_markdown_heading(raw_line) {
+            skipping = normalized_headings
+                .iter()
+                .any(|candidate| candidate == &normalized);
+            if !skipping {
+                lines.push(raw_line.to_string());
+            }
+            continue;
+        }
+        if !skipping {
+            lines.push(raw_line.to_string());
+        }
+    }
+
+    trim_surrounding_blank_lines(lines).join("\n")
+}
+
 fn extract_linear_acceptance_criteria(description: Option<&str>) -> Vec<String> {
     extract_markdown_section_bullets(
         description.unwrap_or_default(),
@@ -3361,36 +3421,80 @@ fn extract_markdown_section_bullets(body: &str, headings: &[&str]) -> Vec<String
 }
 
 fn extract_markdown_section(body: &str, headings: &[&str]) -> Option<String> {
-    let normalized_headings = headings
-        .iter()
-        .map(|heading| heading.trim().to_ascii_lowercase())
-        .collect::<Vec<_>>();
+    extract_markdown_sections(body, headings)
+        .into_iter()
+        .next()
+        .map(|section| section.body)
+}
+
+fn extract_markdown_sections(body: &str, headings: &[&str]) -> Vec<TicketInlineSection> {
+    let normalized_headings = normalize_section_headings(headings);
+    let mut sections = Vec::new();
     let mut current_heading: Option<String> = None;
-    let mut section_lines = Vec::new();
+    let mut current_lines = Vec::new();
+
+    let flush_current = |sections: &mut Vec<TicketInlineSection>,
+                         current_heading: &mut Option<String>,
+                         current_lines: &mut Vec<String>| {
+        let Some(heading) = current_heading.take() else {
+            current_lines.clear();
+            return;
+        };
+        sections.push(TicketInlineSection {
+            heading,
+            body: trim_trailing_blank_lines(std::mem::take(current_lines)).join("\n"),
+        });
+    };
 
     for raw_line in body.lines() {
-        let trimmed = raw_line.trim();
-        if let Some(heading) = trimmed.strip_prefix('#') {
-            let normalized = heading.trim_matches('#').trim().to_ascii_lowercase();
-            if normalized_headings
+        if let Some(normalized) = normalized_markdown_heading(raw_line) {
+            if current_heading.is_some() {
+                flush_current(&mut sections, &mut current_heading, &mut current_lines);
+            }
+            current_heading = normalized_headings
                 .iter()
                 .any(|candidate| candidate == &normalized)
-            {
-                current_heading = Some(normalized);
-                section_lines.clear();
-                continue;
-            }
-            if current_heading.is_some() {
-                break;
-            }
+                .then(|| raw_line.to_string());
+            continue;
         }
 
         if current_heading.is_some() {
-            section_lines.push(raw_line.to_string());
+            current_lines.push(raw_line.to_string());
         }
     }
+    if current_heading.is_some() {
+        flush_current(&mut sections, &mut current_heading, &mut current_lines);
+    }
 
-    (!section_lines.is_empty()).then(|| section_lines.join("\n"))
+    sections
+}
+
+fn normalize_section_headings(headings: &[&str]) -> Vec<String> {
+    headings
+        .iter()
+        .map(|heading| heading.trim().to_ascii_lowercase())
+        .collect()
+}
+
+fn normalized_markdown_heading(raw_line: &str) -> Option<String> {
+    raw_line
+        .trim()
+        .strip_prefix('#')
+        .map(|heading| heading.trim_matches('#').trim().to_ascii_lowercase())
+}
+
+fn trim_trailing_blank_lines(mut lines: Vec<String>) -> Vec<String> {
+    while matches!(lines.last(), Some(last) if last.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn trim_surrounding_blank_lines(mut lines: Vec<String>) -> Vec<String> {
+    while matches!(lines.first(), Some(first) if first.trim().is_empty()) {
+        lines.remove(0);
+    }
+    trim_trailing_blank_lines(lines)
 }
 
 async fn try_transition_issue_to_review_state<C>(
@@ -5065,25 +5169,6 @@ fn render_agent_prompt(
     turn_number: u32,
     max_turns: u32,
 ) -> String {
-    let labels = if issue.labels.is_empty() {
-        "none".to_string()
-    } else {
-        issue
-            .labels
-            .iter()
-            .map(|label| label.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let assignee = issue
-        .assignee
-        .as_ref()
-        .map(|assignee| assignee.name.clone())
-        .unwrap_or_else(|| "unassigned".to_string());
-    let description = issue
-        .description
-        .clone()
-        .unwrap_or_else(|| "No description provided.".to_string());
     let continuation = if turn_number > 1 {
         format!(
             "Continuation context:\n\n- This is continuation turn #{turn_number} of {max_turns} because the ticket is still in an active state.\n- Resume from the current workspace and workpad state instead of restarting from scratch.\n- Do not repeat completed investigation or validation unless the new code changes require it.\n- Do not end the turn while the issue remains active unless you are blocked by missing required auth, permissions, or secrets.\n\n"
@@ -5095,29 +5180,45 @@ fn render_agent_prompt(
     let brief_path = PlanningPaths::new(workspace_path)
         .agent_briefs_dir
         .join(format!("{}.md", issue.identifier));
-    let backlog_context = backlog_issue.map_or_else(String::new, |backlog_issue| {
-        format!(
-            "\nLocal backlog path: {}\nBacklog identifier: {}",
+    let mut lines = vec![
+        format!("You are working on Linear ticket `{}`", issue.identifier),
+        String::new(),
+    ];
+    if !continuation.is_empty() {
+        lines.push(continuation.trim_end().to_string());
+        lines.push(String::new());
+    }
+    lines.extend([
+        "Issue context:".to_string(),
+        format!("Identifier: {}", issue.identifier),
+        format!("Title: {}", issue.title),
+        format!("Current status: {}", state),
+        format!("URL: {}", issue.url),
+        format!("Workspace: {}", workspace_path.display()),
+        format!("Primary brief: {}", brief_path.display()),
+        format!("Tracking workpad comment ID: {workpad_comment_id}"),
+    ]);
+    if let Some(backlog_issue) = backlog_issue {
+        lines.push(format!(
+            "Local backlog path: {}",
             PlanningPaths::new(workspace_path)
                 .backlog_issue_dir(&backlog_issue.identifier)
-                .display(),
-            backlog_issue.identifier,
-        )
-    });
-    let attachment_context = {
-        let manifest_path =
-            PlanningPaths::new(workspace_path).agent_issue_context_manifest_path(&issue.identifier);
-        if manifest_path.is_file() {
-            format!(
-                "\nAttachment context: {}\nAttachment manifest: {}",
-                manifest_path.parent().unwrap_or(workspace_path).display(),
-                manifest_path.display()
-            )
-        } else {
-            String::new()
-        }
-    };
-    let discussion_context = backlog_issue
+                .display()
+        ));
+        lines.push(format!("Backlog identifier: {}", backlog_issue.identifier));
+    }
+
+    let manifest_path =
+        PlanningPaths::new(workspace_path).agent_issue_context_manifest_path(&issue.identifier);
+    if manifest_path.is_file() {
+        lines.push(format!(
+            "Attachment context: {}",
+            manifest_path.parent().unwrap_or(workspace_path).display()
+        ));
+        lines.push(format!("Attachment manifest: {}", manifest_path.display()));
+    }
+
+    let discussion_summary = backlog_issue
         .and_then(|backlog_issue| {
             let discussion_path = PlanningPaths::new(workspace_path)
                 .backlog_issue_dir(&backlog_issue.identifier)
@@ -5130,31 +5231,29 @@ fn render_agent_prompt(
                 .ok()
                 .map(|planning_meta| planning_meta.sync.discussion_prompt_char_limit())
                 .unwrap_or(DEFAULT_SYNC_DISCUSSION_PROMPT_CHAR_LIMIT);
-            Some(format!(
-                "\nDiscussion context: {}\nDiscussion excerpt:\n\n{}",
-                discussion_path.display(),
-                truncate_discussion_excerpt(&contents, char_limit),
-            ))
-        })
-        .unwrap_or_default();
+            let summary = render_discussion_summary(&contents, char_limit);
+            (!summary.is_empty()).then_some((discussion_path, summary))
+        });
+    if let Some((discussion_path, summary)) = discussion_summary {
+        lines.push(format!("Discussion context: {}", discussion_path.display()));
+        lines.push("Discussion summary:".to_string());
+        lines.push(String::new());
+        lines.push(summary);
+    }
 
-    format!(
-        "You are working on Linear ticket `{identifier}`\n\n{continuation}Issue context:\nIdentifier: {identifier}\nTitle: {title}\nCurrent status: {state}\nAssignee: {assignee}\nLabels: {labels}\nURL: {url}\nWorkspace: {workspace}\nPrimary brief: {brief_path}\nTracking workpad comment ID: {comment_id}{backlog_context}{attachment_context}{discussion_context}\n\nDescription:\n\n{description}",
-        identifier = issue.identifier,
-        title = issue.title,
-        state = state,
-        assignee = assignee,
-        labels = labels,
-        url = issue.url,
-        workspace = workspace_path.display(),
-        brief_path = brief_path.display(),
-        comment_id = workpad_comment_id,
-        backlog_context = backlog_context,
-        attachment_context = attachment_context,
-        discussion_context = discussion_context,
-        description = description,
-        continuation = continuation,
-    )
+    lines.extend([
+        String::new(),
+        "Description summary:".to_string(),
+        String::new(),
+        render_issue_description_summary(issue.description.as_deref()),
+    ]);
+
+    for section in extract_ticket_inline_sections(issue.description.as_deref()) {
+        lines.push(String::new());
+        lines.push(section.render());
+    }
+
+    lines.join("\n")
 }
 
 fn render_continuation_prompt(issue: &IssueSummary, turn_number: u32, max_turns: u32) -> String {
@@ -5170,23 +5269,134 @@ fn render_continuation_prompt(issue: &IssueSummary, turn_number: u32, max_turns:
     )
 }
 
-fn truncate_discussion_excerpt(contents: &str, char_limit: usize) -> String {
-    if contents.len() <= char_limit {
-        return contents.to_string();
+fn render_issue_description_summary(description: Option<&str>) -> String {
+    let Some(description) = description else {
+        return "No description provided.".to_string();
+    };
+    let narrative = strip_ticket_inline_sections(description);
+    let narrative = narrative.trim();
+    if narrative.is_empty() {
+        return "No additional narrative context outside inline ticket sections.".to_string();
     }
-    if char_limit <= 32 {
-        return contents.chars().take(char_limit).collect();
+
+    truncate_turn_one_text(narrative, TURN_ONE_DESCRIPTION_SUMMARY_MAX_CHARS)
+}
+
+fn render_discussion_summary(contents: &str, char_limit: usize) -> String {
+    let text_budget = char_limit.min(TURN_ONE_DISCUSSION_MAX_CHARS);
+    if text_budget == 0 {
+        return String::new();
     }
-    let mut tail = contents
-        .chars()
-        .rev()
-        .take(char_limit.saturating_sub(27))
-        .collect::<Vec<_>>();
-    tail.reverse();
-    format!(
-        "[truncated to most recent excerpt]\n\n{}",
-        tail.into_iter().collect::<String>()
-    )
+
+    let sections = extract_discussion_summary_sections(contents);
+    if sections.is_empty() {
+        let normalized = normalize_discussion_excerpt(contents);
+        return if normalized.is_empty() {
+            String::new()
+        } else {
+            format!("- {}", truncate_turn_one_text(&normalized, text_budget))
+        };
+    }
+
+    let mut bullets = Vec::new();
+    let mut used_chars = 0usize;
+    for section in sections.iter().rev().take(TURN_ONE_DISCUSSION_MAX_EXCERPTS) {
+        let remaining = text_budget.saturating_sub(used_chars);
+        if remaining == 0 {
+            break;
+        }
+        let excerpt = truncate_turn_one_text(&section.excerpt, remaining);
+        used_chars += excerpt.chars().count();
+        bullets.push(match section.label.as_deref() {
+            Some(label) => format!("- {label}: {excerpt}"),
+            None => format!("- {excerpt}"),
+        });
+    }
+
+    bullets.join("\n")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscussionSummarySection {
+    label: Option<String>,
+    excerpt: String,
+}
+
+fn extract_discussion_summary_sections(contents: &str) -> Vec<DiscussionSummarySection> {
+    let mut sections = Vec::new();
+    let mut current_label: Option<String> = None;
+    let mut current_lines = Vec::new();
+
+    let flush_current = |sections: &mut Vec<DiscussionSummarySection>,
+                         current_label: &mut Option<String>,
+                         current_lines: &mut Vec<String>| {
+        let excerpt = normalize_discussion_excerpt(&current_lines.join("\n"));
+        if excerpt.is_empty() {
+            current_label.take();
+            current_lines.clear();
+            return;
+        }
+        sections.push(DiscussionSummarySection {
+            label: current_label.take(),
+            excerpt,
+        });
+        current_lines.clear();
+    };
+
+    for raw_line in contents.lines() {
+        let trimmed = raw_line.trim();
+        if let Some(label) = trimmed.strip_prefix("### ") {
+            if current_label.is_some() || !current_lines.is_empty() {
+                flush_current(&mut sections, &mut current_label, &mut current_lines);
+            }
+            current_label = Some(label.trim().to_string());
+            continue;
+        }
+        if current_label.is_some() {
+            current_lines.push(raw_line.to_string());
+        }
+    }
+    if current_label.is_some() || !current_lines.is_empty() {
+        flush_current(&mut sections, &mut current_label, &mut current_lines);
+    }
+    if !sections.is_empty() {
+        return sections;
+    }
+
+    contents
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|block| !block.is_empty())
+        .filter(|block| !block.starts_with("# "))
+        .map(normalize_discussion_excerpt)
+        .filter(|excerpt| !excerpt.is_empty())
+        .map(|excerpt| DiscussionSummarySection {
+            label: None,
+            excerpt,
+        })
+        .collect()
+}
+
+fn normalize_discussion_excerpt(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_turn_one_text(value: &str, max_chars: usize) -> String {
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let truncated = value.chars().take(max_chars - 3).collect::<String>();
+    format!("{truncated}...")
 }
 
 fn render_listen_backlog_description(
@@ -5369,6 +5579,45 @@ fn render_issue_attachment_manifest(
         format!("- Download failures: {}", summary.failed_downloads.len()),
     ];
 
+    let read_first_text_paths = summary
+        .downloaded_paths
+        .iter()
+        .filter(|path| attachment_path_is_read_first_text(path))
+        .collect::<Vec<_>>();
+    let read_first_other_paths = summary
+        .downloaded_paths
+        .iter()
+        .filter(|path| !attachment_path_is_read_first_text(path))
+        .collect::<Vec<_>>();
+
+    if summary.has_entries() {
+        lines.extend([String::new(), "## Read First".to_string(), String::new()]);
+        if !read_first_text_paths.is_empty() {
+            lines.extend(["### Markdown / Text Artifacts".to_string(), String::new()]);
+            for path in read_first_text_paths {
+                lines.push(format!("- `{path}`"));
+            }
+            lines.push(String::new());
+        }
+        if !summary.failed_downloads.is_empty() {
+            lines.extend(["### Download Failures".to_string(), String::new()]);
+            for failure in &summary.failed_downloads {
+                lines.push(format!("- {failure}"));
+            }
+            lines.push(String::new());
+        }
+        if !read_first_other_paths.is_empty() {
+            lines.extend(["### Other Downloaded Files".to_string(), String::new()]);
+            for path in read_first_other_paths {
+                lines.push(format!("- `{path}`"));
+            }
+            lines.push(String::new());
+        }
+        while matches!(lines.last(), Some(last) if last.is_empty()) {
+            lines.pop();
+        }
+    }
+
     if !summary.downloaded_paths.is_empty() {
         lines.extend([
             String::new(),
@@ -5399,6 +5648,19 @@ fn render_issue_attachment_manifest(
     }
 
     lines.join("\n")
+}
+
+fn attachment_path_is_read_first_text(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "txt"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn now_timestamp() -> String {
@@ -5488,10 +5750,12 @@ mod tests {
         format_number, listen_browser_action, listen_scope_label, mark_running_session_stale,
         render_agent_prompt, render_continuation_prompt, required_label_skip_reason,
     };
+    use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
     use crate::config::{
         AppConfig, LinearConfig, ListenAssignmentScope, ListenRefreshPolicy,
         PlanningListenSettings, PlanningMeta,
     };
+    use crate::fs::{PlanningPaths, ensure_dir};
     use crate::linear::{
         AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
         IssueLabelCreateRequest, IssueListFilters, IssueSummary, IssueUpdateRequest, LabelRef,
@@ -5502,6 +5766,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use crossterm::event::KeyCode;
+    use serde::Deserialize;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -7234,7 +7499,100 @@ suffix
     }
 
     #[test]
-    fn render_agent_prompt_includes_truncated_ticket_discussion_excerpt() {
+    fn render_agent_prompt_turn_one_avoids_full_description_duplication() {
+        let temp = tempdir().expect("temp dir should build");
+        let workspace = temp.path();
+        ensure_dir(&PlanningPaths::new(workspace).codebase_dir).expect("codebase dir should build");
+        let description = "# Context\n\nNarrative block that should not appear in full across turn-one surfaces.\n\n## Validation\n\n- `cargo test`\n\n## Acceptance Criteria\n\n- [ ] Preserve compact output\n".to_string();
+        let issue = IssueSummary {
+            description: Some(description.clone()),
+            ..test_issue("ENG-10793")
+        };
+        let brief_path = write_agent_brief(
+            workspace,
+            AgentBriefRequest {
+                ticket: issue.identifier.clone(),
+                title_override: Some(issue.title.clone()),
+                goal: Some("Keep turn one compact.".to_string()),
+                metadata: TicketMetadata {
+                    description: issue.description.clone(),
+                    ..TicketMetadata::default()
+                },
+                output: None,
+            },
+        )
+        .expect("brief should write");
+        let brief = fs::read_to_string(brief_path).expect("brief should read");
+        let prompt = render_agent_prompt(&issue, workspace, "comment-24", Some(&issue), 1, 20);
+
+        assert!(prompt.contains("Description summary:"));
+        assert!(prompt.contains("Narrative block that should not appear in full"));
+        assert!(prompt.contains("## Validation\n\n- `cargo test`"));
+        assert!(prompt.contains("## Acceptance Criteria\n\n- [ ] Preserve compact output"));
+        assert!(!brief.contains("Narrative block that should not appear in full"));
+    }
+
+    #[test]
+    fn render_issue_attachment_manifest_adds_prioritized_summary() {
+        let temp = tempdir().expect("temp dir should build");
+        let workspace = temp.path();
+        let issue = IssueSummary {
+            attachments: vec![
+                AttachmentSummary {
+                    id: "attachment-1".to_string(),
+                    title: "Validation".to_string(),
+                    url: "https://example.com/validation.md".to_string(),
+                    source_type: None,
+                    metadata: serde_json::Value::Null,
+                },
+                AttachmentSummary {
+                    id: "attachment-2".to_string(),
+                    title: "Screenshot".to_string(),
+                    url: "https://example.com/screenshot.png".to_string(),
+                    source_type: None,
+                    metadata: serde_json::Value::Null,
+                },
+            ],
+            ..test_issue("ENG-10793")
+        };
+        let summary = super::AttachmentContextSummary {
+            downloaded_paths: vec![
+                "files/01-validation.md".to_string(),
+                "files/02-screenshot.png".to_string(),
+                "files/03-implementation.txt".to_string(),
+            ],
+            failed_downloads: vec!["README (https://example.com/readme) - failed".to_string()],
+        };
+
+        let manifest = super::render_issue_attachment_manifest(&issue, &summary, workspace);
+
+        let read_first = manifest
+            .find("## Read First")
+            .expect("prioritized summary should render");
+        let markdown = manifest
+            .find("### Markdown / Text Artifacts")
+            .expect("markdown section should render");
+        let failures = manifest
+            .find("### Download Failures")
+            .expect("failure section should render");
+        let other = manifest
+            .find("### Other Downloaded Files")
+            .expect("other-files section should render");
+        let full_manifest = manifest
+            .find("## Downloaded Files")
+            .expect("full manifest should remain");
+
+        assert!(read_first < full_manifest);
+        assert!(markdown < failures);
+        assert!(failures < other);
+        assert!(manifest.contains("- `files/01-validation.md`"));
+        assert!(manifest.contains("- `files/03-implementation.txt`"));
+        assert!(manifest.contains("- README (https://example.com/readme) - failed"));
+        assert!(manifest.contains("## Downloaded Files"));
+    }
+
+    #[test]
+    fn render_agent_prompt_discussion_summary_is_newest_first_and_bounded() {
         let temp = tempdir().expect("temp dir should build");
         let workspace = temp.path();
         fs::create_dir_all(workspace.join(format!(
@@ -7248,7 +7606,7 @@ suffix
             workspace.join(format!("{}/meta.json", crate::branding::PROJECT_DIR)),
             r#"{
   "sync": {
-    "discussion_prompt_char_limit": 80
+    "discussion_prompt_char_limit": 2000
   }
 }
 "#,
@@ -7256,7 +7614,7 @@ suffix
         .expect("meta should write");
         fs::write(
             workspace.join(format!("{}/backlog/MET-24/context/ticket-discussion.md", crate::branding::PROJECT_DIR)),
-            "# Ticket Discussion\n\nOld details that should be truncated away.\n\nNewest discussion tail.",
+            "# Ticket Discussion\n\n### **Alice** (2026-04-01)\n\nOldest details that should drop.\n\n### **Bob** (2026-04-02)\n\nSecond newest details stay.\n\n### **Carol** (2026-04-03)\n\nThird newest details stay.\n\n### **Dana** (2026-04-04)\n\nNewest discussion tail stays.",
         )
         .expect("discussion should write");
 
@@ -7264,9 +7622,30 @@ suffix
         let prompt = render_agent_prompt(&issue, workspace, "comment-24", Some(&issue), 1, 20);
 
         assert!(prompt.contains("Discussion context:"));
-        assert!(prompt.contains("[truncated to most recent excerpt]"));
-        assert!(prompt.contains("Newest discussion tail."));
-        assert!(!prompt.contains("Old details that should be truncated away."));
+        assert!(prompt.contains("Discussion summary:"));
+        assert!(prompt.contains("- **Dana** (2026-04-04): Newest discussion tail stays."));
+        assert!(prompt.contains("- **Carol** (2026-04-03): Third newest details stay."));
+        assert!(prompt.contains("- **Bob** (2026-04-02): Second newest details stay."));
+        assert!(!prompt.contains("Oldest details that should drop."));
+
+        let summary = prompt
+            .split("Discussion summary:\n\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\nDescription summary:").next())
+            .expect("discussion summary block should exist");
+        assert_eq!(
+            summary
+                .lines()
+                .filter(|line| line.starts_with("- "))
+                .count(),
+            3
+        );
+        let excerpt_chars = summary
+            .lines()
+            .filter_map(|line| line.split_once(": ").map(|(_, excerpt)| excerpt))
+            .map(|excerpt| excerpt.chars().count())
+            .sum::<usize>();
+        assert!(excerpt_chars <= 1_200, "summary exceeded 1200 chars");
     }
 
     #[test]
@@ -7316,6 +7695,78 @@ suffix
             full.len(),
             cont.len(),
         );
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TurnOneFixture {
+        description: String,
+        discussion: Option<String>,
+        prompt_max: usize,
+    }
+
+    #[test]
+    fn turn_one_prompt_fixture_byte_budgets_hold_for_required_cases() {
+        for fixture_name in [
+            "small-happy-path",
+            "large-narrative",
+            "validation-heavy",
+            "attachment-heavy",
+            "discussion-heavy",
+        ] {
+            let fixture = load_turn_one_fixture(fixture_name).expect("fixture should load");
+            let temp = tempdir().expect("temp dir should build");
+            let workspace = temp.path();
+            ensure_dir(&PlanningPaths::new(workspace).codebase_dir)
+                .expect("codebase dir should build");
+            fs::create_dir_all(workspace.join(format!(
+                "{}/backlog/ENG-10793/context",
+                crate::branding::PROJECT_DIR
+            )))
+            .expect("discussion dir should build");
+            fs::create_dir_all(workspace.join(crate::branding::PROJECT_DIR))
+                .expect("metastack dir should build");
+            fs::write(
+                workspace.join(format!("{}/meta.json", crate::branding::PROJECT_DIR)),
+                r#"{"sync":{"discussion_prompt_char_limit":2000}}"#,
+            )
+            .expect("meta should write");
+            if let Some(discussion) = fixture.discussion.as_deref() {
+                fs::write(
+                    workspace.join(format!(
+                        "{}/backlog/ENG-10793/context/ticket-discussion.md",
+                        crate::branding::PROJECT_DIR
+                    )),
+                    discussion,
+                )
+                .expect("discussion should write");
+            }
+
+            let issue = IssueSummary {
+                identifier: "ENG-10793".to_string(),
+                description: Some(fixture.description.clone()),
+                ..test_issue("ENG-10793")
+            };
+            let prompt =
+                render_agent_prompt(&issue, workspace, "comment-10793", Some(&issue), 1, 20);
+
+            assert!(
+                prompt.len() <= fixture.prompt_max,
+                "{fixture_name} prompt exceeded budget: {} > {}",
+                prompt.len(),
+                fixture.prompt_max
+            );
+            assert!(prompt.contains("Description summary:"), "{fixture_name}");
+        }
+    }
+
+    fn load_turn_one_fixture(name: &str) -> Result<TurnOneFixture> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/listen/turn-one")
+            .join(format!("{name}.json"));
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| anyhow!("failed to read fixture `{}`: {error}", path.display()))?;
+        serde_json::from_str(&contents)
+            .map_err(|error| anyhow!("failed to parse fixture `{}`: {error}", path.display()))
     }
 
     fn test_issue(identifier: &str) -> IssueSummary {

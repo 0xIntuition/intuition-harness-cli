@@ -1,9 +1,9 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir, write_text_file};
+use crate::listen::extract_ticket_inline_sections;
 use crate::scaffold::ensure_planning_layout;
 
 #[derive(Debug, Clone, Default)]
@@ -34,21 +34,13 @@ pub(crate) fn write_agent_brief(root: &Path, request: AgentBriefRequest) -> Resu
             .agent_briefs_dir
             .join(format!("{}.md", sanitize_ticket(&request.ticket)))
     });
-    let contents = render_brief(&request, &paths)?;
+    let contents = render_brief(&request)?;
     write_text_file(&output_path, &contents, true)?;
 
     Ok(output_path)
 }
 
-fn render_brief(request: &AgentBriefRequest, paths: &PlanningPaths) -> Result<String> {
-    let scan = read_context(&paths.scan_path())?;
-    let architecture = read_context(&paths.architecture_path())?;
-    let concerns = read_context(&paths.concerns_path())?;
-    let conventions = read_context(&paths.conventions_path())?;
-    let integrations = read_context(&paths.integrations_path())?;
-    let stack = read_context(&paths.stack_path())?;
-    let structure = read_context(&paths.structure_path())?;
-    let testing = read_context(&paths.testing_path())?;
+fn render_brief(request: &AgentBriefRequest) -> Result<String> {
     let title = request
         .metadata
         .title
@@ -81,67 +73,30 @@ fn render_brief(request: &AgentBriefRequest, paths: &PlanningPaths) -> Result<St
         String::new(),
         "## Guidance".to_string(),
         String::new(),
-        "- Reconfirm the issue scope and current repository state before editing.".to_string(),
-        format!("- Use `{}/codebase/*.md` as the reusable source of context for future agents.", crate::branding::PROJECT_DIR),
+        format!(
+            "- Use `{}/codebase/*.md` as the reusable source of repo context when those files are present.",
+            crate::branding::PROJECT_DIR
+        ),
         "- Capture reproduction, implement the requested change, validate with focused command proofs, and update the workpad.".to_string(),
         String::new(),
-        "## Scan".to_string(),
+        "## Codebase Context".to_string(),
         String::new(),
-        scan,
-        String::new(),
-        "## Architecture".to_string(),
-        String::new(),
-        architecture,
-        String::new(),
-        "## Concerns".to_string(),
-        String::new(),
-        concerns,
-        String::new(),
-        "## Conventions".to_string(),
-        String::new(),
-        conventions,
-        String::new(),
-        "## Integrations".to_string(),
-        String::new(),
-        integrations,
-        String::new(),
-        "## Stack".to_string(),
-        String::new(),
-        stack,
-        String::new(),
-        "## Structure".to_string(),
-        String::new(),
-        structure,
-        String::new(),
-        "## Testing".to_string(),
-        String::new(),
-        testing,
+        codebase_reference_line("Scan", "SCAN.md"),
+        codebase_reference_line("Architecture", "ARCHITECTURE.md"),
+        codebase_reference_line("Concerns", "CONCERNS.md"),
+        codebase_reference_line("Conventions", "CONVENTIONS.md"),
+        codebase_reference_line("Integrations", "INTEGRATIONS.md"),
+        codebase_reference_line("Stack", "STACK.md"),
+        codebase_reference_line("Structure", "STRUCTURE.md"),
+        codebase_reference_line("Testing", "TESTING.md"),
     ]);
 
-    if let Some(description) = &request.metadata.description {
-        lines.extend([
-            String::new(),
-            "## Linear Description".to_string(),
-            String::new(),
-            description.clone(),
-        ]);
+    for section in extract_ticket_inline_sections(request.metadata.description.as_deref()) {
+        lines.push(String::new());
+        lines.push(section.render());
     }
 
     Ok(lines.join("\n"))
-}
-
-fn read_context(path: &PathBuf) -> Result<String> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "_Missing `{}`. Run `{} scan` to generate it._",
-            path.file_name()
-                .map(|value| value.to_string_lossy())
-                .unwrap_or_default(),
-            crate::branding::COMMAND_NAME,
-        )),
-        Err(error) => Err(error).with_context(|| format!("failed to read `{}`", path.display())),
-    }
 }
 
 fn sanitize_ticket(ticket: &str) -> String {
@@ -152,4 +107,11 @@ fn sanitize_ticket(ticket: &str) -> String {
             _ => '-',
         })
         .collect()
+}
+
+fn codebase_reference_line(label: &str, file_name: &str) -> String {
+    format!(
+        "- {label}: `{}/codebase/{file_name}`",
+        crate::branding::PROJECT_DIR
+    )
 }

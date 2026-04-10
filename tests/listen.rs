@@ -5937,8 +5937,9 @@ printf '%s' "$METASTACK_AGENT_INSTRUCTIONS" > "$TEST_OUTPUT_DIR/instructions.txt
         "comment-21"
     );
     let instructions = fs::read_to_string(stub_dir.join("instructions.txt"))?;
-    assert!(instructions.contains("## Built-in Workflow Contract"));
-    assert!(instructions.contains("No repo overlay files were found"));
+    assert!(instructions.contains("## Invariant Rules"));
+    assert!(instructions.contains("## Execution Guidance"));
+    assert!(instructions.contains("Consult `AGENTS.md` and legacy `WORKFLOW.md`"));
     assert!(instructions.contains("Shared automation keeps the"));
     assert!(instructions.contains("metastack"));
     assert!(instructions.contains("label attached"));
@@ -6873,8 +6874,11 @@ printf '%s' "$METASTACK_LINEAR_ATTACHMENT_CONTEXT_PATH" > "$TEST_OUTPUT_DIR/atta
     assert!(payload.contains("Attachment context:"));
     assert!(payload.contains("Attachment manifest:"));
     assert!(instructions.contains("Additional Linear attachment context has been downloaded"));
-    assert!(instructions.contains("## Repository Scope"));
-    assert!(instructions.contains("Active workspace checkout:"));
+    assert!(instructions.contains("## Invariant Rules"));
+    assert!(instructions.contains("## Execution Guidance"));
+    assert!(instructions.contains(
+        "as the repository root for implementation, validation, commits, pushes, and PR creation"
+    ));
     assert!(instructions.contains(
         "Keep implementation, validation, and local backlog updates anchored to the provided workspace checkout"
     ));
@@ -8437,12 +8441,16 @@ printf '// turn %s\n' "$count" > "src/turn-$count.rs"
             let second_instructions = fs::read_to_string(stub_dir.join("instructions-2.txt"))?;
             assert!(!first_payload.contains("continuation turn #2 of 20"));
             assert!(
-                second_payload.contains("continuation turn #2 of 20")
+                second_payload.contains("Execution continuation for `MET-32` turn #2/20.")
+                    || second_payload.contains("continuation turn #2 of 20")
                     || second_payload.contains("continuation turn 2 of 20"),
                 "unexpected second payload: {}",
                 second_payload
             );
-            assert!(second_instructions.contains("continuation turn 2 of 20"));
+            assert!(
+                second_instructions.contains("This is execution turn 2 of 20"),
+                "unexpected second instructions: {second_instructions}"
+            );
 
             let state_path = listen_state_path(&config_path, &repo_root)?;
             wait_for_file_substring_with_timeout(

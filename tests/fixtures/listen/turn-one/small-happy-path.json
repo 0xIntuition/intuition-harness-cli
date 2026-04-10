@@ -1,0 +1,6 @@
+{
+  "description": "# Context\n\nKeep the first turn small and useful.\n\n## Acceptance Criteria\n\n- [ ] Brief stays compact\n- [ ] Prompt keeps the required metadata\n\n## Validation\n\n- `cargo test --lib -- --exact`\n",
+  "brief_max": 3000,
+  "prompt_max": 4000,
+  "instructions_max": 2600
+}

@@ -141,55 +141,6 @@ impl WorkflowInstructionBundle {
 
         lines.join("\n")
     }
-
-    fn render_for_listen_prompt(&self) -> String {
-        let mut lines = vec![
-            "## Built-in Workflow Contract".to_string(),
-            String::new(),
-            self.builtin_contract().to_string(),
-            String::new(),
-            "## Repository Scope".to_string(),
-            String::new(),
-            self.repo_target.prompt_scope_block(),
-            String::new(),
-            "## Repo Overlays".to_string(),
-            String::new(),
-        ];
-
-        if self.repo_overlays.is_empty() {
-            lines.push(NO_REPO_OVERLAYS_MESSAGE.to_string());
-        } else {
-            for source in &self.repo_overlays {
-                lines.push(format!(
-                    "- `{}`: read this file directly from disk before acting on repo-specific rules.",
-                    display_path(&source.path, self.repo_target.repo_root())
-                ));
-                if source.label == "WORKFLOW.md" {
-                    lines.push(
-                        "  Treat this as legacy compatibility/documentation context; consult it only when the ticket or repo state requires clarification."
-                            .to_string(),
-                    );
-                }
-            }
-        }
-
-        lines.extend([
-            "".to_string(),
-            "## Repo-Scoped Instructions".to_string(),
-            String::new(),
-        ]);
-        match &self.repo_scoped_instructions {
-            Some(source) => {
-                lines.push(format!(
-                    "Read `{}` directly from disk before starting. Use it as additional repo-specific guidance.",
-                    display_path(&source.path, self.repo_target.repo_root())
-                ));
-            }
-            None => lines.push(no_repo_scoped_instructions_text()),
-        }
-
-        lines.join("\n")
-    }
 }
 
 pub(crate) fn builtin_workflow_contract() -> &'static str {
@@ -297,13 +248,6 @@ pub(crate) fn render_workflow_contract_without_legacy_overlay_contents(
         .render_for_prompt_without_legacy_overlay_contents())
 }
 
-pub(crate) fn render_workflow_contract_for_listen(
-    root: &Path,
-    repo_target: RepoTarget,
-) -> Result<String> {
-    Ok(WorkflowInstructionBundle::load(root, repo_target)?.render_for_listen_prompt())
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -347,29 +291,6 @@ mod tests {
     #[test]
     fn builtin_contract_is_not_empty() {
         assert!(builtin_workflow_contract().contains("Inject"));
-    }
-
-    #[test]
-    fn listen_prompt_render_references_overlay_paths_without_inlining_contents() {
-        let temp = tempdir().expect("tempdir should create");
-        let root = temp.path();
-        std::fs::write(root.join("AGENTS.md"), "# AGENTS\nUse tests.\n")
-            .expect("agents should write");
-        std::fs::write(
-            root.join("WORKFLOW.md"),
-            "# Workflow\nVery long legacy guidance.\n",
-        )
-        .expect("workflow should write");
-
-        let bundle = WorkflowInstructionBundle::load(root, RepoTarget::from_root(root))
-            .expect("bundle should load");
-        let rendered = bundle.render_for_listen_prompt();
-
-        assert!(rendered.contains("## Repo Overlays"));
-        assert!(rendered.contains("`AGENTS.md`: read this file directly from disk"));
-        assert!(rendered.contains("`WORKFLOW.md`: read this file directly from disk"));
-        assert!(rendered.contains("legacy compatibility/documentation context"));
-        assert!(!rendered.contains("Very long legacy guidance."));
     }
 
     #[test]
