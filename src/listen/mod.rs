@@ -3377,19 +3377,23 @@ pub(crate) fn extract_ticket_inline_sections(
 pub(crate) fn strip_ticket_inline_sections(body: &str) -> String {
     let normalized_headings = normalize_section_headings(TICKET_INLINE_SECTION_HEADINGS);
     let mut lines = Vec::new();
-    let mut skipping = false;
+    let mut skipping_heading_level: Option<usize> = None;
 
     for raw_line in body.lines() {
-        if let Some(normalized) = normalized_markdown_heading(raw_line) {
-            skipping = normalized_headings
+        if let Some(heading) = parse_markdown_heading(raw_line) {
+            if skipping_heading_level.is_some_and(|level| heading.level > level) {
+                continue;
+            }
+            let skipping = normalized_headings
                 .iter()
-                .any(|candidate| candidate == &normalized);
+                .any(|candidate| candidate == &heading.normalized);
+            skipping_heading_level = skipping.then_some(heading.level);
             if !skipping {
                 lines.push(raw_line.to_string());
             }
             continue;
         }
-        if !skipping {
+        if skipping_heading_level.is_none() {
             lines.push(raw_line.to_string());
         }
     }
@@ -3430,13 +3434,13 @@ fn extract_markdown_section(body: &str, headings: &[&str]) -> Option<String> {
 fn extract_markdown_sections(body: &str, headings: &[&str]) -> Vec<TicketInlineSection> {
     let normalized_headings = normalize_section_headings(headings);
     let mut sections = Vec::new();
-    let mut current_heading: Option<String> = None;
+    let mut current_heading: Option<(String, usize)> = None;
     let mut current_lines = Vec::new();
 
     let flush_current = |sections: &mut Vec<TicketInlineSection>,
-                         current_heading: &mut Option<String>,
+                         current_heading: &mut Option<(String, usize)>,
                          current_lines: &mut Vec<String>| {
-        let Some(heading) = current_heading.take() else {
+        let Some((heading, _)) = current_heading.take() else {
             current_lines.clear();
             return;
         };
@@ -3447,14 +3451,21 @@ fn extract_markdown_sections(body: &str, headings: &[&str]) -> Vec<TicketInlineS
     };
 
     for raw_line in body.lines() {
-        if let Some(normalized) = normalized_markdown_heading(raw_line) {
+        if let Some(heading) = parse_markdown_heading(raw_line) {
+            if current_heading
+                .as_ref()
+                .is_some_and(|(_, level)| heading.level > *level)
+            {
+                current_lines.push(raw_line.to_string());
+                continue;
+            }
             if current_heading.is_some() {
                 flush_current(&mut sections, &mut current_heading, &mut current_lines);
             }
             current_heading = normalized_headings
                 .iter()
-                .any(|candidate| candidate == &normalized)
-                .then(|| raw_line.to_string());
+                .any(|candidate| candidate == &heading.normalized)
+                .then(|| (raw_line.to_string(), heading.level));
             continue;
         }
 
@@ -3476,11 +3487,31 @@ fn normalize_section_headings(headings: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn normalized_markdown_heading(raw_line: &str) -> Option<String> {
-    raw_line
-        .trim()
-        .strip_prefix('#')
-        .map(|heading| heading.trim_matches('#').trim().to_ascii_lowercase())
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkdownHeading {
+    level: usize,
+    normalized: String,
+}
+
+fn parse_markdown_heading(raw_line: &str) -> Option<MarkdownHeading> {
+    let trimmed = raw_line.trim();
+    let level = trimmed
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    if level == 0 {
+        return None;
+    }
+
+    let heading = trimmed.get(level..)?.trim();
+    if heading.is_empty() {
+        return None;
+    }
+
+    Some(MarkdownHeading {
+        level,
+        normalized: heading.trim_matches('#').trim().to_ascii_lowercase(),
+    })
 }
 
 fn trim_trailing_blank_lines(mut lines: Vec<String>) -> Vec<String> {
@@ -7681,6 +7712,32 @@ suffix
             "summary exceeded budget: {summary}"
         );
         assert!(summary.starts_with("- "));
+    }
+
+    #[test]
+    fn extract_ticket_inline_sections_preserves_nested_headings() {
+        let description = "# Context\n\nNarrative.\n\n## Validation\n\n### Unit Tests\n\n- `cargo test`\n\n## Acceptance Criteria\n\n### CLI\n\n- [ ] Compact output\n";
+
+        let sections = super::extract_ticket_inline_sections(Some(description));
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(
+            sections[0].render(),
+            "## Validation\n\n### Unit Tests\n\n- `cargo test`"
+        );
+        assert_eq!(
+            sections[1].render(),
+            "## Acceptance Criteria\n\n### CLI\n\n- [ ] Compact output"
+        );
+    }
+
+    #[test]
+    fn render_issue_description_summary_strips_nested_inline_sections() {
+        let description = "# Context\n\nNarrative stays.\n\n## Validation\n\n### Unit Tests\n\n- `cargo test`\n\n## Acceptance Criteria\n\n### CLI\n\n- [ ] Compact output\n";
+
+        let summary = super::render_issue_description_summary(Some(description));
+
+        assert_eq!(summary, "# Context\n\nNarrative stays.");
     }
 
     #[test]

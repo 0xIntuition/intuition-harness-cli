@@ -96,7 +96,7 @@ mod tests {
                 goal: Some("Keep exact inline ticket sections.".to_string()),
                 metadata: TicketMetadata {
                     description: Some(
-                        "# Technical cleanup\n\nCompact the brief.\n\n## aCcEpTaNcE cRiTeRiA\n\n- [ ] First bullet stays first\n- [ ] Second bullet stays second\n\n## TEST PLAN\n\n- `cargo test --lib`\n\n## vALidAtIoN\n\n- `cargo clippy --all-targets --all-features -- -D warnings`\n"
+                        "# Technical cleanup\n\nCompact the brief.\n\n## aCcEpTaNcE cRiTeRiA\n\n- [ ] First bullet stays first\n- [ ] Second bullet stays second\n\n## TEST PLAN\n\n### Focused pass\n\n- `cargo test --lib`\n\n## vALidAtIoN\n\n### Lint\n\n- `cargo clippy --all-targets --all-features -- -D warnings`\n"
                             .to_string(),
                     ),
                     ..TicketMetadata::default()
@@ -107,9 +107,9 @@ mod tests {
 
         let brief = fs::read_to_string(output)?;
         assert!(brief.contains("## aCcEpTaNcE cRiTeRiA\n\n- [ ] First bullet stays first\n- [ ] Second bullet stays second"));
-        assert!(brief.contains("## TEST PLAN\n\n- `cargo test --lib`"));
+        assert!(brief.contains("## TEST PLAN\n\n### Focused pass\n\n- `cargo test --lib`"));
         assert!(brief.contains(
-            "## vALidAtIoN\n\n- `cargo clippy --all-targets --all-features -- -D warnings`"
+            "## vALidAtIoN\n\n### Lint\n\n- `cargo clippy --all-targets --all-features -- -D warnings`"
         ));
 
         Ok(())
