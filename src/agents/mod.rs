@@ -26,6 +26,7 @@ mod tests {
 
     use anyhow::{Context, Result, bail};
     use image::{ImageBuffer, Rgba};
+    use serde::Deserialize;
     use tempfile::tempdir;
 
     use super::{
@@ -37,78 +38,139 @@ mod tests {
         AGENT_ROUTE_AGENTS_LISTEN, AgentCommandConfig, AgentSettings, AppConfig, PlanningMeta,
         PromptTransport,
     };
-    use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir, write_text_file};
+    use crate::fs::{PlanningPaths, canonicalize_existing_dir, ensure_dir};
     use crate::tui::prompt_images::PromptImageAttachment;
 
     #[test]
-    fn write_agent_brief_renders_deterministic_sections() -> Result<()> {
+    fn write_agent_brief_references_codebase_paths_without_linear_description() -> Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
-        let paths = PlanningPaths::new(root);
-        ensure_dir(&paths.codebase_dir)?;
-        for (path, contents) in [
-            (paths.scan_path(), "# Scan"),
-            (paths.architecture_path(), "# Architecture"),
-            (paths.concerns_path(), "# Concerns"),
-            (paths.conventions_path(), "# Conventions"),
-            (paths.integrations_path(), "# Integrations"),
-            (paths.stack_path(), "# Stack"),
-            (paths.structure_path(), "# Structure"),
-            (paths.testing_path(), "# Testing"),
-        ] {
-            write_text_file(&path, contents, true)?;
-        }
+        ensure_dir(&PlanningPaths::new(root).codebase_dir)?;
 
         let output = write_agent_brief(
             root,
             AgentBriefRequest {
-                ticket: "MET-11".to_string(),
+                ticket: "ENG-10793".to_string(),
                 title_override: Some("CLI Scaffolding & Modules".to_string()),
-                goal: None,
-                metadata: TicketMetadata::default(),
+                goal: Some("Slim turn-1 onset artifacts.".to_string()),
+                metadata: TicketMetadata {
+                    description: Some(
+                        "# Narrative\n\nKeep prompt surfaces small.\n\n## Validation\n\n- `cargo test`\n"
+                            .to_string(),
+                    ),
+                    ..TicketMetadata::default()
+                },
                 output: None,
             },
         )?;
 
         let brief = fs::read_to_string(output)?;
-        assert!(brief.contains("# Agent Kickoff: MET-11"));
+        assert!(brief.contains("# Agent Kickoff: ENG-10793"));
         assert!(brief.contains("CLI Scaffolding & Modules"));
-        assert!(brief.contains("## Scan"));
-        assert!(brief.contains("## Architecture"));
-        assert!(brief.contains("## Concerns"));
-        assert!(brief.contains("## Integrations"));
-        assert!(brief.contains("## Stack"));
-        assert!(brief.contains("## Testing"));
+        assert!(brief.contains("## Codebase Context"));
+        assert!(brief.contains(&format!(
+            "`{}/codebase/SCAN.md`",
+            crate::branding::PROJECT_DIR
+        )));
+        assert!(brief.contains(&format!(
+            "`{}/codebase/TESTING.md`",
+            crate::branding::PROJECT_DIR
+        )));
+        assert!(!brief.contains("## Linear Description"));
+        assert!(!brief.contains("_Missing"));
 
         Ok(())
     }
 
     #[test]
-    fn write_agent_brief_missing_context_uses_branded_scan_hint() -> Result<()> {
+    fn write_agent_brief_preserves_verbatim_inline_ticket_sections() -> Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
-        let paths = PlanningPaths::new(root);
-        ensure_dir(&paths.codebase_dir)?;
-        write_text_file(&paths.scan_path(), "# Scan", true)?;
+        ensure_dir(&PlanningPaths::new(root).codebase_dir)?;
 
         let output = write_agent_brief(
             root,
             AgentBriefRequest {
-                ticket: "MET-12".to_string(),
-                title_override: Some("Missing context".to_string()),
-                goal: None,
-                metadata: TicketMetadata::default(),
+                ticket: "ENG-10793".to_string(),
+                title_override: Some("Inline sections".to_string()),
+                goal: Some("Keep exact inline ticket sections.".to_string()),
+                metadata: TicketMetadata {
+                    description: Some(
+                        "# Technical cleanup\n\nCompact the brief.\n\n## aCcEpTaNcE cRiTeRiA\n\n- [ ] First bullet stays first\n- [ ] Second bullet stays second\n\n## TEST PLAN\n\n### Focused pass\n\n- `cargo test --lib`\n\n## vALidAtIoN\n\n### Lint\n\n- `cargo clippy --all-targets --all-features -- -D warnings`\n"
+                            .to_string(),
+                    ),
+                    ..TicketMetadata::default()
+                },
                 output: None,
             },
         )?;
 
         let brief = fs::read_to_string(output)?;
-        assert!(brief.contains(&format!(
-            "_Missing `ARCHITECTURE.md`. Run `{} scan` to generate it._",
-            crate::branding::COMMAND_NAME
-        )));
+        assert!(brief.contains("## aCcEpTaNcE cRiTeRiA\n\n- [ ] First bullet stays first\n- [ ] Second bullet stays second"));
+        assert!(brief.contains("## TEST PLAN\n\n### Focused pass\n\n- `cargo test --lib`"));
+        assert!(brief.contains(
+            "## vALidAtIoN\n\n### Lint\n\n- `cargo clippy --all-targets --all-features -- -D warnings`"
+        ));
 
         Ok(())
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TurnOneFixture {
+        description: String,
+        brief_max: usize,
+    }
+
+    #[test]
+    fn write_agent_brief_fixture_byte_budgets_hold_for_required_cases() -> Result<()> {
+        for fixture_name in [
+            "small-happy-path",
+            "large-narrative",
+            "validation-heavy",
+            "attachment-heavy",
+            "discussion-heavy",
+        ] {
+            let fixture = load_turn_one_fixture(fixture_name)?;
+            let temp = tempdir()?;
+            let root = temp.path();
+            ensure_dir(&PlanningPaths::new(root).codebase_dir)?;
+
+            let output = write_agent_brief(
+                root,
+                AgentBriefRequest {
+                    ticket: "ENG-10793".to_string(),
+                    title_override: Some(format!("Fixture {fixture_name}")),
+                    goal: Some("Ticket fixture budget check.".to_string()),
+                    metadata: TicketMetadata {
+                        description: Some(fixture.description),
+                        ..TicketMetadata::default()
+                    },
+                    output: None,
+                },
+            )?;
+
+            let brief = fs::read_to_string(output)?;
+            assert!(
+                brief.len() <= fixture.brief_max,
+                "{fixture_name} brief exceeded budget: {} > {}",
+                brief.len(),
+                fixture.brief_max
+            );
+            assert!(!brief.contains("## Linear Description"), "{fixture_name}");
+            assert!(!brief.contains("_Missing"), "{fixture_name}");
+        }
+
+        Ok(())
+    }
+
+    fn load_turn_one_fixture(name: &str) -> Result<TurnOneFixture> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/listen/turn-one")
+            .join(format!("{name}.json"));
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read fixture `{}`", path.display()))?;
+        serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse fixture `{}`", path.display()))
     }
 
     #[test]

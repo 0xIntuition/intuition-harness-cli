@@ -1,0 +1,7 @@
+{
+  "description": "# Context\n\nThis fixture represents a ticket with many supporting documents. The prompt should stay compact because the read-first summary lives in the attachment README instead of being duplicated inline.\n\n## Proposed Approach\n\n- Persist the attachment README with a prioritized summary.\n- Keep the full manifest below that summary.\n- Point turn one at the manifest path instead of dumping the attachment list into the prompt body.\n\n## Acceptance Criteria\n\n- [ ] Attachment context remains reviewer-readable\n- [ ] Prompt stays compact even when attachment context is large\n\n## Validation\n\n- `cargo test render_issue_attachment_manifest_adds_prioritized_summary --lib -- --exact`\n",
+  "attachment_manifest": true,
+  "brief_max": 3500,
+  "prompt_max": 6500,
+  "instructions_max": 2600
+}

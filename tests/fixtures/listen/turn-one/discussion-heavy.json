@@ -1,0 +1,7 @@
+{
+  "description": "# Context\n\nThis fixture keeps a moderate narrative body while the local backlog discussion file carries most of the bulk. The prompt should summarize only the newest discussion entries and keep that summary bounded.\n\n## Acceptance Criteria\n\n- [ ] Discussion summary is newest-first\n- [ ] Discussion summary is capped to three bullets or excerpts\n- [ ] Discussion summary never exceeds the excerpt budget\n\n## Validation\n\n- `cargo test render_agent_prompt_discussion_summary_is_newest_first_and_bounded --lib -- --exact`\n",
+  "discussion": "# Ticket Discussion\n\n### **Alice** (2026-04-01)\n\nOldest discussion context that should fall out of the prompt summary once the newest entries are selected.\n\n### **Bob** (2026-04-02)\n\nSecond discussion context with enough detail to make the summary non-trivial but still deterministic.\n\n### **Carol** (2026-04-03)\n\nThird discussion context that should remain visible in the prompt summary because it is still recent.\n\n### **Dana** (2026-04-04)\n\nNewest discussion context that must appear first in the summary and stay within the combined character budget.\n",
+  "brief_max": 3500,
+  "prompt_max": 6500,
+  "instructions_max": 2600
+}

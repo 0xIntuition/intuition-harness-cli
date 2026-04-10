@@ -27,7 +27,7 @@ use crate::config::{
 };
 use crate::config_resolution::{AgentConfigOverrides, normalize_agent_name, resolve_agent_config};
 use crate::fs::sibling_workspace_root;
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, write_text_file};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, write_text_file};
 use crate::github_pr::{
     GhCli, PullRequestCheck, PullRequestChecksOutcome, PullRequestLifecycleResult,
     PullRequestPublishMode, PullRequestPublishRequest, ResolvedBranchPullRequest, WorkflowRun,
@@ -40,12 +40,10 @@ use crate::managed_child::{
     ManagedChild, ManagedChildOutput, ManagedChildResult, ManagedChildSettings,
     ManagedChildTermination,
 };
-use crate::repo_target::RepoTarget;
 use crate::validation::{
     ResolvedValidationProfile, ValidationCommandRecord, resolve_validation_profile,
     run_validation_commands,
 };
-use crate::workflow_contract::render_workflow_contract_for_listen;
 use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
 use super::state::{ContextPressure, completed_turn_known_input_tokens};
@@ -4195,13 +4193,17 @@ fn build_agent_instructions(
     context: &ListenTurnContext<'_>,
     plan: ExecutionTurnPlan,
 ) -> Result<String> {
-    let repo_target = RepoTarget::with_workspace(context.source_root, context.workspace_path);
-    let workflow_contract = render_workflow_contract_for_listen(context.source_root, repo_target)?;
     let brief_path = PlanningPaths::new(context.workspace_path)
         .agent_briefs_dir
         .join(format!("{}.md", issue.identifier));
-    let mut sections = vec![
-        workflow_contract,
+    let mut invariant_rules = vec![
+        "Treat the CLI-resolved command root as the authoritative repository root for this run.".to_string(),
+        "Use local repository evidence first. Consult `AGENTS.md` and legacy `WORKFLOW.md` on disk only when repo-specific rules need clarification.".to_string(),
+    ];
+    if let Some(repo_scoped_instructions) = repo_scoped_listen_instructions_note(context) {
+        invariant_rules.push(repo_scoped_instructions);
+    }
+    invariant_rules.extend([
         format!(
             "You are running inside `{}` listen, an unattended orchestration session.",
             crate::branding::COMMAND_NAME
@@ -4212,12 +4214,6 @@ fn build_agent_instructions(
             "Use `{}` as the repository root for implementation, validation, commits, pushes, and PR creation.",
             context.workspace_path.display()
         ),
-        "Treat the Linear ticket title, description, labels, and attached instructions as the primary work contract. Execute that work directly instead of expanding it into extra planning unless the ticket explicitly asks for that.".to_string(),
-        format!(
-            "A generated brief is available at `{}` if you need repo context, but do not spend time restating or expanding it unless the ticket requires that depth.",
-            brief_path.display()
-        ),
-        "Keep implementation, validation, and local backlog updates anchored to the provided workspace checkout for the active repository.".to_string(),
         format!(
             "Reconcile the existing `## Codex Workpad` comment `{}` before doing new work and keep that single comment updated in place.",
             context.workpad_comment_id
@@ -4226,21 +4222,25 @@ fn build_agent_instructions(
             "Never overwrite the primary Linear issue description during `{}` listen. Put planning, progress, validation, and status updates in the workpad comment instead.",
             crate::branding::COMMAND_NAME
         ),
+    ]);
+
+    let mut execution_guidance = vec![
+        "Treat the Linear ticket body and attachments as the primary work contract. Execute directly unless the ticket explicitly asks for more planning.".to_string(),
+        format!(
+            "A generated brief is available at `{}` if you need repo context, but do not spend time restating or expanding it unless the ticket requires that depth.",
+            brief_path.display()
+        ),
+        "Keep implementation, validation, and local backlog updates anchored to the provided workspace checkout for the active repository.".to_string(),
         "Execute the requested work directly, validate what you changed, and avoid adding extra planning, analysis, or decomposition unless the ticket explicitly asks for them.".to_string(),
         format!(
-            "Each turn must either leave meaningful workspace updates or stop with a concrete blocker. Do not burn turns rewriting `{}/` files, briefs, or workpad notes unless that is part of the ticket's requested deliverable.",
+            "Leave meaningful workspace updates every turn or stop with a concrete blocker. Avoid rewriting `{}/` files, briefs, or workpad notes unless the ticket requires it.",
             crate::branding::PROJECT_DIR
         ),
         "If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks.".to_string(),
-        "Do not consider the task complete until the requested ticket deliverables are committed and pushed. Shared automation will create or update the branch PR as a draft, attach it to Linear, and promote it to ready during the review handoff.".to_string(),
-        format!(
-            "Shared automation keeps the `{}` label attached when it publishes or updates the GitHub PR for this ticket. If you touch PR metadata directly, preserve that label and do not use the legacy `{}` label.",
-            REQUIRED_LISTEN_PR_LABEL, LEGACY_LISTEN_PR_LABEL
-        ),
     ];
 
     if let Some(backlog_issue) = context.backlog_issue {
-        sections.push(format!(
+        execution_guidance.push(format!(
             "A local backlog exists for `{}` in `{}`. Use it only as lightweight tracking. Do not expand, rewrite, or improve backlog files unless the ticket explicitly asks for that. If checklist items already exist, mark off only the work you actually completed.",
             backlog_issue.identifier,
             PlanningPaths::new(context.workspace_path)
@@ -4252,7 +4252,7 @@ fn build_agent_instructions(
     let manifest_path = PlanningPaths::new(context.workspace_path)
         .agent_issue_context_manifest_path(&issue.identifier);
     if manifest_path.is_file() {
-        sections.push(format!(
+        execution_guidance.push(format!(
             "Additional Linear attachment context has been downloaded to `{}`. Review `{}` and use the downloaded markdown files and attachments as supporting context before implementation.",
             manifest_path.parent().unwrap_or(context.workspace_path).display(),
             manifest_path.display()
@@ -4260,37 +4260,83 @@ fn build_agent_instructions(
     }
 
     if turn_number > 1 {
-        sections.push(format!(
-            "This is continuation turn {turn_number} of {}. Resume from the current workspace and workpad state instead of restarting from scratch.",
+        execution_guidance.push(format!(
+            "This is execution turn {turn_number} of {} for the current run. Resume from the current workspace and workpad state instead of restarting from scratch.",
             plan.max_turns
         ));
-        sections.push(
+        execution_guidance.push(
             "The previous turn completed normally, but the issue is still active. Do not repeat finished investigation or validation unless the new code changes require it."
                 .to_string(),
         );
     }
 
     if plan.checkpoint_turn {
-        sections.push(
+        execution_guidance.push(
             "This is a dedicated context-checkpoint turn. Update `### Review Notes` -> `#### Context Checkpoint` with decisions made, failed approaches, blockers, exact remaining work, and checklist status, and avoid starting broad new implementation work unless it is required to land the checkpoint safely."
                 .to_string(),
         );
     }
     if plan.last_execution_turn {
-        sections.push(
+        execution_guidance.push(
             "This is the final remaining execution turn before context exhaustion. Prioritize wrap-up, checkpointing, and leaving the branch plus workpad in a resumable state for later review and recovery."
                 .to_string(),
         );
     }
-
     if issue.description.is_none() {
-        sections.push(
+        execution_guidance.push(
             "Issue description is empty in Linear; rely on the current workspace and workpad state."
                 .to_string(),
         );
     }
 
-    Ok(sections.join("\n\n"))
+    let publication_guidance = vec![
+        "Do not mark the task complete until the requested deliverables are committed and pushed. Shared automation handles draft PR create/update, Linear attachment, and ready promotion.".to_string(),
+        format!(
+            "Shared automation keeps the `{}` label attached when it publishes or updates the GitHub PR for this ticket. If you touch PR metadata directly, preserve that label and do not use the legacy `{}` label.",
+            REQUIRED_LISTEN_PR_LABEL, LEGACY_LISTEN_PR_LABEL
+        ),
+        "Keep validation notes and final handoff status in the existing workpad comment. Do not post a separate completion summary.".to_string(),
+    ];
+
+    Ok([
+        render_instruction_block("Invariant Rules", &invariant_rules),
+        render_instruction_block("Execution Guidance", &execution_guidance),
+        render_instruction_block("Publication and Handoff", &publication_guidance),
+    ]
+    .join("\n\n"))
+}
+
+fn repo_scoped_listen_instructions_note(context: &ListenTurnContext<'_>) -> Option<String> {
+    let relative_path = context
+        .planning_meta
+        .listen
+        .instructions_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let instructions_path = context.workspace_path.join(relative_path);
+    let display = display_path(&instructions_path, context.workspace_path);
+
+    Some(if instructions_path.is_file() {
+        format!(
+            "Repo-scoped listen instructions are configured at `{display}`. Read that file directly from disk before acting on repo-specific rules."
+        )
+    } else {
+        let source_instructions_path = context.source_root.join(relative_path);
+        let source_display = display_path(&source_instructions_path, context.source_root);
+        format!(
+            "Repo-scoped listen instructions are configured at `{display}`, but that file is missing in this workspace checkout. Fall back to local repository evidence plus `AGENTS.md` and legacy `WORKFLOW.md` on disk. If you need the configured file for read-only reference, consult the source-root copy at `{source_display}` without editing outside the workspace checkout."
+        )
+    })
+}
+
+fn render_instruction_block(title: &str, paragraphs: &[String]) -> String {
+    let mut lines = vec![format!("## {title}")];
+    for paragraph in paragraphs {
+        lines.push(String::new());
+        lines.push(paragraph.clone());
+    }
+    lines.join("\n")
 }
 
 fn build_review_instructions(_: &ListenTurnContext<'_>) -> String {
@@ -6986,7 +7032,10 @@ mod tests {
         SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage, TurnPromptMode,
         TurnTokenSnapshot,
     };
+    use anyhow::{Result, anyhow};
+    use serde::Deserialize;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
     use tempfile::tempdir;
@@ -7686,7 +7735,7 @@ mod tests {
     }
 
     #[test]
-    fn build_agent_instructions_executes_ticket_without_label_based_modes() {
+    fn build_agent_instructions_renders_three_logical_blocks() {
         let temp = tempdir().expect("tempdir should build");
         let workspace = temp.path();
         let source_root = temp.path();
@@ -7733,12 +7782,261 @@ mod tests {
         let instructions = super::build_agent_instructions(&issue, 1, &context, plan)
             .expect("instructions should build");
 
-        assert!(instructions.contains("Treat the Linear ticket title, description, labels, and attached instructions as the primary work contract."));
-        assert!(instructions.contains("Execute the requested work directly"));
-        assert!(instructions.contains("meaningful workspace updates"));
-        assert!(instructions.contains("WORKFLOW.md"));
+        let headings = instructions
+            .lines()
+            .filter(|line| line.starts_with("## "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headings,
+            vec![
+                "## Invariant Rules",
+                "## Execution Guidance",
+                "## Publication and Handoff",
+            ]
+        );
+        assert!(instructions.contains(
+            "Treat the CLI-resolved command root as the authoritative repository root for this run."
+        ));
+        assert!(instructions.contains("Never ask a human to perform follow-up actions."));
+        assert!(instructions.contains(
+            "Treat the Linear ticket body and attachments as the primary work contract."
+        ));
+        assert!(instructions.contains("If the Linear ticket contains `Validation`, `Test Plan`, or `Testing` sections, mirror them into the workpad and execute them as required checks."));
+        assert!(instructions.contains("Shared automation keeps the `metastack` label attached"));
         assert!(!instructions.contains("refine the workpad plan and acceptance criteria"));
         assert!(!instructions.contains("plan/spec oriented"));
+    }
+
+    #[test]
+    fn build_agent_instructions_surfaces_repo_scoped_listen_instructions_path() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path();
+        let source_root = temp.path();
+        fs::create_dir_all(workspace.join(".metastack/agents/briefs"))
+            .expect("brief dir should build");
+        fs::create_dir_all(workspace.join("instructions")).expect("instructions dir should build");
+        fs::write(
+            workspace.join("instructions/listen.md"),
+            "# Listener Instructions\nKeep the workpad current.\n",
+        )
+        .expect("instructions file should write");
+
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta {
+            listen: crate::config::PlanningListenSettings {
+                instructions_path: Some("instructions/listen.md".to_string()),
+                ..crate::config::PlanningListenSettings::default()
+            },
+            ..crate::config::PlanningMeta::default()
+        };
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.to_path_buf(),
+            project: None,
+            workspace: workspace.to_path_buf(),
+            issue: "ENG-10793".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let issue = test_issue("ENG-10793");
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root,
+            project_selector: None,
+            workspace_path: workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+        };
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 1, 20);
+
+        let instructions = super::build_agent_instructions(&issue, 1, &context, plan)
+            .expect("instructions should build");
+
+        assert!(instructions.contains(
+            "Repo-scoped listen instructions are configured at `instructions/listen.md`."
+        ));
+        assert_eq!(
+            instructions
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn build_agent_instructions_uses_honest_fallback_when_workspace_instructions_are_missing() {
+        let temp = tempdir().expect("tempdir should build");
+        let workspace = temp.path().join("workspace");
+        let source_root = temp.path().join("source");
+        fs::create_dir_all(workspace.join(".metastack/agents/briefs"))
+            .expect("brief dir should build");
+        fs::create_dir_all(source_root.join("instructions"))
+            .expect("source instructions dir should build");
+        fs::write(
+            source_root.join("instructions/listen.md"),
+            "# Listener Instructions\nKeep the workpad current.\n",
+        )
+        .expect("source instructions file should write");
+
+        let app_config = crate::config::AppConfig::default();
+        let planning_meta = crate::config::PlanningMeta {
+            listen: crate::config::PlanningListenSettings {
+                instructions_path: Some("instructions/listen.md".to_string()),
+                ..crate::config::PlanningListenSettings::default()
+            },
+            ..crate::config::PlanningMeta::default()
+        };
+        let args = crate::cli::ListenWorkerArgs {
+            source_root: source_root.clone(),
+            project: None,
+            workspace: workspace.clone(),
+            issue: "ENG-10793".to_string(),
+            workpad_comment_id: "comment-1".to_string(),
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+            api_key: None,
+            api_url: None,
+            profile: None,
+            team: None,
+            agent: None,
+            model: None,
+            reasoning: None,
+        };
+        let issue = test_issue("ENG-10793");
+        let context = super::ListenTurnContext {
+            app_config: &app_config,
+            planning_meta: &planning_meta,
+            args: &args,
+            source_root: &source_root,
+            project_selector: None,
+            workspace_path: &workspace,
+            workpad_comment_id: "comment-1",
+            backlog_issue: None,
+            max_turns: 20,
+            context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+        };
+        let plan =
+            super::ExecutionTurnPlan::new(super::ContextPressure::Normal, 0, false, false, 1, 20);
+
+        let instructions = super::build_agent_instructions(&issue, 1, &context, plan)
+            .expect("instructions should build");
+
+        assert!(instructions.contains(
+            "Repo-scoped listen instructions are configured at `instructions/listen.md`, but that file is missing in this workspace checkout."
+        ));
+        assert!(instructions.contains("Fall back to local repository evidence plus `AGENTS.md` and legacy `WORKFLOW.md` on disk."));
+        assert!(instructions.contains("consult the source-root copy at `instructions/listen.md`"));
+        assert!(!instructions.contains("built-in workflow contract"));
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TurnOneFixture {
+        description: String,
+        instructions_max: usize,
+    }
+
+    #[test]
+    fn first_turn_instruction_fixture_byte_budgets_hold_for_required_cases() -> Result<()> {
+        for fixture_name in [
+            "small-happy-path",
+            "large-narrative",
+            "validation-heavy",
+            "attachment-heavy",
+            "discussion-heavy",
+        ] {
+            let fixture = load_turn_one_fixture(fixture_name)?;
+            let temp = tempdir()?;
+            let workspace = temp.path();
+            let source_root = temp.path();
+            fs::create_dir_all(workspace.join(".metastack/agents/briefs"))?;
+            fs::create_dir_all(workspace.join(".metastack"))?;
+            fs::write(workspace.join("AGENTS.md"), "legacy")?;
+
+            let app_config = crate::config::AppConfig::default();
+            let planning_meta = crate::config::PlanningMeta::default();
+            let args = crate::cli::ListenWorkerArgs {
+                source_root: source_root.to_path_buf(),
+                project: None,
+                workspace: workspace.to_path_buf(),
+                issue: "ENG-10793".to_string(),
+                workpad_comment_id: "comment-1".to_string(),
+                backlog_issue: None,
+                max_turns: 20,
+                context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+                api_key: None,
+                api_url: None,
+                profile: None,
+                team: None,
+                agent: None,
+                model: None,
+                reasoning: None,
+            };
+            let mut issue = test_issue("ENG-10793");
+            issue.description = Some(fixture.description);
+            let context = super::ListenTurnContext {
+                app_config: &app_config,
+                planning_meta: &planning_meta,
+                args: &args,
+                source_root,
+                project_selector: None,
+                workspace_path: workspace,
+                workpad_comment_id: "comment-1",
+                backlog_issue: None,
+                max_turns: 20,
+                context_budget_tokens: crate::config::DEFAULT_LISTEN_CONTEXT_BUDGET_TOKENS,
+            };
+            let plan = super::ExecutionTurnPlan::new(
+                super::ContextPressure::Normal,
+                0,
+                false,
+                false,
+                1,
+                20,
+            );
+
+            let instructions = super::build_agent_instructions(&issue, 1, &context, plan)?;
+            assert!(
+                instructions.len() <= fixture.instructions_max,
+                "{fixture_name} instructions exceeded budget: {} > {}",
+                instructions.len(),
+                fixture.instructions_max
+            );
+            assert_eq!(
+                instructions
+                    .lines()
+                    .filter(|line| line.starts_with("## "))
+                    .count(),
+                3,
+                "{fixture_name}"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn load_turn_one_fixture(name: &str) -> Result<TurnOneFixture> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/listen/turn-one")
+            .join(format!("{name}.json"));
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| anyhow!("failed to read fixture `{}`: {error}", path.display()))?;
+        serde_json::from_str(&contents)
+            .map_err(|error| anyhow!("failed to parse fixture `{}`: {error}", path.display()))
     }
 
     #[test]

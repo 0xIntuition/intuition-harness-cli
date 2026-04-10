@@ -1,0 +1,6 @@
+{
+  "description": "# Context\n\nThe listen worker currently repeats too much turn-one context across the brief, the prompt, and the instruction payload. This fixture keeps a long narrative body so the renderer has to compact it instead of echoing the entire issue body back to the agent.\n\n## Proposed Approach\n\n- Keep the brief focused on ticket identity and reusable codebase references.\n- Keep the turn-one prompt focused on live execution metadata plus one compact narrative summary.\n- Keep first-turn instructions in exactly three logical blocks.\n\n## Risks\n\n- Over-compacting the prompt could hide actionable detail that only lives in the narrative body.\n- Reordering attachment or discussion output nondeterministically would make regression tests brittle.\n- Touching continuation behavior would silently regress resumed turns.\n\n## Validation\n\n- `cargo test --lib`\n- `cargo test --test listen -- --test-threads=1`\n\n## Acceptance Criteria\n\n- [ ] Narrative no longer appears in full across multiple turn-one surfaces\n- [ ] Continuation behavior stays unchanged\n",
+  "brief_max": 4000,
+  "prompt_max": 6500,
+  "instructions_max": 2600
+}
