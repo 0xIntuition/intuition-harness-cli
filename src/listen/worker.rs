@@ -46,7 +46,7 @@ use crate::validation::{
 };
 use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
 
-use super::state::{ContextPressure, completed_turn_known_input_tokens};
+use super::state::{ContextPressure, completed_turn_known_input_tokens, derive_session_lifecycle};
 use super::verification::{
     BattleTestInput, VerificationBattleTestCase, VerificationBattleTestReport,
     VerificationCodeReviewReport, VerificationCriterionResult, VerificationE2eReport,
@@ -62,9 +62,9 @@ use super::workpad::{
 use super::{
     BACKLOG_STATE, BlockedCategory, BlockedReason, CanonicalSessionData, LatestResumeHandle,
     MAX_STALLED_TURNS, PendingLinearSync, PendingPullRequestAttachment, PullRequestStatus,
-    PullRequestSummary, ResumeProvider, SessionPhase, SessionTimeoutRecord,
-    SessionTimeoutTermination, TokenUsage, TurnPromptMode, TurnTokenSnapshot, agent_log_path,
-    backlog_progress_for_issue_dir, blocked_reason, capture_workspace_snapshot,
+    PullRequestSummary, ResumeProvider, SessionExitCondition, SessionLifecycle, SessionPhase,
+    SessionTimeoutRecord, SessionTimeoutTermination, TokenUsage, TurnPromptMode, TurnTokenSnapshot,
+    agent_log_path, backlog_progress_for_issue_dir, blocked_reason, capture_workspace_snapshot,
     compact_blocked_summary, compact_completed_summary, compact_running_summary,
     compact_session_summary, compare_workspace_snapshots, current_workspace_branch,
     issue_state_label, issue_team_key, listen_issue_is_active, now_epoch_seconds, now_timestamp,
@@ -1097,6 +1097,42 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                 {
                     Ok(pull_request) => pull_request,
                     Err(error) => {
+                        if error
+                            .to_string()
+                            .contains("still draft after review handoff")
+                        {
+                            let draft_ref = session_context
+                                .pull_request
+                                .number
+                                .map(|number| format!("draft #{number}"))
+                                .unwrap_or_else(|| "draft PR".to_string());
+                            write_listen_session(
+                                &source_root,
+                                project_selector,
+                                with_session_lifecycle(
+                                    build_worker_session(
+                                        &issue,
+                                        SessionPhase::Publishing,
+                                        compact_session_summary([
+                                            Some("Lifecycle truncated".to_string()),
+                                            Some(format!(
+                                                "{draft_ref} remained draft after review handoff"
+                                            )),
+                                            Some(format!("see {}", log_path.display())),
+                                        ]),
+                                        &session_context,
+                                        turns_completed,
+                                        provider_session_id.as_deref(),
+                                        &session_context.canonical,
+                                    ),
+                                    SessionLifecycle::truncated(
+                                        SessionExitCondition::DraftPending,
+                                        true,
+                                    ),
+                                ),
+                            )?;
+                            return Ok(());
+                        }
                         let blocked = blocked_reason(
                             BlockedCategory::Infra,
                             "failed to prepare GitHub PR for review",
@@ -1273,14 +1309,17 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                     write_listen_session(
                         &source_root,
                         project_selector,
-                        build_worker_session(
-                            &refreshed_issue,
-                            SessionPhase::Completed,
-                            summary,
-                            &session_context,
-                            turns_completed,
-                            provider_session_id.as_deref(),
-                            &session_context.canonical,
+                        with_session_lifecycle(
+                            build_worker_session(
+                                &refreshed_issue,
+                                SessionPhase::Publishing,
+                                summary,
+                                &session_context,
+                                turns_completed,
+                                provider_session_id.as_deref(),
+                                &session_context.canonical,
+                            ),
+                            SessionLifecycle::completed(SessionExitCondition::CleanComplete),
                         ),
                     )?;
                     try_listener_auto_clean(
@@ -2261,18 +2300,21 @@ async fn replay_pending_linear_sync(
         write_listen_session(
             context.source_root,
             context.project_selector,
-            build_worker_session(
-                issue,
-                SessionPhase::Completed,
-                compact_completed_summary(
-                    issue.description.as_deref(),
+            with_session_lifecycle(
+                build_worker_session(
+                    issue,
+                    SessionPhase::Publishing,
+                    compact_completed_summary(
+                        issue.description.as_deref(),
+                        turns_completed,
+                        &issue_state_label(issue),
+                    ),
+                    session_context,
                     turns_completed,
-                    &issue_state_label(issue),
+                    provider_session_id,
+                    &session_context.canonical,
                 ),
-                session_context,
-                turns_completed,
-                provider_session_id,
-                &session_context.canonical,
+                SessionLifecycle::completed(SessionExitCondition::CleanComplete),
             ),
         )?;
         try_listener_auto_clean(
@@ -2494,9 +2536,8 @@ fn write_pending_linear_sync_blocked_session(
     provider_session_id: Option<&str>,
     log_path: &Path,
 ) -> Result<()> {
-    let blocked = blocked_reason(BlockedCategory::Infra, "pending Linear sync", true);
     let summary = compact_session_summary([
-        Some(blocked.summary_headline()),
+        Some("Lifecycle truncated".to_string()),
         session_context
             .pending_linear_sync
             .as_ref()
@@ -2506,14 +2547,17 @@ fn write_pending_linear_sync_blocked_session(
     write_listen_session(
         session_context.source_root,
         session_context.project_selector,
-        build_worker_blocked_session(
-            issue,
-            blocked.clone(),
-            summary,
-            session_context,
-            turns_completed,
-            provider_session_id,
-            &session_context.canonical,
+        with_session_lifecycle(
+            build_worker_session(
+                issue,
+                SessionPhase::Publishing,
+                summary,
+                session_context,
+                turns_completed,
+                provider_session_id,
+                &session_context.canonical,
+            ),
+            SessionLifecycle::truncated(SessionExitCondition::PendingLinearSync, true),
         ),
     )
 }
@@ -6731,6 +6775,13 @@ fn build_worker_session(
         team_key: issue.team.key.clone(),
         issue_url: issue.url.clone(),
         phase,
+        lifecycle: Some(derive_session_lifecycle(
+            phase,
+            None,
+            context.pending_linear_sync.as_ref(),
+            &context.pull_request,
+            context.latest_stale_worker_failure.as_ref(),
+        )),
         summary,
         blocked: None,
         brief_path: Some(
@@ -6783,6 +6834,14 @@ fn build_worker_session(
     }
 }
 
+fn with_session_lifecycle(
+    mut session: super::AgentSession,
+    lifecycle: SessionLifecycle,
+) -> super::AgentSession {
+    session.lifecycle = Some(lifecycle);
+    session
+}
+
 fn build_worker_blocked_session(
     issue: &IssueSummary,
     blocked: BlockedReason,
@@ -6802,6 +6861,13 @@ fn build_worker_blocked_session(
         canonical,
     );
     session.blocked = Some(blocked);
+    session.lifecycle = Some(derive_session_lifecycle(
+        session.phase,
+        session.blocked.as_ref(),
+        session.pending_linear_sync.as_ref(),
+        &session.pull_request,
+        session.latest_stale_worker_failure.as_ref(),
+    ));
     session
 }
 

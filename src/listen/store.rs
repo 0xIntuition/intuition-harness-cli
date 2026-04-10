@@ -23,15 +23,18 @@ use crate::session_runtime::{
 use super::state::{
     AgentSession, BlockedReason, COMPLETED_SESSION_TTL_SECONDS, CanonicalRepairRecord,
     CanonicalRepairStatus, CanonicalSessionData, LatestResumeHandle, ListenState,
-    PendingLinearSync, PullRequestStatus, PullRequestSummary, SessionPhase, StaleWorkerFailure,
-    TokenUsage, TurnTokenSnapshot,
+    PendingLinearSync, PullRequestStatus, PullRequestSummary, SessionLifecycle, SessionPhase,
+    StaleWorkerFailure, TokenUsage, TurnTokenSnapshot, derive_session_lifecycle,
 };
 use super::verification::{VerificationReport, VerificationSummary};
 
 const LISTEN_STORE_VERSION: u8 = 1;
 const LISTEN_SESSION_DETAIL_VERSION: u8 = 5;
+const LISTEN_RETAINED_AUDIT_VERSION: u8 = 1;
 const LOG_EXCERPT_LIMIT: usize = 6;
 const LOG_EXCERPT_MAX_CHARS: usize = 120;
+const RETAINED_AUDIT_SESSION_LIMIT: usize = 100;
+const RETAINED_AUDIT_EVENT_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -89,6 +92,9 @@ pub(super) struct ListenProjectPaths {
     pub(super) logs_dir: PathBuf,
     pub(super) details_dir: PathBuf,
     pub(super) verification_dir: PathBuf,
+    pub(super) audit_dir: PathBuf,
+    pub(super) audit_index_path: PathBuf,
+    pub(super) audit_events_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +125,33 @@ pub(super) struct StoredListenProjectSummary {
     pub(super) lock_path: PathBuf,
     pub(super) logs_dir: PathBuf,
     pub(super) latest_session: Option<AgentSession>,
+    pub(super) latest_retained_session: Option<RetainedSessionSummary>,
     pub(super) active_lock: Option<ActiveListenerLock>,
+}
+
+impl StoredListenProjectSummary {
+    pub(super) fn latest_visible_session(&self) -> Option<&AgentSession> {
+        match (&self.latest_session, &self.latest_retained_session) {
+            (Some(live), Some(retained))
+                if retained.session.updated_at_epoch_seconds > live.updated_at_epoch_seconds =>
+            {
+                Some(&retained.session)
+            }
+            (Some(live), _) => Some(live),
+            (None, Some(retained)) => Some(&retained.session),
+            (None, None) => None,
+        }
+    }
+
+    pub(super) fn latest_visible_session_is_retained(&self) -> bool {
+        match (&self.latest_session, &self.latest_retained_session) {
+            (Some(live), Some(retained)) => {
+                retained.session.updated_at_epoch_seconds > live.updated_at_epoch_seconds
+            }
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +184,8 @@ pub(crate) struct SessionContextReference {
 pub(crate) struct SessionMilestone {
     pub at_epoch_seconds: u64,
     pub phase: SessionPhase,
+    #[serde(default)]
+    pub lifecycle: Option<SessionLifecycle>,
     pub summary: String,
     #[serde(default)]
     pub turns: Option<u32>,
@@ -177,6 +211,8 @@ pub(crate) struct ListenSessionDetail {
     pub(super) updated_at_epoch_seconds: u64,
     pub(super) session_updated_at_epoch_seconds: u64,
     pub(super) phase: SessionPhase,
+    #[serde(default)]
+    pub(super) lifecycle: Option<SessionLifecycle>,
     pub(super) summary: String,
     #[serde(default)]
     pub blocked: Option<BlockedReason>,
@@ -219,6 +255,41 @@ impl ListenSessionDetail {
         self.context_budget_tokens
             .unwrap_or_else(default_context_budget_tokens)
     }
+
+    pub(crate) fn effective_lifecycle(&self) -> SessionLifecycle {
+        self.lifecycle.clone().unwrap_or_else(|| {
+            derive_session_lifecycle(
+                self.phase,
+                self.blocked.as_ref(),
+                self.pending_linear_sync.as_ref(),
+                &self.pull_request,
+                self.latest_stale_worker_failure.as_ref(),
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RetainedAuditIndex {
+    version: u8,
+    #[serde(default)]
+    sessions: Vec<RetainedSessionSummary>,
+}
+
+impl Default for RetainedAuditIndex {
+    fn default() -> Self {
+        Self {
+            version: LISTEN_RETAINED_AUDIT_VERSION,
+            sessions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct RetainedSessionSummary {
+    #[serde(flatten)]
+    pub(super) session: AgentSession,
+    pub(super) retained_at_epoch_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,8 +315,8 @@ impl SessionSelector {
     fn matches(&self, session: &AgentSession) -> bool {
         match self {
             Self::IssueIdentifier(identifier) => session.issue_matches(identifier),
-            Self::Blocked => matches!(session.phase, SessionPhase::Blocked),
-            Self::Completed => matches!(session.phase, SessionPhase::Completed),
+            Self::Blocked => session.is_blocked_session(),
+            Self::Completed => session.shows_in_completed_view(),
             Self::Stale => session.pid.is_some_and(|pid| !pid_is_running(pid)),
             Self::All => true,
         }
@@ -325,6 +396,9 @@ impl ListenProjectStore {
             logs_dir: layout.path("logs"),
             details_dir: layout.path("session-details"),
             verification_dir: layout.path("verification"),
+            audit_dir: layout.path("audit"),
+            audit_index_path: layout.path("audit/index.json"),
+            audit_events_dir: layout.path("audit/events"),
         };
 
         Ok(Self { identity, paths })
@@ -369,6 +443,9 @@ impl ListenProjectStore {
             logs_dir: layout.path("logs"),
             details_dir: layout.path("session-details"),
             verification_dir: layout.path("verification"),
+            audit_dir: layout.path("audit"),
+            audit_index_path: layout.path("audit/index.json"),
+            audit_events_dir: layout.path("audit/events"),
         };
         Ok(Self { identity, paths })
     }
@@ -387,6 +464,8 @@ impl ListenProjectStore {
         ensure_dir(&self.paths.logs_dir)?;
         ensure_dir(&self.paths.details_dir)?;
         ensure_dir(&self.paths.verification_dir)?;
+        ensure_dir(&self.paths.audit_dir)?;
+        ensure_dir(&self.paths.audit_events_dir)?;
         self.save_metadata()
     }
 
@@ -412,6 +491,9 @@ impl ListenProjectStore {
             now_epoch_seconds(),
             COMPLETED_SESSION_TTL_SECONDS,
         );
+        for session in &pruned {
+            self.persist_retained_session(session)?;
+        }
         if state_exists && (repaired || !pruned.is_empty()) {
             self.save_state(&state)?;
         }
@@ -424,6 +506,7 @@ impl ListenProjectStore {
         self.remove_orphaned_session_details(state)?;
         for session in &state.sessions {
             self.refresh_session_detail(session)?;
+            self.persist_retained_session(session)?;
         }
         Ok(())
     }
@@ -436,14 +519,15 @@ impl ListenProjectStore {
 
     pub(super) fn retry_blocked_session(&self, identifier: &str) -> Result<bool> {
         let mut state = self.load_state()?;
-        let session = state
-            .sessions
-            .iter_mut()
-            .find(|s| s.issue_matches(identifier) && s.phase == SessionPhase::Blocked);
+        let session = state.sessions.iter_mut().find(|s| {
+            s.issue_matches(identifier)
+                && (s.phase == SessionPhase::Blocked || s.can_manual_resume())
+        });
         let Some(session) = session else {
             return Ok(false);
         };
         session.phase = SessionPhase::BriefReady;
+        session.lifecycle = Some(SessionLifecycle::active(true));
         session.blocked = None;
         session.pid = None;
         if session.latest_stale_worker_failure.is_some() {
@@ -474,6 +558,7 @@ impl ListenProjectStore {
         }
         send_process_signal(pid, ProcessSignal::Pause)?;
         session.phase = SessionPhase::Paused;
+        session.lifecycle = Some(SessionLifecycle::paused());
         session.blocked = None;
         session.summary = compact_session_summary([
             Some("Paused by operator".to_string()),
@@ -505,6 +590,7 @@ impl ListenProjectStore {
         }
         send_process_signal(pid, ProcessSignal::Resume)?;
         session.phase = SessionPhase::Running;
+        session.lifecycle = Some(SessionLifecycle::active(true));
         session.blocked = None;
         session.summary = compact_session_summary([
             Some("Resumed by operator".to_string()),
@@ -547,6 +633,9 @@ impl ListenProjectStore {
 
         let cleared_sessions = state.remove_sessions(|session| selector.matches(session));
         if !cleared_sessions.is_empty() {
+            for session in &cleared_sessions {
+                self.persist_retained_session(session)?;
+            }
             self.save_state(&state)?;
         }
 
@@ -583,6 +672,41 @@ impl ListenProjectStore {
         issue_identifier: &str,
     ) -> Result<Option<ListenSessionDetail>> {
         read_optional_json_lossy(&self.detail_path(issue_identifier))
+    }
+
+    pub(super) fn load_retained_sessions(&self) -> Result<Vec<RetainedSessionSummary>> {
+        let now = now_epoch_seconds();
+        let mut index = self.load_retained_audit_index()?;
+        let mut changed = prune_retained_event_files(self, now, &index.sessions)?;
+        index.sessions.sort_by(|left, right| {
+            right
+                .session
+                .updated_at_epoch_seconds
+                .cmp(&left.session.updated_at_epoch_seconds)
+                .then_with(|| {
+                    left.session
+                        .issue_identifier
+                        .cmp(&right.session.issue_identifier)
+                })
+        });
+        if index.sessions.len() > RETAINED_AUDIT_SESSION_LIMIT {
+            index.sessions.truncate(RETAINED_AUDIT_SESSION_LIMIT);
+            changed = true;
+        }
+        if changed {
+            self.save_retained_audit_index(&index)?;
+        }
+        Ok(index.sessions)
+    }
+
+    pub(super) fn load_retained_session(
+        &self,
+        issue_identifier: &str,
+    ) -> Result<Option<RetainedSessionSummary>> {
+        Ok(self
+            .load_retained_sessions()?
+            .into_iter()
+            .find(|summary| summary.session.issue_matches(issue_identifier)))
     }
 
     pub(super) fn load_verification_report(
@@ -628,6 +752,55 @@ impl ListenProjectStore {
             }
         }
         Ok(details)
+    }
+
+    pub(super) fn load_retained_session_detail(
+        &self,
+        issue_identifier: &str,
+    ) -> Result<Option<ListenSessionDetail>> {
+        let Some(summary) = self.load_retained_session(issue_identifier)? else {
+            return Ok(None);
+        };
+        let events = load_retained_events_file(&self.retained_events_path(issue_identifier))?;
+        Ok(Some(ListenSessionDetail {
+            version: LISTEN_SESSION_DETAIL_VERSION,
+            issue_identifier: summary.session.issue_identifier.clone(),
+            issue_title: summary.session.issue_title.clone(),
+            started_at_epoch_seconds: summary.session.started_at_epoch_seconds,
+            updated_at_epoch_seconds: summary.retained_at_epoch_seconds,
+            session_updated_at_epoch_seconds: summary.session.updated_at_epoch_seconds,
+            phase: summary.session.phase,
+            lifecycle: Some(summary.session.effective_lifecycle()),
+            summary: summary.session.summary.clone(),
+            blocked: summary.session.blocked.clone(),
+            turns: summary.session.turns,
+            tokens: summary.session.tokens.clone(),
+            turn_history: summary.session.turn_history.clone(),
+            context_budget_tokens: summary.session.context_budget_tokens,
+            canonical: summary.session.canonical.clone(),
+            pull_request: summary.session.pull_request.clone(),
+            latest_resume_handle: summary.session.latest_resume_handle.clone(),
+            verification: None,
+            pending_linear_sync: summary.session.pending_linear_sync.clone(),
+            stale_worker_recovery_attempt_count: summary
+                .session
+                .stale_worker_recovery_attempt_count,
+            latest_stale_worker_failure: summary.session.latest_stale_worker_failure.clone(),
+            last_timeout: summary.session.last_timeout.clone(),
+            references: SessionDetailReferences {
+                workspace_path: summary.session.workspace_path.clone(),
+                backlog_path: summary.session.backlog_path.clone(),
+                brief_path: summary.session.brief_path.clone(),
+                workpad_comment_id: summary.session.workpad_comment_id.clone(),
+                log_path: summary.session.log_path.clone(),
+                branch: summary.session.branch.clone(),
+                verification_json_path: None,
+                verification_markdown_path: None,
+            },
+            prompt_context: build_prompt_context_references(&summary.session),
+            milestones: events,
+            log_excerpts: Vec::new(),
+        }))
     }
 
     pub(super) fn acquire_listener_lock(&self, pid: u32) -> Result<ListenerLockGuard> {
@@ -758,7 +931,15 @@ impl ListenProjectStore {
     /// detail/log files cannot be removed.
     pub(crate) fn remove_ticket_artifacts(&self, issue_identifier: &str) -> Result<()> {
         let mut state = self.load_state()?;
+        let removed = state
+            .sessions
+            .iter()
+            .find(|session| session.issue_matches(issue_identifier))
+            .cloned();
         if state.remove_issue(issue_identifier) {
+            if let Some(session) = removed.as_ref() {
+                self.persist_retained_session(session)?;
+            }
             self.save_state(&state)?;
         }
 
@@ -884,12 +1065,19 @@ impl ListenProjectStore {
                     logs_dir: logs_dir.clone(),
                     details_dir,
                     verification_dir: project_dir.join("verification"),
+                    audit_dir: project_dir.join("audit"),
+                    audit_index_path: project_dir.join("audit/index.json"),
+                    audit_events_dir: project_dir.join("audit/events"),
                 },
             };
             let latest_session = match store.load_state() {
                 Ok(state) => state.latest_session(),
                 Err(_) => None,
             };
+            let latest_retained_session = store
+                .load_retained_sessions()
+                .ok()
+                .and_then(|sessions| sessions.into_iter().next());
             let active_lock = store.load_active_lock().ok().flatten();
 
             projects.push(StoredListenProjectSummary {
@@ -898,6 +1086,7 @@ impl ListenProjectStore {
                 lock_path,
                 logs_dir,
                 latest_session,
+                latest_retained_session,
                 active_lock,
             });
         }
@@ -907,12 +1096,27 @@ impl ListenProjectStore {
                 .latest_session
                 .as_ref()
                 .map(|session| session.updated_at_epoch_seconds)
+                .into_iter()
+                .chain(
+                    right
+                        .latest_retained_session
+                        .as_ref()
+                        .map(|summary| summary.session.updated_at_epoch_seconds),
+                )
+                .max()
                 .unwrap_or_default()
                 .cmp(
                     &left
                         .latest_session
                         .as_ref()
                         .map(|session| session.updated_at_epoch_seconds)
+                        .into_iter()
+                        .chain(
+                            left.latest_retained_session
+                                .as_ref()
+                                .map(|summary| summary.session.updated_at_epoch_seconds),
+                        )
+                        .max()
                         .unwrap_or_default(),
                 )
                 .then_with(|| {
@@ -922,6 +1126,78 @@ impl ListenProjectStore {
                 })
         });
         Ok(projects)
+    }
+
+    fn retained_events_path(&self, issue_identifier: &str) -> PathBuf {
+        self.paths
+            .audit_events_dir
+            .join(format!("{issue_identifier}.jsonl"))
+    }
+
+    fn load_retained_audit_index(&self) -> Result<RetainedAuditIndex> {
+        Ok(read_optional_json_lossy(&self.paths.audit_index_path)?.unwrap_or_default())
+    }
+
+    fn save_retained_audit_index(&self, index: &RetainedAuditIndex) -> Result<()> {
+        self.ensure_layout()?;
+        write_json(&self.paths.audit_index_path, index)
+    }
+
+    fn persist_retained_session(&self, session: &AgentSession) -> Result<()> {
+        self.ensure_layout()?;
+        let mut index = self.load_retained_audit_index()?;
+        let mut retained_session = session.clone();
+        retained_session.lifecycle = Some(session.effective_lifecycle());
+        retained_session.pid = None;
+        index
+            .sessions
+            .retain(|summary| !summary.session.issue_matches(&session.issue_identifier));
+        index.sessions.push(RetainedSessionSummary {
+            session: retained_session,
+            retained_at_epoch_seconds: now_epoch_seconds(),
+        });
+        index.sessions.sort_by(|left, right| {
+            right
+                .session
+                .updated_at_epoch_seconds
+                .cmp(&left.session.updated_at_epoch_seconds)
+                .then_with(|| {
+                    left.session
+                        .issue_identifier
+                        .cmp(&right.session.issue_identifier)
+                })
+        });
+        if index.sessions.len() > RETAINED_AUDIT_SESSION_LIMIT {
+            index.sessions.truncate(RETAINED_AUDIT_SESSION_LIMIT);
+        }
+        self.save_retained_audit_index(&index)?;
+
+        let path = self.retained_events_path(&session.issue_identifier);
+        let mut events = load_retained_events_file(&path)?;
+        let now = now_epoch_seconds();
+        events.retain(|event| {
+            now.saturating_sub(event.at_epoch_seconds) <= RETAINED_AUDIT_EVENT_TTL_SECONDS
+        });
+        let candidate = SessionMilestone {
+            at_epoch_seconds: session.updated_at_epoch_seconds,
+            phase: session.phase,
+            lifecycle: Some(session.effective_lifecycle()),
+            summary: session.summary.clone(),
+            turns: session.turns,
+            pull_request_status: session.pull_request.status,
+            pull_request_number: session.pull_request.number,
+        };
+        if events.last().is_none_or(|last| {
+            last.phase != candidate.phase
+                || last.lifecycle != candidate.lifecycle
+                || last.summary != candidate.summary
+                || last.turns != candidate.turns
+                || last.pull_request_status != candidate.pull_request_status
+                || last.pull_request_number != candidate.pull_request_number
+        }) {
+            events.push(candidate);
+        }
+        write_retained_events_file(&path, &events)
     }
 
     fn load_state_from_disk(&self) -> Result<(ListenState, bool)> {
@@ -951,6 +1227,7 @@ impl ListenProjectStore {
                 updated_at_epoch_seconds: session.updated_at_epoch_seconds,
                 session_updated_at_epoch_seconds: session.updated_at_epoch_seconds,
                 phase: session.phase,
+                lifecycle: Some(session.effective_lifecycle()),
                 summary: session.summary.clone(),
                 blocked: session.blocked.clone(),
                 turns: session.turns,
@@ -978,6 +1255,7 @@ impl ListenProjectStore {
         detail.updated_at_epoch_seconds = now_epoch_seconds();
         detail.session_updated_at_epoch_seconds = session.updated_at_epoch_seconds;
         detail.phase = session.phase;
+        detail.lifecycle = Some(session.effective_lifecycle());
         detail.summary = session.summary.clone();
         detail.blocked = session.blocked.clone();
         detail.turns = session.turns;
@@ -1437,6 +1715,7 @@ fn append_milestone(milestones: &mut Vec<SessionMilestone>, session: &AgentSessi
     let candidate = SessionMilestone {
         at_epoch_seconds: session.updated_at_epoch_seconds,
         phase: session.phase,
+        lifecycle: Some(session.effective_lifecycle()),
         summary: session.summary.clone(),
         turns: session.turns,
         pull_request_status: session.pull_request.status,
@@ -1444,6 +1723,7 @@ fn append_milestone(milestones: &mut Vec<SessionMilestone>, session: &AgentSessi
     };
     if milestones.last().is_some_and(|last| {
         last.phase == candidate.phase
+            && last.lifecycle == candidate.lifecycle
             && last.summary == candidate.summary
             && last.turns == candidate.turns
             && last.pull_request_status == candidate.pull_request_status
@@ -1452,6 +1732,124 @@ fn append_milestone(milestones: &mut Vec<SessionMilestone>, session: &AgentSessi
         return;
     }
     milestones.push(candidate);
+}
+
+fn load_retained_events_file(path: &Path) -> Result<Vec<SessionMilestone>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read `{}`", path.display()));
+        }
+    };
+
+    let mut events = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let event: SessionMilestone = serde_json::from_str(trimmed).with_context(|| {
+            format!(
+                "failed to parse retained audit event {} from `{}`",
+                index + 1,
+                path.display()
+            )
+        })?;
+        events.push(event);
+    }
+    Ok(events)
+}
+
+fn write_retained_events_file(path: &Path, events: &[SessionMilestone]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_dir(parent)?;
+    }
+    let body = events
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| {
+            format!(
+                "failed to serialize retained audit events for `{}`",
+                path.display()
+            )
+        })?
+        .join("\n");
+    let rendered = if body.is_empty() {
+        String::new()
+    } else {
+        format!("{body}\n")
+    };
+    fs::write(path, rendered).with_context(|| format!("failed to write `{}`", path.display()))
+}
+
+fn prune_retained_event_files(
+    store: &ListenProjectStore,
+    now_epoch_seconds: u64,
+    sessions: &[RetainedSessionSummary],
+) -> Result<bool> {
+    let mut changed = false;
+    let valid = sessions
+        .iter()
+        .map(|summary| summary.session.issue_identifier.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let entries = match fs::read_dir(&store.paths.audit_events_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read `{}`",
+                    store.paths.audit_events_dir.display()
+                )
+            });
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read `{}`",
+                store.paths.audit_events_dir.display()
+            )
+        })?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to inspect `{}`", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if !valid.contains(&stem.to_ascii_lowercase()) {
+            match fs::remove_file(&path) {
+                Ok(()) => changed = true,
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to remove `{}`", path.display()));
+                }
+            }
+            continue;
+        }
+
+        let mut events = load_retained_events_file(&path)?;
+        let original_len = events.len();
+        events.retain(|event| {
+            now_epoch_seconds.saturating_sub(event.at_epoch_seconds)
+                <= RETAINED_AUDIT_EVENT_TTL_SECONDS
+        });
+        if events.len() != original_len {
+            write_retained_events_file(&path, &events)?;
+            changed = true;
+        }
+    }
+
+    Ok(changed)
 }
 
 fn build_prompt_context_references(session: &AgentSession) -> Vec<SessionContextReference> {
@@ -2143,6 +2541,7 @@ mod tests {
             team_key: "MET".to_string(),
             issue_url: format!("https://linear.app/metastack/{issue_identifier}"),
             phase,
+            lifecycle: None,
             summary: format!("{issue_identifier} summary"),
             blocked: None,
             brief_path: Some(format!(
@@ -2392,6 +2791,9 @@ mod tests {
                 logs_dir: resolved_store.paths.logs_dir.clone(),
                 details_dir: resolved_store.paths.details_dir.clone(),
                 verification_dir: resolved_store.paths.verification_dir.clone(),
+                audit_dir: resolved_store.paths.audit_dir.clone(),
+                audit_index_path: resolved_store.paths.audit_index_path.clone(),
+                audit_events_dir: resolved_store.paths.audit_events_dir.clone(),
             },
         };
         let mut child = spawn_sleep_process()?;
@@ -2657,6 +3059,7 @@ mod tests {
                 updated_at_epoch_seconds: 100,
                 session_updated_at_epoch_seconds: 100,
                 phase: SessionPhase::Completed,
+                lifecycle: None,
                 summary: "detail without state".to_string(),
                 blocked: None,
                 turns: Some(1),
@@ -2728,6 +3131,7 @@ mod tests {
                 updated_at_epoch_seconds: 100,
                 session_updated_at_epoch_seconds: 100,
                 phase: SessionPhase::Completed,
+                lifecycle: None,
                 summary: "detail without state".to_string(),
                 blocked: None,
                 turns: Some(1),

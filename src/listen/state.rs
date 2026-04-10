@@ -540,6 +540,156 @@ impl PullRequestSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleOutcome {
+    #[default]
+    Active,
+    Paused,
+    Blocked,
+    Completed,
+    Truncated,
+}
+
+impl SessionLifecycleOutcome {
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Paused => "Paused",
+            Self::Blocked => "Blocked",
+            Self::Completed => "Completed",
+            Self::Truncated => "Truncated",
+        }
+    }
+
+    pub fn is_blocked(self) -> bool {
+        matches!(self, Self::Blocked)
+    }
+
+    pub fn shows_in_completed_view(self) -> bool {
+        matches!(self, Self::Completed | Self::Truncated)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionExitCondition {
+    CleanComplete,
+    IssueMoved,
+    PendingLinearSync,
+    DraftPending,
+    ManualPause,
+    WorkerDied,
+    SetupMissing,
+    TurnLimit,
+    Stalled,
+    VerificationFailed,
+    ValidationFailed,
+    CiTimeout,
+    ExecuteAwaitingTakeover,
+    Other,
+}
+
+impl SessionExitCondition {
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::CleanComplete => "Ready Handoff",
+            Self::IssueMoved => "Issue Moved",
+            Self::PendingLinearSync => "Sync Pending",
+            Self::DraftPending => "Draft Pending",
+            Self::ManualPause => "Manual Pause",
+            Self::WorkerDied => "Worker Died",
+            Self::SetupMissing => "Setup Missing",
+            Self::TurnLimit => "Turn Limit",
+            Self::Stalled => "Stalled",
+            Self::VerificationFailed => "Verification Failed",
+            Self::ValidationFailed => "Validation Failed",
+            Self::CiTimeout => "CI Timeout",
+            Self::ExecuteAwaitingTakeover => "Awaiting Takeover",
+            Self::Other => "Other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLifecycle {
+    pub outcome: SessionLifecycleOutcome,
+    #[serde(default)]
+    pub exit_condition: Option<SessionExitCondition>,
+    #[serde(default)]
+    pub resumable: bool,
+}
+
+impl SessionLifecycle {
+    pub fn active(resumable: bool) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Active,
+            exit_condition: None,
+            resumable,
+        }
+    }
+
+    pub fn paused() -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Paused,
+            exit_condition: Some(SessionExitCondition::ManualPause),
+            resumable: true,
+        }
+    }
+
+    pub fn blocked(exit_condition: Option<SessionExitCondition>, resumable: bool) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Blocked,
+            exit_condition,
+            resumable,
+        }
+    }
+
+    pub fn completed(exit_condition: SessionExitCondition) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Completed,
+            exit_condition: Some(exit_condition),
+            resumable: false,
+        }
+    }
+
+    pub fn truncated(exit_condition: SessionExitCondition, resumable: bool) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Truncated,
+            exit_condition: Some(exit_condition),
+            resumable,
+        }
+    }
+
+    pub fn outcome_label(&self) -> &'static str {
+        self.outcome.display_label()
+    }
+
+    pub fn exit_label(&self) -> Option<&'static str> {
+        self.exit_condition.map(SessionExitCondition::display_label)
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        self.outcome.is_blocked()
+    }
+
+    pub fn shows_in_completed_view(&self) -> bool {
+        self.outcome.shows_in_completed_view()
+    }
+
+    pub fn can_manual_resume(&self) -> bool {
+        self.resumable
+            && matches!(
+                self.outcome,
+                SessionLifecycleOutcome::Blocked | SessionLifecycleOutcome::Truncated
+            )
+    }
+
+    pub fn can_auto_resume(&self) -> bool {
+        self.resumable && matches!(self.outcome, SessionLifecycleOutcome::Truncated)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaleWorkerFailure {
     pub pid: u32,
@@ -575,6 +725,8 @@ pub struct AgentSession {
     pub team_key: String,
     pub issue_url: String,
     pub phase: SessionPhase,
+    #[serde(default)]
+    pub lifecycle: Option<SessionLifecycle>,
     pub summary: String,
     #[serde(default)]
     pub blocked: Option<BlockedReason>,
@@ -743,11 +895,54 @@ impl AgentSession {
         self.issue_identifier.eq_ignore_ascii_case(identifier)
     }
 
+    pub(super) fn effective_lifecycle(&self) -> SessionLifecycle {
+        self.lifecycle.clone().unwrap_or_else(|| {
+            derive_session_lifecycle(
+                self.phase,
+                self.blocked.as_ref(),
+                self.pending_linear_sync.as_ref(),
+                &self.pull_request,
+                self.latest_stale_worker_failure.as_ref(),
+            )
+        })
+    }
+
     pub(super) fn stage_label(&self) -> String {
+        self.phase.display_label().to_string()
+    }
+
+    pub(super) fn lifecycle_label(&self) -> &'static str {
+        self.effective_lifecycle().outcome_label()
+    }
+
+    pub(super) fn exit_label(&self) -> Option<String> {
         self.blocked
             .as_ref()
             .map(|blocked| blocked.stage_label().to_string())
-            .unwrap_or_else(|| self.phase.display_label().to_string())
+            .or_else(|| self.effective_lifecycle().exit_label().map(str::to_string))
+    }
+
+    pub(super) fn exit_detail_label(&self) -> Option<String> {
+        self.blocked
+            .as_ref()
+            .map(|blocked| blocked.reason.clone())
+            .or_else(|| self.effective_lifecycle().exit_label().map(str::to_string))
+    }
+
+    pub(super) fn is_blocked_session(&self) -> bool {
+        self.effective_lifecycle().is_blocked()
+    }
+
+    pub(super) fn shows_in_completed_view(&self) -> bool {
+        self.effective_lifecycle().shows_in_completed_view()
+    }
+
+    pub(super) fn can_manual_resume(&self) -> bool {
+        self.effective_lifecycle().can_manual_resume()
+    }
+
+    pub(super) fn can_auto_resume(&self) -> bool {
+        self.effective_lifecycle().can_auto_resume()
     }
 
     pub(super) fn blocked_category_label(&self) -> Option<&'static str> {
@@ -912,6 +1107,52 @@ impl SessionPhase {
     }
 }
 
+pub(super) fn derive_session_lifecycle(
+    phase: SessionPhase,
+    blocked: Option<&BlockedReason>,
+    pending_linear_sync: Option<&PendingLinearSync>,
+    pull_request: &PullRequestSummary,
+    latest_stale_worker_failure: Option<&StaleWorkerFailure>,
+) -> SessionLifecycle {
+    if pending_linear_sync.is_some() {
+        return SessionLifecycle::truncated(SessionExitCondition::PendingLinearSync, true);
+    }
+
+    if phase == SessionPhase::Paused {
+        return SessionLifecycle::paused();
+    }
+
+    if phase == SessionPhase::Completed {
+        return if pull_request.status == PullRequestStatus::Draft {
+            SessionLifecycle::truncated(SessionExitCondition::DraftPending, true)
+        } else {
+            SessionLifecycle::completed(SessionExitCondition::CleanComplete)
+        };
+    }
+
+    if let Some(blocked) = blocked {
+        let exit_condition = if latest_stale_worker_failure.is_some() {
+            Some(SessionExitCondition::WorkerDied)
+        } else if blocked.category == BlockedCategory::Setup {
+            Some(SessionExitCondition::SetupMissing)
+        } else {
+            None
+        };
+        return SessionLifecycle::blocked(exit_condition, blocked.retryable);
+    }
+
+    if phase == SessionPhase::Blocked {
+        return SessionLifecycle::blocked(
+            latest_stale_worker_failure
+                .is_some()
+                .then_some(SessionExitCondition::WorkerDied),
+            false,
+        );
+    }
+
+    SessionLifecycle::active(true)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ListenState {
     version: u8,
@@ -949,20 +1190,9 @@ impl ListenState {
     }
 
     pub(super) fn blocks_pickup(&self, identifier: &str) -> bool {
-        self.sessions.iter().any(|session| {
-            session.issue_matches(identifier)
-                && matches!(
-                    session.phase,
-                    SessionPhase::Claimed
-                        | SessionPhase::BriefReady
-                        | SessionPhase::Running
-                        | SessionPhase::Verifying
-                        | SessionPhase::Validating
-                        | SessionPhase::Paused
-                        | SessionPhase::Completed
-                        | SessionPhase::Blocked
-                )
-        })
+        self.sessions
+            .iter()
+            .any(|session| session.issue_matches(identifier))
     }
 
     pub(super) fn upsert(&mut self, session: AgentSession) {
@@ -999,7 +1229,7 @@ impl ListenState {
         ttl_seconds: u64,
     ) -> Vec<AgentSession> {
         self.remove_sessions(|session| {
-            session.phase.is_completed()
+            session.effective_lifecycle().outcome == SessionLifecycleOutcome::Completed
                 && now_epoch_seconds.saturating_sub(session.updated_at_epoch_seconds) > ttl_seconds
         })
     }
@@ -1045,6 +1275,7 @@ mod tests {
             team_key: "ENG".to_string(),
             issue_url: "https://linear.app/issues/ENG-10194".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
