@@ -310,18 +310,16 @@ enum ImprovementLoadingOutcome<T> {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct ImprovementTerminalSessionOptions {
-    raw_mode: bool,
+struct ImprovementTerminalOptions {
     alternate_screen: bool,
     cursor_hidden: bool,
     mouse_capture: bool,
     bracketed_paste: bool,
 }
 
-impl ImprovementTerminalSessionOptions {
+impl ImprovementTerminalOptions {
     const fn loading() -> Self {
         Self {
-            raw_mode: false,
             alternate_screen: true,
             cursor_hidden: true,
             mouse_capture: false,
@@ -331,7 +329,6 @@ impl ImprovementTerminalSessionOptions {
 
     const fn interactive() -> Self {
         Self {
-            raw_mode: true,
             alternate_screen: true,
             cursor_hidden: true,
             mouse_capture: true,
@@ -340,66 +337,9 @@ impl ImprovementTerminalSessionOptions {
     }
 }
 
-struct ImprovementTerminalSession {
-    options: ImprovementTerminalSessionOptions,
-    active: bool,
-}
-
-impl ImprovementTerminalSession {
-    fn start(options: ImprovementTerminalSessionOptions) -> Result<Self> {
-        if options.raw_mode {
-            enable_raw_mode()
-                .context("failed to enable raw mode for backlog improve terminal session")?;
-        }
-
-        let mut stdout = io::stdout();
-        if let Err(error) = write_improvement_terminal_enter(&mut stdout, options) {
-            if options.raw_mode {
-                let _ = disable_raw_mode();
-            }
-            return Err(error);
-        }
-
-        Ok(Self {
-            options,
-            active: true,
-        })
-    }
-
-    fn restore(&mut self) -> Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        self.active = false;
-
-        let mut stdout = io::stdout();
-        let exit_result = write_improvement_terminal_exit(&mut stdout, self.options);
-
-        if self.options.raw_mode {
-            let raw_mode_result = disable_raw_mode()
-                .context("failed to disable raw mode for backlog improve terminal session");
-            if exit_result.is_ok() && (self.options.mouse_capture || self.options.bracketed_paste) {
-                // Give the terminal a moment to apply mode changes before the parent shell redraws.
-                thread::sleep(Duration::from_millis(20));
-            }
-            exit_result?;
-            raw_mode_result?;
-            return Ok(());
-        }
-
-        exit_result
-    }
-}
-
-impl Drop for ImprovementTerminalSession {
-    fn drop(&mut self) {
-        let _ = self.restore();
-    }
-}
-
 fn write_improvement_terminal_enter<W: Write>(
     writer: &mut W,
-    options: ImprovementTerminalSessionOptions,
+    options: ImprovementTerminalOptions,
 ) -> Result<()> {
     if options.alternate_screen {
         execute!(writer, EnterAlternateScreen)
@@ -422,7 +362,7 @@ fn write_improvement_terminal_enter<W: Write>(
 
 fn write_improvement_terminal_exit<W: Write>(
     writer: &mut W,
-    options: ImprovementTerminalSessionOptions,
+    options: ImprovementTerminalOptions,
 ) -> Result<()> {
     if options.cursor_hidden {
         execute!(writer, Show)
@@ -443,6 +383,52 @@ fn write_improvement_terminal_exit<W: Write>(
     Ok(())
 }
 
+fn start_interactive_improvement_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    enable_raw_mode().context("failed to enable raw mode for backlog improve terminal session")?;
+
+    let options = ImprovementTerminalOptions::interactive();
+    let mut stdout = io::stdout();
+    if let Err(error) = write_improvement_terminal_enter(&mut stdout, options) {
+        let _ = disable_raw_mode();
+        return Err(error);
+    }
+
+    Terminal::new(CrosstermBackend::new(stdout))
+        .context("failed to initialize backlog improve interactive terminal")
+}
+
+fn start_loading_improvement_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    let options = ImprovementTerminalOptions::loading();
+    let mut stdout = io::stdout();
+    write_improvement_terminal_enter(&mut stdout, options)?;
+    Terminal::new(CrosstermBackend::new(stdout))
+        .context("failed to initialize backlog improve loading terminal")
+}
+
+struct InteractiveTerminalCleanup;
+
+impl Drop for InteractiveTerminalCleanup {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        if write_improvement_terminal_exit(&mut stdout, ImprovementTerminalOptions::interactive())
+            .is_ok()
+        {
+            // Give the terminal a moment to apply mode changes before the parent shell redraws.
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+struct LoadingTerminalCleanup;
+
+impl Drop for LoadingTerminalCleanup {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout();
+        let _ = write_improvement_terminal_exit(&mut stdout, ImprovementTerminalOptions::loading());
+    }
+}
+
 /// Returns the shared backlog-improve interactive terminal enter/exit byte sequence.
 ///
 /// This is used by deterministic regression tests to prove that cleanup completes before the
@@ -450,7 +436,7 @@ fn write_improvement_terminal_exit<W: Write>(
 #[doc(hidden)]
 pub fn backlog_improve_terminal_cleanup_bytes() -> Result<Vec<u8>> {
     let mut output = Vec::new();
-    let options = ImprovementTerminalSessionOptions::interactive();
+    let options = ImprovementTerminalOptions::interactive();
     write_improvement_terminal_enter(&mut output, options)?;
     write_improvement_terminal_exit(&mut output, options)?;
     Ok(output)
@@ -504,7 +490,6 @@ where
 enum ImprovementLoadingDisplay {
     Tui {
         terminal: Terminal<CrosstermBackend<io::Stdout>>,
-        session: ImprovementTerminalSession,
     },
     Text {
         last_message: Option<String>,
@@ -513,19 +498,22 @@ enum ImprovementLoadingDisplay {
 }
 
 impl ImprovementLoadingDisplay {
-    fn start() -> Result<Self> {
+    fn start() -> Result<(Self, Option<LoadingTerminalCleanup>)> {
         Ok(if io::stdout().is_terminal() {
-            let session =
-                ImprovementTerminalSession::start(ImprovementTerminalSessionOptions::loading())?;
-            Self::Tui {
-                terminal: Terminal::new(CrosstermBackend::new(io::stdout()))?,
-                session,
-            }
+            (
+                Self::Tui {
+                    terminal: start_loading_improvement_terminal()?,
+                },
+                Some(LoadingTerminalCleanup),
+            )
         } else {
-            Self::Text {
-                last_message: None,
-                last_detail: None,
-            }
+            (
+                Self::Text {
+                    last_message: None,
+                    last_detail: None,
+                },
+                None,
+            )
         })
     }
 
@@ -561,16 +549,6 @@ impl ImprovementLoadingDisplay {
             }
         }
         Ok(())
-    }
-}
-
-impl Drop for ImprovementLoadingDisplay {
-    fn drop(&mut self) {
-        let Self::Tui { session, .. } = self else {
-            return;
-        };
-
-        let _ = session.restore();
     }
 }
 
@@ -690,7 +668,7 @@ pub async fn run_backlog_improve(args: &BacklogImproveArgs) -> Result<()> {
     let mut worker = tokio::spawn(async move {
         run_backlog_improve_job(worker_args, selected_issues, related_backlog_issues, sender).await
     });
-    let mut display = ImprovementLoadingDisplay::start()?;
+    let (mut display, loading_cleanup) = ImprovementLoadingDisplay::start()?;
     let mut loading = ImprovementLoadingState {
         message: "Preparing backlog improvement review".to_string(),
         detail: "Starting the selected issue reviews and waiting for the first agent response."
@@ -720,6 +698,7 @@ pub async fn run_backlog_improve(args: &BacklogImproveArgs) -> Result<()> {
     };
 
     drop(display);
+    drop(loading_cleanup);
     println!("{summary}");
     Ok(())
 }
@@ -731,10 +710,8 @@ async fn run_interactive_improvement_session(
     related_backlog_issues: Vec<IssueSummary>,
     args: &BacklogImproveArgs,
 ) -> Result<String> {
-    let mut session =
-        ImprovementTerminalSession::start(ImprovementTerminalSessionOptions::interactive())?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = start_interactive_improvement_terminal()?;
+    let _cleanup = InteractiveTerminalCleanup;
     let result = async {
         let instructions = match run_instruction_prompt(&mut terminal, &issues)? {
             InstructionPromptExit::Cancelled => {
@@ -889,7 +866,6 @@ async fn run_interactive_improvement_session(
     .await;
 
     drop(terminal);
-    session.restore()?;
     result
 }
 
@@ -897,7 +873,7 @@ async fn load_backlog_improve_issues_with_loading(
     command_context: &LinearCommandContext,
     args: &BacklogImproveArgs,
 ) -> Result<Vec<IssueSummary>> {
-    let mut display = ImprovementLoadingDisplay::start()?;
+    let (mut display, loading_cleanup) = ImprovementLoadingDisplay::start()?;
     let loading = ImprovementLoadingState {
         message: "Reading Linear backlog tickets".to_string(),
         detail: format!(
@@ -909,6 +885,7 @@ async fn load_backlog_improve_issues_with_loading(
     display.render(&loading)?;
     let issues = load_target_issues(command_context, args).await?;
     drop(display);
+    drop(loading_cleanup);
     Ok(issues)
 }
 
@@ -987,10 +964,8 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
         );
     }
 
-    let mut session =
-        ImprovementTerminalSession::start(ImprovementTerminalSessionOptions::interactive())?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = start_interactive_improvement_terminal()?;
+    let _cleanup = InteractiveTerminalCleanup;
     let mut app = ImprovementDashboardApp::new(issues);
     let mut copy = CopyUiState::default();
     let mut preview_viewport = Rect::default();
@@ -1114,7 +1089,6 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
     })();
 
     drop(terminal);
-    session.restore()?;
     result
 }
 
@@ -4240,6 +4214,19 @@ mod tests {
     use crate::linear::{IssueLink, LabelRef, ProjectRef, TeamRef, WorkflowState};
     use crossterm::event::KeyEvent;
 
+    fn queued_bytes(command: impl crossterm::Command) -> Vec<u8> {
+        let mut output = Vec::new();
+        crossterm::queue!(&mut output, command).expect("command bytes");
+        output
+    }
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("subsequence should exist")
+    }
+
     fn demo_issue(identifier: &str, title: &str) -> IssueSummary {
         IssueSummary {
             id: format!("id-{identifier}"),
@@ -4492,10 +4479,27 @@ mod tests {
     #[test]
     fn improvement_terminal_cleanup_sequences_finish_before_summary_output() {
         let mut output = Vec::new();
-        let options = ImprovementTerminalSessionOptions::interactive();
+        let options = ImprovementTerminalOptions::interactive();
 
         write_improvement_terminal_enter(&mut output, options).expect("enter commands");
         write_improvement_terminal_exit(&mut output, options).expect("exit commands");
+
+        let show = queued_bytes(Show);
+        let disable_bracketed_paste = queued_bytes(DisableBracketedPaste);
+        let disable_mouse_capture = queued_bytes(DisableMouseCapture);
+        let leave_alternate_screen = queued_bytes(LeaveAlternateScreen);
+
+        let show_index = find_subsequence(&output, &show);
+        let disable_bracketed_paste_index = find_subsequence(&output, &disable_bracketed_paste);
+        let disable_mouse_capture_index = find_subsequence(&output, &disable_mouse_capture);
+        let leave_alternate_screen_index = find_subsequence(&output, &leave_alternate_screen);
+
+        assert!(
+            show_index < disable_bracketed_paste_index
+                && disable_bracketed_paste_index < disable_mouse_capture_index
+                && disable_mouse_capture_index < leave_alternate_screen_index,
+            "cleanup bytes should restore cursor, then disable bracketed paste, mouse capture, and alternate screen"
+        );
 
         let summary = b"Improved 1 issue(s):\n- ENG-10170: accepted no-update recommendation\n";
         let summary_start = output.len();
