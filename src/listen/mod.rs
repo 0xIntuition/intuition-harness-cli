@@ -744,9 +744,14 @@ struct ListenLoopConfig {
     resolved_agent: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct BranchPullRequestLookup {
+    cache: HashMap<String, BranchPullRequestLookupResult>,
+}
+
 #[derive(Debug, Clone)]
-enum BranchPullRequestLookup {
-    Available(HashMap<String, BranchPullRequestState>),
+enum BranchPullRequestLookupResult {
+    Available(Vec<BranchPullRequestRecord>),
     Unavailable(String),
 }
 
@@ -768,6 +773,8 @@ impl BranchPullRequestState {
 struct BranchPullRequestRecord {
     #[serde(rename = "headRefName")]
     head_ref_name: String,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: Option<String>,
     state: String,
 }
 
@@ -1506,10 +1513,21 @@ fn issue_assignee_filter(
 }
 
 impl BranchPullRequestLookup {
-    fn branch_state(&self, branch: &str) -> Option<BranchPullRequestState> {
-        match self {
-            Self::Available(branches) => branches.get(branch).copied(),
-            Self::Unavailable(reason) => {
+    fn branch_state(
+        &mut self,
+        root: &Path,
+        branch: &str,
+        head_ref_oid: Option<&str>,
+    ) -> Option<BranchPullRequestState> {
+        let result = self
+            .cache
+            .entry(branch.to_string())
+            .or_insert_with(|| discover_branch_pull_requests(root, branch));
+        match result {
+            BranchPullRequestLookupResult::Available(records) => {
+                select_branch_pull_request_state(records, branch, head_ref_oid)
+            }
+            BranchPullRequestLookupResult::Unavailable(reason) => {
                 let _ = reason;
                 None
             }
@@ -1517,51 +1535,75 @@ impl BranchPullRequestLookup {
     }
 }
 
-fn discover_branch_pull_requests(root: &Path) -> BranchPullRequestLookup {
+fn discover_branch_pull_requests(root: &Path, branch: &str) -> BranchPullRequestLookupResult {
     let output = Command::new("gh")
         .args([
             "pr",
             "list",
+            "--head",
+            branch,
             "--state",
             "all",
             "--limit",
-            "200",
+            "1000",
             "--json",
-            "headRefName,state",
+            "headRefName,headRefOid,state",
         ])
         .current_dir(root)
         .output();
     let output = match output {
         Ok(output) => output,
-        Err(error) => return BranchPullRequestLookup::Unavailable(error.to_string()),
+        Err(error) => return BranchPullRequestLookupResult::Unavailable(error.to_string()),
     };
     if !output.status.success() {
-        return BranchPullRequestLookup::Unavailable(
+        return BranchPullRequestLookupResult::Unavailable(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         );
     }
 
     let records = match serde_json::from_slice::<Vec<BranchPullRequestRecord>>(&output.stdout) {
         Ok(records) => records,
-        Err(error) => return BranchPullRequestLookup::Unavailable(error.to_string()),
+        Err(error) => return BranchPullRequestLookupResult::Unavailable(error.to_string()),
     };
 
-    BranchPullRequestLookup::Available(
-        records
-            .into_iter()
-            .map(|record| {
-                (
-                    record.head_ref_name,
-                    match record.state.trim().to_ascii_uppercase().as_str() {
-                        "OPEN" => BranchPullRequestState::Open,
-                        "CLOSED" => BranchPullRequestState::Closed,
-                        "MERGED" => BranchPullRequestState::Merged,
-                        _ => BranchPullRequestState::Other,
-                    },
-                )
-            })
-            .collect(),
-    )
+    BranchPullRequestLookupResult::Available(records)
+}
+
+fn select_branch_pull_request_state(
+    records: &[BranchPullRequestRecord],
+    branch: &str,
+    head_ref_oid: Option<&str>,
+) -> Option<BranchPullRequestState> {
+    let mut matching_records = records
+        .iter()
+        .filter(|record| record.head_ref_name == branch)
+        .collect::<Vec<_>>();
+
+    if let Some(head_ref_oid) = head_ref_oid {
+        if let Some(record) = matching_records
+            .iter()
+            .find(|record| record.head_ref_oid.as_deref() == Some(head_ref_oid))
+        {
+            return Some(branch_pull_request_state(record.state.as_str()));
+        }
+    }
+
+    if matching_records.len() == 1 {
+        return Some(branch_pull_request_state(
+            matching_records.pop()?.state.as_str(),
+        ));
+    }
+
+    None
+}
+
+fn branch_pull_request_state(state: &str) -> BranchPullRequestState {
+    match state.trim().to_ascii_uppercase().as_str() {
+        "OPEN" => BranchPullRequestState::Open,
+        "CLOSED" => BranchPullRequestState::Closed,
+        "MERGED" => BranchPullRequestState::Merged,
+        _ => BranchPullRequestState::Other,
+    }
 }
 
 fn render_listen_backlog_file(
@@ -1857,7 +1899,7 @@ where
 
         let existing_sessions = state.sessions.clone();
         let mut reconciled = Vec::with_capacity(existing_sessions.len());
-        let branch_pull_requests = discover_branch_pull_requests(&self.root);
+        let mut branch_pull_requests = BranchPullRequestLookup::default();
 
         for mut session in existing_sessions {
             let mut issue = match self.service.load_issue(&session.issue_identifier).await {
@@ -1933,8 +1975,10 @@ where
                     ]);
                     session.updated_at_epoch_seconds = now_epoch_seconds();
                 }
-                let (removed, cleanup_note) = self
-                    .reconcile_completed_listener_workspace(&mut session, &branch_pull_requests);
+                let (removed, cleanup_note) = self.reconcile_completed_listener_workspace(
+                    &mut session,
+                    &mut branch_pull_requests,
+                );
                 if let Some(note) = cleanup_note {
                     notes.push(note);
                 }
@@ -2125,7 +2169,7 @@ where
     fn reconcile_completed_listener_workspace(
         &self,
         session: &mut AgentSession,
-        branch_pull_requests: &BranchPullRequestLookup,
+        branch_pull_requests: &mut BranchPullRequestLookup,
     ) -> (bool, Option<String>) {
         if session.origin.is_execute() {
             return (false, None);
@@ -2145,7 +2189,10 @@ where
         let Some(branch) = branch else {
             return (false, None);
         };
-        let Some(pr_state) = branch_pull_requests.branch_state(&branch) else {
+        let head_ref_oid = git_stdout(&workspace_path, &["rev-parse", "HEAD"]).ok();
+        let Some(pr_state) =
+            branch_pull_requests.branch_state(&self.root, &branch, head_ref_oid.as_deref())
+        else {
             return (false, None);
         };
         if !pr_state.is_merged() {

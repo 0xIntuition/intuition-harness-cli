@@ -314,6 +314,44 @@ fn write_listen_github_stub_with_checks_for_workspace_head(
 }
 
 #[cfg(unix)]
+fn write_branch_pr_list_stub(
+    path: &Path,
+    branch: &str,
+    payload: &str,
+) -> Result<(), Box<dyn Error>> {
+    fs::write(
+        path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+head=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --head)
+      head="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+if [ "$head" = "{branch}" ]; then
+  printf '%s' '{payload}'
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "$*" >&2
+exit 1
+"#
+        ),
+    )?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn write_listen_store_session(
     config_path: &Path,
     repo_root: &Path,
@@ -10432,24 +10470,17 @@ api_url = "{api_url}"
             branch,
         ])
         .status()?;
+    let head_sha = git_stdout(&workspace, &["rev-parse", "HEAD"])?;
 
-    fs::write(
-        bin_dir.join("gh"),
+    write_branch_pr_list_stub(
+        &bin_dir.join("gh"),
+        branch,
         format!(
-            r#"#!/bin/sh
-set -eu
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s' '[{{"headRefName":"{branch}","state":"MERGED"}}]'
-  exit 0
-fi
-printf 'unexpected gh invocation: %s\n' "$*" >&2
-exit 1
-"#
-        ),
+            r#"[{{"headRefName":"{branch}","headRefOid":"{}","state":"MERGED"}}]"#,
+            head_sha.trim(),
+        )
+        .as_str(),
     )?;
-    let mut permissions = fs::metadata(bin_dir.join("gh"))?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(bin_dir.join("gh"), permissions)?;
 
     let _viewer_mock = server.mock(|when, then| {
         when.method(POST)
@@ -10677,24 +10708,17 @@ api_url = "{api_url}"
         ])
         .status()?;
     fs::write(workspace.join("dirty-note.txt"), "keep this workspace\n")?;
+    let head_sha = git_stdout(&workspace, &["rev-parse", "HEAD"])?;
 
-    fs::write(
-        bin_dir.join("gh"),
+    write_branch_pr_list_stub(
+        &bin_dir.join("gh"),
+        branch,
         format!(
-            r#"#!/bin/sh
-set -eu
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s' '[{{"headRefName":"{branch}","state":"MERGED"}}]'
-  exit 0
-fi
-printf 'unexpected gh invocation: %s\n' "$*" >&2
-exit 1
-"#
-        ),
+            r#"[{{"headRefName":"{branch}","headRefOid":"{}","state":"MERGED"}}]"#,
+            head_sha.trim(),
+        )
+        .as_str(),
     )?;
-    let mut permissions = fs::metadata(bin_dir.join("gh"))?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(bin_dir.join("gh"), permissions)?;
 
     let _viewer_mock = server.mock(|when, then| {
         when.method(POST)
@@ -10834,6 +10858,251 @@ exit 1
     let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
     assert!(inspect.contains("preserved after merge"));
     assert!(inspect.contains("uncommitted changes detected"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn listen_render_once_does_not_clean_completed_workspace_when_branch_was_reused()
+-> Result<(), Box<dyn Error>> {
+    let _guard = listen_test_lock();
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    let bin_dir = temp.path().join("bin");
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    fs::create_dir_all(&repo_root)?;
+    fs::create_dir_all(&bin_dir)?;
+
+    write_minimal_planning_context(
+        &repo_root,
+        r#"{
+  "linear": {
+    "team": "MET",
+    "project_id": "project-1"
+  }
+}
+"#,
+    )?;
+    write_onboarded_config(
+        &config_path,
+        format!(
+            r#"[linear]
+api_key = "token"
+api_url = "{api_url}"
+"#,
+        ),
+    )?;
+    init_repo_with_origin(&repo_root)?;
+
+    let workspace = create_workspace_clone_checkout(&repo_root, "repo-workspace/MET-32")?;
+    let branch = "met-32-reused-branch";
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "checkout",
+            "-B",
+            branch,
+            "main",
+        ])
+        .status()?;
+    fs::write(workspace.join("src.rs"), "pub fn old_branch_head() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Create original merged branch head",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "--set-upstream",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let merged_head_sha = git_stdout(&workspace, &["rev-parse", "HEAD"])?;
+
+    fs::write(workspace.join("src.rs"), "pub fn reused_branch_head() {}\n")?;
+    ProcessCommand::new("git")
+        .args(["-C", workspace.to_str().expect("utf8"), "add", "src.rs"])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "Advance reused branch head",
+        ])
+        .status()?;
+    ProcessCommand::new("git")
+        .args([
+            "-C",
+            workspace.to_str().expect("utf8"),
+            "push",
+            "origin",
+            branch,
+        ])
+        .status()?;
+    let current_head_sha = git_stdout(&workspace, &["rev-parse", "HEAD"])?;
+
+    write_branch_pr_list_stub(
+        &bin_dir.join("gh"),
+        branch,
+        format!(
+            r#"[{{"headRefName":"{branch}","headRefOid":"{}","state":"MERGED"}},{{"headRefName":"{branch}","headRefOid":"{}","state":"OPEN"}}]"#,
+            merged_head_sha.trim(),
+            current_head_sha.trim(),
+        )
+        .as_str(),
+    )?;
+
+    let _viewer_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Viewer");
+        then.status(200).json_body(json!({
+            "data": {
+                "viewer": {
+                    "id": "viewer-1",
+                    "name": "Kames",
+                    "email": "sudo@example.com"
+                }
+            }
+        }));
+    });
+    let _issues_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issues");
+        then.status(200).json_body(json!({
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "id": "issue-32",
+                        "identifier": "MET-32",
+                        "title": "Later cleanup",
+                        "description": "Do not clean reused branch workspace",
+                        "url": "https://linear.app/issues/MET-32",
+                        "priority": 2,
+                        "updatedAt": "2026-03-14T16:00:00Z",
+                        "assignee": {
+                            "id": "viewer-1",
+                            "name": "Kames",
+                            "email": "sudo@example.com"
+                        },
+                        "labels": {
+                            "nodes": [{
+                                "id": "label-1",
+                                "name": "agent"
+                            }]
+                        },
+                        "comments": {
+                            "nodes": []
+                        },
+                        "team": {
+                            "id": "team-1",
+                            "key": "MET",
+                            "name": "Metastack"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "MetaStack CLI"
+                        },
+                        "state": {
+                            "id": "state-done",
+                            "name": "Done",
+                            "type": "completed"
+                        }
+                    }],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("query Issue($id: String!)")
+            .body_includes("\"id\":\"issue-32\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issue": listen_issue_detail_node(
+                    "issue-32",
+                    "MET-32",
+                    "Later cleanup",
+                    "Do not clean reused branch workspace",
+                    "state-done",
+                    "Done",
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        }));
+    });
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let mut session = listen_session_json("MET-32", "completed", now, None);
+    session["summary"] = json!("Completed | waiting for merge reconciliation");
+    session["workspace_path"] = json!(workspace.display().to_string());
+    session["branch"] = json!(branch);
+    session["origin"] = json!("listen");
+    session["started_at_epoch_seconds"] = json!(now.saturating_sub(60));
+    session["stale_worker_recovery_attempt_count"] = json!(0);
+    write_listen_store_session(&config_path, &repo_root, vec![session])?;
+
+    let log_path = listen_log_path(&config_path, &repo_root, "MET-32")?;
+    fs::create_dir_all(log_path.parent().expect("log path should have a parent"))?;
+    fs::write(&log_path, "log for MET-32\n")?;
+
+    let current_path = std::env::var("PATH")?;
+    meta()
+        .current_dir(&repo_root)
+        .env("METASTACK_CONFIG", &config_path)
+        .env("PATH", format!("{}:{}", bin_dir.display(), current_path))
+        .args([
+            "listen",
+            "--render-once",
+            "--width",
+            "160",
+            "--height",
+            "48",
+            "--root",
+            repo_root.to_str().expect("utf8"),
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        workspace.exists(),
+        "reused branch workspaces should not be cleaned based on an older merged PR"
+    );
+    assert!(
+        log_path.exists(),
+        "workspaces without a matched merged PR should retain their log artifacts"
+    );
+
+    let state_text = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
+    assert!(state_text.contains("waiting for merge reconciliation"));
+    assert!(!state_text.contains("preserved after merge"));
 
     Ok(())
 }
