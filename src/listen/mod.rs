@@ -5294,7 +5294,7 @@ fn render_discussion_summary(contents: &str, char_limit: usize) -> String {
         return if normalized.is_empty() {
             String::new()
         } else {
-            format!("- {}", truncate_turn_one_text(&normalized, text_budget))
+            truncate_discussion_bullet(None, &normalized, text_budget)
         };
     }
 
@@ -5305,15 +5305,38 @@ fn render_discussion_summary(contents: &str, char_limit: usize) -> String {
         if remaining == 0 {
             break;
         }
-        let excerpt = truncate_turn_one_text(&section.excerpt, remaining);
-        used_chars += excerpt.chars().count();
-        bullets.push(match section.label.as_deref() {
-            Some(label) => format!("- {label}: {excerpt}"),
-            None => format!("- {excerpt}"),
-        });
+        let separator_cost = usize::from(!bullets.is_empty());
+        if remaining <= separator_cost {
+            break;
+        }
+        let bullet = truncate_discussion_bullet(
+            section.label.as_deref(),
+            &section.excerpt,
+            remaining - separator_cost,
+        );
+        if bullet.is_empty() {
+            break;
+        }
+        used_chars += separator_cost + bullet.chars().count();
+        bullets.push(bullet);
     }
 
     bullets.join("\n")
+}
+
+fn truncate_discussion_bullet(label: Option<&str>, excerpt: &str, max_chars: usize) -> String {
+    if max_chars <= 2 {
+        return String::new();
+    }
+    let content = match label {
+        Some(label) => format!("{label}: {excerpt}"),
+        None => excerpt.to_string(),
+    };
+    let content_budget = max_chars.saturating_sub(2);
+    if content_budget == 0 {
+        return String::new();
+    }
+    format!("- {}", truncate_turn_one_text(&content, content_budget))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7640,12 +7663,24 @@ suffix
                 .count(),
             3
         );
-        let excerpt_chars = summary
-            .lines()
-            .filter_map(|line| line.split_once(": ").map(|(_, excerpt)| excerpt))
-            .map(|excerpt| excerpt.chars().count())
-            .sum::<usize>();
-        assert!(excerpt_chars <= 1_200, "summary exceeded 1200 chars");
+        assert!(
+            summary.chars().count() <= 1_200,
+            "summary exceeded 1200 chars"
+        );
+    }
+
+    #[test]
+    fn render_discussion_summary_counts_labels_inside_total_budget() {
+        let contents = "# Ticket Discussion\n\n### **Very Long Reviewer Name With Timestamp Metadata** (2026-04-04)\n\nNewest discussion excerpt still needs room after the label.\n\n### **Another Long Reviewer Name With Timestamp Metadata** (2026-04-03)\n\nSecond discussion excerpt should fit only if the full rendered bullet length is budgeted.\n";
+
+        let summary = super::render_discussion_summary(contents, 80);
+
+        assert!(!summary.is_empty());
+        assert!(
+            summary.chars().count() <= 80,
+            "summary exceeded budget: {summary}"
+        );
+        assert!(summary.starts_with("- "));
     }
 
     #[test]
