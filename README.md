@@ -1403,6 +1403,8 @@ sandbox_mode = "danger-full-access"
 - Claude: `claude` must be on `PATH`, and `ANTHROPIC_API_KEY` should be unset for unattended subscription-backed runs.
 - `meta agents listen --check --root .` runs the same startup preflight, including Linear reachability/auth validation, without starting the daemon.
 - `--check` also prints the effective assignee filter, for example `only Kames`, `Kames + unassigned`, or `all assignees`.
+- `--check` now also prints the shared workspace-pressure summary: overall pressure level, managed-workspace footprint, disk and memory samples, and cleanup guidance.
+- Normal unattended listen startup now fails closed before any claim or worker launch when the shared workspace-pressure summary reaches `critical`.
 
 Outputs:
 
@@ -1475,6 +1477,8 @@ That root is intentionally not configurable.
 
 When a listener session completes (the Linear ticket moves to a non-active state such as Done or Cancelled), the listener worker attempts to auto-clean the corresponding workspace clone immediately. Auto-clean succeeds only when the workspace has no uncommitted changes, no unpushed commits, and HEAD is not detached. When any safety check fails, the workspace is left in place and a manual-review-needed skip is logged. This ensures no local work is ever lost automatically.
 
+If a completed listener workspace is intentionally preserved during review handoff, later listen reconciliation now retries cleanup after the branch PR is merged. Safe merged listener workspaces are removed automatically at that later lifecycle point, while dirty, ahead, detached, or otherwise unsafe workspaces remain preserved with a clear skip reason.
+
 The same ticket-scoped listen artifacts (session entry, detail file, log file) that manual `meta workspace clean` removes are also removed during auto-clean.
 
 #### Batch reconciliation
@@ -1500,13 +1504,13 @@ meta workspace prune --root .
 
 Behavior:
 
-- `meta workspace list` prints one row per ticket clone with the ticket directory name, branch, disk usage, last modified timestamp, local git safety state, Linear state, and optional GitHub PR state.
+- `meta workspace list` prints the same shared workspace-pressure summary used by listen, then one row per ticket clone with the ticket directory name, branch, disk usage, last modified timestamp, local git safety state, Linear state, and optional GitHub PR state.
 - Done or Cancelled tickets are marked as safe removal candidates in the list output.
 - GitHub PR enrichment is optional. When `gh` auth is unavailable, `list` and `prune` still succeed and mark PR data as unavailable while continuing from Linear completion state alone.
 - `meta workspace clean <TICKET>` deletes one clone after confirmation unless `--force` is passed, and it always reports dirty or ahead safety signals before removal.
 - `meta workspace clean --target-only` removes `target/` directories across all listener clones by default, or narrows to one ticket when a ticket identifier is also supplied.
-- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space. Includes listener ticket clones, improve workspaces, and review remediation workspaces.
-- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled (for listener clones) or whose associated PRs are merged or closed (for improve and review workspaces), keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary.
+- `meta workspace prune --dry-run` previews every clone, whether it would be removed or kept, why, and the estimated reclaimed space. It also includes the shared workspace-pressure summary and managed-workspace footprint before the per-clone preview. Includes listener ticket clones, improve workspaces, and review remediation workspaces.
+- `meta workspace prune` removes clones whose Linear tickets are Done or Cancelled (for listener clones) or whose associated PRs are merged or closed (for improve and review workspaces), keeps clones with open PRs when PR data is available, skips clones with unpushed commits, and prints a final `Removed N clones, freed X GB. Kept M clones.` summary alongside the shared workspace-pressure summary.
 - Clone deletion also removes only the matching ticket-scoped MetaListen session entry and per-ticket log artifact from the install-scoped project store, leaving unrelated sessions for the same repository intact.
 
 For built-in `codex` and `claude` listen workers, the install-scoped `session.json` state now keeps

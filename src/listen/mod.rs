@@ -30,7 +30,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -51,7 +51,7 @@ use crate::config::{
     LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
     PlanningMeta, load_required_planning_meta,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path};
+use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, sibling_workspace_root};
 use crate::linear::{
     IssueAssigneeFilter, IssueComment, IssueEditSpec, IssueListFilters, IssueSummary, LinearClient,
     LinearService, ReqwestLinearClient, UserRef, classify_linear_failure,
@@ -63,6 +63,8 @@ use crate::scaffold::ensure_planning_layout;
 use crate::tui::copy::copy_overlay_viewport;
 use crate::tui::keybindings::is_copy_key;
 use crate::validation::resolve_validation_profile;
+use crate::workspace::{AutoCleanOutcome, try_auto_clean_workspace};
+use crate::workspace_pressure;
 pub use state::{
     ActiveIssue, AgentSession, BlockedCategory, BlockedReason, CanonicalSessionData,
     LatestResumeHandle, LinearFailureSnapshot, PendingIssue, PendingLinearSync,
@@ -294,7 +296,16 @@ impl ListenCycleData {
         Self::demo_at(root, DEMO_NOW_EPOCH_SECONDS, state_file)
     }
 
-    fn demo_at(_root: &Path, reference_now: u64, state_file: String) -> Self {
+    fn demo_at(root: &Path, reference_now: u64, state_file: String) -> Self {
+        let mut notes = vec![
+            "Demo mode: no Linear requests were made.".to_string(),
+            "The live terminal dashboard adapts to the full viewport.".to_string(),
+            format!("State file: {state_file}"),
+        ];
+        if let Ok(summary) = workspace_pressure::assess_workspace_pressure(root) {
+            notes.extend(summary.summary_lines());
+        }
+
         Self {
             scope: "MET / MetaStack CLI".to_string(),
             watch_scope: "all assignees".to_string(),
@@ -473,11 +484,7 @@ impl ListenCycleData {
                 },
             ],
             session_details: demo_session_details(reference_now),
-            notes: vec![
-                "Demo mode: no Linear requests were made.".to_string(),
-                "The live terminal dashboard adapts to the full viewport.".to_string(),
-                format!("State file: {state_file}"),
-            ],
+            notes,
             state_file,
             rate_limits: Some(
                 "codex | primary 12% / reset 1,773,515,901s | secondary 8% / reset 1,773,855,871s | credits n/a".to_string(),
@@ -735,6 +742,40 @@ struct ListenLoopConfig {
     show_active_issues: bool,
     show_preview: bool,
     resolved_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BranchPullRequestLookup {
+    cache: HashMap<String, BranchPullRequestLookupResult>,
+}
+
+#[derive(Debug, Clone)]
+enum BranchPullRequestLookupResult {
+    Available(Vec<BranchPullRequestRecord>),
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchPullRequestState {
+    Open,
+    Closed,
+    Merged,
+    Other,
+}
+
+impl BranchPullRequestState {
+    fn is_merged(self) -> bool {
+        matches!(self, Self::Merged)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BranchPullRequestRecord {
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: Option<String>,
+    state: String,
 }
 
 #[derive(Debug, Default)]
@@ -1470,6 +1511,101 @@ fn issue_assignee_filter(
         }
     }
 }
+
+impl BranchPullRequestLookup {
+    fn branch_state(
+        &mut self,
+        root: &Path,
+        branch: &str,
+        head_ref_oid: Option<&str>,
+    ) -> Option<BranchPullRequestState> {
+        let result = self
+            .cache
+            .entry(branch.to_string())
+            .or_insert_with(|| discover_branch_pull_requests(root, branch));
+        match result {
+            BranchPullRequestLookupResult::Available(records) => {
+                select_branch_pull_request_state(records, branch, head_ref_oid)
+            }
+            BranchPullRequestLookupResult::Unavailable(reason) => {
+                let _ = reason;
+                None
+            }
+        }
+    }
+}
+
+fn discover_branch_pull_requests(root: &Path, branch: &str) -> BranchPullRequestLookupResult {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--limit",
+            "1000",
+            "--json",
+            "headRefName,headRefOid,state",
+        ])
+        .current_dir(root)
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => return BranchPullRequestLookupResult::Unavailable(error.to_string()),
+    };
+    if !output.status.success() {
+        return BranchPullRequestLookupResult::Unavailable(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        );
+    }
+
+    let records = match serde_json::from_slice::<Vec<BranchPullRequestRecord>>(&output.stdout) {
+        Ok(records) => records,
+        Err(error) => return BranchPullRequestLookupResult::Unavailable(error.to_string()),
+    };
+
+    BranchPullRequestLookupResult::Available(records)
+}
+
+fn select_branch_pull_request_state(
+    records: &[BranchPullRequestRecord],
+    branch: &str,
+    head_ref_oid: Option<&str>,
+) -> Option<BranchPullRequestState> {
+    let mut matching_records = records
+        .iter()
+        .filter(|record| record.head_ref_name == branch)
+        .collect::<Vec<_>>();
+
+    if let Some(head_ref_oid) = head_ref_oid {
+        if let Some(record) = matching_records
+            .iter()
+            .find(|record| record.head_ref_oid.as_deref() == Some(head_ref_oid))
+        {
+            return Some(branch_pull_request_state(record.state.as_str()));
+        }
+    }
+
+    if matching_records.len() == 1 {
+        return Some(branch_pull_request_state(
+            matching_records.pop()?.state.as_str(),
+        ));
+    }
+
+    None
+}
+
+fn branch_pull_request_state(state: &str) -> BranchPullRequestState {
+    match state.trim().to_ascii_uppercase().as_str() {
+        "OPEN" => BranchPullRequestState::Open,
+        "CLOSED" => BranchPullRequestState::Closed,
+        "MERGED" => BranchPullRequestState::Merged,
+        _ => BranchPullRequestState::Other,
+    }
+}
+
 fn render_listen_backlog_file(
     relative_path: &str,
     contents: String,
@@ -1567,6 +1703,7 @@ where
             pending.len(),
             active_issues.len()
         )];
+        notes.extend(workspace_pressure::assess_workspace_pressure(&self.root)?.summary_lines());
         self.reconcile_sessions(&mut state, &mut notes, viewer)
             .await?;
         let required_labels = self.listen_settings.required_label_names();
@@ -1721,6 +1858,8 @@ where
             retry_note,
             format!("Latest Linear failure: {:#}", error),
         ];
+        let mut notes = notes;
+        notes.extend(workspace_pressure::assess_workspace_pressure(&self.root)?.summary_lines());
         Ok(ListenCycleData {
             scope,
             watch_scope: self.watch_scope_label_with(viewer),
@@ -1760,6 +1899,7 @@ where
 
         let existing_sessions = state.sessions.clone();
         let mut reconciled = Vec::with_capacity(existing_sessions.len());
+        let mut branch_pull_requests = BranchPullRequestLookup::default();
 
         for mut session in existing_sessions {
             let mut issue = match self.service.load_issue(&session.issue_identifier).await {
@@ -1835,7 +1975,16 @@ where
                     ]);
                     session.updated_at_epoch_seconds = now_epoch_seconds();
                 }
-                reconciled.push(session);
+                let (removed, cleanup_note) = self.reconcile_completed_listener_workspace(
+                    &mut session,
+                    &mut branch_pull_requests,
+                );
+                if let Some(note) = cleanup_note {
+                    notes.push(note);
+                }
+                if !removed {
+                    reconciled.push(session);
+                }
                 continue;
             }
 
@@ -2015,6 +2164,91 @@ where
 
         state.sessions = reconciled;
         Ok(())
+    }
+
+    fn reconcile_completed_listener_workspace(
+        &self,
+        session: &mut AgentSession,
+        branch_pull_requests: &mut BranchPullRequestLookup,
+    ) -> (bool, Option<String>) {
+        if session.origin.is_execute() {
+            return (false, None);
+        }
+
+        let Some(workspace_path) = session.workspace_path.as_deref().map(PathBuf::from) else {
+            return (false, None);
+        };
+        if !workspace_path.is_dir() {
+            return (false, None);
+        }
+
+        let branch = session
+            .branch
+            .clone()
+            .or_else(|| git_stdout(&workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"]).ok());
+        let Some(branch) = branch else {
+            return (false, None);
+        };
+        let head_ref_oid = git_stdout(&workspace_path, &["rev-parse", "HEAD"]).ok();
+        let Some(pr_state) =
+            branch_pull_requests.branch_state(&self.root, &branch, head_ref_oid.as_deref())
+        else {
+            return (false, None);
+        };
+        if !pr_state.is_merged() {
+            return (false, None);
+        }
+
+        let workspace_root = match sibling_workspace_root(&self.root) {
+            Ok(workspace_root) => workspace_root,
+            Err(error) => {
+                return (
+                    false,
+                    Some(format!(
+                        "Retained completed listener workspace for {} after PR merge: failed to resolve workspace root: {error:#}.",
+                        session.issue_identifier
+                    )),
+                );
+            }
+        };
+
+        match try_auto_clean_workspace(
+            &self.root,
+            self.store.identity().project_selector.as_deref(),
+            &workspace_root,
+            &workspace_path,
+            &session.issue_identifier,
+        ) {
+            Ok(AutoCleanOutcome::Removed { bytes_reclaimed }) => (
+                true,
+                Some(format!(
+                    "Auto-cleaned completed listener workspace for {} after PR merge and freed {} bytes.",
+                    session.issue_identifier, bytes_reclaimed
+                )),
+            ),
+            Ok(AutoCleanOutcome::Skipped { reason }) => {
+                let reason = reason.to_string();
+                session.summary = compact_session_summary([
+                    Some("Complete".to_string()),
+                    Some(format!("preserved after merge ({reason})")),
+                ]);
+                session.updated_at_epoch_seconds = now_epoch_seconds();
+                (
+                    false,
+                    Some(format!(
+                        "Retained completed listener workspace for {} after PR merge: {}.",
+                        session.issue_identifier, reason
+                    )),
+                )
+            }
+            Err(error) => (
+                false,
+                Some(format!(
+                    "Retained completed listener workspace for {} after PR merge because auto-clean failed: {error:#}.",
+                    session.issue_identifier
+                )),
+            ),
+        }
     }
 
     async fn ensure_backlog_issue(
@@ -2781,6 +3015,7 @@ fn should_replace_persisted_session(
         std::cmp::Ordering::Less => false,
         std::cmp::Ordering::Equal => {
             session_progress_rank(&merged_candidate) > session_progress_rank(persisted_session)
+                || merged_candidate != *persisted_session
         }
     }
 }
@@ -4127,6 +4362,10 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
     let resolved_agent = startup_provider_preflight
         .as_ref()
         .map(|report| report.provider().to_string());
+    let startup_workspace_pressure = workspace_pressure::assess_workspace_pressure(&root)?;
+    if !args.check && startup_workspace_pressure.should_block_unattended_startup() {
+        bail!("{}", startup_workspace_pressure.startup_block_message());
+    }
 
     let config = LinearConfig::new_with_root(
         Some(&root),
@@ -6208,6 +6447,58 @@ suffix
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].context_budget_tokens, Some(90_000));
+        assert_eq!(
+            merged[0].updated_at_epoch_seconds,
+            daemon_session.updated_at_epoch_seconds
+        );
+    }
+
+    #[test]
+    fn listen_state_merge_persists_equal_timestamp_summary_updates() {
+        let persisted_session = AgentSession {
+            issue_id: Some("issue-67".to_string()),
+            issue_identifier: "MET-67".to_string(),
+            issue_title: "Post-merge cleanup reconciliation".to_string(),
+            project_name: Some("MetaStack CLI".to_string()),
+            team_key: "MET".to_string(),
+            issue_url: "https://linear.app/issues/67".to_string(),
+            phase: SessionPhase::Completed,
+            summary: "Completed | waiting for merge reconciliation".to_string(),
+            blocked: None,
+            brief_path: None,
+            backlog_issue_identifier: None,
+            backlog_issue_title: None,
+            backlog_path: None,
+            workspace_path: Some("/tmp/MET-67".to_string()),
+            branch: Some("met-67-post-merge-cleanup".to_string()),
+            pull_request: PullRequestSummary::default(),
+            workpad_comment_id: None,
+            started_at_epoch_seconds: 1_773_575_905,
+            updated_at_epoch_seconds: 1_773_575_905,
+            pid: None,
+            session_id: None,
+            latest_resume_handle: None,
+            context_budget_tokens: None,
+            pending_linear_sync: None,
+            stale_worker_recovery_attempt_count: 0,
+            latest_stale_worker_failure: None,
+            last_timeout: None,
+            turns: Some(1),
+            tokens: TokenUsage::default(),
+            turn_history: Vec::new(),
+            canonical: CanonicalSessionData::default(),
+            log_path: None,
+            origin: SessionOrigin::Listen,
+        };
+        let mut daemon_session = persisted_session.clone();
+        daemon_session.summary =
+            "Complete | preserved after merge (uncommitted changes detected)".to_string();
+
+        let merged =
+            super::merge_cycle_sessions(vec![persisted_session], vec![daemon_session.clone()]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].summary, daemon_session.summary);
         assert_eq!(
             merged[0].updated_at_epoch_seconds,
             daemon_session.updated_at_epoch_seconds

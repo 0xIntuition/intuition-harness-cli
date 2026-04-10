@@ -16,6 +16,7 @@ use crate::config::{
     AGENT_ROUTE_AGENTS_LISTEN, AppConfig, LinearConfig, PlanningMeta, no_agent_selected_route_key,
 };
 use crate::linear::{LinearClient, LinearService, UserRef, classify_linear_failure};
+use crate::workspace_pressure;
 
 pub(super) struct ListenPreflightRequest<'a> {
     pub(super) working_dir: &'a Path,
@@ -29,6 +30,7 @@ pub(super) struct ListenPreflightRequest<'a> {
 pub(super) struct ListenPreflightReport {
     provider: String,
     checks: Vec<String>,
+    workspace_pressure_lines: Vec<String>,
     warnings: Vec<String>,
     viewer: Option<UserRef>,
 }
@@ -38,6 +40,7 @@ impl ListenPreflightReport {
         Self {
             provider: provider.into(),
             checks: Vec::new(),
+            workspace_pressure_lines: Vec::new(),
             warnings: Vec::new(),
             viewer: None,
         }
@@ -49,6 +52,10 @@ impl ListenPreflightReport {
 
     fn push_warning(&mut self, warning: impl Into<String>) {
         self.warnings.push(warning.into());
+    }
+
+    fn set_workspace_pressure_lines(&mut self, lines: Vec<String>) {
+        self.workspace_pressure_lines = lines;
     }
 
     pub(super) fn viewer(&self) -> Option<&UserRef> {
@@ -67,6 +74,10 @@ impl ListenPreflightReport {
 
         for check in &self.checks {
             lines.push(format!("- {check}"));
+        }
+
+        for pressure_line in &self.workspace_pressure_lines {
+            lines.push(format!("- {pressure_line}"));
         }
 
         for warning in &self.warnings {
@@ -155,6 +166,9 @@ pub(super) fn run_listen_provider_preflight(
         .next()
         .unwrap_or(&attempted_command);
     report.push_check(format!("Resolved listen command: `{display_command} ...`"));
+    report.set_workspace_pressure_lines(
+        workspace_pressure::assess_workspace_pressure(request.working_dir)?.summary_lines(),
+    );
 
     match invocation.agent.as_str() {
         "codex" => verify_codex_listen_prerequisites(&mut report)?,

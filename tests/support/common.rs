@@ -99,6 +99,8 @@ fn test_command() -> Command {
     let home_dir = isolated_home_dir();
     command.env("HOME", &home_dir);
     command.env("XDG_CONFIG_HOME", home_dir.join(".config"));
+    command.env("METASTACK_TEST_MODE", "1");
+    command.env("METASTACK_TEST_WORKSPACE_PRESSURE_FIXTURE", "healthy");
     command
 }
 

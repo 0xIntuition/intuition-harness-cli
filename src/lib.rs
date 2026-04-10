@@ -48,6 +48,7 @@ mod workflow_contract;
 mod workflows;
 mod workspace;
 mod workspace_dashboard;
+mod workspace_pressure;
 
 use std::ffi::OsString;
 

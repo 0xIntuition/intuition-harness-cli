@@ -565,7 +565,7 @@ impl StaleWorkerFailure {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSession {
     #[serde(default)]
     pub issue_id: Option<String>,
