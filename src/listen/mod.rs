@@ -69,16 +69,17 @@ pub use state::{
     ActiveIssue, AgentSession, BlockedCategory, BlockedReason, CanonicalSessionData,
     LatestResumeHandle, LinearFailureSnapshot, PendingIssue, PendingLinearSync,
     PendingPullRequestAttachment, PullRequestStatus, PullRequestSummary, ResumeProvider,
-    SessionOrigin, SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination,
-    StaleWorkerFailure, TokenUsage, TurnPromptMode, TurnTokenSnapshot,
+    SessionExitCondition, SessionLifecycle, SessionLifecycleOutcome, SessionOrigin, SessionPhase,
+    SessionTimeoutRecord, SessionTimeoutTermination, StaleWorkerFailure, TokenUsage,
+    TurnPromptMode, TurnTokenSnapshot,
 };
 use state::{
-    COMPLETED_SESSION_TTL_SECONDS, ListenState, explicit_resume_id_label,
+    COMPLETED_SESSION_TTL_SECONDS, ListenState, derive_session_lifecycle, explicit_resume_id_label,
     explicit_resume_provider_label,
 };
 use store::{
-    ListenProjectStore, ListenSessionDetail, SessionSelector, StoredListenProjectSummary,
-    pid_is_running, resolve_source_project_root,
+    ListenProjectStore, ListenSessionDetail, RetainedSessionSummary, SessionSelector,
+    StoredListenProjectSummary, pid_is_running, resolve_source_project_root,
 };
 use verification::{VerificationStatus, VerificationSummary};
 
@@ -178,10 +179,10 @@ impl ListenDashboardData {
             .iter()
             .filter(|session| match view {
                 SessionListView::Active => {
-                    !session.phase.is_completed() && session.phase != SessionPhase::Blocked
+                    !session.is_blocked_session() && !session.shows_in_completed_view()
                 }
-                SessionListView::Blocked => session.phase == SessionPhase::Blocked,
-                SessionListView::Completed => session.phase.is_completed(),
+                SessionListView::Blocked => session.is_blocked_session(),
+                SessionListView::Completed => session.shows_in_completed_view(),
             })
             .collect()
     }
@@ -247,9 +248,9 @@ impl SessionListCounts {
         sessions
             .iter()
             .fold(Self::default(), |mut counts, session| {
-                if session.phase.is_completed() {
+                if session.shows_in_completed_view() {
                     counts.completed += 1;
-                } else if session.phase == SessionPhase::Blocked {
+                } else if session.is_blocked_session() {
                     counts.blocked += 1;
                 } else {
                     counts.active += 1;
@@ -380,6 +381,7 @@ impl ListenCycleData {
                     issue_url: "https://linear.app/metastack-backlog/issue/MET-13/agent-daemon"
                         .to_string(),
                     phase: SessionPhase::BriefReady,
+                    lifecycle: None,
                     summary: "Brief ready | backlog MET-14 | worker active".to_string(),
                     blocked: None,
                     brief_path: Some(format!("{}/agents/briefs/MET-13.md", crate::branding::PROJECT_DIR)),
@@ -440,6 +442,7 @@ impl ListenCycleData {
                     issue_url: "https://linear.app/metastack-backlog/issue/MET-17/branch-pr-reconciliation"
                         .to_string(),
                     phase: SessionPhase::Claimed,
+                    lifecycle: None,
                     summary: "Claimed | preparing workspace".to_string(),
                     blocked: None,
                     brief_path: None,
@@ -499,6 +502,7 @@ impl ListenCycleData {
     fn apply_state_snapshot(
         &mut self,
         state: ListenState,
+        sessions: Vec<AgentSession>,
         session_details: HashMap<String, ListenSessionDetail>,
     ) {
         let replace_linear_snapshot = !state.pending_issues.is_empty()
@@ -512,9 +516,55 @@ impl ListenCycleData {
             self.active_issues = state.active_issues.clone();
             self.degraded = state.degraded.clone();
         }
-        self.sessions = state.sorted_sessions();
+        self.sessions = sessions;
         self.session_details = session_details;
     }
+}
+
+fn merge_visible_sessions(
+    live_sessions: Vec<AgentSession>,
+    retained_sessions: Vec<RetainedSessionSummary>,
+) -> Vec<AgentSession> {
+    let mut merged = live_sessions.clone();
+    let live_identifiers = live_sessions
+        .iter()
+        .map(|session| session.issue_identifier.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    for retained in retained_sessions {
+        if live_identifiers.contains(&retained.session.issue_identifier.to_ascii_lowercase()) {
+            continue;
+        }
+        merged.push(retained.session);
+    }
+    merged.sort_by(|left, right| {
+        right
+            .updated_at_epoch_seconds
+            .cmp(&left.updated_at_epoch_seconds)
+            .then_with(|| left.issue_identifier.cmp(&right.issue_identifier))
+    });
+    merged
+}
+
+fn load_visible_session_details(
+    store: &ListenProjectStore,
+    app_config: &AppConfig,
+    live_sessions: &[AgentSession],
+    visible_sessions: &[AgentSession],
+) -> Result<HashMap<String, ListenSessionDetail>> {
+    let mut details = store
+        .load_session_details(app_config, live_sessions)?
+        .into_iter()
+        .map(|detail| (detail.issue_identifier.clone(), detail))
+        .collect::<HashMap<_, _>>();
+    for session in visible_sessions {
+        if details.contains_key(&session.issue_identifier) {
+            continue;
+        }
+        if let Some(detail) = store.load_retained_session_detail(&session.issue_identifier)? {
+            details.insert(session.issue_identifier.clone(), detail);
+        }
+    }
+    Ok(details)
 }
 
 fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDetail> {
@@ -529,6 +579,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 updated_at_epoch_seconds: reference_now - 120,
                 session_updated_at_epoch_seconds: reference_now - 1_180,
                 phase: SessionPhase::BriefReady,
+                lifecycle: None,
                 summary: "Brief ready | backlog MET-14 | worker active".to_string(),
                 blocked: None,
                 turns: Some(1),
@@ -614,6 +665,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     store::SessionMilestone {
                         at_epoch_seconds: reference_now - 2_940,
                         phase: SessionPhase::Claimed,
+                        lifecycle: None,
                         summary: "Picked up from Todo | local backlog ready | workpad created | worker pid 95388".to_string(),
                         turns: Some(0),
                         pull_request_status: PullRequestStatus::Unpublished,
@@ -622,6 +674,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                     store::SessionMilestone {
                         at_epoch_seconds: reference_now - 1_180,
                         phase: SessionPhase::BriefReady,
+                        lifecycle: None,
                         summary: "Brief ready | backlog MET-14 | worker active".to_string(),
                         turns: Some(1),
                         pull_request_status: PullRequestStatus::Draft,
@@ -654,6 +707,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 updated_at_epoch_seconds: reference_now - 120,
                 session_updated_at_epoch_seconds: reference_now - 2_940,
                 phase: SessionPhase::Claimed,
+                lifecycle: None,
                 summary: "Claimed | preparing workspace".to_string(),
                 blocked: None,
                 turns: Some(1),
@@ -709,6 +763,7 @@ fn demo_session_details(reference_now: u64) -> HashMap<String, ListenSessionDeta
                 milestones: vec![store::SessionMilestone {
                     at_epoch_seconds: reference_now - 2_940,
                     phase: SessionPhase::Claimed,
+                    lifecycle: None,
                     summary: "Claimed | preparing workspace".to_string(),
                     turns: Some(1),
                     pull_request_status: PullRequestStatus::Unpublished,
@@ -808,7 +863,7 @@ impl CodexLiveTokenHydrator {
     fn refresh_sessions(&mut self, sessions: &mut [AgentSession]) -> Result<()> {
         for session in sessions
             .iter_mut()
-            .filter(|session| !session.phase.is_completed())
+            .filter(|session| !session.shows_in_completed_view())
         {
             let Some(thread_id) = self.resolve_thread_id(session)? else {
                 continue;
@@ -1250,7 +1305,11 @@ fn block_stale_worker_session(
         .log_path
         .clone()
         .unwrap_or_else(|| fallback_log_path.display().to_string());
-    session.phase = SessionPhase::Blocked;
+    session.phase = failure.last_persisted_phase;
+    session.lifecycle = Some(SessionLifecycle::blocked(
+        Some(SessionExitCondition::WorkerDied),
+        blocked.retryable,
+    ));
     session.blocked = Some(blocked);
     session.latest_stale_worker_failure = Some(failure.clone());
     session.log_path = Some(log_path.clone());
@@ -1765,13 +1824,11 @@ where
         persisted_state.active_issues = active_issues.clone();
         persisted_state.degraded = None;
         self.store.save_state(&persisted_state)?;
-        let sessions = persisted_state.sorted_sessions();
-        let session_details = self
-            .store
-            .load_session_details(&self.app_config, &sessions)?
-            .into_iter()
-            .map(|detail| (detail.issue_identifier.clone(), detail))
-            .collect();
+        let live_sessions = persisted_state.sorted_sessions();
+        let sessions =
+            merge_visible_sessions(live_sessions.clone(), self.store.load_retained_sessions()?);
+        let session_details =
+            load_visible_session_details(&self.store, &self.app_config, &live_sessions, &sessions)?;
 
         let scope = match (&self.filters.team, &self.filters.project) {
             (Some(team), Some(project)) => format!("{team} / {project}"),
@@ -1832,13 +1889,11 @@ where
         state.degraded = Some(degraded.clone());
         self.store.save_state(&state)?;
 
-        let sessions = state.sorted_sessions();
-        let session_details = self
-            .store
-            .load_session_details(&self.app_config, &sessions)?
-            .into_iter()
-            .map(|detail| (detail.issue_identifier.clone(), detail))
-            .collect();
+        let live_sessions = state.sorted_sessions();
+        let sessions =
+            merge_visible_sessions(live_sessions.clone(), self.store.load_retained_sessions()?);
+        let session_details =
+            load_visible_session_details(&self.store, &self.app_config, &live_sessions, &sessions)?;
         let scope = match (&self.filters.team, &self.filters.project) {
             (Some(team), Some(project)) => format!("{team} / {project}"),
             (Some(team), None) => team.clone(),
@@ -1923,7 +1978,7 @@ where
             session.team_key = issue.team.key.clone();
             session.issue_url = issue.url.clone();
 
-            if !matches!(session.phase, SessionPhase::Completed)
+            if !session.shows_in_completed_view()
                 && normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo"
                 && self
                     .session_drop_reason_with_viewer(&issue, viewer)
@@ -1970,8 +2025,10 @@ where
             }
 
             if !listen_issue_is_active(issue.state.as_ref().map(|state| state.name.as_str())) {
-                if !matches!(session.phase, SessionPhase::Completed) {
-                    session.phase = SessionPhase::Completed;
+                if session.effective_lifecycle().outcome != SessionLifecycleOutcome::Completed {
+                    session.lifecycle = Some(SessionLifecycle::completed(
+                        SessionExitCondition::IssueMoved,
+                    ));
                     session.summary = compact_session_summary([
                         Some("Complete".to_string()),
                         Some(format!("moved to `{}`", issue_state_label(&issue))),
@@ -1998,12 +2055,14 @@ where
                 continue;
             }
 
-            if !matches!(
-                session.phase,
-                SessionPhase::Completed | SessionPhase::Blocked | SessionPhase::Paused
-            ) && let Some(reason) = self.session_drop_reason_with_viewer(&issue, viewer)
+            if !session.shows_in_completed_view()
+                && !session.is_blocked_session()
+                && session.phase != SessionPhase::Paused
+                && let Some(reason) = self.session_drop_reason_with_viewer(&issue, viewer)
             {
-                session.phase = SessionPhase::Completed;
+                session.lifecycle = Some(SessionLifecycle::completed(
+                    SessionExitCondition::IssueMoved,
+                ));
                 session.summary = reason.clone();
                 session.updated_at_epoch_seconds = now_epoch_seconds();
                 notes.push(format!("Ended {} session: {reason}.", issue.identifier));
@@ -2011,10 +2070,9 @@ where
                 continue;
             }
 
-            if matches!(
-                session.phase,
-                SessionPhase::Completed | SessionPhase::Blocked
-            ) || (session.phase == SessionPhase::Paused && session.pid.is_none())
+            if (session.shows_in_completed_view() || session.is_blocked_session())
+                && !session.can_auto_resume()
+                || (session.phase == SessionPhase::Paused && session.pid.is_none())
             {
                 if normalize_issue_state_name(issue_state_label(&issue).as_str()) == "todo" {
                     notes.push(format!(
@@ -2064,6 +2122,13 @@ where
                     "missing workspace or workpad context",
                     false,
                 ));
+                session.lifecycle = Some(derive_session_lifecycle(
+                    session.phase,
+                    session.blocked.as_ref(),
+                    None,
+                    &session.pull_request,
+                    session.latest_stale_worker_failure.as_ref(),
+                ));
                 session.summary = session
                     .blocked
                     .as_ref()
@@ -2082,6 +2147,13 @@ where
                     "workspace missing",
                     false,
                 ));
+                session.lifecycle = Some(derive_session_lifecycle(
+                    session.phase,
+                    session.blocked.as_ref(),
+                    None,
+                    &session.pull_request,
+                    session.latest_stale_worker_failure.as_ref(),
+                ));
                 session.summary = session
                     .blocked
                     .as_ref()
@@ -2099,6 +2171,10 @@ where
                 session.blocked = Some(blocked_reason(
                     BlockedCategory::Other,
                     "execute-origin awaiting manual takeover",
+                    false,
+                ));
+                session.lifecycle = Some(SessionLifecycle::blocked(
+                    Some(SessionExitCondition::ExecuteAwaitingTakeover),
                     false,
                 ));
                 session.summary = compact_session_summary([
@@ -2129,6 +2205,7 @@ where
             ) {
                 Ok(pid) => {
                     session.phase = SessionPhase::Running;
+                    session.lifecycle = Some(SessionLifecycle::active(true));
                     session.blocked = None;
                     session.pid = Some(pid);
                     session.summary = compact_session_summary([
@@ -2154,6 +2231,13 @@ where
                         BlockedCategory::Infra,
                         "worker resume failed",
                         true,
+                    ));
+                    session.lifecycle = Some(derive_session_lifecycle(
+                        session.phase,
+                        session.blocked.as_ref(),
+                        None,
+                        &session.pull_request,
+                        session.latest_stale_worker_failure.as_ref(),
                     ));
                     session.summary = compact_session_summary([session
                         .blocked
@@ -2714,6 +2798,13 @@ where
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase,
+            lifecycle: Some(derive_session_lifecycle(
+                phase,
+                None,
+                None,
+                &PullRequestSummary::default(),
+                None,
+            )),
             summary,
             blocked: None,
             brief_path: artifacts.brief_path,
@@ -2765,6 +2856,13 @@ where
             updated_at_epoch_seconds,
         );
         session.blocked = Some(blocked);
+        session.lifecycle = Some(derive_session_lifecycle(
+            session.phase,
+            session.blocked.as_ref(),
+            None,
+            &session.pull_request,
+            session.latest_stale_worker_failure.as_ref(),
+        ));
         session
     }
 
@@ -2892,15 +2990,21 @@ fn merge_monotonic_session_fields(
             persisted_session.latest_stale_worker_failure.clone();
     }
 
+    if daemon_session.lifecycle.is_none() && persisted_session.lifecycle.is_some() {
+        daemon_session.lifecycle = persisted_session.lifecycle.clone();
+    }
+
     if session_phase_regressed(persisted_session, &daemon_session) {
         daemon_session.phase = persisted_session.phase;
         daemon_session.summary = persisted_session.summary.clone();
         daemon_session.blocked = persisted_session.blocked.clone();
+        daemon_session.lifecycle = persisted_session.lifecycle.clone();
     }
 
     if blocked_metadata_regressed(persisted_session, &daemon_session) {
         daemon_session.phase = persisted_session.phase;
         daemon_session.blocked = persisted_session.blocked.clone();
+        daemon_session.lifecycle = persisted_session.lifecycle.clone();
         daemon_session.summary = persisted_session.summary.clone();
     }
 
@@ -3025,9 +3129,10 @@ fn should_replace_persisted_session(
 
 fn session_progress_rank(
     session: &AgentSession,
-) -> (u8, u32, u64, usize, u8, u8, u8, u8, u8, u8, u8, u8) {
+) -> (u16, u32, u64, usize, u8, u8, u8, u8, u8, u8, u8, u8) {
     (
-        session_phase_rank(session.phase),
+        u16::from(session_phase_rank(session.phase)) * 8
+            + u16::from(session_lifecycle_rank(session)),
         session.turns.unwrap_or_default(),
         session.canonical.tokens.total().unwrap_or_default(),
         session.turn_history.len(),
@@ -3040,6 +3145,16 @@ fn session_progress_rank(
         u8::from(session.last_timeout.is_some()),
         u8::from(session.blocked.is_some()),
     )
+}
+
+fn session_lifecycle_rank(session: &AgentSession) -> u8 {
+    match session.effective_lifecycle().outcome {
+        SessionLifecycleOutcome::Active => 0,
+        SessionLifecycleOutcome::Paused => 1,
+        SessionLifecycleOutcome::Blocked => 2,
+        SessionLifecycleOutcome::Truncated => 3,
+        SessionLifecycleOutcome::Completed => 4,
+    }
 }
 
 fn session_phase_rank(phase: SessionPhase) -> u8 {
@@ -3636,13 +3751,27 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
     let now = now_epoch_seconds();
     let mut lines = vec![
         "Stored MetaListen project sessions:".to_string(),
-        "KEY  PHASE  UPDATED  ISSUE  PROVIDER  RESUME ID  PROJECT  ROOT".to_string(),
+        "KEY  SOURCE  PHASE  EXIT  PR  UPDATED  ISSUE  PROVIDER  RESUME ID  PROJECT  ROOT"
+            .to_string(),
     ];
     for project in projects {
-        let latest = project.latest_session.as_ref();
+        let latest = project.latest_visible_session();
+        let source = if project.latest_visible_session_is_retained() {
+            "retained"
+        } else if latest.is_some() {
+            "active"
+        } else {
+            "idle"
+        };
         let phase = latest
             .map(AgentSession::stage_label)
             .unwrap_or_else(|| "Idle".to_string());
+        let exit = latest
+            .and_then(AgentSession::exit_label)
+            .unwrap_or_else(|| "-".to_string());
+        let pr = latest
+            .map(AgentSession::pull_request_label)
+            .unwrap_or_else(|| "-".to_string());
         let updated = latest
             .map(|session| format_duration(now.saturating_sub(session.updated_at_epoch_seconds)))
             .unwrap_or_else(|| "-".to_string());
@@ -3656,9 +3785,12 @@ pub fn run_listen_session_list(_: &ListenSessionListArgs) -> Result<String> {
             .map(|session| explicit_resume_id_label(session.latest_resume_handle.as_ref()))
             .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
-            "{}  {}  {}  {}  {}  {}  {}  {}",
+            "{}  {}  {}  {}  {}  {}  {}  {}  {}  {}  {}",
             compact_identifier(&project.metadata.project_key),
+            source,
             phase,
+            exit,
+            pr,
             updated,
             issue,
             provider,
@@ -3675,6 +3807,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
     let store = resolve_session_store(&args.target)?;
     let metadata = store_summary(&store)?;
     let state = store.load_state()?;
+    let retained_sessions = store.load_retained_sessions()?;
     let mut lines = vec![
         format!("Project key: {}", metadata.metadata.project_key),
         format!("Project: {}", metadata.metadata.project_label),
@@ -3685,7 +3818,7 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         format!("Logs dir: {}", metadata.logs_dir.display()),
     ];
 
-    if let Some(lock) = metadata.active_lock {
+    if let Some(ref lock) = metadata.active_lock {
         lines.push(format!(
             "Active listener: pid {}{}",
             lock.pid,
@@ -3708,14 +3841,37 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         lines.push(format!("Degraded failure: {}", degraded.message));
     }
 
-    if let Some(session) = metadata.latest_session {
+    let latest_session = metadata.latest_visible_session().cloned();
+    let latest_session_is_retained = metadata.latest_visible_session_is_retained();
+    if let Some(session) = latest_session {
         let detail_path = store.detail_path(&session.issue_identifier);
-        let detail = store.load_session_detail(&session.issue_identifier)?;
+        let detail = if latest_session_is_retained {
+            store.load_retained_session_detail(&session.issue_identifier)?
+        } else {
+            store
+                .load_session_detail(&session.issue_identifier)?
+                .or(store.load_retained_session_detail(&session.issue_identifier)?)
+        };
         lines.push(String::new());
         lines.push("Latest session:".to_string());
+        lines.push(format!(
+            "  - Source: {}",
+            if latest_session_is_retained {
+                "retained audit"
+            } else {
+                "active state"
+            }
+        ));
         lines.push(format!("  - Issue: {}", session.issue_identifier));
         lines.push(format!("  - Title: {}", session.issue_title));
         lines.push(format!("  - Phase: {}", session.stage_label()));
+        lines.push(format!("  - Lifecycle: {}", session.lifecycle_label()));
+        if let Some(exit) = session.exit_label() {
+            lines.push(format!("  - Exit: {exit}"));
+        }
+        if let Some(exit_detail) = session.exit_detail_label() {
+            lines.push(format!("  - Exit detail: {exit_detail}"));
+        }
         lines.push(format!("  - Origin: {}", session.origin_label()));
         lines.push(format!("  - Summary: {}", session.summary));
         if let Some(category) = session.blocked_category_label() {
@@ -3812,6 +3968,32 @@ pub fn run_listen_session_inspect(args: &ListenSessionInspectArgs) -> Result<Str
         }
     }
 
+    let retained_only = retained_sessions
+        .into_iter()
+        .filter(|summary| {
+            !state
+                .sessions
+                .iter()
+                .any(|session| session.issue_matches(&summary.session.issue_identifier))
+        })
+        .collect::<Vec<_>>();
+    if !retained_only.is_empty() {
+        lines.push(String::new());
+        lines.push("Retained sessions:".to_string());
+        for summary in retained_only {
+            let session = &summary.session;
+            let exit = session.exit_label().unwrap_or_else(|| "-".to_string());
+            lines.push(format!(
+                "  - {} [{} | {}] {} | pr {}",
+                session.issue_identifier,
+                session.stage_label(),
+                exit,
+                session.summary,
+                session.pull_request_label(),
+            ));
+        }
+    }
+
     Ok(lines.join("\n"))
 }
 
@@ -3820,7 +4002,15 @@ fn append_session_inspect_detail_lines(
     detail: &ListenSessionDetail,
     show_turns: bool,
 ) {
+    let lifecycle = detail.effective_lifecycle();
     lines.push("  - Detail status: available".to_string());
+    lines.push(format!(
+        "  - Detail lifecycle: {}",
+        lifecycle.outcome_label()
+    ));
+    if let Some(exit) = lifecycle.exit_label() {
+        lines.push(format!("  - Detail exit: {exit}"));
+    }
     lines.push(format!(
         "  - Detail milestones: {}",
         detail.milestones.len()
@@ -4297,6 +4487,7 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         team_key: detailed_issue.team.key.clone(),
         issue_url: detailed_issue.url.clone(),
         phase: SessionPhase::Running,
+        lifecycle: None,
         summary: compact_pickup_summary(workpad_reused, &attachment_context, pid),
         blocked: None,
         brief_path,
@@ -4676,13 +4867,18 @@ pub async fn run_listen(args: &ListenRunArgs) -> Result<()> {
         || daemon.run_cycle_resilient(),
         |cycle| {
             let state = daemon.store.load_state()?;
-            let session_details = daemon
-                .store
-                .load_session_details(&daemon.app_config, &state.sorted_sessions())?
-                .into_iter()
-                .map(|detail| (detail.issue_identifier.clone(), detail))
-                .collect();
-            cycle.apply_state_snapshot(state, session_details);
+            let live_sessions = state.sorted_sessions();
+            let sessions = merge_visible_sessions(
+                live_sessions.clone(),
+                daemon.store.load_retained_sessions()?,
+            );
+            let session_details = load_visible_session_details(
+                &daemon.store,
+                &daemon.app_config,
+                &live_sessions,
+                &sessions,
+            )?;
+            cycle.apply_state_snapshot(state, sessions, session_details);
             codex_live_tokens.refresh_sessions(&mut cycle.sessions)?;
             Ok(())
         },
@@ -4936,7 +5132,7 @@ where
                             if let Some(session) = browser_state.selected_session(&data) {
                                 let handled = if session.phase == SessionPhase::Paused {
                                     resume_paused(&session.issue_identifier)?
-                                } else if session.phase == SessionPhase::Blocked {
+                                } else if session.can_manual_resume() {
                                     retry_blocked(&session.issue_identifier)?
                                 } else {
                                     false
@@ -5798,11 +5994,12 @@ mod tests {
     use super::{
         AgentDaemon, AgentSession, BlockedCategory, CanonicalSessionData, DashboardRuntimeContext,
         IN_PROGRESS_STATE, LatestResumeHandle, ListenCycleData, ListenState, PullRequestSummary,
-        ResumeProvider, SessionListCounts, SessionOrigin, SessionPhase, SessionTimeoutRecord,
-        SessionTimeoutTermination, TODO_STATE, TokenUsage, TurnPromptMode, TurnTokenSnapshot,
-        blocked_reason, capture_workspace_snapshot, compact_identifier, format_duration,
-        format_number, listen_browser_action, listen_scope_label, mark_running_session_stale,
-        render_agent_prompt, render_continuation_prompt, required_label_skip_reason,
+        ResumeProvider, SessionExitCondition, SessionLifecycleOutcome, SessionListCounts,
+        SessionOrigin, SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination, TODO_STATE,
+        TokenUsage, TurnPromptMode, TurnTokenSnapshot, blocked_reason, capture_workspace_snapshot,
+        compact_identifier, format_duration, format_number, listen_browser_action,
+        listen_scope_label, mark_running_session_stale, render_agent_prompt,
+        render_continuation_prompt, required_label_skip_reason,
     };
     use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
     use crate::config::{
@@ -5993,6 +6190,7 @@ suffix
                 team_key: "ENG".to_string(),
                 issue_url: "https://linear.app/issues/ENG-1".to_string(),
                 phase: SessionPhase::Running,
+                lifecycle: None,
                 summary: "running".to_string(),
                 blocked: None,
                 brief_path: None,
@@ -6031,6 +6229,7 @@ suffix
                 team_key: "ENG".to_string(),
                 issue_url: "https://linear.app/issues/ENG-2".to_string(),
                 phase: SessionPhase::Completed,
+                lifecycle: None,
                 summary: "done".to_string(),
                 blocked: None,
                 brief_path: None,
@@ -6079,6 +6278,7 @@ suffix
             team_key: "ENG".to_string(),
             issue_url: "https://linear.app/issues/ENG-1".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "running".to_string(),
             blocked: None,
             brief_path: None,
@@ -6133,6 +6333,7 @@ suffix
                     team_key: "ENG".to_string(),
                     issue_url: "https://linear.app/issues/ENG-1".to_string(),
                     phase: SessionPhase::Running,
+                    lifecycle: None,
                     summary: "running".to_string(),
                     blocked: None,
                     brief_path: None,
@@ -6177,6 +6378,7 @@ suffix
                     team_key: "ENG".to_string(),
                     issue_url: "https://linear.app/issues/ENG-2".to_string(),
                     phase: SessionPhase::Completed,
+                    lifecycle: None,
                     summary: "done".to_string(),
                     blocked: None,
                     brief_path: None,
@@ -6221,6 +6423,7 @@ suffix
                     team_key: "ENG".to_string(),
                     issue_url: "https://linear.app/issues/ENG-3".to_string(),
                     phase: SessionPhase::Blocked,
+                    lifecycle: None,
                     summary: "blocked".to_string(),
                     blocked: None,
                     brief_path: None,
@@ -6288,6 +6491,7 @@ suffix
                 team_key: "ENG".to_string(),
                 issue_url: "https://linear.app/issues/ENG-1".to_string(),
                 phase: SessionPhase::Running,
+                lifecycle: None,
                 summary: "running".to_string(),
                 blocked: None,
                 brief_path: None,
@@ -6389,6 +6593,7 @@ suffix
             team_key: "MET".to_string(),
             issue_url: "https://linear.app/metastack-backlog/issue/MET-33/completed".to_string(),
             phase: SessionPhase::Completed,
+            lifecycle: None,
             summary: "Complete".to_string(),
             blocked: None,
             brief_path: None,
@@ -6457,6 +6662,7 @@ suffix
             team_key: "MET".to_string(),
             issue_url: "https://linear.app/issues/64".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
@@ -6557,6 +6763,7 @@ suffix
             team_key: "MET".to_string(),
             issue_url: "https://linear.app/issues/64".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
@@ -6667,6 +6874,7 @@ suffix
             team_key: "MET".to_string(),
             issue_url: "https://linear.app/issues/65".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
@@ -6730,6 +6938,7 @@ suffix
             team_key: "MET".to_string(),
             issue_url: "https://linear.app/issues/66".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
@@ -6782,6 +6991,7 @@ suffix
             team_key: "MET".to_string(),
             issue_url: "https://linear.app/issues/67".to_string(),
             phase: SessionPhase::Completed,
+            lifecycle: None,
             summary: "Completed | waiting for merge reconciliation".to_string(),
             blocked: None,
             brief_path: None,
@@ -6866,6 +7076,7 @@ suffix
             team_key: "ENG".to_string(),
             issue_url: "https://linear.app/issues/ENG-9".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "running".to_string(),
             blocked: None,
             brief_path: None,
@@ -6925,6 +7136,7 @@ suffix
             team_key: "ENG".to_string(),
             issue_url: "https://linear.app/issues/ENG-10".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "running".to_string(),
             blocked: None,
             brief_path: None,
@@ -7093,6 +7305,7 @@ suffix
             team_key: "MET".to_string(),
             issue_url: "https://linear.app/issues/eng-10163".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: Some(format!(
@@ -7126,7 +7339,21 @@ suffix
 
         mark_running_session_stale(&mut session, "ENG-10163", Path::new("fallback.log"), 42_424);
 
-        assert_eq!(session.phase, SessionPhase::Blocked);
+        assert_eq!(session.phase, SessionPhase::Running);
+        assert_eq!(
+            session
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.outcome),
+            Some(SessionLifecycleOutcome::Blocked)
+        );
+        assert_eq!(
+            session
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.exit_condition),
+            Some(SessionExitCondition::WorkerDied)
+        );
         assert_eq!(session.workspace_path.as_deref(), Some("/tmp/ENG-10163"));
         assert_eq!(session.log_path.as_deref(), Some("logs/ENG-10163.log"));
         assert!(session.summary.contains("Blocked | worker died"));
@@ -7148,6 +7375,7 @@ suffix
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
@@ -7224,6 +7452,7 @@ suffix
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
@@ -7261,7 +7490,21 @@ suffix
             },
         );
 
-        assert_eq!(session.phase, SessionPhase::Blocked);
+        assert_eq!(session.phase, SessionPhase::Running);
+        assert_eq!(
+            session
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.outcome),
+            Some(SessionLifecycleOutcome::Blocked)
+        );
+        assert_eq!(
+            session
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.exit_condition),
+            Some(SessionExitCondition::WorkerDied)
+        );
         assert_eq!(session.pid, Some(42_424));
         assert_eq!(
             session
@@ -7303,6 +7546,7 @@ suffix
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,
@@ -7469,6 +7713,7 @@ suffix
 
         cycle.apply_state_snapshot(
             ListenState::from_sessions(vec![completed.clone()]),
+            vec![completed.clone()],
             HashMap::new(),
         );
 
@@ -8283,6 +8528,7 @@ suffix
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "turn 1/20".to_string(),
             blocked: None,
             brief_path: None,
@@ -8317,7 +8563,21 @@ suffix
             .await?;
 
         assert_eq!(state.sessions.len(), 1);
-        assert_eq!(state.sessions[0].phase, SessionPhase::Completed);
+        assert_eq!(state.sessions[0].phase, SessionPhase::Running);
+        assert_eq!(
+            state.sessions[0]
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.outcome),
+            Some(SessionLifecycleOutcome::Completed)
+        );
+        assert_eq!(
+            state.sessions[0]
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.exit_condition),
+            Some(SessionExitCondition::IssueMoved)
+        );
         assert_eq!(
             state.sessions[0].summary,
             "session ended: ticket reassigned"
@@ -8400,6 +8660,7 @@ suffix
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase: SessionPhase::Blocked,
+            lifecycle: None,
             summary: "Blocked | waiting for follow-up".to_string(),
             blocked: None,
             brief_path: None,
@@ -8502,6 +8763,7 @@ suffix
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase: SessionPhase::Paused,
+            lifecycle: None,
             summary: "Paused by operator".to_string(),
             blocked: None,
             brief_path: None,
@@ -8537,7 +8799,21 @@ suffix
 
         assert_eq!(state.sessions.len(), 1);
         let session = &state.sessions[0];
-        assert_eq!(session.phase, SessionPhase::Blocked);
+        assert_eq!(session.phase, SessionPhase::Paused);
+        assert_eq!(
+            session
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| lifecycle.outcome),
+            Some(SessionLifecycleOutcome::Blocked)
+        );
+        assert_eq!(
+            session
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.exit_condition),
+            Some(SessionExitCondition::WorkerDied)
+        );
         assert_eq!(session.pid, Some(dead_pid));
         assert_eq!(
             session
@@ -8615,6 +8891,7 @@ suffix
             team_key: issue.team.key.clone(),
             issue_url: issue.url.clone(),
             phase: SessionPhase::Completed,
+            lifecycle: None,
             summary: "Complete".to_string(),
             blocked: None,
             brief_path: None,

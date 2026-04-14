@@ -62,7 +62,7 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
 15. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning. That stall logic is separate from timed-out subprocesses: a timeout means the active child process exceeded its runtime budget, while a stall means repeated completed turns made no meaningful progress.
 16. Once the ticket branch is pushed, the worker creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and reuses the same PR on continuation instead of replacing it.
 17. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state. If no matching open branch PR exists, the handoff keeps PR state at `none` and does not create a new PR during completion.
-18. The worker records `completed` or `blocked` state locally, including timeout summaries (turn, elapsed time, timeout limit, PID, termination path), stall summaries, and recent agent log output for unattended failures.
+18. The worker records the last reached session phase plus additive lifecycle outcome/exit metadata locally, including timeout summaries (turn, elapsed time, timeout limit, PID, termination path), stall summaries, cached PR status, and recent agent log output for unattended failures.
 19. During reconciliation, a stored listen-origin `running` session with a dead worker PID is
     classified through the shared blocked-taxonomy contract, records the latest stale-worker
     failure plus the automatic recovery attempt count, and is relaunched through the existing
@@ -71,8 +71,10 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
     Missing workspace/workpad context, missing workspaces, paused sessions, execute-origin
     sessions, relaunch failures, and exhausted retry budgets stay blocked with structured reasons,
     while `R` / `meta listen sessions resume` continues to provide the manual retry path.
-21. Completed sessions older than the default 24-hour TTL are pruned automatically during store
-    loads and reconciliation, while blocked sessions are retained until explicit cleanup.
+21. Completed live sessions older than the default 24-hour TTL are pruned automatically during
+    store loads and reconciliation, but a bounded retained audit summary/event history survives
+    clear, auto-clean, and TTL prune so late exits remain inspectable after live artifacts are
+    removed.
 22. Live mode keeps the ratatui dashboard open in the terminal and uses the same shared listen snapshot for deterministic `--render-once` output.
 23. Built-in `codex` and `claude` worker runs opportunistically capture structured input/output token usage when the provider surfaces it, accumulate those counts in the persisted session record across turns, append one explicit per-turn token summary line to the worker log after each completed turn, persist additive per-turn token history in `session-details/<TICKET>.json`, and leave token fields blank instead of failing when providers omit exact usage data.
 24. Each listen run resolves one numeric context budget before any hidden worker spawn with the contract `--context-budget-tokens` override, then repo `.metastack/meta.json` `listen.context_budget_tokens`, then install `[defaults.listen].context_budget_tokens`, then built-in default `180000`. The worker derives `ContextPressure` from cumulative known input tokens on completed turns only, uses `pending_linear_sync.workpad_body` before the active workpad comment for one-time managed `#### Context Checkpoint` detection and preservation, clears the stored resume handle after a successful checkpoint turn, and renders the derived pressure in the selected-session detail pane without adding a new session-table column.
@@ -120,16 +122,20 @@ Primary options:
   install-scoped listener store. Use `--project` with `inspect`, `clear`, or `resume` to target a
   non-default project from the same checkout, or `--project-key` when you already know the stored
   install-scoped key.
+- `listen sessions list` now merges live state with the retained audit layer and renders the latest
+  visible `SOURCE`, `PHASE`, `EXIT`, and cached PR state for each project summary instead of
+  collapsing late exits into a generic completed row.
 - `listen sessions list` and `inspect` now show the latest tracked provider-native manual resume
   metadata for built-in `codex` and `claude` workers. The dashboard keeps only the compact handle,
   while these commands print the full latest resume ID and provider so operators can copy the
   correct resume target directly. Missing metadata is shown as explicitly unavailable instead of
   falling back to a legacy `session_id`.
 - `listen sessions clear` accepts an issue identifier, `--blocked`, `--completed`, `--stale`, or
-  `--all`; it refuses to remove any targeted record whose stored PID is still alive.
-- `listen sessions list` and `inspect` surface the structured blocked taxonomy when it is present:
-  blocked stages render as `Setup Err`, `Turn Err`, `Gate Err`, or `Infra Err`, while legacy
-  sessions without blocked metadata stay on the generic `Blocked` fallback.
+  `--all`; it refuses to remove any targeted record whose stored PID is still alive and preserves
+  retained audit history for later inspection.
+- `listen sessions inspect` now surfaces `Source`, `Phase`, `Lifecycle`, `Exit`, `Exit detail`,
+  and a `Retained sessions` section when live detail has already been cleaned up. Structured
+  blocked taxonomy still appears under blocked detail when it is present.
 - Live dashboard keys: `Tab` toggles between panes or session views, `Left` cycles toward active
   sessions, `Right` cycles toward blocked and completed sessions, `Up` / `Down` move the selected
   row, `Enter` toggles the selected-session detail pane, `Esc` / `Backspace` close detail mode,

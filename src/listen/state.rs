@@ -540,6 +540,196 @@ impl PullRequestSummary {
     }
 }
 
+/// High-level lifecycle outcome for a listen session, separate from its last worker phase.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleOutcome {
+    /// The session is currently active or eligible for normal processing.
+    #[default]
+    Active,
+    /// The session was paused by an operator and can be manually resumed.
+    Paused,
+    /// The session stopped on an actionable blocker that should stay visible.
+    Blocked,
+    /// The session reached a clean terminal handoff.
+    Completed,
+    /// The session exited before clean handoff but retained enough state to inspect or resume.
+    Truncated,
+}
+
+impl SessionLifecycleOutcome {
+    /// Returns the operator-facing lifecycle label.
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Paused => "Paused",
+            Self::Blocked => "Blocked",
+            Self::Completed => "Completed",
+            Self::Truncated => "Truncated",
+        }
+    }
+
+    /// Returns true when the outcome should be treated as a blocked session.
+    pub fn is_blocked(self) -> bool {
+        matches!(self, Self::Blocked)
+    }
+
+    /// Returns true when the outcome belongs in the completed/history browser view.
+    pub fn shows_in_completed_view(self) -> bool {
+        matches!(self, Self::Completed | Self::Truncated)
+    }
+}
+
+/// Specific reason a listen session left active processing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionExitCondition {
+    /// The session finished normally and handed off for review.
+    CleanComplete,
+    /// Linear moved the issue out of the listener's active scope.
+    IssueMoved,
+    /// Linear updates could not be confirmed before the worker exited.
+    PendingLinearSync,
+    /// The worker published or retained a draft PR but did not complete review handoff.
+    DraftPending,
+    /// An operator paused the session.
+    ManualPause,
+    /// The persisted worker process disappeared or failed stale-worker recovery.
+    WorkerDied,
+    /// Required setup artifacts were missing.
+    SetupMissing,
+    /// The worker reached its configured turn limit.
+    TurnLimit,
+    /// The session stopped making progress and was marked stale.
+    Stalled,
+    /// The verification stage failed.
+    VerificationFailed,
+    /// The validation stage failed.
+    ValidationFailed,
+    /// The CI quality gate did not finish before timeout.
+    CiTimeout,
+    /// The execute flow needs an operator takeover before continuing.
+    ExecuteAwaitingTakeover,
+    /// A lifecycle exit reason was retained but does not map to a known category.
+    Other,
+}
+
+impl SessionExitCondition {
+    /// Returns the operator-facing exit-condition label.
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::CleanComplete => "Ready Handoff",
+            Self::IssueMoved => "Issue Moved",
+            Self::PendingLinearSync => "Sync Pending",
+            Self::DraftPending => "Draft Pending",
+            Self::ManualPause => "Manual Pause",
+            Self::WorkerDied => "Worker Died",
+            Self::SetupMissing => "Setup Missing",
+            Self::TurnLimit => "Turn Limit",
+            Self::Stalled => "Stalled",
+            Self::VerificationFailed => "Verification Failed",
+            Self::ValidationFailed => "Validation Failed",
+            Self::CiTimeout => "CI Timeout",
+            Self::ExecuteAwaitingTakeover => "Awaiting Takeover",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// Durable lifecycle metadata retained beside the last observed session phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLifecycle {
+    /// High-level outcome used for filtering and resume decisions.
+    pub outcome: SessionLifecycleOutcome,
+    /// Specific terminal or blocked reason when one is known.
+    #[serde(default)]
+    pub exit_condition: Option<SessionExitCondition>,
+    /// Whether an operator or daemon may resume the retained session.
+    #[serde(default)]
+    pub resumable: bool,
+}
+
+impl SessionLifecycle {
+    /// Builds an active lifecycle record.
+    pub fn active(resumable: bool) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Active,
+            exit_condition: None,
+            resumable,
+        }
+    }
+
+    /// Builds a manually paused lifecycle record.
+    pub fn paused() -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Paused,
+            exit_condition: Some(SessionExitCondition::ManualPause),
+            resumable: true,
+        }
+    }
+
+    /// Builds a blocked lifecycle record with an optional known exit condition.
+    pub fn blocked(exit_condition: Option<SessionExitCondition>, resumable: bool) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Blocked,
+            exit_condition,
+            resumable,
+        }
+    }
+
+    /// Builds a clean completed lifecycle record.
+    pub fn completed(exit_condition: SessionExitCondition) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Completed,
+            exit_condition: Some(exit_condition),
+            resumable: false,
+        }
+    }
+
+    /// Builds a truncated lifecycle record for incomplete but retained work.
+    pub fn truncated(exit_condition: SessionExitCondition, resumable: bool) -> Self {
+        Self {
+            outcome: SessionLifecycleOutcome::Truncated,
+            exit_condition: Some(exit_condition),
+            resumable,
+        }
+    }
+
+    /// Returns the operator-facing lifecycle outcome label.
+    pub fn outcome_label(&self) -> &'static str {
+        self.outcome.display_label()
+    }
+
+    /// Returns the operator-facing exit-condition label when one is known.
+    pub fn exit_label(&self) -> Option<&'static str> {
+        self.exit_condition.map(SessionExitCondition::display_label)
+    }
+
+    /// Returns true when the lifecycle marks the session as blocked.
+    pub fn is_blocked(&self) -> bool {
+        self.outcome.is_blocked()
+    }
+
+    /// Returns true when the session should appear in the completed/history view.
+    pub fn shows_in_completed_view(&self) -> bool {
+        self.outcome.shows_in_completed_view()
+    }
+
+    /// Returns true when an operator may manually resume this session.
+    pub fn can_manual_resume(&self) -> bool {
+        self.resumable
+            && matches!(
+                self.outcome,
+                SessionLifecycleOutcome::Blocked | SessionLifecycleOutcome::Truncated
+            )
+    }
+
+    /// Returns true when daemon reconciliation may automatically resume this session.
+    pub fn can_auto_resume(&self) -> bool {
+        self.resumable && matches!(self.outcome, SessionLifecycleOutcome::Truncated)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaleWorkerFailure {
     pub pid: u32,
@@ -575,6 +765,8 @@ pub struct AgentSession {
     pub team_key: String,
     pub issue_url: String,
     pub phase: SessionPhase,
+    #[serde(default)]
+    pub lifecycle: Option<SessionLifecycle>,
     pub summary: String,
     #[serde(default)]
     pub blocked: Option<BlockedReason>,
@@ -743,11 +935,54 @@ impl AgentSession {
         self.issue_identifier.eq_ignore_ascii_case(identifier)
     }
 
+    pub(super) fn effective_lifecycle(&self) -> SessionLifecycle {
+        self.lifecycle.clone().unwrap_or_else(|| {
+            derive_session_lifecycle(
+                self.phase,
+                self.blocked.as_ref(),
+                self.pending_linear_sync.as_ref(),
+                &self.pull_request,
+                self.latest_stale_worker_failure.as_ref(),
+            )
+        })
+    }
+
     pub(super) fn stage_label(&self) -> String {
+        self.phase.display_label().to_string()
+    }
+
+    pub(super) fn lifecycle_label(&self) -> &'static str {
+        self.effective_lifecycle().outcome_label()
+    }
+
+    pub(super) fn exit_label(&self) -> Option<String> {
         self.blocked
             .as_ref()
             .map(|blocked| blocked.stage_label().to_string())
-            .unwrap_or_else(|| self.phase.display_label().to_string())
+            .or_else(|| self.effective_lifecycle().exit_label().map(str::to_string))
+    }
+
+    pub(super) fn exit_detail_label(&self) -> Option<String> {
+        self.blocked
+            .as_ref()
+            .map(|blocked| blocked.reason.clone())
+            .or_else(|| self.effective_lifecycle().exit_label().map(str::to_string))
+    }
+
+    pub(super) fn is_blocked_session(&self) -> bool {
+        self.effective_lifecycle().is_blocked()
+    }
+
+    pub(super) fn shows_in_completed_view(&self) -> bool {
+        self.effective_lifecycle().shows_in_completed_view()
+    }
+
+    pub(super) fn can_manual_resume(&self) -> bool {
+        self.effective_lifecycle().can_manual_resume()
+    }
+
+    pub(super) fn can_auto_resume(&self) -> bool {
+        self.effective_lifecycle().can_auto_resume()
     }
 
     pub(super) fn blocked_category_label(&self) -> Option<&'static str> {
@@ -912,6 +1147,52 @@ impl SessionPhase {
     }
 }
 
+pub(super) fn derive_session_lifecycle(
+    phase: SessionPhase,
+    blocked: Option<&BlockedReason>,
+    pending_linear_sync: Option<&PendingLinearSync>,
+    pull_request: &PullRequestSummary,
+    latest_stale_worker_failure: Option<&StaleWorkerFailure>,
+) -> SessionLifecycle {
+    if pending_linear_sync.is_some() {
+        return SessionLifecycle::truncated(SessionExitCondition::PendingLinearSync, true);
+    }
+
+    if phase == SessionPhase::Paused {
+        return SessionLifecycle::paused();
+    }
+
+    if phase == SessionPhase::Completed {
+        return if pull_request.status == PullRequestStatus::Draft {
+            SessionLifecycle::truncated(SessionExitCondition::DraftPending, true)
+        } else {
+            SessionLifecycle::completed(SessionExitCondition::CleanComplete)
+        };
+    }
+
+    if let Some(blocked) = blocked {
+        let exit_condition = if latest_stale_worker_failure.is_some() {
+            Some(SessionExitCondition::WorkerDied)
+        } else if blocked.category == BlockedCategory::Setup {
+            Some(SessionExitCondition::SetupMissing)
+        } else {
+            None
+        };
+        return SessionLifecycle::blocked(exit_condition, blocked.retryable);
+    }
+
+    if phase == SessionPhase::Blocked {
+        return SessionLifecycle::blocked(
+            latest_stale_worker_failure
+                .is_some()
+                .then_some(SessionExitCondition::WorkerDied),
+            false,
+        );
+    }
+
+    SessionLifecycle::active(true)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ListenState {
     version: u8,
@@ -949,20 +1230,9 @@ impl ListenState {
     }
 
     pub(super) fn blocks_pickup(&self, identifier: &str) -> bool {
-        self.sessions.iter().any(|session| {
-            session.issue_matches(identifier)
-                && matches!(
-                    session.phase,
-                    SessionPhase::Claimed
-                        | SessionPhase::BriefReady
-                        | SessionPhase::Running
-                        | SessionPhase::Verifying
-                        | SessionPhase::Validating
-                        | SessionPhase::Paused
-                        | SessionPhase::Completed
-                        | SessionPhase::Blocked
-                )
-        })
+        self.sessions
+            .iter()
+            .any(|session| session.issue_matches(identifier))
     }
 
     pub(super) fn upsert(&mut self, session: AgentSession) {
@@ -999,7 +1269,7 @@ impl ListenState {
         ttl_seconds: u64,
     ) -> Vec<AgentSession> {
         self.remove_sessions(|session| {
-            session.phase.is_completed()
+            session.effective_lifecycle().outcome == SessionLifecycleOutcome::Completed
                 && now_epoch_seconds.saturating_sub(session.updated_at_epoch_seconds) > ttl_seconds
         })
     }
@@ -1045,6 +1315,7 @@ mod tests {
             team_key: "ENG".to_string(),
             issue_url: "https://linear.app/issues/ENG-10194".to_string(),
             phase: SessionPhase::Running,
+            lifecycle: None,
             summary: "Running".to_string(),
             blocked: None,
             brief_path: None,

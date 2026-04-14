@@ -851,7 +851,7 @@ printf '%s' '{"summary":"Verifier approved the branch","criteria":[{"name":"Veri
             quality_mode: "success-current",
             expect_workflow_lookup: true,
             expected_report_status: "passed",
-            expected_phase: "completed",
+            expected_phase: "publishing",
             expected_snippet: "`quality` passed for PR #321 head",
         },
         Case {
@@ -1427,7 +1427,8 @@ fn listen_sessions_clear_issue_identifier_removes_only_matching_session()
         .assert()
         .success()
         .stdout(predicate::str::contains("ENG-10164 [Blocked]"))
-        .stdout(predicate::str::contains("ENG-10163").not());
+        .stdout(predicate::str::contains("Retained sessions:"))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked | -]"));
 
     Ok(())
 }
@@ -1564,7 +1565,8 @@ fn agents_listen_sessions_clear_blocked_preserves_other_selector_states()
         .success()
         .stdout(predicate::str::contains("ENG-10164 [Completed]"))
         .stdout(predicate::str::contains("ENG-10165 [Running]"))
-        .stdout(predicate::str::contains("ENG-10163").not());
+        .stdout(predicate::str::contains("Retained sessions:"))
+        .stdout(predicate::str::contains("ENG-10163 [Blocked | -]"));
 
     Ok(())
 }
@@ -1786,7 +1788,8 @@ fn listen_sessions_inspect_prunes_expired_completed_sessions_on_load() -> Result
         .success()
         .stdout(predicate::str::contains("Tracked sessions:"))
         .stdout(predicate::str::contains("ENG-10164 [Blocked]"))
-        .stdout(predicate::str::contains("ENG-10163").not());
+        .stdout(predicate::str::contains("Retained sessions:"))
+        .stdout(predicate::str::contains("ENG-10163 [Completed"));
 
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
     let sessions = state["sessions"]
@@ -2091,10 +2094,11 @@ fn listen_sessions_list_and_inspect_surface_structured_blocked_category()
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Phase: Setup Err"))
+        .stdout(predicate::str::contains("Phase: Blocked"))
+        .stdout(predicate::str::contains("Exit: Setup Err"))
         .stdout(predicate::str::contains("Blocked category: Setup"))
         .stdout(predicate::str::contains("Blocked retryable: no"))
-        .stdout(predicate::str::contains("ENG-10185 [Setup Err]"));
+        .stdout(predicate::str::contains("ENG-10185 [Blocked]"));
 
     Ok(())
 }
@@ -3076,9 +3080,9 @@ fn listen_render_once_demo_outputs_dashboard_snapshot() -> Result<(), Box<dyn Er
         .stdout(predicate::str::contains("http://").not())
         .stdout(predicate::str::contains("127.0.0.1").not())
         .stdout(predicate::str::contains("localhost").not())
-        .stdout(predicate::str::contains("SESSION"))
-        .stdout(predicate::str::contains("PROGRESS"))
-        .stdout(predicate::str::contains("draft #321"))
+        .stdout(predicate::str::contains("PHASE"))
+        .stdout(predicate::str::contains("STATE"))
+        .stdout(predicate::str::contains("EXIT"))
         .stdout(predicate::str::contains("MET-13"))
         .stdout(predicate::str::contains("MET-17"));
 
@@ -3124,7 +3128,7 @@ fn listen_render_once_demo_can_snapshot_selected_session_detail() -> Result<(), 
         .success()
         .stdout(predicate::str::contains("Selected Session"))
         .stdout(predicate::str::contains("PR: draft #321"))
-        .stdout(predicate::str::contains("Verification JSON:"))
+        .stdout(predicate::str::contains("Lifecycle: Active"))
         .stdout(predicate::str::contains("Workpad: comment-met-13"))
         .stdout(predicate::str::contains("Origin: Listen"));
 
@@ -5425,8 +5429,6 @@ exit 0
         assert!(rendered.contains("n/a"));
         assert!(rendered.contains("019c...e1bf2a"));
         assert!(rendered.contains("019c...2d66dd"));
-        assert!(rendered.contains("Progress text stays clean"));
-        assert!(rendered.contains("Second progress text stays clean"));
         assert!(!rendered.contains("http://"));
         assert!(!rendered.contains("127.0.0.1"));
         assert!(!rendered.contains("localhost"));
@@ -9199,7 +9201,8 @@ sleep 5
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Phase: Turn Err"))
+        .stdout(predicate::str::contains("Phase: Blocked"))
+        .stdout(predicate::str::contains("Exit: Turn Err"))
         .stdout(predicate::str::contains("Blocked category: Turn"))
         .stdout(predicate::str::contains("Detail blocked category: Turn"))
         .stdout(predicate::str::contains(
@@ -10017,9 +10020,11 @@ code_review = false
         "dirty workspace should be kept for manual review"
     );
     let state_path = listen_state_path(&config_path, &repo_root)?;
-    wait_for_file_substring(&state_path, "\"phase\": \"completed\"")?;
+    wait_for_file_substring(&state_path, "\"exit_condition\": \"clean_complete\"")?;
     let state = fs::read_to_string(&state_path)?;
-    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("\"phase\": \"publishing\""));
+    assert!(state.contains("\"outcome\": \"completed\""));
+    assert!(state.contains("\"exit_condition\": \"clean_complete\""));
     assert!(state.contains("Human Review"));
     assert!(state.contains("\"status\": \"ready\""));
 
@@ -10192,7 +10197,15 @@ code_review = false
 
     let state_path = listen_state_path(&config_path, &repo_root)?;
     let first_state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
-    assert_eq!(first_state["sessions"][0]["phase"], json!("blocked"));
+    assert_eq!(first_state["sessions"][0]["phase"], json!("publishing"));
+    assert_eq!(
+        first_state["sessions"][0]["lifecycle"]["outcome"],
+        json!("truncated")
+    );
+    assert_eq!(
+        first_state["sessions"][0]["lifecycle"]["exit_condition"],
+        json!("pending_linear_sync")
+    );
     assert_eq!(
         first_state["sessions"][0]["pending_linear_sync"]["review_transition_issue"],
         json!(true)
@@ -10247,7 +10260,15 @@ transport = "arg"
         .success();
 
     let second_state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path)?)?;
-    assert_eq!(second_state["sessions"][0]["phase"], json!("completed"));
+    assert_eq!(second_state["sessions"][0]["phase"], json!("publishing"));
+    assert_eq!(
+        second_state["sessions"][0]["lifecycle"]["outcome"],
+        json!("completed")
+    );
+    assert_eq!(
+        second_state["sessions"][0]["lifecycle"]["exit_condition"],
+        json!("clean_complete")
+    );
     assert!(
         second_state["sessions"][0]
             .get("pending_linear_sync")
@@ -11405,7 +11426,9 @@ code_review = false
     assert!(gh_log.contains("pr ready 321"));
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("\"phase\": \"publishing\""));
+    assert!(state.contains("\"outcome\": \"completed\""));
+    assert!(state.contains("\"exit_condition\": \"clean_complete\""));
     assert!(state.contains("\"status\": \"ready\""));
 
     Ok(())
@@ -11882,7 +11905,9 @@ printf '%s' 'ok' > repaired.txt
     );
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("\"phase\": \"publishing\""));
+    assert!(state.contains("\"outcome\": \"completed\""));
+    assert!(state.contains("\"exit_condition\": \"clean_complete\""));
     assert!(state.contains("\"number\": 321"));
 
     Ok(())
@@ -13950,7 +13975,9 @@ e2e:
     assert!(workspace.join(".verification-e2e.txt").is_file());
 
     let state = fs::read_to_string(&state_path)?;
-    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("\"phase\": \"publishing\""));
+    assert!(state.contains("\"outcome\": \"completed\""));
+    assert!(state.contains("\"exit_condition\": \"clean_complete\""));
 
     Ok(())
 }
@@ -14155,7 +14182,15 @@ printf '%s\n' 'validation passed'
     );
 
     let state = fs::read_to_string(&state_path)?;
-    assert!(state.contains("\"phase\": \"completed\""), "state={state}");
+    assert!(state.contains("\"phase\": \"publishing\""), "state={state}");
+    assert!(
+        state.contains("\"outcome\": \"completed\""),
+        "state={state}"
+    );
+    assert!(
+        state.contains("\"exit_condition\": \"clean_complete\""),
+        "state={state}"
+    );
 
     Ok(())
 }
@@ -14204,7 +14239,9 @@ ci_timeout_behavior = "block"
     )?;
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("\"phase\": \"publishing\""));
+    assert!(state.contains("\"outcome\": \"completed\""));
+    assert!(state.contains("\"exit_condition\": \"clean_complete\""));
     assert!(state.contains("GitHub CI passed 1/1"));
 
     let inspect = inspect_listen_sessions(&repo_root, &config_path)?;
@@ -14446,7 +14483,9 @@ ci_timeout_behavior = "warn_and_proceed"
     )?;
 
     let state = fs::read_to_string(listen_state_path(&config_path, &repo_root)?)?;
-    assert!(state.contains("\"phase\": \"completed\""));
+    assert!(state.contains("\"phase\": \"publishing\""));
+    assert!(state.contains("\"outcome\": \"completed\""));
+    assert!(state.contains("\"exit_condition\": \"clean_complete\""));
     assert!(state.contains("GitHub CI timeout warning after 1s"));
 
     let inspect = inspect_listen_sessions(&repo_root, &config_path)?;

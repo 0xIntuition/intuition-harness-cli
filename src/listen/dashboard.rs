@@ -850,6 +850,8 @@ fn render_session_table(
                 session.stage_label(),
                 phase_style(session.phase),
             )),
+            Cell::from(session.lifecycle_label()),
+            Cell::from(session.exit_label().unwrap_or_else(|| "-".to_string())),
             Cell::from(session.pid_label()),
             Cell::from(session.age_label(data.runtime.current_epoch_seconds)),
             Cell::from(session.pull_request_label()),
@@ -862,7 +864,9 @@ fn render_session_table(
     let header = Row::new(vec![
         Cell::from(""),
         Cell::from("ID"),
-        Cell::from("STAGE"),
+        Cell::from("PHASE"),
+        Cell::from("STATE"),
+        Cell::from("EXIT"),
         Cell::from("PID"),
         Cell::from("AGE"),
         Cell::from("PR"),
@@ -882,26 +886,30 @@ fn render_session_table(
             Constraint::Length(2),
             Constraint::Length(10),
             Constraint::Length(13),
+            Constraint::Length(10),
+            Constraint::Length(14),
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Length(12),
             Constraint::Length(12),
             Constraint::Length(8),
             Constraint::Length(13),
-            Constraint::Min(52),
+            Constraint::Min(34),
         ]
     } else {
         vec![
             Constraint::Length(2),
             Constraint::Length(9),
             Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(8),
             Constraint::Length(9),
             Constraint::Length(10),
             Constraint::Length(9),
             Constraint::Length(8),
             Constraint::Length(13),
-            Constraint::Min(29),
+            Constraint::Min(18),
         ]
     };
     let table = Table::new(rows, constraints)
@@ -1059,6 +1067,8 @@ fn render_session_detail_text(
     detail: &ListenSessionDetail,
 ) -> Text<'static> {
     let mut summary_fields = vec![
+        SummaryField::new("Phase", session.stage_label()),
+        SummaryField::new("Lifecycle", session.lifecycle_label().to_string()),
         SummaryField::new("Origin", session.origin_label().to_string()),
         SummaryField::new("Summary", detail.summary.clone()),
         SummaryField::new("Turns", detail.turns.unwrap_or(0).to_string()),
@@ -1081,6 +1091,12 @@ fn render_session_detail_text(
             explicit_resume_id_label(detail.latest_resume_handle.as_ref()),
         ),
     ];
+    if let Some(exit) = session.exit_label() {
+        summary_fields.push(SummaryField::new("Exit", exit));
+    }
+    if let Some(exit_detail) = session.exit_detail_label() {
+        summary_fields.push(SummaryField::new("Exit Detail", exit_detail));
+    }
     if let Some(url) = detail.pull_request.url.as_deref() {
         summary_fields.push(SummaryField::new("PR URL", url));
     } else if let Some(number) = detail.pull_request.number {
@@ -1187,6 +1203,10 @@ fn render_session_detail_text(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(session.stage_label(), phase_style(session.phase)),
+            Span::styled(
+                format!(" | {}", session.lifecycle_label()),
+                Style::default().fg(Color::Gray),
+            ),
         ]),
         Line::from(Span::styled(
             session.issue_title.clone(),
@@ -1237,6 +1257,11 @@ fn render_session_detail_text(
         lines.push(Line::from(""));
         lines.push(section_header("Milestones"));
         for milestone in detail.milestones.iter().rev().take(5).rev() {
+            let lifecycle_suffix = milestone
+                .lifecycle
+                .as_ref()
+                .map(|lifecycle| format!(" | {}", lifecycle.outcome_label()))
+                .unwrap_or_default();
             let pr_suffix = match milestone.pull_request_number {
                 Some(number) => format!(" | {} #{number}", milestone.pull_request_status.label()),
                 None if milestone.pull_request_status != super::PullRequestStatus::Unpublished => {
@@ -1245,8 +1270,9 @@ fn render_session_detail_text(
                 None => String::new(),
             };
             lines.push(detail_bullet(&format!(
-                "{} · {}{}",
+                "{}{} · {}{}",
                 milestone.phase.display_label(),
+                lifecycle_suffix,
                 milestone.summary,
                 pr_suffix
             )));
@@ -1370,9 +1396,12 @@ fn session_list_copy_text(
             "  "
         };
         lines.push(Line::from(format!(
-            "{selected}{} [{}] {}",
+            "{selected}{} [{} | {}] {}",
             session.issue_identifier,
             session.stage_label(),
+            session
+                .exit_label()
+                .unwrap_or_else(|| session.lifecycle_label().to_string()),
             session.issue_title
         )));
         lines.push(Line::from(format!(
@@ -1823,7 +1852,9 @@ mod tests {
         assert!(snapshot.contains("draft #321"));
         assert!(snapshot.contains("9,622,232"));
         assert!(snapshot.contains("PROVIDER"));
-        assert!(snapshot.contains("Brief ready | backlog MET-14"));
+        assert!(snapshot.contains("PHASE"));
+        assert!(snapshot.contains("STATE"));
+        assert!(snapshot.contains("EXIT"));
     }
 
     #[test]
@@ -1907,7 +1938,7 @@ mod tests {
 
         assert!(snapshot.contains("Selected Session"));
         assert!(snapshot.contains("PR: draft #321"));
-        assert!(snapshot.contains("Verification JSON"));
+        assert!(snapshot.contains("Lifecycle: Active"));
     }
 
     #[test]
@@ -2597,6 +2628,7 @@ mod tests {
         detail.milestones.push(SessionMilestone {
             at_epoch_seconds: 1_773_575_620,
             phase: SessionPhase::Publishing,
+            lifecycle: None,
             summary: "Publishing draft PR | waiting for GitHub CI 0/1 settled | 1s remaining"
                 .to_string(),
             turns: Some(1),
@@ -2606,6 +2638,7 @@ mod tests {
         detail.milestones.push(SessionMilestone {
             at_epoch_seconds: 1_773_575_621,
             phase: SessionPhase::Publishing,
+            lifecycle: None,
             summary: "Publishing review-ready handoff | no GitHub checks configured".to_string(),
             turns: Some(1),
             pull_request_status: PullRequestStatus::Ready,

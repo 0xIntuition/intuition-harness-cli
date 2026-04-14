@@ -1451,11 +1451,17 @@ meta listen sessions resume --project-key <PROJECT_KEY> --once
 ```
 
 `meta listen sessions ...` manages the install-scoped listener store only. It does not inventory or delete the sibling workspace clones themselves.
+`meta listen sessions list` now merges live session state with the retained audit layer and renders
+the latest visible source, last reached phase, lifecycle exit, and cached PR state for each
+project summary. This keeps draft-pending, pending-sync, timeout, and other truncated late exits
+visible even after live detail cleanup.
 `meta listen sessions inspect` now expands the latest stored session with structured detail-artifact
 fields when available, including PR URL/state, workspace/backlog/workpad references, recent
 milestones, prompt-context references, compact log excerpts, optional blocked category/retryability
 metadata, and a fallback `Detail PR Ref: #N` line when the detail artifact only carries a PR
-number. Pass `--turns` to append the persisted per-turn token breakdown (`turn N tokens: in ... |
+number. Inspect also prints the current `Source`, `Phase`, `Lifecycle`, `Exit`, and `Exit detail`,
+and adds a `Retained sessions` section when the live row has already been cleared from active
+state. Pass `--turns` to append the persisted per-turn token breakdown (`turn N tokens: in ... |
 out ... | prompt_mode=...`) from the detail artifact; without that flag the inspect output stays
 compact.
 The interactive selected-session detail pane follows the same fallback contract and shows `PR Ref:
@@ -1464,6 +1470,10 @@ Within the live dashboard, `P` pauses the selected running worker, and `R` eithe
 worker or retries a blocked session from its existing workspace state.
 `Ctrl+Y` copies the focused listen pane or detail view and opens the shared terminal export overlay
 when direct clipboard writes are unavailable.
+Clear, auto-clean, and completed-session TTL prune now remove live artifacts only after persisting
+bounded retained audit history under `listen/projects/<PROJECT_KEY>/audit/`, so operator-visible
+lifecycle history survives later cleanup without reparsing raw logs or issuing per-row GitHub
+lookups.
 
 ### `workspace`
 

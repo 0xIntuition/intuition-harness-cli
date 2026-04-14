@@ -275,6 +275,22 @@ Each verification pass writes:
 - a markdown report under the same verification directory
 - a compact summary mirrored into the session detail artifact
 
+### Session Store Lifecycle
+
+The install-scoped listen store now keeps two complementary lifecycle views:
+
+- live session state in `session.json` plus mirrored `session-details/<TICKET>.json`
+- retained audit summaries in `listen/projects/<PROJECT_KEY>/audit/index.json`
+- append-only retained lifecycle events in `listen/projects/<PROJECT_KEY>/audit/events/<TICKET>.jsonl`
+
+`SessionPhase` remains the last reached execution phase. Lifecycle outcome, exit condition, and
+resumable status are additive metadata used to distinguish clean completion from blocked or
+truncated late exits. `meta listen sessions list`, `meta listen sessions inspect`, and the live
+dashboard merge live session state with the retained audit layer so operators can still see the
+last phase, exit, and cached PR state after live detail cleanup. Explicit clear, auto-clean, and
+completed-session TTL prune remove live artifacts when safe, but they preserve the retained audit
+history for later inspection.
+
 ### Local Backlog
 
 If a local backlog entry exists, the listener updates a managed section in `index.md`:
