@@ -268,6 +268,256 @@ team = "MET"
     Ok(())
 }
 
+#[test]
+fn backlog_ingest_dry_run_parses_shaped_markdown_without_linear_auth() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempdir()?;
+    let config_path = temp.path().join("metastack.toml");
+    let backlog_path = temp.path().join("cycle-88-shaped-backlog-greg.md");
+    write_onboarded_config(&config_path, "")?;
+    fs::write(
+        &backlog_path,
+        r#"
+## Initiative: Core UX
+### Project: Wallet Connect
+Lead: Greg
+Contributors: Alice, Bob
+Project notes: Shared QA note.
+#### 4/17
+- Story: Connect wallet from onboarding [Alpha] [Lead: Jane]
+- Task: Add internal QA checklist
+"#,
+    )?;
+
+    let assert = cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "ingest",
+            backlog_path.to_string_lossy().as_ref(),
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "backlog.ingest");
+    assert_eq!(payload["result"]["mode"], "dry-run");
+    assert_eq!(payload["result"]["issue_count"], 2);
+    assert_eq!(payload["result"]["project_count"], 1);
+    assert_eq!(
+        payload["result"]["issues"][0]["milestone"],
+        serde_json::Value::String("Alpha".to_string())
+    );
+    assert_eq!(
+        payload["result"]["issues"][0]["lead"],
+        serde_json::Value::String("Jane".to_string())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn backlog_ingest_apply_resolves_project_milestone_and_lead_before_create()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let server = MockServer::start();
+    let api_url = server.url("/graphql");
+    let config_path = temp.path().join("metastack.toml");
+    let backlog_path = temp.path().join("cycle-88-shaped-backlog-greg.md");
+    write_onboarded_config(&config_path, "")?;
+    fs::write(
+        &backlog_path,
+        r#"
+## Initiative: Core UX
+### Project: Wallet Connect
+Lead: Greg
+#### Alpha
+- Story: Connect wallet from onboarding
+"#,
+    )?;
+
+    let teams_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "token")
+            .body_includes("query Teams");
+        then.status(200).json_body(json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-1",
+                        "key": "ENG",
+                        "name": "Engineering",
+                        "states": {
+                            "nodes": [{
+                                "id": "state-backlog",
+                                "name": "Backlog",
+                                "type": "backlog"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let projects_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "token")
+            .body_includes("query Projects");
+        then.status(200).json_body(json!({
+            "data": {
+                "projects": {
+                    "nodes": [{
+                        "id": "project-1",
+                        "name": "Wallet Connect",
+                        "description": "",
+                        "url": "https://linear.app/projects/project-1",
+                        "progress": 0.0,
+                        "teams": {
+                            "nodes": [{
+                                "id": "team-1",
+                                "key": "ENG",
+                                "name": "Engineering"
+                            }]
+                        }
+                    }]
+                }
+            }
+        }));
+    });
+    let milestones_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "token")
+            .body_includes("query ProjectMilestones")
+            .body_includes("\"projectId\":\"project-1\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "projectMilestones": {
+                    "nodes": [{
+                        "id": "milestone-alpha",
+                        "name": "Alpha",
+                        "targetDate": null,
+                        "project": {
+                            "id": "project-1",
+                            "name": "Wallet Connect"
+                        }
+                    }],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        }));
+    });
+    let users_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "token")
+            .body_includes("query Users");
+        then.status(200).json_body(json!({
+            "data": {
+                "users": {
+                    "nodes": [{
+                        "id": "user-greg",
+                        "name": "Greg",
+                        "email": "greg@example.com"
+                    }],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        }));
+    });
+    let create_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", "token")
+            .body_includes("mutation CreateIssue")
+            .body_includes("\"projectId\":\"project-1\"")
+            .body_includes("\"projectMilestoneId\":\"milestone-alpha\"")
+            .body_includes("\"assigneeId\":\"user-greg\"");
+        then.status(200).json_body(json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "ENG-12000",
+                        "title": "Connect wallet from onboarding",
+                        "description": "Story: Connect wallet from onboarding",
+                        "url": "https://linear.app/issues/ENG-12000",
+                        "priority": 0,
+                        "updatedAt": "2026-04-14T20:00:00Z",
+                        "team": {
+                            "id": "team-1",
+                            "key": "ENG",
+                            "name": "Engineering"
+                        },
+                        "project": {
+                            "id": "project-1",
+                            "name": "Wallet Connect"
+                        },
+                        "assignee": {
+                            "id": "user-greg",
+                            "name": "Greg",
+                            "email": "greg@example.com"
+                        },
+                        "labels": { "nodes": [] },
+                        "comments": { "nodes": [] },
+                        "state": {
+                            "id": "state-backlog",
+                            "name": "Backlog",
+                            "type": "backlog"
+                        }
+                    }
+                }
+            }
+        }));
+    });
+
+    let assert = cli()
+        .current_dir(temp.path())
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "backlog",
+            "ingest",
+            "--api-key",
+            "token",
+            "--api-url",
+            &api_url,
+            backlog_path.to_string_lossy().as_ref(),
+            "--team",
+            "ENG",
+            "--state",
+            "Backlog",
+            "--apply",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let payload: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout)?;
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["result"]["mode"], "apply");
+    assert_eq!(payload["result"]["created"][0]["identifier"], "ENG-12000");
+    teams_mock.assert_calls(1);
+    projects_mock.assert_calls(2);
+    milestones_mock.assert_calls(1);
+    users_mock.assert_calls(1);
+    create_mock.assert_calls(1);
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn issues_command_uses_repo_scoped_api_key_over_global_auth() -> Result<(), Box<dyn Error>> {

@@ -3,6 +3,7 @@ mod agents;
 mod backlog;
 mod backlog_defaults;
 mod backlog_improve;
+mod backlog_ingest;
 mod backlog_spec;
 pub mod branding;
 mod build;
@@ -59,6 +60,7 @@ use clap::error::ErrorKind;
 #[doc(hidden)]
 pub use crate::backlog_improve::backlog_improve_terminal_cleanup_bytes;
 use crate::backlog_improve::run_backlog_improve;
+use crate::backlog_ingest::run_backlog_ingest;
 use crate::backlog_spec::{BacklogSpecOutput, run_backlog_spec};
 use crate::build::run_build;
 use crate::cli::{
@@ -199,6 +201,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 } else {
                     println!("{}", report.render());
                 }
+            }
+            BacklogCommands::Ingest(args) => {
+                println!("{}", run_backlog_ingest(&args).await?);
             }
             BacklogCommands::Sync(args) => match args.command {
                 Some(SyncCommands::Link(link_args)) => {

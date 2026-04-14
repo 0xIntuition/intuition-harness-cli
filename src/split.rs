@@ -1431,6 +1431,7 @@ where
                 description: Some(initial_description),
                 project: resolved_defaults.project.clone(),
                 project_id: resolved_defaults.project_id.clone(),
+                project_milestone_id: None,
                 parent_id: Some(source.id.clone()),
                 state: resolved_defaults.state.clone(),
                 priority: resolved_defaults.priority,

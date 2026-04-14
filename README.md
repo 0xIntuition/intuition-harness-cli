@@ -186,7 +186,7 @@ The preferred public surface is domain-first. Legacy top-level commands such as 
 
 | Command family | Use it for |
 | --- | --- |
-| `meta backlog` | Plan, analyze dependencies, batch into releases, create technical backlog children, and sync backlog work for the current repository |
+| `meta backlog` | Plan, analyze dependencies, batch into releases, ingest shaped Markdown backlogs, create technical backlog children, and sync backlog work for the current repository |
 | `meta linear` | Browse, create, edit, refine, and dashboard Linear work |
 | `meta agents` | Run the unattended listener and reusable workflow playbooks |
 | `meta context` | Inspect, map, doctor, scan, or reload the effective agent context |
@@ -675,6 +675,7 @@ Use these flags when an outer agent or shell wrapper needs deterministic non-int
 | `meta backlog plan` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
 | `meta backlog split` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
 | `meta backlog tech` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
+| `meta backlog ingest` | n/a | `--json` | dry-run and apply results emit JSON |
 | `meta backlog sync <subcommand>` | `--no-interactive` | `--json` or implicit in `--no-interactive` | direct subcommands emit JSON |
 | `meta linear issues create` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
 | `meta linear issues edit` | `--no-interactive` | implicit in `--no-interactive` | success and failure emit JSON |
@@ -699,6 +700,7 @@ This matrix is the contract for agent callers deciding whether to drive a comman
 | `meta backlog plan` | required for promptless runs; implies JSON | n/a | not supported |
 | `meta backlog split` | required for promptless runs; implies JSON | n/a | not supported |
 | `meta backlog tech` | required for promptless runs; implies JSON | n/a | not supported |
+| `meta backlog ingest` | not needed; command is headless and dry-run by default | supported | not supported |
 | `meta backlog sync status` | optional | supported | supported on dashboard form (`meta backlog sync --render-once`) |
 | `meta backlog sync link` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
 | `meta backlog sync pull` | optional for scripting; requires explicit selectors | supported and implied by `--no-interactive` | not supported |
@@ -868,6 +870,26 @@ Side effects:
 - writes each generated backlog item to `.metastack/backlog/<NEW_ISSUE_ID>/`
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
 - writes `.metastack/backlog/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
+
+### `backlog ingest`
+
+Parse a shaped Markdown backlog into Linear-ready issues:
+
+```bash
+meta backlog ingest cycle-88-shaped-backlog-greg.md --dry-run
+meta backlog ingest cycle-88-shaped-backlog-greg.md --team ENG --state Backlog --apply
+meta backlog ingest cycle-88-shaped-backlog-greg.md --json
+```
+
+The command is dry-run by default. It reads heading-structured Markdown as initiative, project, and milestone context, then treats task bullets under projects as issue rows. It recognizes metadata lines or inline tags for `Lead`, `Contributors`, `Milestone`, and project notes; canonical milestone tags such as `[4/17]`, `[Alpha]`, and `[Next]` are also accepted. Project notes are included in the preview and copied into created issue descriptions for that project.
+
+Apply mode resolves every referenced Linear project, project milestone, and lead before creating any issue. If a row is missing required milestone or lead metadata, use `--default-milestone` or `--default-lead`, or update the source Markdown. Missing Linear projects, project milestones, or users fail before mutation. Created issues preserve initiative, project, milestone, lead, contributors, project notes, and source line in their descriptions.
+
+Machine mode:
+
+- `meta backlog ingest <FILE> --json` emits parsed rows and warnings under the `backlog.ingest` envelope
+- `meta backlog ingest <FILE> --apply --json` emits the same preview plus created Linear issue summaries after all rows validate
+- failures also emit JSON when `--json` is present
 
 ### `backlog spec`
 

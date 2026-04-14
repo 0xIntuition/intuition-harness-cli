@@ -109,6 +109,8 @@ Examples:\n\
   {cmd} backlog plan --root . ENG-10144 --velocity\n\
   {cmd} backlog improve --root . --mode basic\n\
   {cmd} backlog improve --root . ENG-10144 --mode advanced --apply\n\
+  {cmd} backlog ingest cycle-88-shaped-backlog-greg.md --dry-run\n\
+  {cmd} backlog ingest cycle-88-shaped-backlog-greg.md --team ENG --state Backlog --apply\n\
   {cmd} backlog tech MET-35\n\
   {cmd} backlog split MET-35\n\
   {cmd} backlog sync status\n\

@@ -15,6 +15,15 @@ pub struct ProjectRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMilestoneSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub target_date: Option<String>,
+    pub project: ProjectRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRef {
     pub id: String,
     pub name: String,
@@ -165,6 +174,7 @@ pub struct IssueCreateSpec {
     pub description: Option<String>,
     pub project: Option<String>,
     pub project_id: Option<String>,
+    pub project_milestone_id: Option<String>,
     pub parent_id: Option<String>,
     pub state: Option<String>,
     pub priority: Option<u8>,
@@ -198,6 +208,7 @@ pub struct IssueCreateRequest {
     pub title: String,
     pub description: Option<String>,
     pub project_id: Option<String>,
+    pub project_milestone_id: Option<String>,
     pub parent_id: Option<String>,
     pub state_id: Option<String>,
     pub priority: Option<u8>,
@@ -217,6 +228,7 @@ pub struct IssueUpdateRequest {
     pub title: Option<String>,
     pub description: Option<String>,
     pub project_id: Option<String>,
+    pub project_milestone_id: Option<String>,
     pub state_id: Option<String>,
     pub priority: Option<u8>,
     pub estimate: Option<f64>,

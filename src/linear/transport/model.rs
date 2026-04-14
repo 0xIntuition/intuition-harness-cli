@@ -2,8 +2,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::linear::{
-    AttachmentSummary, IssueComment, IssueLink, IssueSummary, LabelRef, ProjectRef, ProjectSummary,
-    TeamRef, TeamSummary, UserRef, WorkflowState,
+    AttachmentSummary, IssueComment, IssueLink, IssueSummary, LabelRef, ProjectMilestoneSummary,
+    ProjectRef, ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
 };
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +36,12 @@ pub(super) struct PageInfo {
 #[derive(Debug, Deserialize)]
 pub(super) struct ProjectsPayload {
     pub(super) projects: Connection<ProjectNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestonesPayload {
+    pub(super) project_milestones: Connection<ProjectMilestoneNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +200,16 @@ pub(super) struct ProjectNode {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestoneNode {
+    pub(super) id: String,
+    pub(super) name: String,
+    #[serde(default)]
+    pub(super) target_date: Option<String>,
+    pub(super) project: ProjectRef,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct IssueNode {
     pub(super) id: String,
     pub(super) identifier: String,
@@ -321,6 +337,17 @@ impl From<IssueNode> for IssueSummary {
                 .children
                 .map(|children| children.nodes.into_iter().map(IssueLink::from).collect())
                 .unwrap_or_default(),
+        }
+    }
+}
+
+impl From<ProjectMilestoneNode> for ProjectMilestoneSummary {
+    fn from(value: ProjectMilestoneNode) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            target_date: value.target_date,
+            project: value.project,
         }
     }
 }

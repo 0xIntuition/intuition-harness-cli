@@ -62,6 +62,49 @@ where
         }
     }
 
+    /// Resolve a project milestone selector to one Linear milestone ID.
+    ///
+    /// Returns an error when the selector is empty, missing from the project, ambiguous, or when
+    /// the Linear milestone query fails.
+    pub async fn resolve_project_milestone_id_strict(
+        &self,
+        project_id: &str,
+        project_name: &str,
+        milestone_selector: &str,
+    ) -> Result<String> {
+        let milestone_selector = milestone_selector.trim();
+        if milestone_selector.is_empty() {
+            bail!("project milestone selector must not be empty");
+        }
+
+        let milestones: Vec<crate::linear::ProjectMilestoneSummary> =
+            self.client.list_project_milestones(project_id, 250).await?;
+        let matches = milestones
+            .into_iter()
+            .filter(|milestone| {
+                milestone.id == milestone_selector
+                    || milestone.name.eq_ignore_ascii_case(milestone_selector)
+            })
+            .collect::<Vec<_>>();
+
+        match matches.as_slice() {
+            [] => Err(anyhow!(
+                "project milestone `{milestone_selector}` was not found in Linear project `{project_name}`"
+            )),
+            [milestone] => Ok(milestone.id.clone()),
+            candidates => Err(anyhow!(
+                "project milestone `{}` is ambiguous in Linear project `{}`: {}",
+                milestone_selector,
+                project_name,
+                candidates
+                    .iter()
+                    .map(|milestone| format!("{} ({})", milestone.name, milestone.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
     pub async fn resolve_assignee_id(&self, assignee: Option<&str>) -> Result<Option<String>> {
         let Some(assignee) = normalize_user_selector(assignee) else {
             return Ok(None);

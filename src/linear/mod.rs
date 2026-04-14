@@ -29,5 +29,6 @@ pub use types::{
     IssueAssigneeFilter, IssueComment, IssueCreateRequest, IssueCreateSpec, IssueEditContext,
     IssueEditSpec, IssueLabelCreateRequest, IssueLink, IssueListFilters,
     IssueRelationCreateRequest, IssueSummary, IssueUpdateRequest, LabelRef, ProjectListFilters,
-    ProjectRef, ProjectSummary, TeamRef, TeamSummary, UserRef, WorkflowState,
+    ProjectMilestoneSummary, ProjectRef, ProjectSummary, TeamRef, TeamSummary, UserRef,
+    WorkflowState,
 };

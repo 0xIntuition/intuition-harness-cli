@@ -6,7 +6,7 @@ use crate::config::LinearConfig;
 use crate::linear::{
     AttachmentCreateRequest, AttachmentSummary, IssueComment, IssueCreateRequest,
     IssueLabelCreateRequest, IssueListFilters, IssueRelationCreateRequest, IssueSummary,
-    IssueUpdateRequest, LabelRef, ProjectSummary, TeamSummary, UserRef,
+    IssueUpdateRequest, LabelRef, ProjectMilestoneSummary, ProjectSummary, TeamSummary, UserRef,
 };
 
 mod attachments;
@@ -14,6 +14,7 @@ mod comments;
 mod graphql;
 mod issues;
 mod labels;
+mod milestones;
 mod model;
 mod pagination;
 mod projects;
@@ -27,6 +28,16 @@ mod viewer;
 #[async_trait]
 pub trait LinearClient: Send + Sync {
     async fn list_projects(&self, limit: usize) -> Result<Vec<ProjectSummary>>;
+    /// List milestones that belong to a Linear project.
+    ///
+    /// Returns an error when the Linear client cannot query project milestones.
+    async fn list_project_milestones(
+        &self,
+        _project_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<ProjectMilestoneSummary>> {
+        anyhow::bail!("this Linear client does not support project milestone queries")
+    }
     async fn list_users(&self, limit: usize) -> Result<Vec<UserRef>>;
     async fn list_issues(&self, limit: usize) -> Result<Vec<IssueSummary>>;
     async fn list_filtered_issues(&self, filters: &IssueListFilters) -> Result<Vec<IssueSummary>>;
@@ -83,6 +94,15 @@ impl ReqwestLinearClient {
 impl LinearClient for ReqwestLinearClient {
     async fn list_projects(&self, limit: usize) -> Result<Vec<ProjectSummary>> {
         self.list_projects_resource(limit).await
+    }
+
+    async fn list_project_milestones(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ProjectMilestoneSummary>> {
+        self.list_project_milestones_resource(project_id, limit)
+            .await
     }
 
     async fn list_users(&self, limit: usize) -> Result<Vec<UserRef>> {

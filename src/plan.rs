@@ -461,6 +461,7 @@ pub async fn run_plan(args: &PlanArgs) -> Result<PlanReport> {
                 description: Some(initial_description),
                 project: resolved_defaults.project.clone(),
                 project_id: resolved_defaults.project_id.clone(),
+                project_milestone_id: None,
                 parent_id: None,
                 state: resolved_defaults.state.clone(),
                 priority: resolved_defaults.priority,

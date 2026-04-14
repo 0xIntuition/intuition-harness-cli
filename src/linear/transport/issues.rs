@@ -375,6 +375,7 @@ mutation CreateIssue($input: IssueCreateInput!) {{
                         "title": request.title,
                         "description": request.description,
                         "projectId": request.project_id,
+                        "projectMilestoneId": request.project_milestone_id,
                         "parentId": request.parent_id,
                         "stateId": request.state_id,
                         "priority": request.priority,
@@ -422,6 +423,12 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {{
         }
         if let Some(project_id) = request.project_id {
             input.insert("projectId".to_string(), Value::String(project_id));
+        }
+        if let Some(project_milestone_id) = request.project_milestone_id {
+            input.insert(
+                "projectMilestoneId".to_string(),
+                Value::String(project_milestone_id),
+            );
         }
         if let Some(state_id) = request.state_id {
             input.insert("stateId".to_string(), Value::String(state_id));

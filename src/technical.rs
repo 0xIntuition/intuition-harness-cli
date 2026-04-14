@@ -480,6 +480,7 @@ pub async fn run_technical(args: &TechnicalArgs) -> Result<TechnicalReport> {
             description: Some(rendered_index_contents(&generated.files)?),
             project: resolved_defaults.project.clone(),
             project_id: resolved_defaults.project_id.clone(),
+            project_milestone_id: None,
             parent_id: Some(generated.parent.id.clone()),
             state: resolved_defaults.state.clone(),
             priority: resolved_defaults.priority,

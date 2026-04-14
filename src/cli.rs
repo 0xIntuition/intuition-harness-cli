@@ -214,8 +214,40 @@ pub enum BacklogCommands {
     /// Create a backlog sub-issue and local planning files from a parent issue.
     #[command(name = "tech", visible_alias = "derive")]
     Tech(TechnicalArgs),
+    /// Ingest a shaped Markdown backlog into Linear issues.
+    Ingest(BacklogIngestArgs),
     /// Launch the sync dashboard or run direct pull/push backlog operations.
     Sync(SyncArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BacklogIngestArgs {
+    #[command(flatten)]
+    pub client: LinearClientArgs,
+    /// Shaped Markdown backlog file to parse.
+    #[arg(value_name = "PATH")]
+    pub path: PathBuf,
+    /// Default Linear team key for created issues.
+    #[arg(long)]
+    pub team: Option<String>,
+    /// Workflow state name for created issues.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Lead/assignee selector used when an item has no lead metadata.
+    #[arg(long)]
+    pub default_lead: Option<String>,
+    /// Milestone selector used when an item has no milestone metadata.
+    #[arg(long)]
+    pub default_milestone: Option<String>,
+    /// Create Linear issues after parsing and validating all rows.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub apply: bool,
+    /// Parse and preview without Linear mutations. This is the default when --apply is omitted.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit raw JSON instead of a text summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -2319,6 +2351,7 @@ impl Cli {
                 BacklogCommands::Plan(args) if args.no_interactive => Some("backlog.plan"),
                 BacklogCommands::Split(args) if args.no_interactive => Some("backlog.split"),
                 BacklogCommands::Tech(args) if args.no_interactive => Some("backlog.tech"),
+                BacklogCommands::Ingest(args) if args.json => Some("backlog.ingest"),
                 BacklogCommands::Sync(args) if args.no_interactive || args.json => {
                     Some("backlog.sync")
                 }
@@ -2434,6 +2467,7 @@ fn infer_backlog_machine_output(tokens: &[String]) -> Option<&'static str> {
         "plan" if has_flag(rest, "--no-interactive") => Some("backlog.plan"),
         "split" if has_flag(rest, "--no-interactive") => Some("backlog.split"),
         "tech" | "derive" if has_flag(rest, "--no-interactive") => Some("backlog.tech"),
+        "ingest" if has_flag(rest, "--json") => Some("backlog.ingest"),
         "sync" if has_flag(rest, "--json") || has_flag(rest, "--no-interactive") => {
             Some("backlog.sync")
         }
