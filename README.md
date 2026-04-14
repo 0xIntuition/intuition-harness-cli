@@ -869,6 +869,14 @@ Side effects:
 - uses `.metastack/backlog/<NEW_ISSUE_ID>/index.md` as the initial Linear issue description
 - writes `.metastack/backlog/<NEW_ISSUE_ID>/.linear.json` to persist issue metadata
 
+### Deferred altitude-1 backlog organization
+
+`meta backlog ingest` and `meta backlog scaffold` are reserved for a later altitude-1 workflow and are not active commands today. The intended path is staged: a one-off Cycle 88 ingest script first, then a minimal reusable `backlog ingest` command for reviewed shaped markdown, then a reviewed `backlog scaffold` organizer that groups many altitude-0 stories into projects, milestones, leads, cross-cutting flags, and deduped Linear work.
+
+The Stage 2 ingest command is gated by Linear milestone primitives plus deterministic project and lead resolution. The Stage 3 scaffold command should reuse that ingestion path after interactive review instead of writing directly through a separate mutation flow.
+
+See [`docs/backlog-scaffold-staging.md`](docs/backlog-scaffold-staging.md) for the deferred contract, stage boundaries, compatibility rules, and open architecture questions.
+
 ### `backlog spec`
 
 Create or improve the repo-local `.metastack/SPEC.md` for the active repository:
