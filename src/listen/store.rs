@@ -677,7 +677,7 @@ impl ListenProjectStore {
     pub(super) fn load_retained_sessions(&self) -> Result<Vec<RetainedSessionSummary>> {
         let now = now_epoch_seconds();
         let mut index = self.load_retained_audit_index()?;
-        let mut changed = prune_retained_event_files(self, now, &index.sessions)?;
+        let mut changed = false;
         index.sessions.sort_by(|left, right| {
             right
                 .session
@@ -693,6 +693,7 @@ impl ListenProjectStore {
             index.sessions.truncate(RETAINED_AUDIT_SESSION_LIMIT);
             changed = true;
         }
+        changed |= prune_retained_event_files(self, now, &index.sessions)?;
         if changed {
             self.save_retained_audit_index(&index)?;
         }
@@ -2342,10 +2343,12 @@ mod tests {
 
     use super::{
         ActiveListenerLock, AgentSession, COMPLETED_SESSION_TTL_SECONDS,
-        LISTEN_SESSION_DETAIL_VERSION, ListenProjectPaths, ListenProjectStore, ListenState,
-        SessionDetailReferences, SessionPhase, SessionSelector, WorkflowRootLayout,
-        now_epoch_seconds, project_key_for_metastack_root, read_json, resolve_source_root,
-        sibling_recovery_path, write_json,
+        LISTEN_RETAINED_AUDIT_VERSION, LISTEN_SESSION_DETAIL_VERSION, ListenProjectPaths,
+        ListenProjectStore, ListenState, RETAINED_AUDIT_SESSION_LIMIT, RetainedAuditIndex,
+        RetainedSessionSummary, SessionDetailReferences, SessionMilestone, SessionPhase,
+        SessionSelector, WorkflowRootLayout, now_epoch_seconds, project_key_for_metastack_root,
+        read_json, resolve_source_root, sibling_recovery_path, write_json,
+        write_retained_events_file,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2583,6 +2586,63 @@ mod tests {
             &store.paths().state_path,
             &ListenState::from_sessions(sessions),
         )
+    }
+
+    #[test]
+    fn load_retained_sessions_prunes_event_files_after_retention_cap() -> Result<()> {
+        let temp = tempdir()?;
+        let repo_root = temp.path().join("repo");
+        let data_root = temp.path().join("data");
+        fs::create_dir_all(repo_root.join(crate::branding::PROJECT_DIR))?;
+        let store = ListenProjectStore::resolve_with_data_root(&repo_root, data_root, None)?;
+        store.ensure_layout()?;
+
+        let mut retained = Vec::new();
+        for index in 0..=RETAINED_AUDIT_SESSION_LIMIT {
+            let issue_identifier = format!("MET-{index:03}");
+            let session = default_session(
+                &issue_identifier,
+                SessionPhase::Completed,
+                (RETAINED_AUDIT_SESSION_LIMIT - index + 1) as u64,
+            );
+            write_retained_events_file(
+                &store.retained_events_path(&issue_identifier),
+                &[SessionMilestone {
+                    at_epoch_seconds: session.updated_at_epoch_seconds,
+                    phase: session.phase,
+                    lifecycle: Some(session.effective_lifecycle()),
+                    summary: session.summary.clone(),
+                    turns: session.turns,
+                    pull_request_status: session.pull_request.status,
+                    pull_request_number: session.pull_request.number,
+                }],
+            )?;
+            retained.push(RetainedSessionSummary {
+                session,
+                retained_at_epoch_seconds: 1_773_575_000,
+            });
+        }
+
+        store.save_retained_audit_index(&RetainedAuditIndex {
+            version: LISTEN_RETAINED_AUDIT_VERSION,
+            sessions: retained,
+        })?;
+
+        let dropped_issue = format!("MET-{RETAINED_AUDIT_SESSION_LIMIT:03}");
+        let dropped_events = store.retained_events_path(&dropped_issue);
+        assert!(dropped_events.is_file());
+
+        let visible = store.load_retained_sessions()?;
+
+        assert_eq!(visible.len(), RETAINED_AUDIT_SESSION_LIMIT);
+        assert!(
+            visible
+                .iter()
+                .all(|summary| summary.session.issue_identifier != dropped_issue)
+        );
+        assert!(!dropped_events.exists());
+        assert!(store.retained_events_path("MET-000").is_file());
+        Ok(())
     }
 
     fn spawn_sleep_process() -> Result<Child> {

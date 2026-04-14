@@ -540,18 +540,25 @@ impl PullRequestSummary {
     }
 }
 
+/// High-level lifecycle outcome for a listen session, separate from its last worker phase.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleOutcome {
+    /// The session is currently active or eligible for normal processing.
     #[default]
     Active,
+    /// The session was paused by an operator and can be manually resumed.
     Paused,
+    /// The session stopped on an actionable blocker that should stay visible.
     Blocked,
+    /// The session reached a clean terminal handoff.
     Completed,
+    /// The session exited before clean handoff but retained enough state to inspect or resume.
     Truncated,
 }
 
 impl SessionLifecycleOutcome {
+    /// Returns the operator-facing lifecycle label.
     pub fn display_label(self) -> &'static str {
         match self {
             Self::Active => "Active",
@@ -562,35 +569,53 @@ impl SessionLifecycleOutcome {
         }
     }
 
+    /// Returns true when the outcome should be treated as a blocked session.
     pub fn is_blocked(self) -> bool {
         matches!(self, Self::Blocked)
     }
 
+    /// Returns true when the outcome belongs in the completed/history browser view.
     pub fn shows_in_completed_view(self) -> bool {
         matches!(self, Self::Completed | Self::Truncated)
     }
 }
 
+/// Specific reason a listen session left active processing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionExitCondition {
+    /// The session finished normally and handed off for review.
     CleanComplete,
+    /// Linear moved the issue out of the listener's active scope.
     IssueMoved,
+    /// Linear updates could not be confirmed before the worker exited.
     PendingLinearSync,
+    /// The worker published or retained a draft PR but did not complete review handoff.
     DraftPending,
+    /// An operator paused the session.
     ManualPause,
+    /// The persisted worker process disappeared or failed stale-worker recovery.
     WorkerDied,
+    /// Required setup artifacts were missing.
     SetupMissing,
+    /// The worker reached its configured turn limit.
     TurnLimit,
+    /// The session stopped making progress and was marked stale.
     Stalled,
+    /// The verification stage failed.
     VerificationFailed,
+    /// The validation stage failed.
     ValidationFailed,
+    /// The CI quality gate did not finish before timeout.
     CiTimeout,
+    /// The execute flow needs an operator takeover before continuing.
     ExecuteAwaitingTakeover,
+    /// A lifecycle exit reason was retained but does not map to a known category.
     Other,
 }
 
 impl SessionExitCondition {
+    /// Returns the operator-facing exit-condition label.
     pub fn display_label(self) -> &'static str {
         match self {
             Self::CleanComplete => "Ready Handoff",
@@ -611,16 +636,21 @@ impl SessionExitCondition {
     }
 }
 
+/// Durable lifecycle metadata retained beside the last observed session phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLifecycle {
+    /// High-level outcome used for filtering and resume decisions.
     pub outcome: SessionLifecycleOutcome,
+    /// Specific terminal or blocked reason when one is known.
     #[serde(default)]
     pub exit_condition: Option<SessionExitCondition>,
+    /// Whether an operator or daemon may resume the retained session.
     #[serde(default)]
     pub resumable: bool,
 }
 
 impl SessionLifecycle {
+    /// Builds an active lifecycle record.
     pub fn active(resumable: bool) -> Self {
         Self {
             outcome: SessionLifecycleOutcome::Active,
@@ -629,6 +659,7 @@ impl SessionLifecycle {
         }
     }
 
+    /// Builds a manually paused lifecycle record.
     pub fn paused() -> Self {
         Self {
             outcome: SessionLifecycleOutcome::Paused,
@@ -637,6 +668,7 @@ impl SessionLifecycle {
         }
     }
 
+    /// Builds a blocked lifecycle record with an optional known exit condition.
     pub fn blocked(exit_condition: Option<SessionExitCondition>, resumable: bool) -> Self {
         Self {
             outcome: SessionLifecycleOutcome::Blocked,
@@ -645,6 +677,7 @@ impl SessionLifecycle {
         }
     }
 
+    /// Builds a clean completed lifecycle record.
     pub fn completed(exit_condition: SessionExitCondition) -> Self {
         Self {
             outcome: SessionLifecycleOutcome::Completed,
@@ -653,6 +686,7 @@ impl SessionLifecycle {
         }
     }
 
+    /// Builds a truncated lifecycle record for incomplete but retained work.
     pub fn truncated(exit_condition: SessionExitCondition, resumable: bool) -> Self {
         Self {
             outcome: SessionLifecycleOutcome::Truncated,
@@ -661,22 +695,27 @@ impl SessionLifecycle {
         }
     }
 
+    /// Returns the operator-facing lifecycle outcome label.
     pub fn outcome_label(&self) -> &'static str {
         self.outcome.display_label()
     }
 
+    /// Returns the operator-facing exit-condition label when one is known.
     pub fn exit_label(&self) -> Option<&'static str> {
         self.exit_condition.map(SessionExitCondition::display_label)
     }
 
+    /// Returns true when the lifecycle marks the session as blocked.
     pub fn is_blocked(&self) -> bool {
         self.outcome.is_blocked()
     }
 
+    /// Returns true when the session should appear in the completed/history view.
     pub fn shows_in_completed_view(&self) -> bool {
         self.outcome.shows_in_completed_view()
     }
 
+    /// Returns true when an operator may manually resume this session.
     pub fn can_manual_resume(&self) -> bool {
         self.resumable
             && matches!(
@@ -685,6 +724,7 @@ impl SessionLifecycle {
             )
     }
 
+    /// Returns true when daemon reconciliation may automatically resume this session.
     pub fn can_auto_resume(&self) -> bool {
         self.resumable && matches!(self.outcome, SessionLifecycleOutcome::Truncated)
     }
