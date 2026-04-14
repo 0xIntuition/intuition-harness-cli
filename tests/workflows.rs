@@ -71,6 +71,7 @@ fn workflows_list_shows_builtin_playbooks() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("Available workflows"))
         .stdout(predicate::str::contains("backlog-planning"))
         .stdout(predicate::str::contains("ticket-implementation"))
+        .stdout(predicate::str::contains("product-altitude"))
         .stdout(predicate::str::contains("pr-review"))
         .stdout(predicate::str::contains("incident-triage"));
 
@@ -101,6 +102,35 @@ fn workflows_explain_describes_ticket_implementation_contract() -> Result<(), Bo
         .stdout(predicate::str::contains("implementation_notes"))
         .stdout(predicate::str::contains("Validation"))
         .stdout(predicate::str::contains("Prompt Template"));
+
+    Ok(())
+}
+
+#[test]
+fn workflows_explain_describes_product_altitude_contract() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let config_path = temp.path().join("metastack.toml");
+    fs::create_dir_all(&repo_root)?;
+    ensure_workflow_test_config(&config_path)?;
+
+    cli()
+        .env("METASTACK_CONFIG", &config_path)
+        .args([
+            "workflows",
+            "explain",
+            "--root",
+            repo_root.to_string_lossy().as_ref(),
+            "product-altitude",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Workflow: product-altitude"))
+        .stdout(predicate::str::contains("Altitude 0 product shaper"))
+        .stdout(predicate::str::contains("Altitude 1"))
+        .stdout(predicate::str::contains("Altitude 2"))
+        .stdout(predicate::str::contains("decision-callout blocks"))
+        .stdout(predicate::str::contains("feature-additive"));
 
     Ok(())
 }

@@ -605,12 +605,16 @@ When stdout is attached to a TTY, `meta context scan` renders a compact progress
 
 ### `agents workflows`
 
-List, explain, and run reusable workflow playbooks. The CLI ships with built-in playbooks for backlog planning, ticket implementation, PR review, and incident triage, and it also loads repo-local playbooks from `.metastack/workflows/`.
+List, explain, and run reusable workflow playbooks. The CLI ships with built-in playbooks for backlog planning, ticket implementation, product-altitude story shaping, PR review, and incident triage, and it also loads repo-local playbooks from `.metastack/workflows/`.
+
+The product-altitude vocabulary and persona contract live in [`docs/product-altitude-workflow.md`](docs/product-altitude-workflow.md).
 
 ```bash
 meta agents workflows list
 meta agents workflows explain backlog-planning
+meta agents workflows explain product-altitude
 meta agents workflows run backlog-planning
+meta agents workflows run product-altitude --no-interactive --param meeting_material="..." --param project_scope="Cycle 88"
 meta agents workflows run ticket-implementation
 meta agents workflows run ticket-implementation --no-interactive --param issue=MET-93
 meta agents workflows run ticket-implementation --render-once --param issue=MET-93

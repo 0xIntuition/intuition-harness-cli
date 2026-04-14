@@ -63,6 +63,16 @@ Repo-local playbooks live under `{{brand.project_dir}}/workflows/`. The built-in
 
 Legacy alias: `{{brand.command_name}} workflows`
 
+## Built-In Playbooks
+
+- `backlog-planning`: break a product request into actionable backlog work.
+- `ticket-implementation`: prepare an implementation plan from a Linear issue plus repo context.
+- `product-altitude`: draft Altitude 0 product stories using the `ENG-10996` three-altitude frame.
+- `pr-review`: review a patch or pull request against repo constraints.
+- `incident-triage`: triage an incident or blocker from operator notes and repo context.
+
+The product-altitude vocabulary and persona contract are documented in `docs/product-altitude-workflow.md`.
+
 ## Run Experience
 
 `{{brand.command_name}} agents workflows run <NAME>` is TUI-first when stdin/stdout are attached to a TTY:

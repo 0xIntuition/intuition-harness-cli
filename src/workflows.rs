@@ -49,7 +49,7 @@ use crate::tui::fields::InputFieldState;
 use crate::tui::keybindings::{is_copy_key, is_mouse_toggle_key};
 use crate::tui::scroll::{ScrollState, scrollable_paragraph, wrapped_rows};
 
-const BUILTIN_WORKFLOWS: [(&str, &str); 4] = [
+const BUILTIN_WORKFLOWS: [(&str, &str); 5] = [
     (
         "builtin/backlog-planning.md",
         include_str!(concat!(
@@ -62,6 +62,13 @@ const BUILTIN_WORKFLOWS: [(&str, &str); 4] = [
         include_str!(concat!(
             env!("OUT_DIR"),
             "/artifacts/workflows/ticket-implementation.md"
+        )),
+    ),
+    (
+        "builtin/product-altitude.md",
+        include_str!(concat!(
+            env!("OUT_DIR"),
+            "/artifacts/workflows/product-altitude.md"
         )),
     ),
     (
