@@ -372,10 +372,14 @@ fn is_safe_javascript_validation_script(script_name: &str, body: &str) -> bool {
         return false;
     }
 
-    matches!(
+    if matches!(
         script_name,
         "typecheck" | "type-check" | "lint" | "format:check"
-    ) || script_mentions_static_javascript_validation(body)
+    ) {
+        return true;
+    }
+
+    script_mentions_static_javascript_tool(body)
 }
 
 fn script_mentions_unattended_unsafe_javascript_step(script: &str) -> bool {
@@ -423,20 +427,15 @@ fn script_mentions_workspace_wide_javascript_runner(script: &str) -> bool {
     .any(|marker| script_contains_token(&normalized, marker))
 }
 
-fn script_mentions_static_javascript_validation(script: &str) -> bool {
+fn script_mentions_static_javascript_tool(script: &str) -> bool {
     let normalized = script.to_ascii_lowercase();
     [
-        "typecheck",
-        "type-check",
         "tsc",
         "vue-tsc",
         "svelte-check",
-        "check",
         "biome",
         "eslint",
         "prettier",
-        "lint",
-        "format:check",
         "oxlint",
         "knip",
     ]
@@ -708,7 +707,7 @@ mod tests {
             r#"{
               "packageManager": "bun@1.3.3",
               "scripts": {
-                "quality": "bun run typecheck && bun run lint",
+                "quality": "tsc --noEmit && eslint .",
                 "typecheck": "tsc --noEmit",
                 "lint": "eslint ."
               }
@@ -718,6 +717,24 @@ mod tests {
         assert_eq!(
             resolve_validation_profile(temp.path(), &PlanningMeta::default(), &[])?.commands,
             vec!["bun run quality"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolver_skips_javascript_quality_when_it_only_delegates_to_check() -> Result<()> {
+        let temp = tempdir()?;
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"scripts":{"quality":"bun run check","check":"playwright test"}}"#,
+        )?;
+
+        let error = resolve_validation_profile(temp.path(), &PlanningMeta::default(), &[])
+            .expect_err("delegated JavaScript quality scripts should require explicit config");
+        assert!(
+            error
+                .to_string()
+                .contains("no default validation command was inferred")
         );
         Ok(())
     }
