@@ -232,15 +232,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         load_existing_provider_session_id(&source_root, project_selector, &args.issue)?;
     let mut stalled_turns = 0u32;
     let mut last_review: Option<ReviewReport> = None;
-    let validation_repair_attempts = PlanningMeta::load(&workspace_path)
-        .with_context(|| {
-            format!(
-                "failed to load repo validation settings from `{}`",
-                workspace_path.display()
-            )
-        })?
-        .validation
-        .repair_attempts();
+    let validation_repair_attempts = planning_meta.validation.repair_attempts();
     let mut remaining_verification_repair_turns = validation_repair_attempts;
     let mut remaining_validation_repair_turns = validation_repair_attempts;
     if let Err(error) = preflight::run_listen_preflight(
@@ -1065,6 +1057,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         .await?;
                         return Ok(());
                     }
+                    ValidationGateOutcome::Blocked => return Ok(()),
                 };
                 write_listen_session(
                     &source_root,
@@ -1438,6 +1431,7 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
                         .await?;
                         return Ok(());
                     }
+                    ValidationGateOutcome::Blocked => return Ok(()),
                 };
                 match publish_listener_pull_request(
                     &issue,
@@ -1935,6 +1929,7 @@ enum ValidationGateOutcome {
     Passed(ReviewReport),
     Retry(ReviewReport),
     Exhausted(ReviewReport),
+    Blocked,
 }
 
 struct PrePrValidationGateContext<'a> {
@@ -2709,10 +2704,17 @@ async fn prepare_listener_pull_request_for_review(
     Ok(Some(pull_request))
 }
 
-fn load_listen_validation_profile(workspace_path: &Path) -> Result<ResolvedValidationProfile> {
-    let planning_meta = PlanningMeta::load(workspace_path)
+fn load_listen_validation_profile(
+    workspace_path: &Path,
+    source_planning_meta: &PlanningMeta,
+) -> Result<ResolvedValidationProfile> {
+    if !source_planning_meta.validation.commands.is_empty() {
+        return resolve_validation_profile(workspace_path, source_planning_meta, &[]);
+    }
+
+    let workspace_planning_meta = PlanningMeta::load(workspace_path)
         .with_context(|| format!("failed to load `{}`", workspace_path.display()))?;
-    resolve_validation_profile(workspace_path, &planning_meta, &[])
+    resolve_validation_profile(workspace_path, &workspace_planning_meta, &[])
 }
 
 fn append_worker_log(log_path: &Path, section: &str, lines: &[String]) -> Result<()> {
@@ -2936,8 +2938,39 @@ async fn run_pre_pr_validation_gate(
     review: &ReviewReport,
     remaining_validation_repair_turns: &mut usize,
 ) -> Result<ValidationGateOutcome> {
-    let validation_profile =
-        load_listen_validation_profile(gate_context.turn_context.workspace_path)?;
+    let validation_profile = match load_listen_validation_profile(
+        gate_context.turn_context.workspace_path,
+        gate_context.turn_context.planning_meta,
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            let reason = format!("validation profile unavailable: {error:#}");
+            append_worker_log(
+                gate_context.phase_context.log_path,
+                "validation profile error",
+                std::slice::from_ref(&reason),
+            )?;
+            let blocked = blocked_reason(BlockedCategory::Gate, reason, false);
+            write_listen_session(
+                gate_context.phase_context.source_root,
+                gate_context.phase_context.project_selector,
+                build_worker_blocked_session(
+                    gate_context.issue,
+                    blocked.clone(),
+                    compact_blocked_summary(
+                        &blocked,
+                        gate_context.issue.description.as_deref(),
+                        gate_context.phase_context.log_path,
+                    ),
+                    gate_context.phase_context.session_context,
+                    gate_context.turns_completed,
+                    gate_context.phase_context.provider_session_id,
+                    &gate_context.phase_context.session_context.canonical,
+                ),
+            )?;
+            return Ok(ValidationGateOutcome::Blocked);
+        }
+    };
     write_listen_session(
         gate_context.phase_context.source_root,
         gate_context.phase_context.project_selector,
@@ -7083,11 +7116,12 @@ mod tests {
     use super::{
         ExecutionTurnPlan, LatestResumeHandle, ListenTurnContext, Path, ResumeProvider,
         ReviewReport, TurnExecutionResult, Value, WorkerSessionContext, build_worker_session,
-        continuation_id_for_invocation, listener_pull_request_body, parse_claude_resume_handle,
-        parse_codex_resume_handle, plan_execution_turn, query_codex_threads,
-        read_codex_session_index, render_review_workpad, update_resume_handle_after_turn,
+        continuation_id_for_invocation, listener_pull_request_body, load_listen_validation_profile,
+        parse_claude_resume_handle, parse_codex_resume_handle, plan_execution_turn,
+        query_codex_threads, read_codex_session_index, render_review_workpad,
+        update_resume_handle_after_turn,
     };
-    use crate::config::{AppConfig, PlanningMeta};
+    use crate::config::{AppConfig, PlanningMeta, PlanningValidationSettings};
     use crate::linear::{IssueComment, IssueSummary, TeamRef};
     use crate::listen::state::ContextPressure;
     use crate::listen::verification::{
@@ -7431,6 +7465,32 @@ mod tests {
             read_codex_session_index(&codex_root, 1_773_932_400, 1_773_932_420).expect("index");
 
         assert_eq!(ids, vec!["recent".to_string()]);
+    }
+
+    #[test]
+    fn listen_validation_profile_uses_source_meta_commands_for_workspace() -> Result<()> {
+        let temp = tempdir()?;
+        let source_root = temp.path().join("source");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&source_root)?;
+        fs::create_dir_all(&workspace)?;
+        PlanningMeta {
+            validation: PlanningValidationSettings {
+                commands: vec!["true".to_string()],
+                repair_attempts: Some(0),
+                profile: Some("local-source".to_string()),
+            },
+            ..PlanningMeta::default()
+        }
+        .save(&source_root)?;
+        PlanningMeta::default().save(&workspace)?;
+
+        let source_meta = PlanningMeta::load(&source_root)?;
+        let profile = load_listen_validation_profile(&workspace, &source_meta)?;
+
+        assert_eq!(profile.commands, vec!["true"]);
+        assert_eq!(profile.profile_label.as_deref(), Some("local-source"));
+        Ok(())
     }
 
     #[test]
