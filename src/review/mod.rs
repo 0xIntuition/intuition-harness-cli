@@ -1952,17 +1952,16 @@ impl InteractiveReviewApp {
                             }
                         };
                     }
-                    KeyCode::Esc => {
+                    KeyCode::Esc
                         if self.tab == InteractiveReviewTab::Sessions
-                            || self.focus != InteractiveReviewFocus::CandidateList
-                        {
-                            self.tab = InteractiveReviewTab::Candidates;
-                            self.focus = InteractiveReviewFocus::CandidateList;
-                            self.status = format!(
-                                "Returned to candidates. {} active review session(s) remain visible and candidate rows with running work stay highlighted.",
-                                self.active_session_count()
-                            );
-                        }
+                            || self.focus != InteractiveReviewFocus::CandidateList =>
+                    {
+                        self.tab = InteractiveReviewTab::Candidates;
+                        self.focus = InteractiveReviewFocus::CandidateList;
+                        self.status = format!(
+                            "Returned to candidates. {} active review session(s) remain visible and candidate rows with running work stay highlighted.",
+                            self.active_session_count()
+                        );
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') => {
                         self.stage = InteractiveReviewStage::Loading;

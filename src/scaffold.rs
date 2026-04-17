@@ -77,7 +77,7 @@ fn ensure_layout(root: &Path, force: bool, include_cron: bool) -> Result<Scaffol
 
     for (path, contents) in templates(&paths, include_cron)
         .into_iter()
-        .chain(template_seed_files(&paths).into_iter())
+        .chain(template_seed_files(&paths))
     {
         match write_text_file(&path, &contents, force)? {
             FileWriteStatus::Created => report.created_files.push(display_path(&path, root)),

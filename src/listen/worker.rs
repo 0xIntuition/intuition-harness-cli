@@ -4242,7 +4242,7 @@ fn latest_codex_state_db(codex_root: &Path) -> Option<PathBuf> {
             Some((modified, path))
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
     candidates.into_iter().next().map(|(_, path)| path)
 }
 

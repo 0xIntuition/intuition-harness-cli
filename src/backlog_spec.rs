@@ -820,14 +820,17 @@ impl BacklogSpecApp {
     fn handle_paste(&mut self, text: &str) {
         match &mut self.stage {
             SpecStage::Request(app) => {
-                if app.request.paste(text) {
+                let pasted = app.request.paste(text);
+                if pasted {
                     clear_error(&mut app.error, &mut app.sticky_error);
                 }
             }
             SpecStage::Questions(app) => {
-                if let Some(current) = app.questions.get_mut(app.selected)
-                    && current.answer.paste(text)
-                {
+                let pasted = app
+                    .questions
+                    .get_mut(app.selected)
+                    .is_some_and(|current| current.answer.paste(text));
+                if pasted {
                     clear_error(&mut app.error, &mut app.sticky_error);
                 }
             }

@@ -1243,7 +1243,7 @@ fn load_all_runs(paths: &PlanningPaths) -> Result<Vec<PersistedRun>> {
             .with_context(|| format!("failed to parse `{}`", path.display()))?;
         runs.push(run);
     }
-    runs.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    runs.sort_by_key(|run| run.created_at);
     Ok(runs)
 }
 

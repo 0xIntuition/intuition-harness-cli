@@ -714,10 +714,8 @@ pub(crate) fn run_build_dashboard(options: BuildDashboardOptions) -> Result<()> 
                     }
                 }
             }
-            Event::Paste(text) => {
-                if app.focus == BuildFocus::Prompt {
-                    let _ = app.prompt.paste(&text);
-                }
+            Event::Paste(text) if app.focus == BuildFocus::Prompt => {
+                let _ = app.prompt.paste(&text);
             }
             Event::Mouse(mouse)
                 if matches!(
@@ -759,29 +757,21 @@ fn handle_workspace_keys(app: &mut BuildDashboardApp, key: crossterm::event::Key
     match key.code {
         KeyCode::Tab => app.focus = BuildFocus::Runs,
         KeyCode::Enter => app.focus = BuildFocus::Prompt,
-        KeyCode::Up => {
-            if app.workspace_index > 0 {
-                app.workspace_index -= 1;
-                app.output_scroll.reset();
-            }
+        KeyCode::Up if app.workspace_index > 0 => {
+            app.workspace_index -= 1;
+            app.output_scroll.reset();
         }
-        KeyCode::Down => {
-            if app.workspace_index + 1 < app.workspaces.len() {
-                app.workspace_index += 1;
-                app.output_scroll.reset();
-            }
+        KeyCode::Down if app.workspace_index + 1 < app.workspaces.len() => {
+            app.workspace_index += 1;
+            app.output_scroll.reset();
         }
-        KeyCode::Home => {
-            if !app.workspaces.is_empty() {
-                app.workspace_index = 0;
-                app.output_scroll.reset();
-            }
+        KeyCode::Home if !app.workspaces.is_empty() => {
+            app.workspace_index = 0;
+            app.output_scroll.reset();
         }
-        KeyCode::End => {
-            if !app.workspaces.is_empty() {
-                app.workspace_index = app.workspaces.len() - 1;
-                app.output_scroll.reset();
-            }
+        KeyCode::End if !app.workspaces.is_empty() => {
+            app.workspace_index = app.workspaces.len() - 1;
+            app.output_scroll.reset();
         }
         _ => {}
     }
