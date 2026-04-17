@@ -53,7 +53,10 @@ use crate::config::{
     LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
     PlanningMeta, load_required_planning_meta,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, sibling_workspace_root};
+use crate::fs::{
+    PlanningPaths, canonicalize_existing_dir, display_path, sibling_workspace_root,
+    ticket_workspace_root,
+};
 use crate::linear::{
     IssueAssigneeFilter, IssueComment, IssueEditSpec, IssueListFilters, IssueSummary, LinearClient,
     LinearService, ReqwestLinearClient, UserRef, classify_linear_failure,
@@ -2460,6 +2463,13 @@ where
     }
 
     async fn pickup_issue(&self, issue: &IssueSummary) -> Result<AgentSession> {
+        let expected_workspace_path =
+            expected_ticket_workspace_path(&self.root, &issue.identifier)?;
+        worker_lease::ensure_listen_worker_lease_available(
+            &expected_workspace_path,
+            &issue.identifier,
+        )?;
+
         let updated_issue = self
             .service
             .edit_issue(IssueEditSpec {
@@ -2508,7 +2518,7 @@ where
         let ws_refresh_policy = self.listen_settings.refresh_policy();
         let ws_identifier = detailed_issue.identifier.clone();
         let ws_title = detailed_issue.title.clone();
-        let workspace = match tokio::task::spawn_blocking(move || {
+        let mut workspace = match tokio::task::spawn_blocking(move || {
             ensure_ticket_workspace(&ws_root, ws_refresh_policy, &ws_identifier, &ws_title)
         })
         .await?
@@ -2526,6 +2536,11 @@ where
                 ));
             }
         };
+        workspace.workspace_path = canonicalize_existing_dir(&workspace.workspace_path)?;
+        worker_lease::ensure_listen_worker_lease_available(
+            &workspace.workspace_path,
+            &detailed_issue.identifier,
+        )?;
         if let Err(error) = preflight::run_listen_preflight(
             &self.service,
             &self.linear_config,
@@ -3003,6 +3018,15 @@ where
         );
 
         Ok(pid)
+    }
+}
+
+fn expected_ticket_workspace_path(root: &Path, issue_identifier: &str) -> Result<PathBuf> {
+    let workspace_path = ticket_workspace_root(root)?.join(issue_identifier);
+    if workspace_path.is_dir() {
+        canonicalize_existing_dir(&workspace_path)
+    } else {
+        Ok(workspace_path)
     }
 }
 
@@ -4687,6 +4711,11 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
             issue.identifier,
         );
     }
+    let expected_workspace_path = expected_ticket_workspace_path(&root, &issue.identifier)?;
+    worker_lease::ensure_listen_worker_lease_available(
+        &expected_workspace_path,
+        &issue.identifier,
+    )?;
 
     let updated_issue = service
         .edit_issue(crate::linear::IssueEditSpec {
@@ -4703,11 +4732,16 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         .await?;
 
     let detailed_issue = service.load_issue(&updated_issue.identifier).await?;
-    let workspace = ensure_ticket_workspace(
+    let mut workspace = ensure_ticket_workspace(
         &root,
         listen_settings.refresh_policy(),
         &detailed_issue.identifier,
         &detailed_issue.title,
+    )?;
+    workspace.workspace_path = canonicalize_existing_dir(&workspace.workspace_path)?;
+    worker_lease::ensure_listen_worker_lease_available(
+        &workspace.workspace_path,
+        &detailed_issue.identifier,
     )?;
 
     let brief_metadata = crate::agents::TicketMetadata {
@@ -4815,10 +4849,6 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         "METASTACK_LISTEN_SPAWN_REASON",
         ListenWorkerSpawnReason::Execute.label(),
     );
-    worker_lease::ensure_listen_worker_lease_available(
-        &workspace.workspace_path,
-        &detailed_issue.identifier,
-    )?;
     append_worker_lifecycle_log(
         &log_path,
         WorkerLifecycleLog {
