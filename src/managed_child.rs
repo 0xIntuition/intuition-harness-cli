@@ -109,8 +109,7 @@ impl ManagedChild {
         })
     }
 
-    /// Return the spawned child PID for supervision tests.
-    #[cfg(test)]
+    /// Return the spawned child PID for supervision and lifecycle logging.
     pub(crate) fn pid(&self) -> u32 {
         self.child.id()
     }
