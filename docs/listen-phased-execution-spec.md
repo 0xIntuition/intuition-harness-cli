@@ -325,8 +325,8 @@ uses the shared blocked taxonomy to classify the dead PID, relaunches recoverabl
 their existing workspace/workpad context, and stops after `2` automatic stale-worker recovery
 attempts per operator-started run. Terminal classifications, missing context, relaunch failures,
 paused sessions, and execute-origin sessions remain blocked and rely on the manual retry path.
-Replacement launches are additionally gated by the workspace-local
-`.metastack/listen-worker.lock.json` lease. A normal issue run has one hidden worker PID across
+Replacement launches are additionally gated by the workspace-local planning-directory
+`listen-worker.lock.json` lease. A normal issue run has one hidden worker PID across
 turns; a replacement PID is recorded as active only after the child acquires that lease, and live
 lease owners block overlapping workspace mutation.
 
