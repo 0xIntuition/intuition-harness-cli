@@ -57,11 +57,11 @@ The initial implementation delivered in `MET-13` focuses on the smallest end-to-
       worker PIDs are never cleared automatically.
 11. A full-screen ratatui dashboard renders runtime summary rows, a colorized agent table, the pending queue, daemon notes, and an active/completed session toggle.
 12. The session table keeps a focused row selection, shows compact PR state (`none`, `draft #N`, `ready #N`), and opens a structured selected-session detail pane with `Enter`.
-13. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active.
+13. The hidden listen worker keeps refreshing the Linear issue and re-running the agent with first-turn and continuation prompts while the issue remains active. Worker lifecycle is one process per issue run: continuation, timeout repair, verification repair, validation repair, and CI repair turns stay inside that process. Before the worker starts the turn loop it acquires `.metastack/listen-worker.lock.json` inside the ticket workspace. Launchers refuse to start another worker while that lease is owned by a live PID, wait for a newly spawned worker to acquire the lease before recording its PID as active, and reap the child process after exit so stale detection is not confused by unreaped PIDs. Worker lifecycle log lines include parent PID, worker PID, issue, workspace, spawn reason, exit reason, and lease ownership; agent-child lifecycle lines include the child PID for each turn/phase.
 14. Built-in provider turns and route-scoped E2E recipe steps now run under one shared subprocess supervisor that creates a dedicated Unix process group, applies the install-scoped listen turn timeout (default `1800s`), sends `SIGTERM`, waits the install-scoped graceful shutdown window (default `5s`), and escalates to `SIGKILL` only when the process group does not exit in time.
 15. The hidden listen worker keeps looping while the issue remains active, but it treats repeated planning-only or no-op turns as a local stall instead of silently spinning. That stall logic is separate from timed-out subprocesses: a timeout means the active child process exceeded its runtime budget, while a stall means repeated completed turns made no meaningful progress.
 16. Once the ticket branch is pushed, the worker creates or updates the matching branch PR as a draft, keeps the `metastack` label attached, and reuses the same PR on continuation instead of replacing it.
-17. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state. If no matching open branch PR exists, the handoff keeps PR state at `none` and does not create a new PR during completion.
+17. When the technical backlog is complete and meaningful non-`.metastack/` workspace progress was observed, the worker promotes that same branch PR to ready for review and then attempts to move both the parent issue and backlog child into a review-style state. Validation-artifact-only diffs that merely refresh volatile handoff fields such as captured timestamps, latest SHAs, workflow run IDs, turn counts, or branch sync status do not count as implementation progress. If no matching open branch PR exists, the handoff keeps PR state at `none` and does not create a new PR during completion.
 18. The worker records the last reached session phase plus additive lifecycle outcome/exit metadata locally, including timeout summaries (turn, elapsed time, timeout limit, PID, termination path), stall summaries, cached PR status, and recent agent log output for unattended failures.
 19. During reconciliation, a stored listen-origin `running` session with a dead worker PID is
     classified through the shared blocked-taxonomy contract, records the latest stale-worker
@@ -229,8 +229,9 @@ opts into rendering the persisted turn-history breakdown.
 ## Current Limitations
 
 - Live mode runs in an alternate terminal screen, keeps list/detail navigation terminal-local, and exits on `q` or `Ctrl-C` without binding a local TCP port.
-- Session persistence is install-scoped and local-file based; there is no remote coordination
-  beyond the per-project active-listener lock yet.
+- Session persistence is install-scoped and local-file based. Local coordination uses the
+  per-project active-listener lock plus the per-workspace listen-worker lease; there is no remote
+  cross-machine lease yet.
 - The supervised worker can mark a ticket `blocked` if it exhausts the configured turn cap, if a timed-out subprocess consumes the remaining turn budget, or if repeated turns fail to produce meaningful implementation updates while the issue stays active.
 - Detail artifacts intentionally store only bounded milestones, references, PR metadata, and short
   log excerpts; raw log files remain the source of truth for full history.

@@ -325,9 +325,20 @@ uses the shared blocked taxonomy to classify the dead PID, relaunches recoverabl
 their existing workspace/workpad context, and stops after `2` automatic stale-worker recovery
 attempts per operator-started run. Terminal classifications, missing context, relaunch failures,
 paused sessions, and execute-origin sessions remain blocked and rely on the manual retry path.
+Replacement launches are additionally gated by the workspace-local
+`.metastack/listen-worker.lock.json` lease. A normal issue run has one hidden worker PID across
+turns; a replacement PID is recorded as active only after the child acquires that lease, and live
+lease owners block overlapping workspace mutation.
 
 Context pressure itself is not persisted. The selected-session detail pane derives `Context
 Pressure` from the selected `AgentSession.turn_history` using the shared pressure mapping.
+
+Repository-level validation artifacts are treated as durable evidence, not live checkpoint ledgers.
+When a turn only changes `artifacts/validation/*.md` lines that refresh volatile handoff facts such
+as captured timestamps, turn counts, branch head SHAs, PR head SHAs, workflow run IDs, or
+synchronized-through notes, that diff is classified separately from implementation progress. The
+worker may still preserve the file content, but volatile validation-artifact-only churn must not
+reset stalled-turn detection or drive another "final checkpoint" turn.
 
 ## Completion Rules
 

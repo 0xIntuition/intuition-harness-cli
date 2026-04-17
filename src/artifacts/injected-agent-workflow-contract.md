@@ -7,4 +7,5 @@
 - Preserve existing behavior outside the requested change and avoid unrelated refactors unless they are required to complete the task safely.
 - When code or docs change, validate the affected command paths with targeted tests or deterministic command proofs before finishing.
 - Keep packet-local execution proof in `.metastack/backlog/<ISSUE>/validation.md`, record reviewer-facing repo-level evidence in `artifacts/validation/<TICKET>.md`, and do not write ticket-specific evidence to repo-root `validation.md`.
+- Treat repo-level validation artifacts as durable evidence, not live checkpoint ledgers. Do not commit validation-artifact-only updates that merely refresh captured timestamps, latest commit SHAs, PR head SHAs, workflow run IDs, turn counts, or branch sync status.
 - Surface real blockers explicitly when required auth, permissions, or other mandatory inputs are missing.
