@@ -3609,8 +3609,8 @@ fn validation_artifact_line_is_volatile(line: &str) -> bool {
         "latest sha",
         "pr head",
         "remote branch",
-        "github actions",
-        "workflow `quality`",
+        "github actions run id",
+        "workflow run id",
         "exact-head",
         "exact head",
         "exact final sha",
@@ -8270,6 +8270,47 @@ suffix
         .expect("artifact should update");
         run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
         run_git(repo, &["commit", "-m", "add validation proof"])
+            .expect("git commit should succeed");
+
+        let updated =
+            capture_workspace_snapshot(repo, "MET-36").expect("updated snapshot should build");
+        let progress = compare_workspace_snapshots(repo, &baseline, &updated)
+            .expect("progress should compare");
+
+        assert_eq!(
+            progress.implementation_entries,
+            vec!["artifacts/validation/MET-36.md".to_string()]
+        );
+        assert!(progress.volatile_validation_entries.is_empty());
+    }
+
+    #[test]
+    fn github_actions_validation_proof_counts_as_implementation_progress() {
+        let temp = tempdir().expect("tempdir should build");
+        let repo = temp.path();
+        run_git(repo, &["init"]).expect("git init should succeed");
+        run_git(repo, &["config", "user.email", "listen@example.com"])
+            .expect("git config should succeed");
+        run_git(repo, &["config", "user.name", "Listen Tests"]).expect("git config should succeed");
+        fs::create_dir_all(repo.join("artifacts/validation")).expect("artifact dir should build");
+        fs::write(
+            repo.join("artifacts/validation/MET-36.md"),
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n",
+        )
+        .expect("artifact should write");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "add validation artifact"])
+            .expect("git commit should succeed");
+
+        let baseline = capture_workspace_snapshot(repo, "MET-36")
+            .expect("baseline snapshot should build for artifact");
+        fs::write(
+            repo.join("artifacts/validation/MET-36.md"),
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n- GitHub Actions `quality` workflow passed on `a790d24`.\n",
+        )
+        .expect("artifact should update");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "add ci validation proof"])
             .expect("git commit should succeed");
 
         let updated =
