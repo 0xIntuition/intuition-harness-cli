@@ -1068,7 +1068,9 @@ fn run_improvement_dashboard(issues: Vec<IssueSummary>) -> Result<ImprovementDas
                     }
                 }
                 Event::Paste(text) => {
-                    if app.focus == ImprovementPickerFocus::List && app.query.paste(&text) {
+                    let query_changed =
+                        app.focus == ImprovementPickerFocus::List && app.query.paste(&text);
+                    if query_changed {
                         app.cursor = 0;
                         app.preview_scroll.reset();
                     }
@@ -1834,7 +1836,8 @@ fn run_improvement_review_dashboard(
                             && !key.modifiers.contains(KeyModifiers::SHIFT)
                             && !key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
-                        if app.record_or_submit_question_answers()? {
+                        let submitted = app.record_or_submit_question_answers()?;
+                        if submitted {
                             return Ok(ImprovementReviewExit::FollowUp {
                                 answers: app.collected_answers().unwrap_or_default(),
                                 question_round: app.question_round + 1,

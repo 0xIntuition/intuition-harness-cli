@@ -4,6 +4,7 @@ mod state;
 pub(crate) mod store;
 mod verification;
 mod worker;
+mod worker_lease;
 mod workpad;
 mod workspace;
 
@@ -18,7 +19,8 @@ use std::future::Future;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -51,7 +53,10 @@ use crate::config::{
     LinearConfig, LinearConfigOverrides, ListenAssignmentScope, PlanningListenSettings,
     PlanningMeta, load_required_planning_meta,
 };
-use crate::fs::{PlanningPaths, canonicalize_existing_dir, display_path, sibling_workspace_root};
+use crate::fs::{
+    PlanningPaths, canonicalize_existing_dir, display_path, sibling_workspace_root,
+    ticket_workspace_root,
+};
 use crate::linear::{
     IssueAssigneeFilter, IssueComment, IssueEditSpec, IssueListFilters, IssueSummary, LinearClient,
     LinearService, ReqwestLinearClient, UserRef, classify_linear_failure,
@@ -98,6 +103,26 @@ const DEMO_NOW_EPOCH_SECONDS: u64 = 1_773_575_600;
 const DEMO_START_EPOCH_SECONDS: u64 = DEMO_NOW_EPOCH_SECONDS - 7_351;
 const REVIEW_STATE_CANDIDATES: &[&str] =
     &["Human Review", "In Review", "Review", "Ready for Review"];
+const WORKER_LEASE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenWorkerSpawnReason {
+    Pickup,
+    Resume,
+    StaleRecovery,
+    Execute,
+}
+
+impl ListenWorkerSpawnReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pickup => "pickup",
+            Self::Resume => "resume",
+            Self::StaleRecovery => "stale_recovery",
+            Self::Execute => "execute",
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct ListenDashboardData {
     pub title: String,
@@ -1106,6 +1131,7 @@ struct BacklogProgress {
 struct TurnProgress {
     planning_entries: Vec<String>,
     implementation_entries: Vec<String>,
+    volatile_validation_entries: Vec<String>,
 }
 
 impl TurnProgress {
@@ -1678,7 +1704,7 @@ fn render_listen_backlog_file(
     }
 
     format!(
-        "# Validation Plan\n\n## Command Proofs\n\n- Keep packet-local execution notes in this file (`{}/backlog/{}/validation.md`)\n- Record reviewer-facing repo-level validation evidence in `artifacts/validation/{}.md`\n- Run the changed CLI flow against a deterministic local or mocked setup\n- Verify the original Linear issue description for `{}` remains unchanged\n- Update the existing `## Codex Workpad` comment with validation notes instead of running `{} sync push`\n\n## Notes\n\n- `{} listen` must not overwrite the primary Linear issue description.\n- Do not write ticket-specific PR evidence to repo-root `validation.md`.\n",
+        "# Validation Plan\n\n## Command Proofs\n\n- Keep packet-local execution notes in this file (`{}/backlog/{}/validation.md`)\n- Record reviewer-facing repo-level validation evidence in `artifacts/validation/{}.md`\n- Run the changed CLI flow against a deterministic local or mocked setup\n- Verify the original Linear issue description for `{}` remains unchanged\n- Update the existing `## Codex Workpad` comment with validation notes instead of running `{} sync push`\n\n## Notes\n\n- `{} listen` must not overwrite the primary Linear issue description.\n- Do not write ticket-specific PR evidence to repo-root `validation.md`.\n- Do not commit validation-artifact-only changes that merely refresh timestamps, latest commit SHA, PR head SHA, workflow run IDs, turn counts, or branch-head status.\n",
         crate::branding::PROJECT_DIR,
         parent_issue.identifier,
         parent_issue.identifier,
@@ -2106,6 +2132,7 @@ where
                             workspace_path,
                             workpad_comment_id,
                             backlog_issue_identifier,
+                            ListenWorkerSpawnReason::StaleRecovery,
                         )
                     },
                 ));
@@ -2202,6 +2229,7 @@ where
                 &workspace_path,
                 workpad_comment_id,
                 session.backlog_issue_identifier.as_deref(),
+                ListenWorkerSpawnReason::Resume,
             ) {
                 Ok(pid) => {
                     session.phase = SessionPhase::Running;
@@ -2435,6 +2463,13 @@ where
     }
 
     async fn pickup_issue(&self, issue: &IssueSummary) -> Result<AgentSession> {
+        let expected_workspace_path =
+            expected_ticket_workspace_path(&self.root, &issue.identifier)?;
+        worker_lease::ensure_listen_worker_lease_available(
+            &expected_workspace_path,
+            &issue.identifier,
+        )?;
+
         let updated_issue = self
             .service
             .edit_issue(IssueEditSpec {
@@ -2483,7 +2518,7 @@ where
         let ws_refresh_policy = self.listen_settings.refresh_policy();
         let ws_identifier = detailed_issue.identifier.clone();
         let ws_title = detailed_issue.title.clone();
-        let workspace = match tokio::task::spawn_blocking(move || {
+        let mut workspace = match tokio::task::spawn_blocking(move || {
             ensure_ticket_workspace(&ws_root, ws_refresh_policy, &ws_identifier, &ws_title)
         })
         .await?
@@ -2501,6 +2536,11 @@ where
                 ));
             }
         };
+        workspace.workspace_path = canonicalize_existing_dir(&workspace.workspace_path)?;
+        worker_lease::ensure_listen_worker_lease_available(
+            &workspace.workspace_path,
+            &detailed_issue.identifier,
+        )?;
         if let Err(error) = preflight::run_listen_preflight(
             &self.service,
             &self.linear_config,
@@ -2878,6 +2918,7 @@ where
             &workspace.workspace_path,
             &workpad_comment.id,
             backlog_issue_identifier,
+            ListenWorkerSpawnReason::Pickup,
         )
     }
 
@@ -2891,6 +2932,7 @@ where
         workspace_path: &Path,
         workpad_comment_id: &str,
         backlog_issue_identifier: Option<&str>,
+        spawn_reason: ListenWorkerSpawnReason,
     ) -> Result<u32> {
         let current_exe = std::env::current_exe().with_context(|| {
             format!(
@@ -2898,6 +2940,8 @@ where
                 crate::branding::COMMAND_NAME
             )
         })?;
+        let workspace_path = canonicalize_existing_dir(workspace_path)?;
+        worker_lease::ensure_listen_worker_lease_available(&workspace_path, &issue.identifier)?;
         let log_path = self.agent_log_path(&issue.identifier);
         if let Some(parent) = log_path.parent() {
             fs::create_dir_all(parent)
@@ -2919,7 +2963,7 @@ where
         command.args(build_listen_worker_cli_args(
             &self.root,
             self.store.identity().project_selector.as_deref(),
-            workspace_path,
+            &workspace_path,
             &issue.identifier,
             workpad_comment_id,
             backlog_issue_identifier,
@@ -2937,14 +2981,187 @@ where
         if let Some(team) = self.linear_config.default_team.as_deref() {
             command.env("LINEAR_TEAM", team);
         }
-        command.env("METASTACK_WORKSPACE_PATH", workspace_path);
+        command.env("METASTACK_WORKSPACE_PATH", &workspace_path);
         command.env("METASTACK_SOURCE_ROOT", &self.root);
+        command.env(
+            "METASTACK_LISTEN_PARENT_PID",
+            std::process::id().to_string(),
+        );
+        command.env("METASTACK_LISTEN_SPAWN_REASON", spawn_reason.label());
+        append_worker_lifecycle_log(
+            &log_path,
+            WorkerLifecycleLog {
+                event: "spawn",
+                parent_pid: Some(std::process::id()),
+                worker_pid: None,
+                issue_identifier: &issue.identifier,
+                workspace_path: &workspace_path,
+                turn_number: None,
+                spawn_reason: spawn_reason.label(),
+                exit_reason: None,
+                lease_owner: false,
+            },
+        )?;
 
-        let child = command
+        let mut child = command
             .spawn()
             .context("failed to launch the hidden listen worker")?;
+        let pid = child.id();
+        wait_for_worker_lease(&mut child, &workspace_path, &issue.identifier, pid)?;
+        spawn_worker_reaper(
+            issue.identifier.clone(),
+            pid,
+            child,
+            log_path.clone(),
+            workspace_path.clone(),
+            spawn_reason,
+        );
 
-        Ok(child.id())
+        Ok(pid)
+    }
+}
+
+fn expected_ticket_workspace_path(root: &Path, issue_identifier: &str) -> Result<PathBuf> {
+    let workspace_path = ticket_workspace_root(root)?.join(issue_identifier);
+    if workspace_path.is_dir() {
+        canonicalize_existing_dir(&workspace_path)
+    } else {
+        Ok(workspace_path)
+    }
+}
+
+struct WorkerLifecycleLog<'a> {
+    event: &'a str,
+    parent_pid: Option<u32>,
+    worker_pid: Option<u32>,
+    issue_identifier: &'a str,
+    workspace_path: &'a Path,
+    turn_number: Option<u32>,
+    spawn_reason: &'a str,
+    exit_reason: Option<&'a str>,
+    lease_owner: bool,
+}
+
+fn append_worker_lifecycle_log(log_path: &Path, event: WorkerLifecycleLog<'_>) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = log_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    writeln!(
+        log,
+        "listen-worker lifecycle event={} parent_pid={} worker_pid={} issue={} workspace={} turn={} spawn_reason={} exit_reason={} lease_owner={}",
+        event.event,
+        event
+            .parent_pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        event
+            .worker_pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        event.issue_identifier,
+        event.workspace_path.display(),
+        event
+            .turn_number
+            .map(|turn| turn.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        event.spawn_reason,
+        event.exit_reason.unwrap_or("-"),
+        event.lease_owner,
+    )
+    .with_context(|| format!("failed to write `{}`", log_path.display()))
+}
+
+fn wait_for_worker_lease(
+    child: &mut Child,
+    workspace_path: &Path,
+    issue_identifier: &str,
+    worker_pid: u32,
+) -> Result<()> {
+    let deadline = Instant::now() + WORKER_LEASE_STARTUP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                bail!(
+                    "listen worker pid {} exited before acquiring the workspace lease for `{}` (status {})",
+                    worker_pid,
+                    issue_identifier,
+                    status
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect listen worker pid {worker_pid}"));
+            }
+        }
+
+        if let Some(lease) = worker_lease::load_listen_worker_lease(workspace_path)
+            && lease.worker_pid == worker_pid
+        {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "listen worker pid {} did not acquire the workspace lease for `{}` within {}s",
+                worker_pid,
+                issue_identifier,
+                WORKER_LEASE_STARTUP_TIMEOUT.as_secs()
+            );
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn spawn_worker_reaper(
+    issue_identifier: String,
+    worker_pid: u32,
+    mut child: Child,
+    log_path: PathBuf,
+    workspace_path: PathBuf,
+    spawn_reason: ListenWorkerSpawnReason,
+) {
+    let builder = thread::Builder::new().name(format!("listen-worker-reaper-{worker_pid}"));
+    if let Err(error) = builder.spawn(move || match child.wait() {
+        Ok(status) => {
+            let exit_reason = if status.success() {
+                "exit_success".to_string()
+            } else {
+                status
+                    .code()
+                    .map(|code| format!("exit_code_{code}"))
+                    .unwrap_or_else(|| "terminated_by_signal".to_string())
+            };
+            let _ = append_worker_lifecycle_log(
+                &log_path,
+                WorkerLifecycleLog {
+                    event: "exit",
+                    parent_pid: Some(std::process::id()),
+                    worker_pid: Some(worker_pid),
+                    issue_identifier: &issue_identifier,
+                    workspace_path: &workspace_path,
+                    turn_number: None,
+                    spawn_reason: spawn_reason.label(),
+                    exit_reason: Some(&exit_reason),
+                    lease_owner: false,
+                },
+            );
+        }
+        Err(error) => {
+            eprintln!("warning: failed to reap listen worker pid {worker_pid}: {error:#}");
+        }
+    }) {
+        eprintln!("warning: failed to spawn listen worker reaper for pid {worker_pid}: {error:#}");
     }
 }
 
@@ -3260,14 +3477,29 @@ fn compare_workspace_snapshots(
     changed_entries.sort();
     changed_entries.dedup();
 
-    let (planning_entries, implementation_entries): (Vec<_>, Vec<_>) = changed_entries
-        .iter()
-        .cloned()
-        .partition(|entry| workspace_entry_is_planning_artifact(entry));
+    let mut planning_entries = Vec::new();
+    let mut implementation_entries = Vec::new();
+    let mut volatile_validation_entries = Vec::new();
+
+    for entry in changed_entries {
+        if workspace_entry_is_planning_artifact(&entry) {
+            planning_entries.push(entry);
+        } else if workspace_entry_is_volatile_validation_artifact(
+            workspace_path,
+            &before.head_sha,
+            &after.head_sha,
+            &entry,
+        )? {
+            volatile_validation_entries.push(entry);
+        } else {
+            implementation_entries.push(entry);
+        }
+    }
 
     Ok(TurnProgress {
         planning_entries,
         implementation_entries,
+        volatile_validation_entries,
     })
 }
 
@@ -3289,13 +3521,139 @@ fn committed_change_entries(
 }
 
 fn workspace_entry_is_planning_artifact(entry: &str) -> bool {
+    let path = workspace_entry_path(entry);
+    path.starts_with(&format!("{}/", crate::branding::PROJECT_DIR))
+}
+
+fn workspace_entry_path(entry: &str) -> &str {
     let path = if let Some((_, path)) = entry.split_once(' ') {
         path.trim()
     } else {
         entry.trim()
     };
-    let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
-    path.starts_with(&format!("{}/", crate::branding::PROJECT_DIR))
+    path.rsplit(" -> ").next().unwrap_or(path).trim()
+}
+
+fn workspace_entry_is_validation_artifact(entry: &str) -> bool {
+    let path = workspace_entry_path(entry);
+    path.starts_with("artifacts/validation/") && path.ends_with(".md")
+}
+
+fn workspace_entry_is_volatile_validation_artifact(
+    workspace_path: &Path,
+    before_head: &str,
+    after_head: &str,
+    entry: &str,
+) -> Result<bool> {
+    if !workspace_entry_is_validation_artifact(entry) {
+        return Ok(false);
+    }
+
+    let path = workspace_entry_path(entry);
+    let mut diff = String::new();
+    if before_head != after_head {
+        diff.push_str(&git_stdout(
+            workspace_path,
+            &["diff", "--unified=0", before_head, after_head, "--", path],
+        )?);
+    }
+    diff.push_str(&git_stdout(
+        workspace_path,
+        &["diff", "--unified=0", "--", path],
+    )?);
+    diff.push_str(&git_stdout(
+        workspace_path,
+        &["diff", "--cached", "--unified=0", "--", path],
+    )?);
+
+    let changed_lines = validation_artifact_changed_lines(&diff);
+    Ok(!changed_lines.is_empty()
+        && changed_lines
+            .iter()
+            .all(|line| validation_artifact_line_is_volatile(line)))
+}
+
+fn validation_artifact_changed_lines(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter_map(|line| {
+            if line.starts_with("+++") || line.starts_with("---") {
+                return None;
+            }
+            line.strip_prefix('+')
+                .or_else(|| line.strip_prefix('-'))
+                .map(|line| line.trim().to_string())
+        })
+        .collect()
+}
+
+fn validation_artifact_line_is_volatile(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line_starts_with_commit_sha_bullet(line) {
+        return true;
+    }
+
+    let lower = line.to_ascii_lowercase();
+    const VOLATILE_PHRASES: &[&str] = &[
+        "date:",
+        "captured at",
+        "execution turn",
+        "worktree state at capture",
+        "push state at capture",
+        "pr state at capture",
+        "pr body status at capture",
+        "branch diff vs",
+        "current workspace head",
+        "current branch head",
+        "current workspace sha",
+        "latest commit",
+        "latest sha",
+        "pr head",
+        "remote branch",
+        "github actions run id",
+        "workflow run id",
+        "exact-head",
+        "exact head",
+        "exact final sha",
+        "current sha",
+        "synchronized through",
+        "pending commit",
+        "final artifact delta",
+        "final validation-artifact refresh",
+        "final handoff commit",
+        "checkpoint commits",
+        "checkpoint lineage",
+        "commit lineage",
+        "docs-only handoff commits",
+        "use the git branch head",
+        "matches local `head`",
+        "points at the same",
+    ];
+
+    VOLATILE_PHRASES.iter().any(|phrase| lower.contains(phrase)) || contains_iso_timestamp(line)
+}
+
+fn line_starts_with_commit_sha_bullet(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("- `") else {
+        return false;
+    };
+    let Some((token, _)) = rest.split_once('`') else {
+        return false;
+    };
+    (7..=40).contains(&token.len()) && token.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn contains_iso_timestamp(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.windows("2026-04-17T18:03:54Z".len()).any(|window| {
+        window.get(4) == Some(&b'-')
+            && window.get(7) == Some(&b'-')
+            && window.get(10) == Some(&b'T')
+            && window.get(13) == Some(&b':')
+            && window.get(16) == Some(&b':')
+            && window.iter().enumerate().all(|(index, byte)| {
+                matches!(index, 4 | 7 | 10 | 13 | 16) || byte.is_ascii_digit() || *byte == b'Z'
+            })
+    })
 }
 
 fn workspace_has_meaningful_progress(
@@ -4353,6 +4711,11 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
             issue.identifier,
         );
     }
+    let expected_workspace_path = expected_ticket_workspace_path(&root, &issue.identifier)?;
+    worker_lease::ensure_listen_worker_lease_available(
+        &expected_workspace_path,
+        &issue.identifier,
+    )?;
 
     let updated_issue = service
         .edit_issue(crate::linear::IssueEditSpec {
@@ -4369,11 +4732,16 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
         .await?;
 
     let detailed_issue = service.load_issue(&updated_issue.identifier).await?;
-    let workspace = ensure_ticket_workspace(
+    let mut workspace = ensure_ticket_workspace(
         &root,
         listen_settings.refresh_policy(),
         &detailed_issue.identifier,
         &detailed_issue.title,
+    )?;
+    workspace.workspace_path = canonicalize_existing_dir(&workspace.workspace_path)?;
+    worker_lease::ensure_listen_worker_lease_available(
+        &workspace.workspace_path,
+        &detailed_issue.identifier,
     )?;
 
     let brief_metadata = crate::agents::TicketMetadata {
@@ -4473,11 +4841,47 @@ pub async fn run_execute(args: &crate::cli::ExecuteArgs) -> Result<()> {
     }
     command.env("METASTACK_WORKSPACE_PATH", &workspace.workspace_path);
     command.env("METASTACK_SOURCE_ROOT", &root);
+    command.env(
+        "METASTACK_LISTEN_PARENT_PID",
+        std::process::id().to_string(),
+    );
+    command.env(
+        "METASTACK_LISTEN_SPAWN_REASON",
+        ListenWorkerSpawnReason::Execute.label(),
+    );
+    append_worker_lifecycle_log(
+        &log_path,
+        WorkerLifecycleLog {
+            event: "spawn",
+            parent_pid: Some(std::process::id()),
+            worker_pid: None,
+            issue_identifier: &detailed_issue.identifier,
+            workspace_path: &workspace.workspace_path,
+            turn_number: None,
+            spawn_reason: ListenWorkerSpawnReason::Execute.label(),
+            exit_reason: None,
+            lease_owner: false,
+        },
+    )?;
 
-    let child = command
+    let mut child = command
         .spawn()
         .context("failed to launch the execute worker")?;
     let pid = child.id();
+    wait_for_worker_lease(
+        &mut child,
+        &workspace.workspace_path,
+        &detailed_issue.identifier,
+        pid,
+    )?;
+    spawn_worker_reaper(
+        detailed_issue.identifier.clone(),
+        pid,
+        child,
+        log_path.clone(),
+        workspace.workspace_path.clone(),
+        ListenWorkerSpawnReason::Execute,
+    );
 
     let session = AgentSession {
         issue_id: Some(detailed_issue.id.clone()),
@@ -5997,8 +6401,8 @@ mod tests {
         ResumeProvider, SessionExitCondition, SessionLifecycleOutcome, SessionListCounts,
         SessionOrigin, SessionPhase, SessionTimeoutRecord, SessionTimeoutTermination, TODO_STATE,
         TokenUsage, TurnPromptMode, TurnTokenSnapshot, blocked_reason, capture_workspace_snapshot,
-        compact_identifier, format_duration, format_number, listen_browser_action,
-        listen_scope_label, mark_running_session_stale, render_agent_prompt,
+        compact_identifier, compare_workspace_snapshots, format_duration, format_number,
+        listen_browser_action, listen_scope_label, mark_running_session_stale, render_agent_prompt,
         render_continuation_prompt, required_label_skip_reason,
     };
     use crate::agents::{AgentBriefRequest, TicketMetadata, write_agent_brief};
@@ -7781,6 +8185,144 @@ suffix
             "expected src.rs in status entries: {:?}",
             updated.status_entries
         );
+    }
+
+    #[test]
+    fn volatile_validation_artifact_checkpoint_edits_do_not_count_as_implementation_progress() {
+        let temp = tempdir().expect("tempdir should build");
+        let repo = temp.path();
+        run_git(repo, &["init"]).expect("git init should succeed");
+        run_git(repo, &["config", "user.email", "listen@example.com"])
+            .expect("git config should succeed");
+        run_git(repo, &["config", "user.name", "Listen Tests"]).expect("git config should succeed");
+        fs::write(repo.join("README.md"), "# Demo\n").expect("readme should write");
+        run_git(repo, &["add", "README.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "init"]).expect("git commit should succeed");
+
+        let artifact_path = repo.join("artifacts/validation/MET-36.md");
+        fs::create_dir_all(
+            artifact_path
+                .parent()
+                .expect("artifact path should have a parent"),
+        )
+        .expect("artifact dir should build");
+        fs::write(
+            &artifact_path,
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n\n## Context Checkpoint\n\n- Captured at: 2026-04-17T18:03:37Z\n- Execution turn: 6/6 final checkpoint\n- Push state at capture: synchronized through `386b9510`; this final artifact delta must be committed and pushed before handoff.\n",
+        )
+        .expect("artifact should write");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "add validation artifact"])
+            .expect("git commit should succeed");
+
+        let baseline = capture_workspace_snapshot(repo, "MET-36")
+            .expect("baseline snapshot should build for artifact");
+        fs::write(
+            &artifact_path,
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n\n## Context Checkpoint\n\n- Captured at: 2026-04-17T18:03:54Z\n- Execution turn: 8/8 final checkpoint\n- Push state at capture: synchronized through `979c438a`; this final artifact delta must be committed and pushed before handoff.\n",
+        )
+        .expect("artifact should update");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "refresh volatile handoff"])
+            .expect("git commit should succeed");
+
+        let updated =
+            capture_workspace_snapshot(repo, "MET-36").expect("updated snapshot should build");
+        let progress = compare_workspace_snapshots(repo, &baseline, &updated)
+            .expect("progress should compare");
+
+        assert!(
+            progress.implementation_entries.is_empty(),
+            "volatile artifact changes should not count as implementation progress: {:?}",
+            progress.implementation_entries
+        );
+        assert!(progress.planning_entries.is_empty());
+        assert_eq!(
+            progress.volatile_validation_entries,
+            vec!["artifacts/validation/MET-36.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn substantive_validation_artifact_edits_count_as_implementation_progress() {
+        let temp = tempdir().expect("tempdir should build");
+        let repo = temp.path();
+        run_git(repo, &["init"]).expect("git init should succeed");
+        run_git(repo, &["config", "user.email", "listen@example.com"])
+            .expect("git config should succeed");
+        run_git(repo, &["config", "user.name", "Listen Tests"]).expect("git config should succeed");
+        fs::create_dir_all(repo.join("artifacts/validation")).expect("artifact dir should build");
+        fs::write(
+            repo.join("artifacts/validation/MET-36.md"),
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n",
+        )
+        .expect("artifact should write");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "add validation artifact"])
+            .expect("git commit should succeed");
+
+        let baseline = capture_workspace_snapshot(repo, "MET-36")
+            .expect("baseline snapshot should build for artifact");
+        fs::write(
+            repo.join("artifacts/validation/MET-36.md"),
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n- `cargo clippy --all-targets --all-features -- -D warnings`\n",
+        )
+        .expect("artifact should update");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "add validation proof"])
+            .expect("git commit should succeed");
+
+        let updated =
+            capture_workspace_snapshot(repo, "MET-36").expect("updated snapshot should build");
+        let progress = compare_workspace_snapshots(repo, &baseline, &updated)
+            .expect("progress should compare");
+
+        assert_eq!(
+            progress.implementation_entries,
+            vec!["artifacts/validation/MET-36.md".to_string()]
+        );
+        assert!(progress.volatile_validation_entries.is_empty());
+    }
+
+    #[test]
+    fn github_actions_validation_proof_counts_as_implementation_progress() {
+        let temp = tempdir().expect("tempdir should build");
+        let repo = temp.path();
+        run_git(repo, &["init"]).expect("git init should succeed");
+        run_git(repo, &["config", "user.email", "listen@example.com"])
+            .expect("git config should succeed");
+        run_git(repo, &["config", "user.name", "Listen Tests"]).expect("git config should succeed");
+        fs::create_dir_all(repo.join("artifacts/validation")).expect("artifact dir should build");
+        fs::write(
+            repo.join("artifacts/validation/MET-36.md"),
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n",
+        )
+        .expect("artifact should write");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "add validation artifact"])
+            .expect("git commit should succeed");
+
+        let baseline = capture_workspace_snapshot(repo, "MET-36")
+            .expect("baseline snapshot should build for artifact");
+        fs::write(
+            repo.join("artifacts/validation/MET-36.md"),
+            "# MET-36 Validation\n\n## Command Proofs\n\n- `cargo test`\n- GitHub Actions `quality` workflow passed on `a790d24`.\n",
+        )
+        .expect("artifact should update");
+        run_git(repo, &["add", "artifacts/validation/MET-36.md"]).expect("git add should succeed");
+        run_git(repo, &["commit", "-m", "add ci validation proof"])
+            .expect("git commit should succeed");
+
+        let updated =
+            capture_workspace_snapshot(repo, "MET-36").expect("updated snapshot should build");
+        let progress = compare_workspace_snapshots(repo, &baseline, &updated)
+            .expect("progress should compare");
+
+        assert_eq!(
+            progress.implementation_entries,
+            vec!["artifacts/validation/MET-36.md".to_string()]
+        );
+        assert!(progress.volatile_validation_entries.is_empty());
     }
 
     #[test]

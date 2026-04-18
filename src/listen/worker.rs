@@ -133,6 +133,34 @@ pub(super) async fn run_listen_worker(args: &ListenWorkerArgs) -> Result<()> {
         .with_context(|| format!("failed to open `{}`", log_path.display()))?;
     let branch = current_workspace_branch(&workspace_path).ok();
     let worker_pid = std::process::id();
+    let parent_pid = std::env::var("METASTACK_LISTEN_PARENT_PID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
+    let spawn_reason =
+        std::env::var("METASTACK_LISTEN_SPAWN_REASON").unwrap_or_else(|_| "unknown".to_string());
+    let worker_lease_guard = super::worker_lease::acquire_listen_worker_lease(
+        super::worker_lease::ListenWorkerLeaseRequest {
+            source_root: &source_root,
+            project_selector,
+            workspace_path: &workspace_path,
+            issue_identifier: &args.issue,
+            worker_pid,
+            parent_pid,
+            spawn_reason: &spawn_reason,
+        },
+    )?;
+    let worker_lease = worker_lease_guard.lease();
+    eprintln!(
+        "listen-worker lifecycle event=lease_acquired parent_pid={} worker_pid={} issue={} workspace={} turn=- spawn_reason={} exit_reason=- lease_owner=true",
+        worker_lease
+            .parent_pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        worker_lease.worker_pid,
+        worker_lease.issue_identifier,
+        worker_lease.workspace_path,
+        worker_lease.spawn_reason,
+    );
     let mut turns_completed =
         load_existing_turn_count(&source_root, project_selector, &args.issue)?;
     let mut pending_linear_sync =
@@ -3821,6 +3849,16 @@ fn execute_agent_run(
             invocation.agent
         )
     })?;
+    let child_pid = child.pid();
+    append_agent_child_lifecycle_log(
+        &log_path,
+        phase_label,
+        turn_number,
+        &invocation.agent,
+        child_pid,
+        "spawn",
+        None,
+    )?;
     let turn_started_at = now_epoch_seconds();
 
     if invocation.transport == PromptTransport::Stdin {
@@ -3879,6 +3917,15 @@ fn execute_agent_run(
                     .with_context(|| format!("failed to write `{}`", log_path.display()))
             },
             |_| Ok(()),
+        )?;
+        append_agent_child_lifecycle_log(
+            &log_path,
+            phase_label,
+            turn_number,
+            &invocation.agent,
+            child_pid,
+            "exit",
+            Some(agent_exit_reason(&managed_result)),
         )?;
         if let Some(timeout) = managed_result.timeout {
             append_agent_turn_timeout_log(
@@ -3946,6 +3993,15 @@ fn execute_agent_run(
     }
 
     let managed_result = child.wait(|_| Ok(()))?;
+    append_agent_child_lifecycle_log(
+        &log_path,
+        phase_label,
+        turn_number,
+        &invocation.agent,
+        child_pid,
+        "exit",
+        Some(agent_exit_reason(&managed_result)),
+    )?;
     if let Some(timeout) = managed_result.timeout {
         append_agent_turn_timeout_log(
             &log_path,
@@ -4012,6 +4068,42 @@ fn session_timeout_record(
             ManagedChildTermination::ForceKilled => SessionTimeoutTermination::Sigkill,
         },
     }
+}
+
+fn agent_exit_reason(result: &ManagedChildResult) -> String {
+    if let Some(timeout) = result.timeout {
+        return format!("timeout_{}", timeout.termination.label());
+    }
+    if result.status.success() {
+        return "exit_success".to_string();
+    }
+    result
+        .status
+        .code()
+        .map(|code| format!("exit_code_{code}"))
+        .unwrap_or_else(|| "terminated_by_signal".to_string())
+}
+
+fn append_agent_child_lifecycle_log(
+    log_path: &Path,
+    phase_label: &str,
+    turn_number: u32,
+    agent: &str,
+    child_pid: u32,
+    event: &str,
+    exit_reason: Option<String>,
+) -> Result<()> {
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open `{}`", log_path.display()))?;
+    writeln!(
+        log,
+        "agent-child lifecycle event={event} phase={phase_label} turn={turn_number} agent={agent} child_pid={child_pid} exit_reason={}",
+        exit_reason.as_deref().unwrap_or("-"),
+    )
+    .with_context(|| format!("failed to write `{}`", log_path.display()))
 }
 
 fn append_agent_turn_timeout_log(
@@ -4150,7 +4242,7 @@ fn latest_codex_state_db(codex_root: &Path) -> Option<PathBuf> {
             Some((modified, path))
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
     candidates.into_iter().next().map(|(_, path)| path)
 }
 
@@ -6665,6 +6757,22 @@ fn heuristic_review_report(
         remaining_items = acceptance.clone();
     }
 
+    let mut notes = vec![
+        "Using heuristic review; dedicated code verification runs in the verification phase."
+            .to_string(),
+    ];
+    if !turn_progress.volatile_validation_entries.is_empty() {
+        notes.push(format!(
+            "Ignored volatile validation handoff-only changes while scoring progress: {}.",
+            turn_progress
+                .volatile_validation_entries
+                .iter()
+                .map(|entry| format!("`{entry}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     Ok(ReviewReport {
         summary: if complete {
             "Heuristic review believes the ticket work is complete.".to_string()
@@ -6684,10 +6792,7 @@ fn heuristic_review_report(
         },
         validation_remaining: if complete { Vec::new() } else { validation },
         risks: Vec::new(),
-        notes: vec![
-            "Using heuristic review; dedicated code verification runs in the verification phase."
-                .to_string(),
-        ],
+        notes,
     })
 }
 
@@ -8433,6 +8538,7 @@ old
         let progress = super::super::TurnProgress {
             planning_entries: Vec::new(),
             implementation_entries: vec!["src/lib.rs".to_string()],
+            volatile_validation_entries: Vec::new(),
         };
 
         let report = super::heuristic_review_report(
@@ -8493,6 +8599,7 @@ old
         let progress = super::super::TurnProgress {
             planning_entries: Vec::new(),
             implementation_entries: vec!["src/lib.rs".to_string()],
+            volatile_validation_entries: Vec::new(),
         };
 
         let report = super::heuristic_review_report(
@@ -8557,6 +8664,7 @@ old
         let progress = super::super::TurnProgress {
             planning_entries: Vec::new(),
             implementation_entries: vec!["src/lib.rs".to_string()],
+            volatile_validation_entries: Vec::new(),
         };
         let report = super::heuristic_review_report(
             &test_issue("MET-57"),

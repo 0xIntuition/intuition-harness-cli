@@ -2274,13 +2274,24 @@ fn truncate_log_excerpt(value: &str) -> String {
 }
 
 pub(super) fn pid_is_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     Command::new("ps")
+        .arg("-o")
+        .arg("stat=")
         .arg("-p")
         .arg(pid.to_string())
-        .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
+        .output()
+        .map(|output| {
+            if !output.status.success() {
+                return false;
+            }
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        })
         .unwrap_or(true)
 }
 

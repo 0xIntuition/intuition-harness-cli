@@ -620,11 +620,11 @@ fn run_interactive_split_session(
                         return Ok(exit);
                     }
                 }
-                Event::Paste(text) => {
-                    if app.loading.is_none() && app.stage == SplitStage::Addendum {
-                        let _ = app.addendum.paste(&text);
-                        clear_split_error(&mut app);
-                    }
+                Event::Paste(text)
+                    if app.loading.is_none() && app.stage == SplitStage::Addendum =>
+                {
+                    let _ = app.addendum.paste(&text);
+                    clear_split_error(&mut app);
                 }
                 Event::Mouse(mouse)
                     if matches!(
